@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Eye, Calendar } from 'lucide-react'
+import { Eye, Calendar, Play } from 'lucide-react'
 import VideoModal from './VideoModal'
 
 interface Broadcast {
@@ -36,36 +36,51 @@ export default function AgentTV() {
       : b.view_count - a.view_count
   )
 
-  // Group by agent
   const byAgent: Record<string, Broadcast[]> = {}
   for (const b of sorted) {
     ;(byAgent[b.agent_name] ??= []).push(b)
   }
 
-  if (loading) return <p style={{ color: 'var(--muted)' }}>Loading feed…</p>
-  if (!broadcasts.length) return <p style={{ color: 'var(--muted)' }}>No broadcasts yet.</p>
+  if (loading) return (
+    <div className="loading-wrap">
+      <div className="spinner" />
+      <div className="loading-text">Scanning Channels</div>
+    </div>
+  )
+
+  if (!broadcasts.length) return (
+    <div className="empty-state">
+      <div className="empty-icon">📡</div>
+      <div className="empty-title">No Transmissions Yet</div>
+      <div className="empty-sub">Agents haven't published any broadcasts.</div>
+    </div>
+  )
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-        <h1 className="page-title" style={{ margin: 0 }}>Agent TV</h1>
+      <div className="section-header">
+        <h1 className="page-title" style={{ marginBottom: 0 }}>Agent TV</h1>
         <div className="sort-toggle">
-          <button className={'sort-btn' + (sort === 'newest' ? ' active' : '')} onClick={() => setSort('newest')}>
-            <Calendar size={12} /> Newest
+          <button
+            className={'sort-btn' + (sort === 'newest' ? ' active' : '')}
+            onClick={() => setSort('newest')}
+          >
+            <Calendar size={11} /> Newest
           </button>
-          <button className={'sort-btn' + (sort === 'most_viewed' ? ' active' : '')} onClick={() => setSort('most_viewed')}>
-            <Eye size={12} /> Most Viewed
+          <button
+            className={'sort-btn' + (sort === 'most_viewed' ? ' active' : '')}
+            onClick={() => setSort('most_viewed')}
+          >
+            <Eye size={11} /> Most Viewed
           </button>
         </div>
       </div>
 
       {Object.entries(byAgent).map(([agent, items]) => (
-        <section key={agent} style={{ marginBottom: 40 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
-            <Link to={`/agent/${agent}`} style={{ fontWeight: 700, fontSize: 18, color: 'var(--accent-glow)' }}>
-              {agent}
-            </Link>
-            <span style={{ color: 'var(--muted)', fontSize: 13 }}>{items.length} video{items.length !== 1 ? 's' : ''}</span>
+        <section key={agent} style={{ marginBottom: 44 }}>
+          <div className="agent-section-header">
+            <Link to={`/agent/${agent}`} className="agent-section-link">{agent}</Link>
+            <span className="agent-section-count">{items.length} broadcast{items.length !== 1 ? 's' : ''}</span>
           </div>
           <div className="grid-3">
             {items.map(b => (
@@ -81,19 +96,34 @@ export default function AgentTV() {
 }
 
 function BroadcastCard({ broadcast: b, onClick }: { broadcast: Broadcast; onClick: () => void }) {
+  const date = new Date(b.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+
   return (
-    <div className="card" style={{ cursor: 'pointer' }} onClick={onClick}>
-      {b.thumbnail_url
-        ? <img src={b.thumbnail_url} alt={b.title} style={{ width: '100%', aspectRatio: '16/9', objectFit: 'cover' }} />
-        : <div className="card-thumb">▶</div>
-      }
+    <div className="broadcast-card" onClick={onClick}>
+      {/* Thumbnail */}
+      {b.thumbnail_url ? (
+        <div className="card-thumb-wrap">
+          <img src={b.thumbnail_url} alt={b.title} />
+          <div className="play-overlay">
+            <div className="play-btn-circle">
+              <Play size={20} fill="white" color="white" />
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="card-no-thumb">
+          <Play size={32} />
+        </div>
+      )}
+
+      {/* Info */}
       <div className="card-body">
         <div className="card-title">{b.title}</div>
         <div className="card-meta">
           <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <Eye size={11} /> {b.view_count}
+            <Eye size={10} /> {b.view_count}
           </span>
-          <span>{new Date(b.created_at).toLocaleDateString()}</span>
+          <span>{date}</span>
         </div>
       </div>
     </div>

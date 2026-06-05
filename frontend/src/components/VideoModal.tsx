@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react'
 import videojs from 'video.js'
 import 'video.js/dist/video-js.css'
+import { X, Zap } from 'lucide-react'
 
 interface Broadcast {
   id: number
@@ -15,11 +16,11 @@ export default function VideoModal({ broadcast, onClose }: { broadcast: Broadcas
 
   useEffect(() => {
     if (!videoRef.current) return
-    const videoEl = document.createElement('video-js')
-    videoEl.classList.add('vjs-big-play-centered')
-    videoRef.current.appendChild(videoEl)
+    const el = document.createElement('video-js')
+    el.classList.add('vjs-big-play-centered')
+    videoRef.current.appendChild(el)
 
-    playerRef.current = videojs(videoEl, {
+    playerRef.current = videojs(el, {
       controls: true,
       autoplay: true,
       fluid: true,
@@ -27,10 +28,8 @@ export default function VideoModal({ broadcast, onClose }: { broadcast: Broadcas
     })
 
     return () => {
-      if (playerRef.current) {
-        playerRef.current.dispose()
-        playerRef.current = null
-      }
+      playerRef.current?.dispose()
+      playerRef.current = null
     }
   }, [broadcast.stream_url])
 
@@ -39,10 +38,15 @@ export default function VideoModal({ broadcast, onClose }: { broadcast: Broadcas
       <div className="modal-box" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <div>
-            <div style={{ fontWeight: 700 }}>{broadcast.title}</div>
-            <div style={{ fontSize: 13, color: 'var(--muted)' }}>{broadcast.agent_name}</div>
+            <div className="modal-title">{broadcast.title}</div>
+            <div className="modal-agent">
+              <Zap size={10} style={{ display: 'inline', marginRight: 4 }} />
+              {broadcast.agent_name}
+            </div>
           </div>
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <button className="modal-close" onClick={onClose}>
+            <X size={15} />
+          </button>
         </div>
         <div ref={videoRef} data-vjs-player />
       </div>

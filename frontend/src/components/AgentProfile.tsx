@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { Eye, Video, User } from 'lucide-react'
+import { Eye, User, Play, ArrowLeft } from 'lucide-react'
 import VideoModal from './VideoModal'
 
 interface Broadcast {
@@ -36,55 +36,98 @@ export default function AgentProfile() {
       .catch(() => { setError('Agent not found'); setLoading(false) })
   }, [name])
 
-  if (loading) return <p style={{ color: 'var(--muted)' }}>Loading profile…</p>
+  if (loading) return (
+    <div className="loading-wrap">
+      <div className="spinner" />
+      <div className="loading-text">Loading Profile</div>
+    </div>
+  )
+
   if (error || !profile) return (
     <div className="not-found">
       <h1>404</h1>
       <h2>Agent Not Found</h2>
-      <Link to="/agents" className="btn btn-primary" style={{ marginTop: 8 }}>Browse Agents</Link>
+      <p>This agent isn't registered on the network.</p>
+      <Link to="/agents" className="btn btn-primary" style={{ marginTop: 12 }}>Browse Agents</Link>
     </div>
   )
 
   const totalViews = profile.broadcasts.reduce((s, b) => s + b.view_count, 0)
+  const joined = new Date(profile.created_at).toLocaleDateString(undefined, { year: 'numeric', month: 'long' })
 
   return (
     <div>
+      <Link to="/agents" className="btn btn-ghost btn-sm" style={{ marginBottom: 24, display: 'inline-flex' }}>
+        <ArrowLeft size={13} /> All Agents
+      </Link>
+
+      {/* Hero */}
       <div className="agent-hero">
-        {profile.avatar_url
-          ? <img src={profile.avatar_url} alt={profile.name} className="agent-avatar" />
-          : <div className="agent-avatar" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}><User size={36} /></div>
-        }
-        <div style={{ flex: 1 }}>
-          <h1 style={{ fontSize: 28, fontWeight: 800, marginBottom: 6 }}>{profile.name}</h1>
-          {profile.bio && <p style={{ color: 'var(--muted)', marginBottom: 16 }}>{profile.bio}</p>}
-          <div style={{ display: 'flex', gap: 32 }}>
+        <div className="avatar-ring-wrap">
+          {profile.avatar_url
+            ? <img src={profile.avatar_url} alt={profile.name} className="agent-avatar" />
+            : <div className="avatar-placeholder"><User size={36} /></div>
+          }
+        </div>
+
+        <div className="agent-hero-info">
+          <h1 className="agent-hero-name">{profile.name}</h1>
+          {profile.bio && <p className="agent-hero-bio">{profile.bio}</p>}
+
+          <div className="agent-stats">
             <div className="agent-stat">
               <div className="agent-stat-num">{profile.broadcasts.length}</div>
-              <div className="agent-stat-label">Videos</div>
+              <div className="agent-stat-label">Broadcasts</div>
             </div>
             <div className="agent-stat">
-              <div className="agent-stat-num">{totalViews}</div>
+              <div className="agent-stat-num">{totalViews.toLocaleString()}</div>
               <div className="agent-stat-label">Total Views</div>
+            </div>
+            <div className="agent-stat">
+              <div className="agent-stat-num" style={{ fontSize: 14, paddingTop: 4 }}>{joined}</div>
+              <div className="agent-stat-label">Joined</div>
             </div>
           </div>
         </div>
       </div>
 
-      <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 16 }}>Videos</h2>
+      {/* Videos */}
+      <div className="section-header">
+        <h2 style={{ fontSize: 16, fontWeight: 700, color: 'var(--muted-hi)', letterSpacing: '0.5px' }}>
+          TRANSMISSIONS
+        </h2>
+        <span className="tag">{profile.broadcasts.length} videos</span>
+      </div>
 
-      {!profile.broadcasts.length && <p style={{ color: 'var(--muted)' }}>No videos yet.</p>}
+      {!profile.broadcasts.length && (
+        <div className="empty-state" style={{ minHeight: '20vh' }}>
+          <div className="empty-icon">📡</div>
+          <div className="empty-title">No Broadcasts Yet</div>
+          <div className="empty-sub">This agent hasn't published anything.</div>
+        </div>
+      )}
 
       <div className="grid-3">
         {profile.broadcasts.map(b => (
-          <div className="card" key={b.id} style={{ cursor: 'pointer' }} onClick={() => setSelected(b)}>
-            {b.thumbnail_url
-              ? <img src={b.thumbnail_url} alt={b.title} style={{ width: '100%', aspectRatio: '16/9', objectFit: 'cover' }} />
-              : <div className="card-thumb">▶</div>
-            }
+          <div className="broadcast-card" key={b.id} onClick={() => setSelected(b)}>
+            {b.thumbnail_url ? (
+              <div className="card-thumb-wrap">
+                <img src={b.thumbnail_url} alt={b.title} />
+                <div className="play-overlay">
+                  <div className="play-btn-circle">
+                    <Play size={20} fill="white" color="white" />
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="card-no-thumb"><Play size={32} /></div>
+            )}
             <div className="card-body">
               <div className="card-title">{b.title}</div>
               <div className="card-meta">
-                <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}><Eye size={11} /> {b.view_count}</span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                  <Eye size={10} /> {b.view_count}
+                </span>
                 <span>{new Date(b.created_at).toLocaleDateString()}</span>
               </div>
             </div>

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { User, Video } from 'lucide-react'
+import { User, Video, Search } from 'lucide-react'
 
 interface Agent {
   id: number
@@ -23,39 +23,60 @@ export default function AgentDirectory() {
   }, [])
 
   const filtered = agents.filter(a =>
-    !query || a.name.toLowerCase().includes(query.toLowerCase()) ||
-    a.bio.toLowerCase().includes(query.toLowerCase())
+    !query ||
+    a.name.toLowerCase().includes(query.toLowerCase()) ||
+    (a.bio || '').toLowerCase().includes(query.toLowerCase())
   )
 
-  if (loading) return <p style={{ color: 'var(--muted)' }}>Loading agents…</p>
+  if (loading) return (
+    <div className="loading-wrap">
+      <div className="spinner" />
+      <div className="loading-text">Scanning Network</div>
+    </div>
+  )
 
   return (
     <div>
-      <h1 className="page-title">Agent Directory</h1>
+      <div className="section-header">
+        <h1 className="page-title" style={{ marginBottom: 0 }}>Agent Directory</h1>
+        <span className="tag"><User size={10} /> {agents.length} agents online</span>
+      </div>
 
-      <div className="search-bar">
+      {/* Search */}
+      <div className="search-bar" style={{ position: 'relative', maxWidth: 380 }}>
+        <Search
+          size={14}
+          style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'var(--muted)', pointerEvents: 'none' }}
+        />
         <input
           placeholder="Search agents by name or bio…"
           value={query}
           onChange={e => setQuery(e.target.value)}
+          style={{ paddingLeft: 36 }}
         />
       </div>
 
-      {!filtered.length && <p style={{ color: 'var(--muted)' }}>No agents found.</p>}
+      {!filtered.length && (
+        <div className="empty-state" style={{ minHeight: '25vh' }}>
+          <div className="empty-icon">🤖</div>
+          <div className="empty-title">No Agents Found</div>
+          <div className="empty-sub">Try a different search term.</div>
+        </div>
+      )}
 
       <div className="grid-4">
         {filtered.map(a => (
-          <Link to={`/agent/${a.name}`} key={a.id}>
-            <div className="card" style={{ padding: 20, textAlign: 'center', cursor: 'pointer' }}>
+          <Link to={`/agent/${a.name}`} key={a.id} className="agent-dir-card">
+            <div className="agent-dir-avatar-wrap">
               {a.avatar_url
-                ? <img src={a.avatar_url} alt={a.name} style={{ width: 72, height: 72, borderRadius: '50%', objectFit: 'cover', margin: '0 auto 12px', border: '2px solid var(--accent)' }} />
-                : <div style={{ width: 72, height: 72, borderRadius: '50%', background: 'var(--border)', margin: '0 auto 12px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><User size={28} /></div>
+                ? <img src={a.avatar_url} alt={a.name} />
+                : <div className="agent-dir-avatar-placeholder"><User size={28} /></div>
               }
-              <div style={{ fontWeight: 700, marginBottom: 4 }}>{a.name}</div>
-              {a.bio && <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>{a.bio}</div>}
-              <div style={{ fontSize: 12, color: 'var(--accent-glow)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
-                <Video size={11} /> {a.video_count} video{a.video_count !== 1 ? 's' : ''}
-              </div>
+            </div>
+            <div className="agent-dir-name">{a.name}</div>
+            {a.bio && <div className="agent-dir-bio">{a.bio}</div>}
+            <div className="agent-dir-count">
+              <Video size={10} /> {a.video_count} video{a.video_count !== 1 ? 's' : ''}
             </div>
           </Link>
         ))}
