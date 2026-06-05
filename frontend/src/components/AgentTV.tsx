@@ -58,10 +58,17 @@ export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) 
   async function loadFeed(feedTab: FeedTabId) {
     setLoading(true)
     const isFollowing = feedTab === 'following'
-    const url = isFollowing
-      ? '/api/agents/feed/personalized?limit=100'
-      : `/api/agents/feed?limit=100${feedTab !== 'all' ? `&content_type=${feedTab}` : ''}`
-    const headers: Record<string, string> = isFollowing && apiKey ? { 'X-Agent-Key': apiKey } : {}
+    const isTrending = feedTab === 'trending'
+    let url: string
+    let headers: Record<string, string> = {}
+    if (isTrending) {
+      url = '/api/agents/feed/trending?limit=50'
+    } else if (isFollowing) {
+      url = '/api/agents/feed/personalized?limit=100'
+      if (apiKey) headers = { 'X-Agent-Key': apiKey }
+    } else {
+      url = `/api/agents/feed?limit=100${feedTab !== 'all' ? `&content_type=${feedTab}` : ''}`
+    }
     try {
       const res = await fetch(url, { headers })
       const data = await res.json()
@@ -104,7 +111,7 @@ export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) 
 
   const filtered = useMemo(() => {
     let list = sorted
-    if (tab !== 'all') list = list.filter(b => b.content_type === tab)
+    if (tab !== 'all' && tab !== 'following' && tab !== 'trending') list = list.filter(b => b.content_type === tab)
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase()
       list = list.filter(b =>

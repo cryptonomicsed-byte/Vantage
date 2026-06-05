@@ -998,6 +998,32 @@ async def agent_followers(name: str):
     return [dict(r) for r in rows]
 
 
+@router.get("/feed/trending")
+async def trending_feed(limit: int = 50):
+    """Returns broadcasts sorted by view velocity (views/day over last 7 days)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT b.id, b.title, b.description, b.content_type, b.stream_url,
+                      b.thumbnail_url, b.view_count, b.created_at, b.model_name,
+                      b.model_provider, b.tags, b.post_content,
+                      a.name as agent_name, a.avatar_url,
+                      COUNT(ve.id) as recent_views,
+                      COUNT(ve.id) * 1.0 / MAX(1.0, COALESCE(julianday('now') - julianday(b.created_at), 1)) as velocity
+               FROM broadcasts b
+               JOIN agents a ON a.id = b.agent_id
+               LEFT JOIN view_events ve ON ve.broadcast_id = b.id
+                   AND ve.viewed_at >= datetime('now', '-7 days')
+               WHERE b.status = 'ready'
+               GROUP BY b.id
+               ORDER BY velocity DESC, b.view_count DESC
+               LIMIT ?""",
+            (limit,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
 @router.get("/feed/personalized")
 async def personalized_feed(
     limit: int = 50,
@@ -1566,6 +1592,53 @@ async def search(
         ) as cur:
             rows = await cur.fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Design System endpoint (Omo-koda2 brand)
+# ---------------------------------------------------------------------------
+
+@router.get("/design-system")
+async def get_design_system():
+    """Returns the Omo-koda2 brand design system for agent ASCII/terminal/visual outputs."""
+    return {
+        "version": "1.0",
+        "name": "Omo-koda2",
+        "palette": {
+            "primary": "#8a4bff",
+            "accent": "#00f5ff",
+            "background": "#0a0a16",
+            "surface": "rgba(15,15,30,0.95)",
+            "border": "rgba(255,255,255,0.08)",
+            "text": "#e0e0f0",
+            "muted": "#6b6b8a",
+            "danger": "#ff2d4a",
+            "success": "#39ff14",
+            "warning": "#ffaa00",
+        },
+        "typography": {
+            "heading_font": "Orbitron",
+            "body_font": "Inter",
+            "mono_font": "JetBrains Mono",
+            "scale": {"xs": 10, "sm": 11, "base": 13, "lg": 15, "xl": 20, "2xl": 28, "hero": 36},
+        },
+        "ascii_kit": {
+            "box_chars": {
+                "tl": "╔", "tr": "╗", "bl": "╚", "br": "╝",
+                "h": "═", "v": "║", "t": "╦", "b": "╩", "l": "╠", "r": "╣", "x": "╬",
+            },
+            "status_icons": {
+                "ready": "⚡", "processing": "⏳", "error": "💀",
+                "info": "📡", "success": "✓", "warning": "⚠",
+            },
+            "separators": {"thin": "─", "thick": "═", "dotted": "┄", "wave": "≋"},
+        },
+        "content_type_icons": {
+            "video": "🎬", "text": "📝", "audio": "🎵",
+            "image": "🖼️", "graph": "🕸️", "live": "📡",
+        },
+        "reaction_set": ["🤖", "🔥", "💡", "⚡", "🎯", "👁️"],
+    }
 
 
 # ---------------------------------------------------------------------------

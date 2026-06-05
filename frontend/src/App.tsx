@@ -1,6 +1,6 @@
-import React, { Component, ReactNode, useRef, useState } from 'react'
+import React, { Component, ReactNode, useEffect, useRef, useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
-import { Tv, Users, LayoutDashboard, Radio, Zap, Search, BarChart2, Mail, SearchIcon } from 'lucide-react'
+import { Tv, Users, LayoutDashboard, Radio, Zap, Search, BarChart2, Mail, SearchIcon, BookOpen } from 'lucide-react'
 import AgentTV from './components/AgentTV'
 import AgentDirectory from './components/AgentDirectory'
 import AgentProfile from './components/AgentProfile'
@@ -8,6 +8,7 @@ import AgentDashboard from './components/AgentDashboard'
 import AgentAnalytics from './components/AgentAnalytics'
 import AgentInbox from './components/AgentInbox'
 import SearchPage from './components/SearchPage'
+import ApiDocs from './components/ApiDocs'
 import SeriesView from './components/SeriesView'
 
 /* ── Particles ────────────────────────────────────────────────────────────── */
@@ -53,10 +54,30 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
   }
 }
 
+/* ── Unread count hook ────────────────────────────────────────────────────── */
+function useUnreadCount() {
+  const [count, setCount] = useState(0)
+  useEffect(() => {
+    const apiKey = localStorage.getItem('vantage_api_key')
+    if (!apiKey) return
+    function fetch_() {
+      fetch('/api/agents/messages/unread-count', { headers: { 'X-Agent-Key': apiKey! } })
+        .then(r => r.ok ? r.json() : null)
+        .then(d => d && setCount(d.unread))
+        .catch(() => {})
+    }
+    fetch_()
+    const t = setInterval(fetch_, 60000)
+    return () => clearInterval(t)
+  }, [])
+  return count
+}
+
 /* ── Layout ───────────────────────────────────────────────────────────────── */
 function Layout({ children, searchQuery, onSearchChange }: {
   children: ReactNode; searchQuery: string; onSearchChange: (q: string) => void
 }) {
+  const unread = useUnreadCount()
   return (
     <div className="layout">
       <Particles />
@@ -97,6 +118,10 @@ function Layout({ children, searchQuery, onSearchChange }: {
         </NavLink>
         <NavLink to="/inbox" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
           <Mail size={15} /> <span>Messages</span>
+          {unread > 0 && <span className="nav-badge">{unread}</span>}
+        </NavLink>
+        <NavLink to="/api-docs" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
+          <BookOpen size={15} /> <span>API Docs</span>
         </NavLink>
       </aside>
       <main className="main">{children}</main>
@@ -119,6 +144,7 @@ export default function App() {
           <Route path="/series/:id" element={<ErrorBoundary><SeriesView /></ErrorBoundary>} />
           <Route path="/inbox" element={<ErrorBoundary><AgentInbox /></ErrorBoundary>} />
           <Route path="/search" element={<ErrorBoundary><SearchPage /></ErrorBoundary>} />
+          <Route path="/api-docs" element={<ErrorBoundary><ApiDocs /></ErrorBoundary>} />
           <Route path="*" element={
             <div className="not-found">
               <h1>404</h1><h2>Channel Not Found</h2>

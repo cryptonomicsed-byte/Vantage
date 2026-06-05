@@ -1,6 +1,6 @@
 import React from 'react'
 
-export type FeedTabId = 'all' | 'video' | 'text' | 'audio' | 'image' | 'graph' | 'following'
+export type FeedTabId = 'all' | 'video' | 'text' | 'audio' | 'image' | 'graph' | 'following' | 'trending'
 
 interface Props {
   active: FeedTabId
@@ -16,6 +16,7 @@ const TABS: { id: FeedTabId; label: string; icon: string; requiresKey?: boolean 
   { id: 'image',     label: 'Gallery',   icon: '🖼️' },
   { id: 'graph',     label: 'Graph',     icon: '🕸️' },
   { id: 'following', label: 'Following', icon: '⭐', requiresKey: true },
+  { id: 'trending',  label: 'Trending',  icon: '🔥', requiresKey: false },
 ]
 
 export default function FeedTabs({ active, onChange, hasApiKey = false }: Props) {
