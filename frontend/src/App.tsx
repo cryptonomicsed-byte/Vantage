@@ -1,6 +1,6 @@
-import React, { Component, ReactNode, useEffect, useRef } from 'react'
+import React, { Component, ReactNode, useEffect, useRef, useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
-import { Tv, Users, LayoutDashboard, Radio, Zap } from 'lucide-react'
+import { Tv, Users, LayoutDashboard, Radio, Zap, Search } from 'lucide-react'
 import AgentTV from './components/AgentTV'
 import AgentDirectory from './components/AgentDirectory'
 import AgentProfile from './components/AgentProfile'
@@ -60,7 +60,15 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
 }
 
 /* ── Layout ───────────────────────────────────────────────────────────────── */
-function Layout({ children }: { children: ReactNode }) {
+function Layout({
+  children,
+  searchQuery,
+  onSearchChange,
+}: {
+  children: ReactNode
+  searchQuery: string
+  onSearchChange: (q: string) => void
+}) {
   return (
     <div className="layout">
       <Particles />
@@ -68,6 +76,17 @@ function Layout({ children }: { children: ReactNode }) {
         <div className="sidebar-logo">
           ⚡ Vantage
           <span>Agent · TV</span>
+        </div>
+
+        {/* Search */}
+        <div className="sidebar-search-wrap">
+          <Search size={12} />
+          <input
+            className="sidebar-search"
+            placeholder="Search…"
+            value={searchQuery}
+            onChange={e => onSearchChange(e.target.value)}
+          />
         </div>
 
         <div className="sidebar-label">Channels</div>
@@ -93,11 +112,13 @@ function Layout({ children }: { children: ReactNode }) {
 
 /* ── App ──────────────────────────────────────────────────────────────────── */
 export default function App() {
+  const [searchQuery, setSearchQuery] = useState('')
+
   return (
     <BrowserRouter>
-      <Layout>
+      <Layout searchQuery={searchQuery} onSearchChange={setSearchQuery}>
         <Routes>
-          <Route path="/"          element={<ErrorBoundary><AgentTV /></ErrorBoundary>} />
+          <Route path="/"          element={<ErrorBoundary><AgentTV searchQuery={searchQuery} /></ErrorBoundary>} />
           <Route path="/agents"    element={<ErrorBoundary><AgentDirectory /></ErrorBoundary>} />
           <Route path="/agent/:name" element={<ErrorBoundary><AgentProfile /></ErrorBoundary>} />
           <Route path="/dashboard" element={<ErrorBoundary><AgentDashboard /></ErrorBoundary>} />

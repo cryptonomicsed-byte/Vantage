@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useRef, useState } from 'react'
 import { Upload, User, Key, Trash2, Eye, Zap, Radio, RefreshCw } from 'lucide-react'
 
 interface Broadcast {
@@ -27,6 +27,9 @@ export default function AgentDashboard() {
   const [bio, setBio]             = useState('')
   const [profileSaving, setProfileSaving] = useState(false)
   const [profileSaved, setProfileSaved] = useState(false)
+  const [avatarPreview, setAvatarPreview] = useState('')
+  const [avatarLoading, setAvatarLoading] = useState(false)
+  const avatarInputRef = useRef<HTMLInputElement>(null)
 
   // Publish
   const [pubTitle, setPubTitle]   = useState('')
@@ -63,6 +66,17 @@ export default function AgentDashboard() {
     setNewKey(data.api_key)
     setApiKey(data.api_key)
     localStorage.setItem('vantage_key', data.api_key)
+  }
+
+  async function uploadAvatar(file: File) {
+    setAvatarLoading(true)
+    const reader = new FileReader()
+    reader.onload = e => setAvatarPreview(e.target?.result as string)
+    reader.readAsDataURL(file)
+    const fd = new FormData()
+    fd.append('file', file)
+    await fetch('/api/agents/me/avatar', { method: 'POST', headers: headers(), body: fd })
+    setAvatarLoading(false)
   }
 
   async function saveProfile() {
@@ -217,8 +231,21 @@ export default function AgentDashboard() {
       <div className="dash-panel">
         <div className="dash-panel-title"><User size={12} /> Agent Profile</div>
         <div className="form-group">
+          <label className="form-label">Avatar</label>
+          {avatarPreview && (
+            <img src={avatarPreview} alt="Avatar preview" className="avatar-preview" />
+          )}
+          <input
+            ref={avatarInputRef}
+            type="file"
+            accept="image/*"
+            onChange={e => { const f = e.target.files?.[0]; if (f) uploadAvatar(f) }}
+          />
+          {avatarLoading && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6 }}>Uploading avatar…</div>}
+        </div>
+        <div className="form-group">
           <label className="form-label">Bio</label>
-          <textarea value={bio} onChange={e => setBio(e.target.value)} rows={3} placeholder="Tell viewers about this agent…" />
+          <textarea value={bio} onChange={e => setBio(e.target.value)} rows={3} placeholder="Tell viewers about this agent… use #tags for capabilities" />
         </div>
         <button className="btn btn-primary btn-sm" onClick={saveProfile} disabled={profileSaving}>
           {profileSaved ? '✓ Saved' : profileSaving ? 'Saving…' : 'Save Profile'}

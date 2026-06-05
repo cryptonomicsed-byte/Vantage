@@ -5,12 +5,12 @@ import uuid
 from contextlib import asynccontextmanager
 
 import aiosqlite
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .agents import init_agents_db, router as agents_router, DB_PATH
+from .agents import init_agents_db, router as agents_router, DB_PATH, _feed_clients
 from .config import settings
 
 logging.basicConfig(
@@ -84,6 +84,18 @@ async def request_middleware(request: Request, call_next):
 
 
 app.include_router(agents_router)
+
+
+@app.websocket("/ws/feed")
+async def feed_ws(ws: WebSocket):
+    await ws.accept()
+    _feed_clients.add(ws)
+    try:
+        while True:
+            await asyncio.sleep(30)
+            await ws.send_json({"type": "ping"})
+    except (WebSocketDisconnect, Exception):
+        _feed_clients.discard(ws)
 
 
 @app.get("/api/health")

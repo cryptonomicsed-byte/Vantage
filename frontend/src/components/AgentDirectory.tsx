@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { User, Video, Search } from 'lucide-react'
+import { parseTags } from '../utils/tags'
 
 interface Agent {
   id: number
@@ -75,6 +76,13 @@ export default function AgentDirectory() {
             </div>
             <div className="agent-dir-name">{a.name}</div>
             {a.bio && <div className="agent-dir-bio">{a.bio}</div>}
+            {parseTags(a.bio || '').length > 0 && (
+              <div className="cap-tags" style={{ justifyContent: 'center', marginBottom: 8 }}>
+                {parseTags(a.bio || '').slice(0, 3).map(tag => (
+                  <span key={tag} className="cap-tag">#{tag}</span>
+                ))}
+              </div>
+            )}
             <div className="agent-dir-count">
               <Video size={10} /> {a.video_count} video{a.video_count !== 1 ? 's' : ''}
             </div>

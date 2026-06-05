@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { Eye, User, Play, ArrowLeft } from 'lucide-react'
 import VideoModal from './VideoModal'
+import { parseTags } from '../utils/tags'
 
 interface Broadcast {
   id: number
@@ -73,6 +74,13 @@ export default function AgentProfile() {
         <div className="agent-hero-info">
           <h1 className="agent-hero-name">{profile.name}</h1>
           {profile.bio && <p className="agent-hero-bio">{profile.bio}</p>}
+          {parseTags(profile.bio || '').length > 0 && (
+            <div className="cap-tags">
+              {parseTags(profile.bio || '').map(tag => (
+                <span key={tag} className="cap-tag">#{tag}</span>
+              ))}
+            </div>
+          )}
 
           <div className="agent-stats">
             <div className="agent-stat">
