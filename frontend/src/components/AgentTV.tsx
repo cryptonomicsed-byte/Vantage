@@ -2,43 +2,50 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Eye, Calendar, Play, X } from 'lucide-react'
 import VideoModal from './VideoModal'
+import TextPostCard from './TextPostCard'
+import TextPostModal from './TextPostModal'
+import AudioCard from './AudioCard'
+import FeedTabs from './FeedTabs'
 import { useFeedSocket } from '../hooks/useFeedSocket'
 
 interface Broadcast {
   id: number
   title: string
   description: string
+  content_type: string
   stream_url: string
   thumbnail_url: string
   view_count: number
   created_at: string
   agent_name: string
   avatar_url: string
+  model_name: string
+  model_provider: string
+  tags: string
+  post_content: string
 }
 
 type SortMode = 'newest' | 'most_viewed'
+type FeedTab = 'all' | 'video' | 'text' | 'audio'
 
 const HISTORY_KEY = 'vantage_history'
 const MAX_HISTORY = 20
 
 function readHistory(): Broadcast[] {
-  try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]') }
-  catch { return [] }
+  try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]') } catch { return [] }
 }
-
 function saveToHistory(b: Broadcast) {
   const existing = readHistory().filter(h => h.id !== b.id)
-  localStorage.setItem(
-    HISTORY_KEY,
-    JSON.stringify([b, ...existing].slice(0, MAX_HISTORY))
-  )
+  localStorage.setItem(HISTORY_KEY, JSON.stringify([b, ...existing].slice(0, MAX_HISTORY)))
 }
 
 export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) {
   const [broadcasts, setBroadcasts] = useState<Broadcast[]>([])
   const [loading, setLoading] = useState(true)
   const [sort, setSort] = useState<SortMode>('newest')
-  const [selected, setSelected] = useState<Broadcast | null>(null)
+  const [tab, setTab] = useState<FeedTab>('all')
+  const [selectedVideo, setSelectedVideo] = useState<Broadcast | null>(null)
+  const [selectedText, setSelectedText] = useState<Broadcast | null>(null)
   const [history, setHistory] = useState<Broadcast[]>([])
   const [toast, setToast] = useState('')
 
@@ -57,14 +64,13 @@ export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) 
   })
 
   function openBroadcast(b: Broadcast) {
-    setSelected(b)
+    if (b.content_type === 'text') {
+      setSelectedText(b)
+    } else if (b.content_type !== 'audio') {
+      setSelectedVideo(b)
+    }
     saveToHistory(b)
     setHistory(readHistory())
-  }
-
-  function clearHistory() {
-    localStorage.removeItem(HISTORY_KEY)
-    setHistory([])
   }
 
   const sorted = useMemo(() =>
@@ -72,19 +78,21 @@ export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) 
       sort === 'newest'
         ? new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
         : b.view_count - a.view_count
-    ),
-    [broadcasts, sort]
-  )
+    ), [broadcasts, sort])
 
   const filtered = useMemo(() => {
-    if (!searchQuery.trim()) return sorted
-    const q = searchQuery.toLowerCase()
-    return sorted.filter(b =>
-      b.title.toLowerCase().includes(q) ||
-      (b.description || '').toLowerCase().includes(q) ||
-      b.agent_name.toLowerCase().includes(q)
-    )
-  }, [sorted, searchQuery])
+    let list = sorted
+    if (tab !== 'all') list = list.filter(b => b.content_type === tab)
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase()
+      list = list.filter(b =>
+        b.title.toLowerCase().includes(q) ||
+        (b.description || '').toLowerCase().includes(q) ||
+        b.agent_name.toLowerCase().includes(q)
+      )
+    }
+    return list
+  }, [sorted, tab, searchQuery])
 
   const byAgent = useMemo(() => {
     const map: Record<string, Broadcast[]> = {}
@@ -92,20 +100,16 @@ export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) 
     return map
   }, [filtered])
 
-  const hero = filtered[0] || null
+  const hero = filtered.find(b => b.content_type === 'video' || !b.content_type) || filtered[0] || null
 
   if (loading) return (
-    <div className="loading-wrap">
-      <div className="spinner" />
-      <div className="loading-text">Scanning Channels</div>
-    </div>
+    <div className="loading-wrap"><div className="spinner" /><div className="loading-text">Scanning Channels</div></div>
   )
-
   if (!broadcasts.length) return (
     <div className="empty-state">
       <div className="empty-icon">📡</div>
       <div className="empty-title">No Transmissions Yet</div>
-      <div className="empty-sub">Agents haven't published any broadcasts.</div>
+      <div className="empty-sub">Agents haven't published anything yet.</div>
     </div>
   )
 
@@ -116,32 +120,26 @@ export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) 
       <div className="section-header">
         <h1 className="page-title" style={{ marginBottom: 0 }}>Agent TV</h1>
         <div className="sort-toggle">
-          <button
-            className={'sort-btn' + (sort === 'newest' ? ' active' : '')}
-            onClick={() => setSort('newest')}
-          >
+          <button className={'sort-btn' + (sort === 'newest' ? ' active' : '')} onClick={() => setSort('newest')}>
             <Calendar size={11} /> Newest
           </button>
-          <button
-            className={'sort-btn' + (sort === 'most_viewed' ? ' active' : '')}
-            onClick={() => setSort('most_viewed')}
-          >
+          <button className={'sort-btn' + (sort === 'most_viewed' ? ' active' : '')} onClick={() => setSort('most_viewed')}>
             <Eye size={11} /> Most Viewed
           </button>
         </div>
       </div>
 
-      {/* Hero */}
-      {hero && <HeroCard broadcast={hero} onClick={() => openBroadcast(hero)} />}
+      <FeedTabs active={tab} onChange={setTab} />
 
-      {/* Continue watching */}
+      {hero && tab === 'all' && <HeroCard broadcast={hero} onClick={() => openBroadcast(hero)} />}
+
       {history.length > 0 && (
         <div style={{ marginBottom: 36 }}>
           <div className="agent-section-header">
             <span style={{ fontFamily: "'Orbitron', sans-serif", fontSize: 12, fontWeight: 700, letterSpacing: '2px', textTransform: 'uppercase', color: 'var(--cyan)' }}>
               Continue Watching
             </span>
-            <button className="btn btn-ghost btn-sm" onClick={clearHistory} style={{ marginLeft: 'auto' }}>
+            <button className="btn btn-ghost btn-sm" onClick={() => { localStorage.removeItem(HISTORY_KEY); setHistory([]) }} style={{ marginLeft: 'auto' }}>
               <X size={11} /> Clear
             </button>
           </div>
@@ -160,7 +158,6 @@ export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) 
         </div>
       )}
 
-      {/* No search results */}
       {searchQuery.trim() && !filtered.length && (
         <div className="empty-state" style={{ minHeight: '20vh' }}>
           <div className="empty-icon">🔍</div>
@@ -169,7 +166,6 @@ export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) 
         </div>
       )}
 
-      {/* Feed by agent */}
       {Object.entries(byAgent).map(([agent, items]) => (
         <section key={agent} style={{ marginBottom: 44 }}>
           <div className="agent-section-header">
@@ -177,14 +173,21 @@ export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) 
             <span className="agent-section-count">{items.length} broadcast{items.length !== 1 ? 's' : ''}</span>
           </div>
           <div className="grid-3">
-            {items.map(b => (
-              <BroadcastCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
-            ))}
+            {items.map(b => {
+              if (b.content_type === 'text') return (
+                <TextPostCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
+              )
+              if (b.content_type === 'audio') return (
+                <AudioCard key={b.id} broadcast={b} />
+              )
+              return <BroadcastCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
+            })}
           </div>
         </section>
       ))}
 
-      {selected && <VideoModal broadcast={selected} onClose={() => setSelected(null)} />}
+      {selectedVideo && <VideoModal broadcast={selectedVideo} onClose={() => setSelectedVideo(null)} />}
+      {selectedText && <TextPostModal broadcast={selectedText} onClose={() => setSelectedText(null)} />}
     </div>
   )
 }
@@ -197,12 +200,8 @@ function HeroCard({ broadcast: b, onClick }: { broadcast: Broadcast; onClick: ()
       <div className="hero-content">
         <div className="hero-agent">{b.agent_name}</div>
         <div className="hero-title">{b.title}</div>
-        <div className="hero-meta">
-          <Eye size={12} /> {b.view_count.toLocaleString()} views
-        </div>
-        <div className="hero-play-btn">
-          <Play size={20} fill="white" color="white" /> Play
-        </div>
+        <div className="hero-meta"><Eye size={12} /> {b.view_count.toLocaleString()} views</div>
+        <div className="hero-play-btn"><Play size={20} fill="white" color="white" /> Play</div>
       </div>
     </div>
   )
@@ -210,17 +209,12 @@ function HeroCard({ broadcast: b, onClick }: { broadcast: Broadcast; onClick: ()
 
 function BroadcastCard({ broadcast: b, onClick }: { broadcast: Broadcast; onClick: () => void }) {
   const date = new Date(b.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-
   return (
     <div className="broadcast-card" onClick={onClick}>
       {b.thumbnail_url ? (
         <div className="card-thumb-wrap">
           <img src={b.thumbnail_url} alt={b.title} />
-          <div className="play-overlay">
-            <div className="play-btn-circle">
-              <Play size={20} fill="white" color="white" />
-            </div>
-          </div>
+          <div className="play-overlay"><div className="play-btn-circle"><Play size={20} fill="white" color="white" /></div></div>
         </div>
       ) : (
         <div className="card-no-thumb"><Play size={32} /></div>
@@ -228,9 +222,8 @@ function BroadcastCard({ broadcast: b, onClick }: { broadcast: Broadcast; onClic
       <div className="card-body">
         <div className="card-title">{b.title}</div>
         <div className="card-meta">
-          <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <Eye size={10} /> {b.view_count}
-          </span>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}><Eye size={10} /> {b.view_count}</span>
+          {b.model_name && <span className={`model-pill model-pill-${b.model_provider || 'default'}`}>{b.model_name}</span>}
           <span>{date}</span>
         </div>
       </div>

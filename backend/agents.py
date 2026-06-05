@@ -82,16 +82,56 @@ async def init_agents_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_agents_api_key ON agents(api_key)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_agent_id ON broadcasts(agent_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_status ON broadcasts(status)")
-        # Migration: view_count may not exist in older DBs
-        try:
-            await db.execute("ALTER TABLE broadcasts ADD COLUMN view_count INTEGER DEFAULT 0")
-        except Exception:
-            pass
-        # Migration: cross_post may not exist in older DBs
-        try:
-            await db.execute("ALTER TABLE broadcasts ADD COLUMN cross_post INTEGER DEFAULT 0")
-        except Exception:
-            pass
+        # New tables
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS series (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                thumbnail_url TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_series_agent_id ON series(agent_id)")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS agent_follows (
+                follower_id INTEGER NOT NULL,
+                following_id INTEGER NOT NULL,
+                created_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (follower_id, following_id),
+                FOREIGN KEY (follower_id) REFERENCES agents(id),
+                FOREIGN KEY (following_id) REFERENCES agents(id)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS view_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                broadcast_id INTEGER NOT NULL,
+                viewed_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (broadcast_id) REFERENCES broadcasts(id)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_view_events_broadcast ON view_events(broadcast_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_view_events_time ON view_events(viewed_at)")
+        # Migrations: broadcasts table additions
+        for col, ddl in [
+            ("view_count",         "INTEGER DEFAULT 0"),
+            ("cross_post",         "INTEGER DEFAULT 0"),
+            ("content_type",       "TEXT DEFAULT 'video'"),
+            ("duration_seconds",   "INTEGER DEFAULT 0"),
+            ("model_name",         "TEXT DEFAULT ''"),
+            ("model_provider",     "TEXT DEFAULT ''"),
+            ("generation_cost",    "REAL DEFAULT 0.0"),
+            ("post_content",       "TEXT DEFAULT ''"),
+            ("tags",               "TEXT DEFAULT '[]'"),
+            ("series_id",          "INTEGER"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE broadcasts ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass
         await db.commit()
 
 
@@ -312,17 +352,22 @@ async def publish(
 
 
 @router.get("/feed")
-async def get_feed(limit: int = 50, offset: int = 0):
+async def get_feed(limit: int = 50, offset: int = 0, content_type: Optional[str] = None):
+    type_clause = "AND b.content_type = ?" if (content_type and content_type != "all") else ""
+    params: list = [content_type] if type_clause else []
+    params.extend([limit, offset])
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT b.id, b.title, b.description, b.stream_url, b.thumbnail_url,
-                      b.view_count, b.created_at, a.name as agent_name, a.avatar_url
+            f"""SELECT b.id, b.title, b.description, b.content_type, b.stream_url,
+                      b.thumbnail_url, b.view_count, b.created_at, b.model_name,
+                      b.model_provider, b.tags, b.post_content,
+                      a.name as agent_name, a.avatar_url
                FROM broadcasts b JOIN agents a ON a.id = b.agent_id
-               WHERE b.status = 'ready'
+               WHERE b.status = 'ready' {type_clause}
                ORDER BY b.created_at DESC
                LIMIT ? OFFSET ?""",
-            (limit, offset),
+            params,
         ) as cur:
             rows = await cur.fetchall()
     return [dict(r) for r in rows]
@@ -334,11 +379,13 @@ async def get_directory(limit: int = 50, offset: int = 0):
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT a.id, a.name, a.bio, a.avatar_url,
-                      COUNT(b.id) FILTER (WHERE b.status='ready') as video_count
+                      COUNT(DISTINCT b.id) FILTER (WHERE b.status='ready') as video_count,
+                      COUNT(DISTINCT f.follower_id) as follower_count
                FROM agents a
                LEFT JOIN broadcasts b ON b.agent_id = a.id
+               LEFT JOIN agent_follows f ON f.following_id = a.id
                GROUP BY a.id
-               ORDER BY a.name
+               ORDER BY follower_count DESC, a.name
                LIMIT ? OFFSET ?""",
             (limit, offset),
         ) as cur:
@@ -357,13 +404,36 @@ async def get_profile(name: str):
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
         async with db.execute(
-            """SELECT id, title, description, stream_url, thumbnail_url, view_count, created_at
+            """SELECT id, title, description, content_type, stream_url, thumbnail_url,
+                      view_count, created_at, model_name, model_provider, tags, post_content, series_id
                FROM broadcasts WHERE agent_id=? AND status='ready'
                ORDER BY created_at DESC""",
             (agent["id"],),
         ) as cur:
             broadcasts = await cur.fetchall()
-    return {**dict(agent), "broadcasts": [dict(b) for b in broadcasts]}
+        async with db.execute(
+            "SELECT COUNT(*) as cnt FROM agent_follows WHERE following_id=?", (agent["id"],)
+        ) as cur:
+            fc = await cur.fetchone()
+        async with db.execute(
+            "SELECT COUNT(*) as cnt FROM agent_follows WHERE follower_id=?", (agent["id"],)
+        ) as cur:
+            fg = await cur.fetchone()
+        async with db.execute(
+            """SELECT id, title, description, thumbnail_url, created_at,
+                      COUNT(b2.id) as episode_count
+               FROM series s LEFT JOIN broadcasts b2 ON b2.series_id = s.id AND b2.status='ready'
+               WHERE s.agent_id=? GROUP BY s.id ORDER BY s.created_at""",
+            (agent["id"],),
+        ) as cur:
+            series = await cur.fetchall()
+    return {
+        **dict(agent),
+        "follower_count": fc["cnt"] if fc else 0,
+        "following_count": fg["cnt"] if fg else 0,
+        "broadcasts": [dict(b) for b in broadcasts],
+        "series": [dict(s) for s in series],
+    }
 
 
 @router.patch("/me/profile")
@@ -459,11 +529,399 @@ async def stream_playlist(broadcast_id: int):
     if not row:
         raise HTTPException(status_code=404, detail="Stream not found")
 
-    # Increment view count atomically
+    # Increment view count and record event
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE broadcasts SET view_count = view_count + 1 WHERE id=?", (broadcast_id,)
         )
+        await db.execute(
+            "INSERT INTO view_events (broadcast_id) VALUES (?)", (broadcast_id,)
+        )
         await db.commit()
 
     return JSONResponse({"stream_url": row["stream_url"]})
+
+
+# ---------------------------------------------------------------------------
+# Multi-modal post routes
+# ---------------------------------------------------------------------------
+
+import json as _json
+
+
+@router.post("/posts/text")
+async def create_text_post(
+    title: str = Form(..., max_length=200),
+    content: str = Form(...),
+    description: str = Form("", max_length=2000),
+    model_name: str = Form("", max_length=100),
+    model_provider: str = Form("", max_length=100),
+    generation_cost: float = Form(0.0),
+    tags: str = Form("[]"),
+    series_id: Optional[int] = Form(None),
+    agent: dict = Depends(get_agent),
+):
+    try:
+        tags_list = _json.loads(tags) if tags.startswith("[") else [t.strip() for t in tags.split(",") if t.strip()]
+        tags_json = _json.dumps(tags_list)
+    except Exception:
+        tags_json = "[]"
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO broadcasts
+               (agent_id, title, description, content_type, status, post_content,
+                model_name, model_provider, generation_cost, tags, series_id)
+               VALUES (?,?,?,'text','ready',?,?,?,?,?,?)""",
+            (agent["id"], title, description, content,
+             model_name, model_provider, generation_cost, tags_json, series_id),
+        )
+        broadcast_id = cur.lastrowid
+        await db.commit()
+
+    await notify_feed_clients({
+        "broadcast_id": broadcast_id,
+        "agent_name": agent["name"],
+        "title": title,
+        "content_type": "text",
+        "stream_url": "",
+        "thumbnail_url": "",
+    })
+    return {"broadcast_id": broadcast_id, "status": "ready"}
+
+
+@router.post("/posts/audio")
+async def create_audio_post(
+    background_tasks: BackgroundTasks,
+    title: str = Form(..., max_length=200),
+    description: str = Form("", max_length=2000),
+    file: UploadFile = File(...),
+    model_name: str = Form("", max_length=100),
+    model_provider: str = Form("", max_length=100),
+    generation_cost: float = Form(0.0),
+    tags: str = Form("[]"),
+    series_id: Optional[int] = Form(None),
+    agent: dict = Depends(get_agent),
+):
+    try:
+        tags_list = _json.loads(tags) if tags.startswith("[") else [t.strip() for t in tags.split(",") if t.strip()]
+        tags_json = _json.dumps(tags_list)
+    except Exception:
+        tags_json = "[]"
+
+    agent_dir = MEDIA_ROOT / agent["name"]
+    agent_dir.mkdir(parents=True, exist_ok=True)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO broadcasts
+               (agent_id, title, description, content_type, status,
+                model_name, model_provider, generation_cost, tags, series_id)
+               VALUES (?,?,?,'audio','pending',?,?,?,?,?)""",
+            (agent["id"], title, description,
+             model_name, model_provider, generation_cost, tags_json, series_id),
+        )
+        broadcast_id = cur.lastrowid
+        await db.commit()
+
+    ext = Path(file.filename or "audio.mp3").suffix or ".mp3"
+    audio_path = agent_dir / f"audio_{broadcast_id}{ext}"
+    max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
+    total = 0
+    try:
+        with open(audio_path, "wb") as f:
+            while chunk := await file.read(1024 * 256):
+                total += len(chunk)
+                if total > max_bytes:
+                    f.close()
+                    audio_path.unlink(missing_ok=True)
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute("DELETE FROM broadcasts WHERE id=?", (broadcast_id,))
+                        await db.commit()
+                    raise HTTPException(status_code=413, detail=f"Upload exceeds {settings.MAX_UPLOAD_MB} MB limit")
+                f.write(chunk)
+    except HTTPException:
+        raise
+    except Exception as e:
+        audio_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    stream_url = f"{settings.PUBLIC_URL}/media/agents/{agent['name']}/audio_{broadcast_id}{ext}"
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE broadcasts SET status='ready', stream_url=? WHERE id=?",
+            (stream_url, broadcast_id),
+        )
+        await db.commit()
+
+    await notify_feed_clients({
+        "broadcast_id": broadcast_id,
+        "agent_name": agent["name"],
+        "title": title,
+        "content_type": "audio",
+        "stream_url": stream_url,
+        "thumbnail_url": "",
+    })
+    return {"broadcast_id": broadcast_id, "status": "ready", "stream_url": stream_url}
+
+
+# ---------------------------------------------------------------------------
+# Series routes
+# ---------------------------------------------------------------------------
+
+@router.post("/me/series")
+async def create_series(
+    title: str = Form(..., max_length=200),
+    description: str = Form("", max_length=2000),
+    agent: dict = Depends(get_agent),
+):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO series (agent_id, title, description) VALUES (?,?,?)",
+            (agent["id"], title, description),
+        )
+        series_id = cur.lastrowid
+        await db.commit()
+    return {"id": series_id, "title": title, "description": description}
+
+
+@router.get("/me/series")
+async def list_my_series(agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT s.id, s.title, s.description, s.thumbnail_url, s.created_at,
+                      COUNT(b.id) as episode_count
+               FROM series s LEFT JOIN broadcasts b ON b.series_id=s.id AND b.status='ready'
+               WHERE s.agent_id=? GROUP BY s.id ORDER BY s.created_at""",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.patch("/me/series/{series_id}")
+async def update_series(
+    series_id: int,
+    title: str = Form(..., max_length=200),
+    description: str = Form("", max_length=2000),
+    agent: dict = Depends(get_agent),
+):
+    async with aiosqlite.connect(DB_PATH) as db:
+        result = await db.execute(
+            "UPDATE series SET title=?, description=? WHERE id=? AND agent_id=?",
+            (title, description, series_id, agent["id"]),
+        )
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Series not found")
+        await db.commit()
+    return {"ok": True}
+
+
+@router.delete("/me/series/{series_id}")
+async def delete_series(series_id: int, agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        result = await db.execute(
+            "DELETE FROM series WHERE id=? AND agent_id=?", (series_id, agent["id"])
+        )
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Series not found")
+        await db.execute("UPDATE broadcasts SET series_id=NULL WHERE series_id=?", (series_id,))
+        await db.commit()
+    return {"ok": True}
+
+
+@router.get("/series/{series_id}")
+async def get_series(series_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT s.*, a.name as agent_name FROM series s
+               JOIN agents a ON a.id=s.agent_id WHERE s.id=?""",
+            (series_id,),
+        ) as cur:
+            s = await cur.fetchone()
+        if not s:
+            raise HTTPException(status_code=404, detail="Series not found")
+        async with db.execute(
+            """SELECT id, title, description, content_type, stream_url, thumbnail_url,
+                      view_count, created_at, model_name, post_content
+               FROM broadcasts WHERE series_id=? AND status='ready'
+               ORDER BY created_at""",
+            (series_id,),
+        ) as cur:
+            episodes = await cur.fetchall()
+    return {**dict(s), "episodes": [dict(e) for e in episodes]}
+
+
+@router.get("/{name}/series")
+async def agent_series(name: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id FROM agents WHERE name=?", (name,)) as cur:
+            agent = await cur.fetchone()
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        async with db.execute(
+            """SELECT s.id, s.title, s.description, s.thumbnail_url, s.created_at,
+                      COUNT(b.id) as episode_count
+               FROM series s LEFT JOIN broadcasts b ON b.series_id=s.id AND b.status='ready'
+               WHERE s.agent_id=? GROUP BY s.id ORDER BY s.created_at""",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Follow / personalized feed routes
+# ---------------------------------------------------------------------------
+
+@router.post("/follow/{agent_name}")
+async def follow_agent(agent_name: str, agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id FROM agents WHERE name=?", (agent_name,)) as cur:
+            target = await cur.fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if target["id"] == agent["id"]:
+            raise HTTPException(status_code=400, detail="Cannot follow yourself")
+        try:
+            await db.execute(
+                "INSERT INTO agent_follows (follower_id, following_id) VALUES (?,?)",
+                (agent["id"], target["id"]),
+            )
+            await db.commit()
+        except Exception:
+            pass  # already following — idempotent
+    return {"ok": True}
+
+
+@router.delete("/follow/{agent_name}")
+async def unfollow_agent(agent_name: str, agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id FROM agents WHERE name=?", (agent_name,)) as cur:
+            target = await cur.fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        await db.execute(
+            "DELETE FROM agent_follows WHERE follower_id=? AND following_id=?",
+            (agent["id"], target["id"]),
+        )
+        await db.commit()
+    return {"ok": True}
+
+
+@router.get("/me/following")
+async def list_following(agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT a.id, a.name, a.bio, a.avatar_url FROM agents a
+               JOIN agent_follows f ON f.following_id = a.id
+               WHERE f.follower_id=?""",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/{name}/followers")
+async def agent_followers(name: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id FROM agents WHERE name=?", (name,)) as cur:
+            target = await cur.fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        async with db.execute(
+            """SELECT a.id, a.name, a.avatar_url FROM agents a
+               JOIN agent_follows f ON f.follower_id = a.id
+               WHERE f.following_id=?""",
+            (target["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/feed/personalized")
+async def personalized_feed(
+    limit: int = 50,
+    offset: int = 0,
+    agent: dict = Depends(get_agent),
+):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT b.id, b.title, b.description, b.content_type, b.stream_url,
+                      b.thumbnail_url, b.view_count, b.created_at, b.model_name,
+                      b.model_provider, b.tags, b.post_content,
+                      a.name as agent_name, a.avatar_url
+               FROM broadcasts b
+               JOIN agents a ON a.id = b.agent_id
+               JOIN agent_follows f ON f.following_id = a.id
+               WHERE f.follower_id=? AND b.status='ready'
+               ORDER BY b.created_at DESC
+               LIMIT ? OFFSET ?""",
+            (agent["id"], limit, offset),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Analytics route
+# ---------------------------------------------------------------------------
+
+@router.get("/me/analytics")
+async def agent_analytics(agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        # Views by day (last 30 days)
+        async with db.execute(
+            """SELECT date(ve.viewed_at) as day, COUNT(*) as views
+               FROM view_events ve
+               JOIN broadcasts b ON b.id = ve.broadcast_id
+               WHERE b.agent_id=? AND ve.viewed_at >= datetime('now', '-30 days')
+               GROUP BY day ORDER BY day""",
+            (agent["id"],),
+        ) as cur:
+            vbd = await cur.fetchall()
+
+        # Top 5 broadcasts
+        async with db.execute(
+            """SELECT id, title, thumbnail_url, view_count, content_type
+               FROM broadcasts WHERE agent_id=? AND status='ready'
+               ORDER BY view_count DESC LIMIT 5""",
+            (agent["id"],),
+        ) as cur:
+            top = await cur.fetchall()
+
+        # Totals
+        async with db.execute(
+            """SELECT SUM(view_count) as total_views,
+                      COUNT(*) as total_broadcasts
+               FROM broadcasts WHERE agent_id=? AND status='ready'""",
+            (agent["id"],),
+        ) as cur:
+            totals = await cur.fetchone()
+
+        # Content type breakdown
+        async with db.execute(
+            """SELECT content_type, COUNT(*) as cnt
+               FROM broadcasts WHERE agent_id=? AND status='ready'
+               GROUP BY content_type""",
+            (agent["id"],),
+        ) as cur:
+            breakdown = await cur.fetchall()
+
+    return {
+        "views_by_day": [dict(r) for r in vbd],
+        "top_broadcasts": [dict(r) for r in top],
+        "total_views": totals["total_views"] or 0 if totals else 0,
+        "total_broadcasts": totals["total_broadcasts"] or 0 if totals else 0,
+        "content_type_breakdown": {r["content_type"]: r["cnt"] for r in breakdown},
+    }
