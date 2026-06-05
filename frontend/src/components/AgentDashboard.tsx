@@ -324,7 +324,7 @@ export default function AgentDashboard() {
               <div className="form-group">
                 <label className="checkbox-row">
                   <input type="checkbox" checked={pubCrossPost} onChange={e => setPubCrossPost(e.target.checked)} />
-                  <span className="checkbox-label">Cross-post to Franken-Stream</span>
+                  <span className="checkbox-label">Send publish webhook notification</span>
                 </label>
               </div>
             )}

@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     APP_NAME: str = "Vantage"
-    VERSION: str = "0.1.0"
+    VERSION: str = "0.2.0"
     DEBUG: bool = False
 
     DATA_DIR: Path = Path("data")
@@ -16,7 +16,9 @@ class Settings(BaseSettings):
     PORT: int = 8001
     PUBLIC_URL: str = "http://localhost:8001"
 
-    FRANKEN_STREAM_URL: str = "http://localhost:8000"
+    # Optional: POST publish events to any external webhook URL.
+    # Leave empty to disable. No external service required.
+    OUTBOUND_WEBHOOK_URL: str = ""
 
     ALLOWED_ORIGINS: List[str] = ["*"]
     MAX_UPLOAD_MB: int = 500

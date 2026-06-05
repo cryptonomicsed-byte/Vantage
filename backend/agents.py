@@ -221,8 +221,8 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
                 row = await cur.fetchone()
 
         if row:
-            if row["cross_post"]:
-                await _notify_franken_stream(
+            if row["cross_post"] and settings.OUTBOUND_WEBHOOK_URL:
+                await _notify_webhook(
                     broadcast_id=broadcast_id,
                     agent_name=row["agent_name"],
                     title=row["title"],
@@ -260,10 +260,13 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
             pass
 
 
-async def _notify_franken_stream(
+async def _notify_webhook(
     broadcast_id: int, agent_name: str, title: str, stream_url: str, thumbnail_url: str
 ) -> None:
-    url = f"{settings.FRANKEN_STREAM_URL}/api/v1/vantage/notify"
+    """POST publish events to an optional external webhook. No external service required."""
+    url = settings.OUTBOUND_WEBHOOK_URL
+    if not url:
+        return
     payload = {
         "broadcast_id": broadcast_id,
         "agent_name": agent_name,
@@ -275,7 +278,7 @@ async def _notify_franken_stream(
         async with httpx.AsyncClient(timeout=10) as client:
             await client.post(url, json=payload)
     except Exception:
-        logger.warning("Could not notify Franken-Stream at %s", url)
+        logger.warning("Could not deliver webhook to %s", url)
 
 
 # ---------------------------------------------------------------------------
