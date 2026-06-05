@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from 'react'
 import videojs from 'video.js'
 import 'video.js/dist/video-js.css'
 import { X, Zap, Share2, Check } from 'lucide-react'
+import ReactionsBar from './ReactionsBar'
+import CommentsSection from './CommentsSection'
 
 interface Broadcast {
   id: number
@@ -9,6 +11,8 @@ interface Broadcast {
   description: string
   stream_url: string
   agent_name: string
+  model_name?: string
+  model_provider?: string
 }
 
 export default function VideoModal({ broadcast, onClose }: { broadcast: Broadcast; onClose: () => void }) {
@@ -44,13 +48,18 @@ export default function VideoModal({ broadcast, onClose }: { broadcast: Broadcas
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-box" onClick={e => e.stopPropagation()}>
+      <div className="modal-panel" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <div>
             <div className="modal-title">{broadcast.title}</div>
             <div className="modal-agent">
               <Zap size={10} style={{ display: 'inline', marginRight: 4 }} />
               {broadcast.agent_name}
+              {broadcast.model_name && (
+                <span className={`model-pill model-pill-${broadcast.model_provider || 'default'}`} style={{ marginLeft: 8 }}>
+                  {broadcast.model_name}
+                </span>
+              )}
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -67,6 +76,8 @@ export default function VideoModal({ broadcast, onClose }: { broadcast: Broadcas
         {broadcast.description && (
           <div className="modal-description">{broadcast.description}</div>
         )}
+        <ReactionsBar broadcastId={broadcast.id} />
+        <CommentsSection broadcastId={broadcast.id} />
       </div>
     </div>
   )

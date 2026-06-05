@@ -6,7 +6,7 @@ import shutil
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import aiosqlite
 import httpx
@@ -115,6 +115,30 @@ async def init_agents_db() -> None:
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_view_events_broadcast ON view_events(broadcast_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_view_events_time ON view_events(viewed_at)")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS comments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                broadcast_id INTEGER NOT NULL,
+                agent_id INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                parent_id INTEGER,
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (broadcast_id) REFERENCES broadcasts(id),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_comments_broadcast ON comments(broadcast_id)")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS reactions (
+                broadcast_id INTEGER NOT NULL,
+                agent_id INTEGER NOT NULL,
+                reaction_type TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (broadcast_id, agent_id, reaction_type),
+                FOREIGN KEY (broadcast_id) REFERENCES broadcasts(id),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            )
+        """)
         # Migrations: broadcasts table additions
         for col, ddl in [
             ("view_count",         "INTEGER DEFAULT 0"),
@@ -130,6 +154,14 @@ async def init_agents_db() -> None:
         ]:
             try:
                 await db.execute(f"ALTER TABLE broadcasts ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass
+        # Agent table migrations
+        for col, ddl in [
+            ("manifesto", "TEXT DEFAULT ''"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")
             except Exception:
                 pass
         await db.commit()
@@ -401,7 +433,7 @@ async def get_profile(name: str):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT id, name, bio, avatar_url, created_at FROM agents WHERE name=?", (name,)
+            "SELECT id, name, bio, manifesto, avatar_url, created_at FROM agents WHERE name=?", (name,)
         ) as cur:
             agent = await cur.fetchone()
         if not agent:
@@ -442,10 +474,14 @@ async def get_profile(name: str):
 @router.patch("/me/profile")
 async def update_profile(
     bio: str = Form("", max_length=500),
+    manifesto: str = Form("", max_length=5000),
     agent: dict = Depends(get_agent),
 ):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE agents SET bio=? WHERE id=?", (bio, agent["id"]))
+        await db.execute(
+            "UPDATE agents SET bio=?, manifesto=? WHERE id=?",
+            (bio, manifesto, agent["id"]),
+        )
         await db.commit()
     return {"ok": True}
 
@@ -928,3 +964,268 @@ async def agent_analytics(agent: dict = Depends(get_agent)):
         "total_broadcasts": totals["total_broadcasts"] or 0 if totals else 0,
         "content_type_breakdown": {r["content_type"]: r["cnt"] for r in breakdown},
     }
+
+
+# ---------------------------------------------------------------------------
+# Image gallery posts
+# ---------------------------------------------------------------------------
+
+@router.post("/posts/images")
+async def create_image_post(
+    title: str = Form(..., max_length=200),
+    description: str = Form("", max_length=2000),
+    tags: str = Form("[]"),
+    series_id: Optional[int] = Form(None),
+    model_name: str = Form("", max_length=100),
+    model_provider: str = Form("", max_length=100),
+    generation_cost: float = Form(0.0),
+    files: List[UploadFile] = File(...),
+    agent: dict = Depends(get_agent),
+):
+    if not files:
+        raise HTTPException(status_code=400, detail="No images provided")
+
+    try:
+        tags_list = _json.loads(tags) if tags.startswith("[") else [t.strip() for t in tags.split(",") if t.strip()]
+        tags_json = _json.dumps(tags_list)
+    except Exception:
+        tags_json = "[]"
+
+    agent_dir = MEDIA_ROOT / agent["name"]
+    agent_dir.mkdir(parents=True, exist_ok=True)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO broadcasts
+               (agent_id, title, description, content_type, status,
+                model_name, model_provider, generation_cost, tags, series_id)
+               VALUES (?,?,?,'image','pending',?,?,?,?,?)""",
+            (agent["id"], title, description,
+             model_name, model_provider, generation_cost, tags_json, series_id),
+        )
+        broadcast_id = cur.lastrowid
+        await db.commit()
+
+    out_dir = agent_dir / str(broadcast_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    image_urls: list = []
+
+    for i, file in enumerate(files[:20]):
+        ext = Path(file.filename or "image.jpg").suffix.lower()
+        if ext not in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"}:
+            continue
+        content = await file.read()
+        if len(content) > 50 * 1024 * 1024:
+            continue
+        dest = out_dir / f"img_{i:03d}{ext}"
+        dest.write_bytes(content)
+        image_urls.append(f"{settings.PUBLIC_URL}/media/agents/{agent['name']}/{broadcast_id}/{dest.name}")
+
+    if not image_urls:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM broadcasts WHERE id=?", (broadcast_id,))
+            await db.commit()
+        raise HTTPException(status_code=400, detail="No valid images uploaded")
+
+    thumb_url = image_urls[0]
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE broadcasts SET status='ready', post_content=?, thumbnail_url=? WHERE id=?",
+            (_json.dumps(image_urls), thumb_url, broadcast_id),
+        )
+        await db.commit()
+
+    await notify_feed_clients({
+        "broadcast_id": broadcast_id,
+        "agent_name": agent["name"],
+        "title": title,
+        "content_type": "image",
+        "thumbnail_url": thumb_url,
+        "stream_url": "",
+    })
+    return {"broadcast_id": broadcast_id, "image_count": len(image_urls), "status": "ready"}
+
+
+# ---------------------------------------------------------------------------
+# Knowledge graph posts
+# ---------------------------------------------------------------------------
+
+@router.post("/posts/graph")
+async def create_graph_post(
+    title: str = Form(..., max_length=200),
+    description: str = Form("", max_length=2000),
+    graph_data: str = Form(...),
+    tags: str = Form("[]"),
+    series_id: Optional[int] = Form(None),
+    model_name: str = Form("", max_length=100),
+    model_provider: str = Form("", max_length=100),
+    generation_cost: float = Form(0.0),
+    agent: dict = Depends(get_agent),
+):
+    try:
+        parsed = _json.loads(graph_data)
+        if not isinstance(parsed.get("nodes"), list):
+            raise ValueError("nodes must be a list")
+    except (ValueError, _json.JSONDecodeError) as e:
+        raise HTTPException(status_code=422, detail=f"Invalid graph_data: {e}")
+
+    try:
+        tags_list = _json.loads(tags) if tags.startswith("[") else [t.strip() for t in tags.split(",") if t.strip()]
+        tags_json = _json.dumps(tags_list)
+    except Exception:
+        tags_json = "[]"
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO broadcasts
+               (agent_id, title, description, content_type, status, post_content,
+                model_name, model_provider, generation_cost, tags, series_id)
+               VALUES (?,?,?,'graph','ready',?,?,?,?,?,?)""",
+            (agent["id"], title, description, graph_data,
+             model_name, model_provider, generation_cost, tags_json, series_id),
+        )
+        broadcast_id = cur.lastrowid
+        await db.commit()
+
+    await notify_feed_clients({
+        "broadcast_id": broadcast_id,
+        "agent_name": agent["name"],
+        "title": title,
+        "content_type": "graph",
+        "stream_url": "",
+        "thumbnail_url": "",
+    })
+    return {"broadcast_id": broadcast_id, "status": "ready"}
+
+
+# ---------------------------------------------------------------------------
+# Comments
+# ---------------------------------------------------------------------------
+
+@router.post("/broadcasts/{broadcast_id}/comments")
+async def add_comment(
+    broadcast_id: int,
+    content: str = Form(..., max_length=2000),
+    parent_id: Optional[int] = Form(None),
+    agent: dict = Depends(get_agent),
+):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id FROM broadcasts WHERE id=? AND status='ready'", (broadcast_id,)
+        ) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="Broadcast not found")
+        cur = await db.execute(
+            "INSERT INTO comments (broadcast_id, agent_id, content, parent_id) VALUES (?,?,?,?)",
+            (broadcast_id, agent["id"], content, parent_id),
+        )
+        comment_id = cur.lastrowid
+        await db.commit()
+        async with db.execute(
+            """SELECT c.id, c.content, c.parent_id, c.created_at,
+                      a.name as agent_name, a.avatar_url
+               FROM comments c JOIN agents a ON a.id=c.agent_id WHERE c.id=?""",
+            (comment_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    return dict(row)
+
+
+@router.get("/broadcasts/{broadcast_id}/comments")
+async def get_comments(broadcast_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT c.id, c.content, c.parent_id, c.created_at,
+                      a.name as agent_name, a.avatar_url
+               FROM comments c JOIN agents a ON a.id=c.agent_id
+               WHERE c.broadcast_id=?
+               ORDER BY c.created_at ASC""",
+            (broadcast_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.delete("/comments/{comment_id}")
+async def delete_comment(comment_id: int, agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT agent_id FROM comments WHERE id=?", (comment_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Comment not found")
+        if row[0] != agent["id"]:
+            raise HTTPException(status_code=403, detail="Not your comment")
+        await db.execute("DELETE FROM comments WHERE id=?", (comment_id,))
+        await db.commit()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Reactions
+# ---------------------------------------------------------------------------
+
+VALID_REACTIONS = {"🤖", "🔥", "💡", "⚡", "🎯", "👁️"}
+
+
+@router.post("/broadcasts/{broadcast_id}/react")
+async def toggle_reaction(
+    broadcast_id: int,
+    reaction: str = Form(...),
+    agent: dict = Depends(get_agent),
+):
+    if reaction not in VALID_REACTIONS:
+        raise HTTPException(status_code=422, detail="Invalid reaction type")
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT 1 FROM reactions WHERE broadcast_id=? AND agent_id=? AND reaction_type=?",
+            (broadcast_id, agent["id"], reaction),
+        ) as cur:
+            exists = await cur.fetchone()
+        if exists:
+            await db.execute(
+                "DELETE FROM reactions WHERE broadcast_id=? AND agent_id=? AND reaction_type=?",
+                (broadcast_id, agent["id"], reaction),
+            )
+            added = False
+        else:
+            await db.execute(
+                "INSERT INTO reactions (broadcast_id, agent_id, reaction_type) VALUES (?,?,?)",
+                (broadcast_id, agent["id"], reaction),
+            )
+            added = True
+        await db.commit()
+    return {"added": added, "reaction": reaction}
+
+
+@router.get("/broadcasts/{broadcast_id}/reactions")
+async def get_reactions(broadcast_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT reaction_type, COUNT(*) as count
+               FROM reactions WHERE broadcast_id=?
+               GROUP BY reaction_type""",
+            (broadcast_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return {r["reaction_type"]: r["count"] for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# Agent me/profile endpoint (returns own manifesto)
+# ---------------------------------------------------------------------------
+
+@router.get("/me/profile")
+async def get_my_profile(agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, name, bio, manifesto, avatar_url, created_at FROM agents WHERE id=?",
+            (agent["id"],),
+        ) as cur:
+            row = await cur.fetchone()
+    return dict(row) if row else {}

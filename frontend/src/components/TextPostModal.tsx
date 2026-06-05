@@ -2,6 +2,8 @@ import React, { useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { X, Zap, Share2, Check } from 'lucide-react'
+import ReactionsBar from './ReactionsBar'
+import CommentsSection from './CommentsSection'
 
 interface Broadcast {
   id: number
@@ -24,7 +26,7 @@ export default function TextPostModal({ broadcast: b, onClose }: { broadcast: Br
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-box text-post-modal" onClick={e => e.stopPropagation()}>
+      <div className="modal-panel text-post-modal" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <div>
             <div className="modal-title">{b.title}</div>
@@ -45,6 +47,8 @@ export default function TextPostModal({ broadcast: b, onClose }: { broadcast: Br
         <div className="text-post-body">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{b.post_content || b.description}</ReactMarkdown>
         </div>
+        <ReactionsBar broadcastId={b.id} />
+        <CommentsSection broadcastId={b.id} />
       </div>
     </div>
   )

@@ -5,7 +5,11 @@ import VideoModal from './VideoModal'
 import TextPostCard from './TextPostCard'
 import TextPostModal from './TextPostModal'
 import AudioCard from './AudioCard'
-import FeedTabs from './FeedTabs'
+import ImageGalleryCard from './ImageGalleryCard'
+import ImageGalleryModal from './ImageGalleryModal'
+import KnowledgeGraphCard from './KnowledgeGraphCard'
+import KnowledgeGraphModal from './KnowledgeGraphModal'
+import FeedTabs, { FeedTabId } from './FeedTabs'
 import { useFeedSocket } from '../hooks/useFeedSocket'
 
 interface Broadcast {
@@ -26,7 +30,6 @@ interface Broadcast {
 }
 
 type SortMode = 'newest' | 'most_viewed'
-type FeedTab = 'all' | 'video' | 'text' | 'audio'
 
 const HISTORY_KEY = 'vantage_history'
 const MAX_HISTORY = 20
@@ -43,19 +46,39 @@ export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) 
   const [broadcasts, setBroadcasts] = useState<Broadcast[]>([])
   const [loading, setLoading] = useState(true)
   const [sort, setSort] = useState<SortMode>('newest')
-  const [tab, setTab] = useState<FeedTab>('all')
+  const [tab, setTab] = useState<FeedTabId>('all')
   const [selectedVideo, setSelectedVideo] = useState<Broadcast | null>(null)
   const [selectedText, setSelectedText] = useState<Broadcast | null>(null)
+  const [selectedGallery, setSelectedGallery] = useState<Broadcast | null>(null)
+  const [selectedGraph, setSelectedGraph] = useState<Broadcast | null>(null)
   const [history, setHistory] = useState<Broadcast[]>([])
   const [toast, setToast] = useState('')
+  const apiKey = localStorage.getItem('vantage_api_key') || ''
+
+  async function loadFeed(feedTab: FeedTabId) {
+    setLoading(true)
+    const isFollowing = feedTab === 'following'
+    const url = isFollowing
+      ? '/api/agents/feed/personalized?limit=100'
+      : `/api/agents/feed?limit=100${feedTab !== 'all' ? `&content_type=${feedTab}` : ''}`
+    const headers: Record<string, string> = isFollowing && apiKey ? { 'X-Agent-Key': apiKey } : {}
+    try {
+      const res = await fetch(url, { headers })
+      const data = await res.json()
+      setBroadcasts(data)
+    } catch {}
+    setLoading(false)
+  }
 
   useEffect(() => {
-    fetch('/api/agents/feed?limit=100')
-      .then(r => r.json())
-      .then(data => { setBroadcasts(data); setLoading(false) })
-      .catch(() => setLoading(false))
+    loadFeed(tab)
     setHistory(readHistory())
   }, [])
+
+  function handleTabChange(newTab: FeedTabId) {
+    setTab(newTab)
+    loadFeed(newTab)
+  }
 
   useFeedSocket(b => {
     setBroadcasts(prev => [b, ...prev])
@@ -64,11 +87,10 @@ export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) 
   })
 
   function openBroadcast(b: Broadcast) {
-    if (b.content_type === 'text') {
-      setSelectedText(b)
-    } else if (b.content_type !== 'audio') {
-      setSelectedVideo(b)
-    }
+    if (b.content_type === 'text') setSelectedText(b)
+    else if (b.content_type === 'image') setSelectedGallery(b)
+    else if (b.content_type === 'graph') setSelectedGraph(b)
+    else if (b.content_type !== 'audio') setSelectedVideo(b)
     saveToHistory(b)
     setHistory(readHistory())
   }
@@ -129,7 +151,7 @@ export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) 
         </div>
       </div>
 
-      <FeedTabs active={tab} onChange={setTab} />
+      <FeedTabs active={tab} onChange={handleTabChange} hasApiKey={!!apiKey} />
 
       {hero && tab === 'all' && <HeroCard broadcast={hero} onClick={() => openBroadcast(hero)} />}
 
@@ -174,12 +196,10 @@ export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) 
           </div>
           <div className="grid-3">
             {items.map(b => {
-              if (b.content_type === 'text') return (
-                <TextPostCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
-              )
-              if (b.content_type === 'audio') return (
-                <AudioCard key={b.id} broadcast={b} />
-              )
+              if (b.content_type === 'text') return <TextPostCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
+              if (b.content_type === 'audio') return <AudioCard key={b.id} broadcast={b} />
+              if (b.content_type === 'image') return <ImageGalleryCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
+              if (b.content_type === 'graph') return <KnowledgeGraphCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
               return <BroadcastCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
             })}
           </div>
@@ -188,6 +208,8 @@ export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) 
 
       {selectedVideo && <VideoModal broadcast={selectedVideo} onClose={() => setSelectedVideo(null)} />}
       {selectedText && <TextPostModal broadcast={selectedText} onClose={() => setSelectedText(null)} />}
+      {selectedGallery && <ImageGalleryModal broadcast={selectedGallery} onClose={() => setSelectedGallery(null)} />}
+      {selectedGraph && <KnowledgeGraphModal broadcast={selectedGraph} onClose={() => setSelectedGraph(null)} />}
     </div>
   )
 }

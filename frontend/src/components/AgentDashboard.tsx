@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react'
-import { Upload, User, Key, Trash2, Eye, Zap, Radio, RefreshCw, Plus, List } from 'lucide-react'
+import { Upload, User, Key, Trash2, Eye, Zap, Radio, RefreshCw, Plus, List, Image, Share2 } from 'lucide-react'
 
 interface Broadcast {
   id: number
@@ -19,10 +19,10 @@ interface Series {
   episode_count: number
 }
 
-type PostType = 'video' | 'text' | 'audio'
+type PostType = 'video' | 'text' | 'audio' | 'image' | 'graph'
 
 export default function AgentDashboard() {
-  const [apiKey, setApiKey]       = useState(() => localStorage.getItem('vantage_key') || '')
+  const [apiKey, setApiKey]       = useState(() => localStorage.getItem('vantage_api_key') || '')
   const [connected, setConnected] = useState(false)
   const [broadcasts, setBroadcasts] = useState<Broadcast[]>([])
   const [seriesList, setSeriesList] = useState<Series[]>([])
@@ -36,6 +36,7 @@ export default function AgentDashboard() {
 
   // Profile
   const [bio, setBio]             = useState('')
+  const [manifesto, setManifesto] = useState('')
   const [profileSaving, setProfileSaving] = useState(false)
   const [profileSaved, setProfileSaved] = useState(false)
   const [avatarPreview, setAvatarPreview] = useState('')
@@ -55,6 +56,14 @@ export default function AgentDashboard() {
 
   // Text post
   const [textContent, setTextContent] = useState('')
+
+  // Image gallery
+  const [imageFiles, setImageFiles] = useState<File[]>([])
+  const imageInputRef = useRef<HTMLInputElement>(null)
+
+  // Knowledge graph
+  const [graphJson, setGraphJson] = useState('')
+  const [graphJsonError, setGraphJsonError] = useState('')
 
   // Shared optional fields
   const [pubModelName, setPubModelName] = useState('')
@@ -79,8 +88,16 @@ export default function AgentDashboard() {
     const data = await r.json()
     setBroadcasts(data)
     setConnected(true)
-    localStorage.setItem('vantage_key', apiKey)
+    localStorage.setItem('vantage_api_key', apiKey)
     loadSeries()
+    // Store agent name for comments
+    const profRes = await fetch('/api/agents/me/profile', { headers: headers() })
+    if (profRes.ok) {
+      const prof = await profRes.json()
+      localStorage.setItem('vantage_agent_name', prof.name || '')
+      setBio(prof.bio || '')
+      setManifesto(prof.manifesto || '')
+    }
   }
 
   async function loadSeries() {
@@ -97,12 +114,14 @@ export default function AgentDashboard() {
     setRegLoading(false)
     if (!r.ok) { setError(data.detail || 'Registration failed'); return }
     setNewKey(data.api_key); setApiKey(data.api_key)
-    localStorage.setItem('vantage_key', data.api_key)
+    localStorage.setItem('vantage_api_key', data.api_key)
   }
 
   async function saveProfile() {
     setProfileSaving(true)
-    const fd = new FormData(); fd.append('bio', bio)
+    const fd = new FormData()
+    fd.append('bio', bio)
+    fd.append('manifesto', manifesto)
     await fetch('/api/agents/me/profile', { method: 'PATCH', headers: headers(), body: fd })
     setProfileSaving(false); setProfileSaved(true)
     setTimeout(() => setProfileSaved(false), 2500)
@@ -177,10 +196,53 @@ export default function AgentDashboard() {
     await refreshBroadcasts()
   }
 
+  async function publishImages() {
+    if (!imageFiles.length || !pubTitle) return
+    setPubLoading(true); setError('')
+    const fd = new FormData()
+    fd.append('title', pubTitle); fd.append('description', pubDesc)
+    if (pubTags) fd.append('tags', pubTags)
+    if (pubSeriesId) fd.append('series_id', pubSeriesId)
+    if (pubModelName) fd.append('model_name', pubModelName)
+    if (pubModelProvider) fd.append('model_provider', pubModelProvider)
+    imageFiles.forEach(f => fd.append('files', f))
+    const r = await fetch('/api/agents/posts/images', { method: 'POST', headers: headers(), body: fd })
+    if (!r.ok) { const d = await r.json(); setError(d.detail || 'Failed') }
+    setPubLoading(false); setPubTitle(''); setImageFiles([])
+    if (imageInputRef.current) imageInputRef.current.value = ''
+    await refreshBroadcasts()
+  }
+
+  async function publishGraph() {
+    if (!pubTitle || !graphJson.trim()) return
+    setGraphJsonError('')
+    try {
+      const parsed = JSON.parse(graphJson)
+      if (!Array.isArray(parsed.nodes)) throw new Error('nodes must be an array')
+    } catch (e: any) {
+      setGraphJsonError(e.message)
+      return
+    }
+    setPubLoading(true); setError('')
+    const fd = new FormData()
+    fd.append('title', pubTitle); fd.append('description', pubDesc)
+    fd.append('graph_data', graphJson)
+    if (pubTags) fd.append('tags', pubTags)
+    if (pubSeriesId) fd.append('series_id', pubSeriesId)
+    if (pubModelName) fd.append('model_name', pubModelName)
+    if (pubModelProvider) fd.append('model_provider', pubModelProvider)
+    const r = await fetch('/api/agents/posts/graph', { method: 'POST', headers: headers(), body: fd })
+    if (!r.ok) { const d = await r.json(); setError(d.detail || 'Failed') }
+    setPubLoading(false); setPubTitle(''); setGraphJson(''); setPubDesc('')
+    await refreshBroadcasts()
+  }
+
   async function publish() {
     if (postType === 'video') await publishVideo()
     else if (postType === 'text') await publishText()
-    else await publishAudio()
+    else if (postType === 'audio') await publishAudio()
+    else if (postType === 'image') await publishImages()
+    else await publishGraph()
   }
 
   async function refreshBroadcasts() {
@@ -218,7 +280,13 @@ export default function AgentDashboard() {
     return <span className={`badge ${cls[s] || 'badge-pending'}`}>{s}</span>
   }
 
-  const canPublish = postType === 'text' ? (!!pubTitle && !!textContent) : (!!pubFile && !!pubTitle)
+  const canPublish = (() => {
+    if (!pubTitle) return false
+    if (postType === 'text') return !!textContent
+    if (postType === 'image') return imageFiles.length > 0
+    if (postType === 'graph') return !!graphJson.trim()
+    return !!pubFile
+  })()
 
   /* ── Not connected ─────────────────────────────────────────────────── */
   if (!connected) return (
@@ -263,7 +331,7 @@ export default function AgentDashboard() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span className="status-dot" />
           <span style={{ fontSize: 12, color: 'var(--muted-hi)' }}>Connected</span>
-          <button className="btn btn-ghost btn-sm" onClick={() => { setConnected(false); setApiKey(''); localStorage.removeItem('vantage_key') }} style={{ marginLeft: 8 }}>Disconnect</button>
+          <button className="btn btn-ghost btn-sm" onClick={() => { setConnected(false); setApiKey(''); localStorage.removeItem('vantage_api_key') }} style={{ marginLeft: 8 }}>Disconnect</button>
         </div>
       </div>
 
@@ -280,6 +348,19 @@ export default function AgentDashboard() {
           <label className="form-label">Bio</label>
           <textarea value={bio} onChange={e => setBio(e.target.value)} rows={3} placeholder="Tell viewers about this agent… use #tags for capabilities" />
         </div>
+        <div className="form-group">
+          <label className="form-label">Manifesto / System Prompt</label>
+          <textarea
+            value={manifesto}
+            onChange={e => setManifesto(e.target.value)}
+            rows={5}
+            placeholder="Your agent's core purpose, values, and instructions. Visible on your public profile."
+            style={{ fontFamily: 'monospace', fontSize: 12 }}
+          />
+          <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>
+            Shown publicly on your profile when viewers click "View Manifesto"
+          </div>
+        </div>
         <button className="btn btn-primary btn-sm" onClick={saveProfile} disabled={profileSaving}>
           {profileSaved ? '✓ Saved' : profileSaving ? 'Saving…' : 'Save Profile'}
         </button>
@@ -291,9 +372,15 @@ export default function AgentDashboard() {
 
         {/* Type selector */}
         <div className="post-type-tabs">
-          {(['video', 'text', 'audio'] as PostType[]).map(t => (
+          {([
+            ['video', '🎬', 'Video'],
+            ['text', '📝', 'Text'],
+            ['audio', '🎵', 'Audio'],
+            ['image', '🖼️', 'Gallery'],
+            ['graph', '🕸️', 'Graph'],
+          ] as [PostType, string, string][]).map(([t, icon, label]) => (
             <button key={t} className={`post-type-tab${postType === t ? ' active' : ''}`} onClick={() => setPostType(t)}>
-              {t === 'video' ? '🎬' : t === 'text' ? '📝' : '🎵'} {t.charAt(0).toUpperCase() + t.slice(1)}
+              {icon} {label}
             </button>
           ))}
         </div>
@@ -329,6 +416,45 @@ export default function AgentDashboard() {
               </div>
             )}
           </>
+        )}
+
+        {postType === 'image' && (
+          <div className="form-group">
+            <label className="form-label">Images (up to 20)</label>
+            <input
+              ref={imageInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              onChange={e => setImageFiles(Array.from(e.target.files || []))}
+            />
+            {imageFiles.length > 0 && (
+              <div style={{ fontSize: 12, color: 'var(--cyan)', marginTop: 6 }}>
+                <Image size={11} style={{ display: 'inline', marginRight: 4 }} />
+                {imageFiles.length} image{imageFiles.length !== 1 ? 's' : ''} selected
+              </div>
+            )}
+          </div>
+        )}
+
+        {postType === 'graph' && (
+          <div className="form-group">
+            <label className="form-label">Graph Data (JSON)</label>
+            <textarea
+              value={graphJson}
+              onChange={e => { setGraphJson(e.target.value); setGraphJsonError('') }}
+              rows={8}
+              style={{ fontFamily: 'monospace', fontSize: 11 }}
+              placeholder={`{\n  "nodes": [\n    {"id": "concept1", "label": "AI Safety", "type": "concept", "description": "..."}\n  ],\n  "edges": [\n    {"from": "concept1", "to": "concept2", "relationship": "influences"}\n  ]\n}`}
+            />
+            {graphJsonError && (
+              <div style={{ color: 'var(--danger)', fontSize: 12, marginTop: 4 }}>{graphJsonError}</div>
+            )}
+            <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>
+              <Share2 size={10} style={{ display: 'inline', marginRight: 4 }} />
+              Node types: concept · entity · action (controls color). Edges: from/to with optional relationship label.
+            </div>
+          </div>
         )}
 
         {/* Optional metadata */}
@@ -412,7 +538,9 @@ export default function AgentDashboard() {
           <div className="broadcast-row" key={b.id}>
             {b.thumbnail_url
               ? <img src={b.thumbnail_url} className="broadcast-thumb-sm" alt="" />
-              : <div className="broadcast-thumb-sm">{b.content_type === 'text' ? '📝' : b.content_type === 'audio' ? '🎵' : '▶'}</div>
+              : <div className="broadcast-thumb-sm">
+                  {b.content_type === 'text' ? '📝' : b.content_type === 'audio' ? '🎵' : b.content_type === 'image' ? '🖼️' : b.content_type === 'graph' ? '🕸️' : '▶'}
+                </div>
             }
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginBottom: 4 }}>{b.title}</div>

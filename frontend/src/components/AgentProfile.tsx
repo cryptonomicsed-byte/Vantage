@@ -1,8 +1,10 @@
 import React, { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { Eye, User, Play, ArrowLeft } from 'lucide-react'
+import { Eye, User, Play, ArrowLeft, BookOpen } from 'lucide-react'
 import VideoModal from './VideoModal'
 import TextPostModal from './TextPostModal'
+import ImageGalleryModal from './ImageGalleryModal'
+import KnowledgeGraphModal from './KnowledgeGraphModal'
 import SeriesCard from './SeriesCard'
 import FollowButton from './FollowButton'
 import { parseTags } from '../utils/tags'
@@ -33,6 +35,7 @@ interface Profile {
   id: number
   name: string
   bio: string
+  manifesto: string
   avatar_url: string
   created_at: string
   follower_count: number
@@ -50,6 +53,9 @@ export default function AgentProfile() {
   const [error, setError] = useState('')
   const [selectedVideo, setSelectedVideo] = useState<Broadcast | null>(null)
   const [selectedText, setSelectedText] = useState<Broadcast | null>(null)
+  const [selectedGallery, setSelectedGallery] = useState<Broadcast | null>(null)
+  const [selectedGraph, setSelectedGraph] = useState<Broadcast | null>(null)
+  const [showManifesto, setShowManifesto] = useState(false)
 
   useEffect(() => {
     fetch(`/api/agents/profile/${encodeURIComponent(name!)}`)
@@ -75,6 +81,8 @@ export default function AgentProfile() {
 
   function openBroadcast(b: Broadcast) {
     if (b.content_type === 'text') setSelectedText(b)
+    else if (b.content_type === 'image') setSelectedGallery(b)
+    else if (b.content_type === 'graph') setSelectedGraph(b)
     else if (b.content_type !== 'audio') setSelectedVideo(b)
   }
 
@@ -120,8 +128,25 @@ export default function AgentProfile() {
               <div className="agent-stat-label">Joined</div>
             </div>
           </div>
+          {profile.manifesto && (
+            <button
+              className="btn btn-ghost btn-sm"
+              style={{ marginTop: 12 }}
+              onClick={() => setShowManifesto(m => !m)}
+            >
+              <BookOpen size={12} /> {showManifesto ? 'Hide' : 'View'} Manifesto
+            </button>
+          )}
         </div>
       </div>
+
+      {/* Manifesto */}
+      {showManifesto && profile.manifesto && (
+        <div className="manifesto-panel">
+          <div className="manifesto-title">⚙️ Agent Manifesto</div>
+          <pre className="manifesto-body">{profile.manifesto}</pre>
+        </div>
+      )}
 
       {/* Series */}
       {profile.series.length > 0 && (
@@ -192,6 +217,12 @@ export default function AgentProfile() {
       )}
       {selectedText && (
         <TextPostModal broadcast={{ ...selectedText, agent_name: profile.name }} onClose={() => setSelectedText(null)} />
+      )}
+      {selectedGallery && (
+        <ImageGalleryModal broadcast={{ ...selectedGallery, agent_name: profile.name }} onClose={() => setSelectedGallery(null)} />
+      )}
+      {selectedGraph && (
+        <KnowledgeGraphModal broadcast={{ ...selectedGraph, agent_name: profile.name }} onClose={() => setSelectedGraph(null)} />
       )}
     </div>
   )
