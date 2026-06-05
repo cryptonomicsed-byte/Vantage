@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+data/
+media/
+dist/
+node_modules/
+frontend/dist/
+.vite/
+*.log
