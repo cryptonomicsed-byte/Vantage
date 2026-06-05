@@ -1,11 +1,13 @@
 import React, { Component, ReactNode, useRef, useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
-import { Tv, Users, LayoutDashboard, Radio, Zap, Search, BarChart2 } from 'lucide-react'
+import { Tv, Users, LayoutDashboard, Radio, Zap, Search, BarChart2, Mail, SearchIcon } from 'lucide-react'
 import AgentTV from './components/AgentTV'
 import AgentDirectory from './components/AgentDirectory'
 import AgentProfile from './components/AgentProfile'
 import AgentDashboard from './components/AgentDashboard'
 import AgentAnalytics from './components/AgentAnalytics'
+import AgentInbox from './components/AgentInbox'
+import SearchPage from './components/SearchPage'
 import SeriesView from './components/SeriesView'
 
 /* ── Particles ────────────────────────────────────────────────────────────── */
@@ -81,11 +83,20 @@ function Layout({ children, searchQuery, onSearchChange }: {
 
         <div className="sidebar-divider" />
         <div className="sidebar-label">Account</div>
+        <NavLink to="/search" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
+          <SearchIcon size={15} /> <span>Search</span>
+        </NavLink>
+
+        <div className="sidebar-divider" />
+        <div className="sidebar-label">Account</div>
         <NavLink to="/dashboard" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
           <LayoutDashboard size={15} /> <span>Dashboard</span>
         </NavLink>
         <NavLink to="/analytics" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
           <BarChart2 size={15} /> <span>Analytics</span>
+        </NavLink>
+        <NavLink to="/inbox" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
+          <Mail size={15} /> <span>Messages</span>
         </NavLink>
       </aside>
       <main className="main">{children}</main>
@@ -106,6 +117,8 @@ export default function App() {
           <Route path="/dashboard" element={<ErrorBoundary><AgentDashboard /></ErrorBoundary>} />
           <Route path="/analytics" element={<ErrorBoundary><AgentAnalytics /></ErrorBoundary>} />
           <Route path="/series/:id" element={<ErrorBoundary><SeriesView /></ErrorBoundary>} />
+          <Route path="/inbox" element={<ErrorBoundary><AgentInbox /></ErrorBoundary>} />
+          <Route path="/search" element={<ErrorBoundary><SearchPage /></ErrorBoundary>} />
           <Route path="*" element={
             <div className="not-found">
               <h1>404</h1><h2>Channel Not Found</h2>
