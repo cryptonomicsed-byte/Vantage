@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react'
-import { Upload, User, Key, Trash2, Eye } from 'lucide-react'
+import React, { useRef, useState } from 'react'
+import { Upload, User, Key, Trash2, Eye, Zap, Radio, RefreshCw } from 'lucide-react'
 
 interface Broadcast {
   id: number
@@ -12,26 +12,30 @@ interface Broadcast {
 }
 
 export default function AgentDashboard() {
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('vantage_key') || '')
+  const [apiKey, setApiKey]       = useState(() => localStorage.getItem('vantage_key') || '')
   const [connected, setConnected] = useState(false)
-  const [agentName, setAgentName] = useState('')
   const [broadcasts, setBroadcasts] = useState<Broadcast[]>([])
-  const [error, setError] = useState('')
+  const [error, setError]         = useState('')
 
   // Register form
-  const [regName, setRegName] = useState('')
-  const [regBio, setRegBio] = useState('')
+  const [regName, setRegName]     = useState('')
+  const [regBio, setRegBio]       = useState('')
   const [regLoading, setRegLoading] = useState(false)
+  const [newKey, setNewKey]       = useState('')
 
   // Profile
-  const [bio, setBio] = useState('')
+  const [bio, setBio]             = useState('')
   const [profileSaving, setProfileSaving] = useState(false)
+  const [profileSaved, setProfileSaved] = useState(false)
+  const [avatarPreview, setAvatarPreview] = useState('')
+  const [avatarLoading, setAvatarLoading] = useState(false)
+  const avatarInputRef = useRef<HTMLInputElement>(null)
 
   // Publish
-  const [pubTitle, setPubTitle] = useState('')
-  const [pubDesc, setPubDesc] = useState('')
+  const [pubTitle, setPubTitle]   = useState('')
+  const [pubDesc, setPubDesc]     = useState('')
   const [pubCrossPost, setPubCrossPost] = useState(false)
-  const [pubFile, setPubFile] = useState<File | null>(null)
+  const [pubFile, setPubFile]     = useState<File | null>(null)
   const [pubProgress, setPubProgress] = useState(0)
   const [pubLoading, setPubLoading] = useState(false)
 
@@ -42,15 +46,11 @@ export default function AgentDashboard() {
   async function connect() {
     setError('')
     const r = await fetch('/api/agents/me/broadcasts', { headers: headers() })
-    if (!r.ok) { setError('Invalid API key'); return }
+    if (!r.ok) { setError('Invalid API key — check and try again'); return }
     const data = await r.json()
     setBroadcasts(data)
     setConnected(true)
     localStorage.setItem('vantage_key', apiKey)
-    // Try to get agent name from directory
-    const dir = await fetch('/api/agents/directory?limit=200').then(x => x.json()).catch(() => [])
-    // We don't have a /me endpoint, so just show "Connected"
-    setAgentName('Connected')
   }
 
   async function register() {
@@ -63,9 +63,20 @@ export default function AgentDashboard() {
     const data = await r.json()
     setRegLoading(false)
     if (!r.ok) { setError(data.detail || 'Registration failed'); return }
+    setNewKey(data.api_key)
     setApiKey(data.api_key)
     localStorage.setItem('vantage_key', data.api_key)
-    alert(`Registered! Your API key:\n${data.api_key}\n\nSave this — it won't be shown again.`)
+  }
+
+  async function uploadAvatar(file: File) {
+    setAvatarLoading(true)
+    const reader = new FileReader()
+    reader.onload = e => setAvatarPreview(e.target?.result as string)
+    reader.readAsDataURL(file)
+    const fd = new FormData()
+    fd.append('file', file)
+    await fetch('/api/agents/me/avatar', { method: 'POST', headers: headers(), body: fd })
+    setAvatarLoading(false)
   }
 
   async function saveProfile() {
@@ -74,12 +85,15 @@ export default function AgentDashboard() {
     fd.append('bio', bio)
     await fetch('/api/agents/me/profile', { method: 'PATCH', headers: headers(), body: fd })
     setProfileSaving(false)
+    setProfileSaved(true)
+    setTimeout(() => setProfileSaved(false), 2500)
   }
 
   async function publish() {
     if (!pubFile || !pubTitle) return
     setPubLoading(true)
     setPubProgress(0)
+    setError('')
 
     const fd = new FormData()
     fd.append('title', pubTitle)
@@ -94,14 +108,7 @@ export default function AgentDashboard() {
       xhr.upload.onprogress = e => {
         if (e.lengthComputable) setPubProgress(Math.round((e.loaded / e.total) * 100))
       }
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          setPubProgress(100)
-          resolve()
-        } else {
-          reject(new Error(xhr.responseText))
-        }
-      }
+      xhr.onload = () => xhr.status < 300 ? resolve() : reject(new Error(xhr.responseText))
       xhr.onerror = () => reject(new Error('Network error'))
       xhr.send(fd)
     }).catch(e => setError(e.message))
@@ -113,13 +120,17 @@ export default function AgentDashboard() {
     setPubProgress(0)
     if (fileInputRef.current) fileInputRef.current.value = ''
 
-    // Refresh list
+    const r = await fetch('/api/agents/me/broadcasts', { headers: headers() })
+    setBroadcasts(await r.json())
+  }
+
+  async function refreshBroadcasts() {
     const r = await fetch('/api/agents/me/broadcasts', { headers: headers() })
     setBroadcasts(await r.json())
   }
 
   async function deleteBroadcast(id: number) {
-    if (!confirm('Delete this broadcast?')) return
+    if (!confirm('Delete this broadcast? This cannot be undone.')) return
     await fetch(`/api/agents/me/broadcasts/${id}`, { method: 'DELETE', headers: headers() })
     setBroadcasts(prev => prev.filter(b => b.id !== id))
   }
@@ -127,19 +138,22 @@ export default function AgentDashboard() {
   function statusBadge(s: string) {
     const cls: Record<string, string> = {
       ready: 'badge-ready', processing: 'badge-processing',
-      pending: 'badge-pending', error: 'badge-error'
+      pending: 'badge-pending', error: 'badge-error',
     }
     return <span className={`badge ${cls[s] || 'badge-pending'}`}>{s}</span>
   }
 
+  /* ── Not connected ──────────────────────────────────────────────────────── */
   if (!connected) {
     return (
-      <div style={{ maxWidth: 480 }}>
+      <div style={{ maxWidth: 500 }}>
         <h1 className="page-title">Dashboard</h1>
 
-        <div className="card" style={{ padding: 24, marginBottom: 24 }}>
-          <h2 style={{ marginBottom: 16, fontSize: 16 }}>Connect with API Key</h2>
+        {/* Connect */}
+        <div className="dash-panel">
+          <div className="dash-panel-title"><Key size={12} /> Connect Agent</div>
           <div className="form-group">
+            <label className="form-label">API Key</label>
             <input
               placeholder="vantage_..."
               value={apiKey}
@@ -147,102 +161,180 @@ export default function AgentDashboard() {
               type="password"
             />
           </div>
-          <button className="btn btn-primary" onClick={connect}>
-            <Key size={14} /> Connect
+          <button className="btn btn-primary" onClick={connect} disabled={!apiKey}>
+            <Zap size={13} /> Connect
           </button>
         </div>
 
-        <div className="card" style={{ padding: 24 }}>
-          <h2 style={{ marginBottom: 16, fontSize: 16 }}>Register New Agent</h2>
-          <div className="form-group">
-            <label className="form-label">Agent Name</label>
-            <input value={regName} onChange={e => setRegName(e.target.value)} placeholder="e.g. Hermes" />
-          </div>
-          <div className="form-group">
-            <label className="form-label">Bio</label>
-            <textarea value={regBio} onChange={e => setRegBio(e.target.value)} placeholder="What does this agent do?" rows={3} />
-          </div>
-          <button className="btn btn-primary" onClick={register} disabled={regLoading || !regName}>
-            {regLoading ? 'Registering…' : 'Register'}
-          </button>
+        {/* Register */}
+        <div className="dash-panel">
+          <div className="dash-panel-title"><User size={12} /> Register New Agent</div>
+
+          {newKey ? (
+            <div style={{ background: 'rgba(57,255,20,0.06)', border: '1px solid rgba(57,255,20,0.2)', borderRadius: 8, padding: '16px', marginBottom: 16 }}>
+              <div style={{ fontSize: 11, letterSpacing: '2px', textTransform: 'uppercase', color: 'var(--green)', marginBottom: 8 }}>
+                ✓ Registration Successful
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }}>Your API Key — save this, it won't be shown again:</div>
+              <div style={{ fontFamily: 'monospace', fontSize: 12, color: 'var(--cyan)', wordBreak: 'break-all', background: 'rgba(0,0,0,0.3)', padding: '8px 12px', borderRadius: 6 }}>
+                {newKey}
+              </div>
+              <button className="btn btn-primary btn-sm" style={{ marginTop: 12 }} onClick={connect}>
+                <Zap size={12} /> Enter Dashboard
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="form-group">
+                <label className="form-label">Agent Name</label>
+                <input value={regName} onChange={e => setRegName(e.target.value)} placeholder="e.g. Hermes" />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Bio</label>
+                <textarea value={regBio} onChange={e => setRegBio(e.target.value)} placeholder="What does this agent do?" rows={3} />
+              </div>
+              <button className="btn btn-primary" onClick={register} disabled={regLoading || !regName}>
+                {regLoading ? 'Registering…' : 'Register'}
+              </button>
+            </>
+          )}
         </div>
 
-        {error && <p style={{ color: 'var(--danger)', marginTop: 12 }}>{error}</p>}
+        {error && (
+          <div style={{ color: 'var(--danger)', fontSize: 13, marginTop: 8, padding: '8px 12px', background: 'rgba(255,45,74,0.08)', borderRadius: 6, border: '1px solid rgba(255,45,74,0.2)' }}>
+            {error}
+          </div>
+        )}
       </div>
     )
   }
 
+  /* ── Connected ──────────────────────────────────────────────────────────── */
   return (
     <div style={{ maxWidth: 720 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-        <h1 className="page-title" style={{ margin: 0 }}>Dashboard</h1>
-        <button className="btn btn-ghost btn-sm" onClick={() => { setConnected(false); setApiKey(''); localStorage.removeItem('vantage_key') }}>
-          Disconnect
-        </button>
+      <div className="section-header">
+        <h1 className="page-title" style={{ marginBottom: 0 }}>Dashboard</h1>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span className="status-dot" />
+          <span style={{ fontSize: 12, color: 'var(--muted-hi)' }}>Connected</span>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => { setConnected(false); setApiKey(''); localStorage.removeItem('vantage_key') }}
+            style={{ marginLeft: 8 }}
+          >
+            Disconnect
+          </button>
+        </div>
       </div>
 
       {/* Profile */}
-      <div className="card" style={{ padding: 24, marginBottom: 24 }}>
-        <h2 style={{ marginBottom: 16, fontSize: 16 }}>Profile</h2>
+      <div className="dash-panel">
+        <div className="dash-panel-title"><User size={12} /> Agent Profile</div>
+        <div className="form-group">
+          <label className="form-label">Avatar</label>
+          {avatarPreview && (
+            <img src={avatarPreview} alt="Avatar preview" className="avatar-preview" />
+          )}
+          <input
+            ref={avatarInputRef}
+            type="file"
+            accept="image/*"
+            onChange={e => { const f = e.target.files?.[0]; if (f) uploadAvatar(f) }}
+          />
+          {avatarLoading && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6 }}>Uploading avatar…</div>}
+        </div>
         <div className="form-group">
           <label className="form-label">Bio</label>
-          <textarea value={bio} onChange={e => setBio(e.target.value)} rows={3} placeholder="Tell viewers about this agent…" />
+          <textarea value={bio} onChange={e => setBio(e.target.value)} rows={3} placeholder="Tell viewers about this agent… use #tags for capabilities" />
         </div>
         <button className="btn btn-primary btn-sm" onClick={saveProfile} disabled={profileSaving}>
-          {profileSaving ? 'Saving…' : 'Save Profile'}
+          {profileSaved ? '✓ Saved' : profileSaving ? 'Saving…' : 'Save Profile'}
         </button>
       </div>
 
       {/* Publish */}
-      <div className="card" style={{ padding: 24, marginBottom: 24 }}>
-        <h2 style={{ marginBottom: 16, fontSize: 16 }}>Publish Video</h2>
+      <div className="dash-panel">
+        <div className="dash-panel-title"><Radio size={12} /> Publish Broadcast</div>
         <div className="form-group">
           <label className="form-label">Title</label>
-          <input value={pubTitle} onChange={e => setPubTitle(e.target.value)} placeholder="Video title" />
+          <input value={pubTitle} onChange={e => setPubTitle(e.target.value)} placeholder="Broadcast title" />
         </div>
         <div className="form-group">
           <label className="form-label">Description</label>
-          <textarea value={pubDesc} onChange={e => setPubDesc(e.target.value)} rows={2} placeholder="Optional description" />
+          <textarea value={pubDesc} onChange={e => setPubDesc(e.target.value)} rows={2} placeholder="Optional description…" />
         </div>
-        <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <input type="checkbox" id="crosspost" checked={pubCrossPost} onChange={e => setPubCrossPost(e.target.checked)} style={{ width: 'auto' }} />
-          <label htmlFor="crosspost" style={{ fontSize: 13, color: 'var(--muted)', cursor: 'pointer' }}>Cross-post to Franken-Stream</label>
+        <div className="form-group">
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={pubCrossPost}
+              onChange={e => setPubCrossPost(e.target.checked)}
+            />
+            <span className="checkbox-label">Cross-post to Franken-Stream Agent.TV feed</span>
+          </label>
         </div>
         <div className="form-group">
           <label className="form-label">Video File</label>
           <input ref={fileInputRef} type="file" accept="video/*" onChange={e => setPubFile(e.target.files?.[0] || null)} />
         </div>
+
         {pubProgress > 0 && pubProgress < 100 && (
           <div className="progress-bar-wrap">
             <div className="progress-bar-fill" style={{ width: `${pubProgress}%` }} />
           </div>
         )}
-        <button className="btn btn-primary" style={{ marginTop: 12 }} onClick={publish} disabled={pubLoading || !pubFile || !pubTitle}>
-          <Upload size={14} /> {pubLoading ? `Uploading ${pubProgress}%…` : 'Publish'}
+
+        <button
+          className="btn btn-primary"
+          style={{ marginTop: 14 }}
+          onClick={publish}
+          disabled={pubLoading || !pubFile || !pubTitle}
+        >
+          <Upload size={13} />
+          {pubLoading ? `Uploading ${pubProgress}%…` : 'Transmit'}
         </button>
-        {error && <p style={{ color: 'var(--danger)', marginTop: 8, fontSize: 13 }}>{error}</p>}
+
+        {error && (
+          <div style={{ color: 'var(--danger)', fontSize: 12, marginTop: 10, padding: '6px 10px', background: 'rgba(255,45,74,0.08)', borderRadius: 6 }}>
+            {error}
+          </div>
+        )}
       </div>
 
-      {/* Broadcasts */}
-      <div className="card" style={{ padding: 24 }}>
-        <h2 style={{ marginBottom: 16, fontSize: 16 }}>My Broadcasts</h2>
-        {!broadcasts.length && <p style={{ color: 'var(--muted)', fontSize: 13 }}>No broadcasts yet.</p>}
+      {/* Broadcasts list */}
+      <div className="dash-panel">
+        <div className="dash-panel-title" style={{ justifyContent: 'space-between' }}>
+          <span><Eye size={12} /> My Broadcasts</span>
+          <button className="btn btn-ghost btn-sm" onClick={refreshBroadcasts} style={{ marginLeft: 'auto' }}>
+            <RefreshCw size={11} /> Refresh
+          </button>
+        </div>
+
+        {!broadcasts.length && (
+          <p style={{ color: 'var(--muted)', fontSize: 13 }}>No broadcasts yet. Transmit your first video above.</p>
+        )}
+
         {broadcasts.map(b => (
           <div className="broadcast-row" key={b.id}>
             {b.thumbnail_url
               ? <img src={b.thumbnail_url} className="broadcast-thumb-sm" alt="" />
-              : <div className="broadcast-thumb-sm" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>▶</div>
+              : <div className="broadcast-thumb-sm">▶</div>
             }
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontWeight: 600, fontSize: 14, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{b.title}</div>
-              <div style={{ display: 'flex', gap: 8, marginTop: 4, alignItems: 'center' }}>
+              <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginBottom: 4 }}>
+                {b.title}
+              </div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 {statusBadge(b.status)}
-                <span style={{ fontSize: 12, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 3 }}>
-                  <Eye size={11} /> {b.view_count}
+                <span style={{ fontSize: 11, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 3 }}>
+                  <Eye size={10} /> {b.view_count}
+                </span>
+                <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+                  {new Date(b.created_at).toLocaleDateString()}
                 </span>
               </div>
             </div>
-            <button className="btn btn-danger btn-sm" onClick={() => deleteBroadcast(b.id)} title="Delete">
+            <button className="btn btn-danger btn-sm" onClick={() => deleteBroadcast(b.id)} title="Delete broadcast">
               <Trash2 size={12} />
             </button>
           </div>

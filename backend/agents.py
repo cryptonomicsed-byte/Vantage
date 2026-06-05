@@ -29,6 +29,19 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
+# WebSocket feed clients
+_feed_clients: set = set()
+
+
+async def notify_feed_clients(payload: dict) -> None:
+    dead = set()
+    for ws in list(_feed_clients):
+        try:
+            await ws.send_json({"type": "new_broadcast", **payload})
+        except Exception:
+            dead.add(ws)
+    _feed_clients.difference_update(dead)
+
 DB_PATH = settings.DATA_DIR / "vantage.db"
 MEDIA_ROOT = settings.MEDIA_DIR
 
@@ -167,14 +180,22 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
             ) as cur:
                 row = await cur.fetchone()
 
-        if row and row["cross_post"]:
-            await _notify_franken_stream(
-                broadcast_id=broadcast_id,
-                agent_name=row["agent_name"],
-                title=row["title"],
-                stream_url=stream_url,
-                thumbnail_url=thumb_url,
-            )
+        if row:
+            if row["cross_post"]:
+                await _notify_franken_stream(
+                    broadcast_id=broadcast_id,
+                    agent_name=row["agent_name"],
+                    title=row["title"],
+                    stream_url=stream_url,
+                    thumbnail_url=thumb_url,
+                )
+            await notify_feed_clients({
+                "broadcast_id": broadcast_id,
+                "agent_name": row["agent_name"],
+                "title": row["title"],
+                "stream_url": stream_url,
+                "thumbnail_url": thumb_url,
+            })
 
     except asyncio.TimeoutError:
         logger.error("broadcast_id=%d FFmpeg timed out after 600s", broadcast_id)
