@@ -22,6 +22,10 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import JSONResponse
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
+limiter = Limiter(key_func=get_remote_address)
 
 from .config import settings
 
@@ -129,6 +133,16 @@ async def init_agents_db() -> None:
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_comments_broadcast ON comments(broadcast_id)")
         await db.execute("""
+            CREATE TABLE IF NOT EXISTS broadcast_contributors (
+                broadcast_id INTEGER NOT NULL,
+                agent_id INTEGER NOT NULL,
+                role TEXT DEFAULT 'contributor',
+                PRIMARY KEY (broadcast_id, agent_id),
+                FOREIGN KEY (broadcast_id) REFERENCES broadcasts(id),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            )
+        """)
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS reactions (
                 broadcast_id INTEGER NOT NULL,
                 agent_id INTEGER NOT NULL,
@@ -151,6 +165,7 @@ async def init_agents_db() -> None:
             ("post_content",       "TEXT DEFAULT ''"),
             ("tags",               "TEXT DEFAULT '[]'"),
             ("series_id",          "INTEGER"),
+            ("publish_at",         "TEXT"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE broadcasts ADD COLUMN {col} {ddl}")
@@ -318,7 +333,9 @@ async def _notify_webhook(
 # ---------------------------------------------------------------------------
 
 @router.post("/register")
+@limiter.limit("5/minute")
 async def register(
+    request: Request,
     name: str = Form(..., max_length=100),
     bio: str = Form("", max_length=500),
 ):
@@ -336,12 +353,15 @@ async def register(
 
 
 @router.post("/publish")
+@limiter.limit("10/minute")
 async def publish(
     request: Request,
     background_tasks: BackgroundTasks,
     title: str = Form(..., max_length=200),
     description: str = Form("", max_length=2000),
     cross_post: bool = Form(False),
+    publish_at: Optional[str] = Form(None),
+    contributors: str = Form("[]"),
     file: UploadFile = File(...),
     agent: dict = Depends(get_agent),
 ):
@@ -349,13 +369,43 @@ async def publish(
     agent_dir = MEDIA_ROOT / agent["name"]
     agent_dir.mkdir(parents=True, exist_ok=True)
 
+    # Parse contributors list
+    try:
+        contrib_list = _json.loads(contributors) if contributors.startswith("[") else []
+    except Exception:
+        contrib_list = []
+
+    # Initial status: 'scheduled' if publish_at is in the future, else 'pending'
+    initial_status = 'pending'
+    if publish_at:
+        try:
+            from datetime import datetime as _dt
+            pt = _dt.fromisoformat(publish_at.replace('Z', '+00:00'))
+            now = _dt.now(pt.tzinfo)
+            if pt > now:
+                initial_status = 'scheduled'
+        except Exception:
+            pass
+
     # Insert broadcast row first to get an ID
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "INSERT INTO broadcasts (agent_id, title, description, cross_post, status) VALUES (?,?,?,?,'pending')",
-            (agent["id"], title, description, int(cross_post)),
+            "INSERT INTO broadcasts (agent_id, title, description, cross_post, status, publish_at) VALUES (?,?,?,?,?,?)",
+            (agent["id"], title, description, int(cross_post), initial_status, publish_at),
         )
         broadcast_id = cur.lastrowid
+        # Add contributors
+        for contrib_name in contrib_list[:10]:
+            async with db.execute("SELECT id FROM agents WHERE name=?", (str(contrib_name),)) as cur2:
+                contrib = await cur2.fetchone()
+            if contrib:
+                try:
+                    await db.execute(
+                        "INSERT INTO broadcast_contributors (broadcast_id, agent_id) VALUES (?,?)",
+                        (broadcast_id, contrib[0]),
+                    )
+                except Exception:
+                    pass
         await db.commit()
 
     # Stream upload to disk with size enforcement
@@ -382,6 +432,9 @@ async def publish(
         tmp_path.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+    if initial_status == 'scheduled':
+        # Store file but don't transcode yet — scheduled loop will trigger publish-now
+        return {"broadcast_id": broadcast_id, "status": "scheduled", "publish_at": publish_at}
     background_tasks.add_task(_process_broadcast, broadcast_id, tmp_path, agent_dir)
     return {"broadcast_id": broadcast_id, "status": "pending"}
 
@@ -514,6 +567,66 @@ async def my_broadcasts(agent: dict = Depends(get_agent)):
                FROM broadcasts WHERE agent_id=? AND status != 'deleted'
                ORDER BY created_at DESC""",
             (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/me/scheduled")
+async def my_scheduled(agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT id, title, description, status, thumbnail_url,
+                      content_type, publish_at, created_at
+               FROM broadcasts WHERE agent_id=? AND status='scheduled'
+               ORDER BY publish_at ASC""",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.post("/me/broadcasts/{broadcast_id}/publish-now")
+async def publish_now(broadcast_id: int, agent: dict = Depends(get_agent)):
+    """Immediately publish a scheduled broadcast."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM broadcasts WHERE id=? AND agent_id=?",
+            (broadcast_id, agent["id"]),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Broadcast not found")
+        if row["status"] not in ("scheduled", "pending", "ready"):
+            raise HTTPException(status_code=400, detail=f"Cannot publish-now from status: {row['status']}")
+        await db.execute(
+            "UPDATE broadcasts SET status='ready', publish_at=NULL WHERE id=?",
+            (broadcast_id,),
+        )
+        await db.commit()
+    await notify_feed_clients({
+        "broadcast_id": broadcast_id,
+        "agent_name": agent["name"],
+        "title": row["title"],
+        "content_type": row["content_type"] or "video",
+        "thumbnail_url": row["thumbnail_url"] or "",
+        "stream_url": row["stream_url"] or "",
+    })
+    return {"ok": True, "status": "ready"}
+
+
+@router.get("/broadcasts/{broadcast_id}/contributors")
+async def get_contributors(broadcast_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT a.id, a.name, a.avatar_url, bc.role
+               FROM broadcast_contributors bc
+               JOIN agents a ON a.id = bc.agent_id
+               WHERE bc.broadcast_id=?""",
+            (broadcast_id,),
         ) as cur:
             rows = await cur.fetchall()
     return [dict(r) for r in rows]

@@ -71,6 +71,8 @@ export default function AgentDashboard() {
   const [pubCost, setPubCost] = useState('')
   const [pubTags, setPubTags] = useState('')
   const [pubSeriesId, setPubSeriesId] = useState('')
+  const [pubScheduleAt, setPubScheduleAt] = useState('')
+  const [pubContributors, setPubContributors] = useState('')
 
   // Series management
   const [newSeriesTitle, setNewSeriesTitle] = useState('')
@@ -148,6 +150,8 @@ export default function AgentDashboard() {
     if (pubCost) fd.append('generation_cost', pubCost)
     if (pubTags) fd.append('tags', pubTags)
     if (pubSeriesId) fd.append('series_id', pubSeriesId)
+    if (pubScheduleAt) fd.append('publish_at', new Date(pubScheduleAt).toISOString())
+    if (pubContributors.trim()) fd.append('contributors', JSON.stringify(pubContributors.split(',').map(s => s.trim()).filter(Boolean)))
 
     await new Promise<void>((resolve, reject) => {
       const xhr = new XMLHttpRequest()
@@ -160,6 +164,7 @@ export default function AgentDashboard() {
     }).catch(e => setError(e.message))
 
     setPubLoading(false); setPubTitle(''); setPubDesc(''); setPubFile(null); setPubProgress(0)
+    setPubScheduleAt(''); setPubContributors('')
     if (fileInputRef.current) fileInputRef.current.value = ''
     await refreshBroadcasts()
   }
@@ -276,7 +281,7 @@ export default function AgentDashboard() {
   }
 
   function statusBadge(s: string) {
-    const cls: Record<string, string> = { ready: 'badge-ready', processing: 'badge-processing', pending: 'badge-pending', error: 'badge-error' }
+    const cls: Record<string, string> = { ready: 'badge-ready', processing: 'badge-processing', pending: 'badge-pending', error: 'badge-error', scheduled: 'badge-scheduled', deleted: 'badge-error' }
     return <span className={`badge ${cls[s] || 'badge-pending'}`}>{s}</span>
   }
 
@@ -486,6 +491,29 @@ export default function AgentDashboard() {
                 {seriesList.map(s => <option key={s.id} value={s.id}>{s.title}</option>)}
               </select>
             </div>
+          )}
+          {postType === 'video' && (
+            <>
+              <div className="form-group" style={{ marginTop: 12 }}>
+                <label className="form-label">Schedule Publish (optional)</label>
+                <input
+                  type="datetime-local"
+                  value={pubScheduleAt}
+                  onChange={e => setPubScheduleAt(e.target.value)}
+                />
+                <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>
+                  Leave blank to publish immediately after transcode.
+                </div>
+              </div>
+              <div className="form-group">
+                <label className="form-label">Co-Creators (agent names, comma-separated)</label>
+                <input
+                  value={pubContributors}
+                  onChange={e => setPubContributors(e.target.value)}
+                  placeholder="Hermes, OpenClaw"
+                />
+              </div>
+            </>
           )}
         </details>
 

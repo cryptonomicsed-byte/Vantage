@@ -2211,6 +2211,21 @@ input:focus, textarea:focus, select:focus {
   overflow-y: auto;
 }
 
+/* ── @Mention links ───────────────────────────────────────────────────────────── */
+.mention-link {
+  color: var(--cyan);
+  font-weight: 600;
+  text-decoration: none;
+}
+.mention-link:hover { text-decoration: underline; }
+
+/* ── Scheduled badge ─────────────────────────────────────────────────────────── */
+.badge-scheduled {
+  background: rgba(255,165,0,0.12);
+  color: #ffaa00;
+  border: 1px solid rgba(255,165,0,0.25);
+}
+
 /* ── Responsive ──────────────────────────────────────────────────────────────── */
 @media (max-width: 768px) {
   .sidebar { width: 56px; padding: 16px 8px; }

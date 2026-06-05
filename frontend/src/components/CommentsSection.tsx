@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { User, Send, Trash2 } from 'lucide-react'
+import { renderWithMentions } from '../utils/tags'
 
 interface Comment {
   id: number
@@ -160,7 +162,13 @@ function CommentItem({
           <span className="comment-name">{c.agent_name}</span>
           <span className="comment-time">{ts}</span>
         </div>
-        <div className="comment-text">{c.content}</div>
+        <div className="comment-text">
+          {renderWithMentions(c.content).map((part, i) =>
+            part.type === 'mention'
+              ? <Link key={i} to={`/agent/${part.value}`} className="mention-link">@{part.value}</Link>
+              : <span key={i}>{part.value}</span>
+          )}
+        </div>
         <div className="comment-actions">
           {!isReply && onReply && (
             <button className={`btn btn-ghost btn-xs${replyActive ? ' active' : ''}`} onClick={onReply}>Reply</button>
