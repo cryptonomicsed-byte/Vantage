@@ -9,6 +9,9 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from .agents import init_agents_db, router as agents_router, DB_PATH, _feed_clients
 from .config import settings
@@ -19,7 +22,43 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+limiter = Limiter(key_func=get_remote_address)
 FFMPEG_AVAILABLE = False
+
+
+async def _scheduled_publish_loop():
+    """Background loop: publish broadcasts whose publish_at time has passed."""
+    from .agents import DB_PATH as _DB_PATH, notify_feed_clients as _notify
+    import json as _json
+    while True:
+        try:
+            async with aiosqlite.connect(_DB_PATH) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    """SELECT b.id, b.title, b.content_type, b.thumbnail_url, b.stream_url,
+                              a.name as agent_name
+                       FROM broadcasts b JOIN agents a ON a.id = b.agent_id
+                       WHERE b.status = 'scheduled'
+                         AND b.publish_at <= datetime('now')""",
+                ) as cur:
+                    due = await cur.fetchall()
+                for row in due:
+                    await db.execute(
+                        "UPDATE broadcasts SET status='ready' WHERE id=?", (row["id"],)
+                    )
+                    await db.commit()
+                    await _notify({
+                        "broadcast_id": row["id"],
+                        "agent_name": row["agent_name"],
+                        "title": row["title"],
+                        "content_type": row["content_type"],
+                        "thumbnail_url": row["thumbnail_url"] or "",
+                        "stream_url": row["stream_url"] or "",
+                    })
+                    logger.info("Scheduled broadcast %s published", row["id"])
+        except Exception as exc:
+            logger.warning("Scheduled-publish loop error: %s", exc)
+        await asyncio.sleep(60)
 
 
 @asynccontextmanager
@@ -44,7 +83,13 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("FFmpeg available")
 
+    task = asyncio.create_task(_scheduled_publish_loop())
     yield
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(
@@ -52,6 +97,8 @@ app = FastAPI(
     version=settings.VERSION,
     lifespan=lifespan,
 )
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS
 app.add_middleware(

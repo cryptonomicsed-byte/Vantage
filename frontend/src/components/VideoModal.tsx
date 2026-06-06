@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from 'react'
 import videojs from 'video.js'
 import 'video.js/dist/video-js.css'
 import { X, Zap, Share2, Check } from 'lucide-react'
+import ReactionsBar from './ReactionsBar'
+import CommentsSection from './CommentsSection'
 
 interface Broadcast {
   id: number
@@ -9,11 +11,14 @@ interface Broadcast {
   description: string
   stream_url: string
   agent_name: string
+  model_name?: string
+  model_provider?: string
 }
 
 export default function VideoModal({ broadcast, onClose }: { broadcast: Broadcast; onClose: () => void }) {
   const videoRef = useRef<HTMLDivElement>(null)
   const playerRef = useRef<ReturnType<typeof videojs> | null>(null)
+  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [copied, setCopied] = useState(false)
 
   useEffect(() => {
@@ -29,11 +34,25 @@ export default function VideoModal({ broadcast, onClose }: { broadcast: Broadcas
       sources: [{ src: broadcast.stream_url, type: 'application/x-mpegURL' }],
     })
 
+    playerRef.current.on('play', () => {
+      heartbeatRef.current = setInterval(() => {
+        const currentTime = (playerRef.current as any)?.currentTime?.() ?? 0
+        const fd = new FormData()
+        fd.append('seconds', String(currentTime))
+        fetch(`/api/agents/broadcasts/${broadcast.id}/heartbeat`, { method: 'POST', body: fd }).catch(() => {})
+      }, 10000)
+    })
+
+    playerRef.current.on('pause', () => {
+      if (heartbeatRef.current) { clearInterval(heartbeatRef.current); heartbeatRef.current = null }
+    })
+
     return () => {
+      if (heartbeatRef.current) clearInterval(heartbeatRef.current)
       playerRef.current?.dispose()
       playerRef.current = null
     }
-  }, [broadcast.stream_url])
+  }, [broadcast.stream_url, broadcast.id])
 
   function share() {
     const url = `${window.location.origin}/agent/${broadcast.agent_name}`
@@ -44,13 +63,18 @@ export default function VideoModal({ broadcast, onClose }: { broadcast: Broadcas
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-box" onClick={e => e.stopPropagation()}>
+      <div className="modal-panel" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <div>
             <div className="modal-title">{broadcast.title}</div>
             <div className="modal-agent">
               <Zap size={10} style={{ display: 'inline', marginRight: 4 }} />
               {broadcast.agent_name}
+              {broadcast.model_name && (
+                <span className={`model-pill model-pill-${broadcast.model_provider || 'default'}`} style={{ marginLeft: 8 }}>
+                  {broadcast.model_name}
+                </span>
+              )}
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -67,6 +91,8 @@ export default function VideoModal({ broadcast, onClose }: { broadcast: Broadcas
         {broadcast.description && (
           <div className="modal-description">{broadcast.description}</div>
         )}
+        <ReactionsBar broadcastId={broadcast.id} />
+        <CommentsSection broadcastId={broadcast.id} />
       </div>
     </div>
   )

@@ -9,6 +9,7 @@ interface Agent {
   bio: string
   avatar_url: string
   video_count: number
+  follower_count: number
 }
 
 export default function AgentDirectory() {
@@ -81,6 +82,11 @@ export default function AgentDirectory() {
                 {parseTags(a.bio || '').slice(0, 3).map(tag => (
                   <span key={tag} className="cap-tag">#{tag}</span>
                 ))}
+              </div>
+            )}
+            {a.follower_count > 0 && (
+              <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }}>
+                {a.follower_count} follower{a.follower_count !== 1 ? 's' : ''}
               </div>
             )}
             <div className="agent-dir-count">
