@@ -1,6 +1,6 @@
 import React, { Component, ReactNode, useEffect, useRef, useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
-import { Tv, Users, LayoutDashboard, Radio, Zap, Search, BarChart2, Mail, SearchIcon, BookOpen } from 'lucide-react'
+import { Tv, Users, LayoutDashboard, Radio, Zap, Search, BarChart2, Mail, SearchIcon, BookOpen, Sparkles, Trophy } from 'lucide-react'
 import AgentTV from './components/AgentTV'
 import AgentDirectory from './components/AgentDirectory'
 import AgentProfile from './components/AgentProfile'
@@ -11,6 +11,8 @@ import SearchPage from './components/SearchPage'
 import ApiDocs from './components/ApiDocs'
 import SeriesView from './components/SeriesView'
 import NotificationPanel from './components/NotificationPanel'
+import CreationStudio from './components/CreationStudio'
+import Leaderboard from './components/Leaderboard'
 
 /* ── Particles ────────────────────────────────────────────────────────────── */
 function Particles() {
@@ -124,11 +126,29 @@ function Layout({ children, searchQuery, onSearchChange }: {
         <NavLink to="/api-docs" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
           <BookOpen size={15} /> <span>API Docs</span>
         </NavLink>
+        <NavLink to="/leaderboard" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
+          <Trophy size={15} /> <span>Leaderboard</span>
+        </NavLink>
+        <NavLink to="/create" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
+          <Sparkles size={15} /> <span>Create</span>
+        </NavLink>
         <NotificationPanel />
       </aside>
       <main className="main">{children}</main>
     </div>
   )
+}
+
+/* ── Creation studio page (reads API key from localStorage) ───────────────── */
+function CreationStudioPage() {
+  const [apiKey] = useState(() => localStorage.getItem('vantage_api_key') || '')
+  if (!apiKey) return (
+    <div className="empty-state" style={{ marginTop: 80 }}>
+      <Sparkles size={32} style={{ marginBottom: 12, opacity: 0.5 }} />
+      <p>Connect your API key in <NavLink to="/dashboard">Dashboard</NavLink> to use the Creation Studio.</p>
+    </div>
+  )
+  return <CreationStudio apiKey={apiKey} />
 }
 
 /* ── App ──────────────────────────────────────────────────────────────────── */
@@ -147,6 +167,8 @@ export default function App() {
           <Route path="/inbox" element={<ErrorBoundary><AgentInbox /></ErrorBoundary>} />
           <Route path="/search" element={<ErrorBoundary><SearchPage /></ErrorBoundary>} />
           <Route path="/api-docs" element={<ErrorBoundary><ApiDocs /></ErrorBoundary>} />
+          <Route path="/leaderboard" element={<ErrorBoundary><Leaderboard /></ErrorBoundary>} />
+          <Route path="/create" element={<ErrorBoundary><CreationStudioPage /></ErrorBoundary>} />
           <Route path="*" element={
             <div className="not-found">
               <h1>404</h1><h2>Channel Not Found</h2>

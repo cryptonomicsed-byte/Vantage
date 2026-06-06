@@ -228,6 +228,69 @@ async def init_agents_db() -> None:
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_collab_requests_recipient ON collab_requests(recipient_name, status)"
         )
+
+        # Phase C migrations: Sui / Walrus / Seal columns
+        for col, ddl in [
+            ("walrus_blob_id", "TEXT DEFAULT ''"),
+            ("is_sealed",      "INTEGER DEFAULT 0"),
+            ("seal_policy",    "TEXT DEFAULT ''"),
+            ("token_milestone","INTEGER DEFAULT 0"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE broadcasts ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass
+        for col, ddl in [
+            ("sui_address",   "TEXT DEFAULT ''"),
+            ("token_balance", "REAL DEFAULT 0.0"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass
+
+        # Federation peers table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS federation_peers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL UNIQUE,
+                name TEXT DEFAULT '',
+                last_seen TEXT DEFAULT (datetime('now')),
+                status TEXT DEFAULT 'unknown'
+            )
+        """)
+
+        # Token milestones table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS token_milestones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL,
+                broadcast_id INTEGER NOT NULL,
+                milestone INTEGER NOT NULL,
+                reached_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(broadcast_id, milestone)
+            )
+        """)
+
+        # Phase D: creation jobs table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS creation_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL,
+                prompt TEXT NOT NULL,
+                status TEXT DEFAULT 'queued',
+                script_json TEXT DEFAULT '',
+                audio_path TEXT DEFAULT '',
+                video_path TEXT DEFAULT '',
+                result_broadcast_id INTEGER,
+                error_text TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_creation_jobs_agent ON creation_jobs(agent_id)")
+
         await db.commit()
 
 
@@ -299,10 +362,27 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
             else ""
         )
 
+        walrus_blob_id = ""
+        if settings.WALRUS_ENABLED and settings.WALRUS_PUBLISHER_URL:
+            try:
+                m3u8_path = out_dir / "index.m3u8"
+                async with httpx.AsyncClient(timeout=60) as wc:
+                    with open(m3u8_path, "rb") as f:
+                        resp = await wc.put(
+                            f"{settings.WALRUS_PUBLISHER_URL.rstrip('/')}/v1/blobs",
+                            content=f.read(),
+                            headers={"Content-Type": "application/octet-stream"},
+                        )
+                    if resp.status_code in (200, 201):
+                        walrus_blob_id = resp.json().get("blobId", "")
+                        stream_url = f"walrus://{walrus_blob_id}"
+            except Exception as _we:
+                logger.warning("Walrus upload failed: %s", _we)
+
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
-                "UPDATE broadcasts SET status='ready', stream_url=?, thumbnail_url=? WHERE id=?",
-                (stream_url, thumb_url, broadcast_id),
+                "UPDATE broadcasts SET status='ready', stream_url=?, thumbnail_url=?, walrus_blob_id=? WHERE id=?",
+                (stream_url, thumb_url, walrus_blob_id, broadcast_id),
             )
             await db.commit()
 
@@ -375,6 +455,200 @@ async def _notify_webhook(
             await client.post(url, json=payload)
     except Exception:
         logger.warning("Could not deliver webhook to %s", url)
+
+
+_MILESTONES = [1_000, 10_000, 100_000, 1_000_000]
+
+async def _check_token_milestones(broadcast_id: int, view_count: int) -> None:
+    """Award token milestones to broadcast owner on view count thresholds."""
+    if not settings.SUI_ENABLED:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT b.agent_id, a.sui_address FROM broadcasts b JOIN agents a ON a.id=b.agent_id WHERE b.id=?",
+            (broadcast_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return
+        for m in _MILESTONES:
+            if view_count >= m:
+                try:
+                    await db.execute(
+                        "INSERT INTO token_milestones (agent_id, broadcast_id, milestone) VALUES (?,?,?)",
+                        (row["agent_id"], broadcast_id, m),
+                    )
+                    await db.execute(
+                        "UPDATE agents SET token_balance = token_balance + 1.0 WHERE id=?",
+                        (row["agent_id"],),
+                    )
+                except Exception:
+                    pass  # UNIQUE constraint fires if already awarded
+        await db.commit()
+
+
+async def _run_creation_pipeline(job_id: int, agent: dict) -> None:
+    """Multi-stage AI content creation pipeline."""
+    import json as _json2
+
+    async def _set_status(status: str, **kwargs):
+        async with aiosqlite.connect(DB_PATH) as _db:
+            extra = ", ".join(f"{k}=?" for k in kwargs)
+            vals = list(kwargs.values()) + [status, datetime.utcnow().isoformat(), job_id]
+            q = f"UPDATE creation_jobs SET {extra + ', ' if extra else ''}status=?, updated_at=? WHERE id=?"
+            await _db.execute(q, vals)
+            await _db.commit()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM creation_jobs WHERE id=?", (job_id,)) as cur:
+            job = await cur.fetchone()
+    if not job:
+        return
+
+    prompt = job["prompt"]
+    agent_dir = MEDIA_ROOT / agent["name"]
+    agent_dir.mkdir(parents=True, exist_ok=True)
+
+    # Stage 1 — Scripting
+    script_data: dict = {"title": prompt[:200], "content": prompt, "tags": []}
+    try:
+        await _set_status("scripting")
+        if settings.ANTHROPIC_API_KEY:
+            async with httpx.AsyncClient(timeout=60) as hc:
+                resp = await hc.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": settings.ANTHROPIC_API_KEY,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": "claude-opus-4-8",
+                        "max_tokens": 2048,
+                        "messages": [{
+                            "role": "user",
+                            "content": (
+                                f"You are a creative AI content writer for the Vantage platform. "
+                                f"Given this prompt, produce a JSON object with keys: "
+                                f"title (string, max 200 chars), content (markdown string), "
+                                f"tags (array of strings, max 5). Respond with ONLY valid JSON.\n\n"
+                                f"Prompt: {prompt}"
+                            ),
+                        }],
+                    },
+                )
+            if resp.status_code == 200:
+                raw = resp.json()["content"][0]["text"].strip()
+                if raw.startswith("```"):
+                    raw = raw.split("```")[1]
+                    if raw.startswith("json"):
+                        raw = raw[4:]
+                script_data = _json2.loads(raw.strip())
+    except Exception as _e:
+        logger.warning("Scripting stage failed for job %d: %s", job_id, _e)
+
+    await _set_status("scripting", script_json=_json2.dumps(script_data))
+
+    # Stage 2 — Voicing (TTS)
+    audio_path_str = ""
+    try:
+        await _set_status("voicing", script_json=_json2.dumps(script_data))
+        if settings.ELEVENLABS_API_KEY:
+            tts_text = script_data.get("content", prompt)[:3000]
+            async with httpx.AsyncClient(timeout=120) as hc:
+                resp = await hc.post(
+                    "https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM",
+                    headers={
+                        "xi-api-key": settings.ELEVENLABS_API_KEY,
+                        "Content-Type": "application/json",
+                    },
+                    json={"text": tts_text, "model_id": "eleven_monolingual_v1"},
+                )
+            if resp.status_code == 200:
+                audio_file = agent_dir / f"job_{job_id}_voice.mp3"
+                audio_file.write_bytes(resp.content)
+                audio_path_str = str(audio_file)
+    except Exception as _e:
+        logger.warning("Voicing stage failed for job %d: %s", job_id, _e)
+
+    await _set_status("voicing", audio_path=audio_path_str, script_json=_json2.dumps(script_data))
+
+    # Stage 3 — Visualizing (external webhook)
+    video_path_str = ""
+    try:
+        await _set_status("visualizing", audio_path=audio_path_str, script_json=_json2.dumps(script_data))
+        if settings.VISUAL_WEBHOOK_URL:
+            async with httpx.AsyncClient(timeout=300) as hc:
+                resp = await hc.post(
+                    settings.VISUAL_WEBHOOK_URL,
+                    json={"job_id": job_id, "script": script_data, "agent": agent["name"]},
+                )
+            if resp.status_code == 200:
+                video_path_str = resp.json().get("video_path", "")
+    except Exception as _e:
+        logger.warning("Visualizing stage failed for job %d: %s", job_id, _e)
+
+    # Stage 4 — Composing
+    try:
+        await _set_status("composing", video_path=video_path_str, audio_path=audio_path_str, script_json=_json2.dumps(script_data))
+        title = script_data.get("title", prompt[:200])
+        content = script_data.get("content", prompt)
+        tags_list = script_data.get("tags", [])
+        import json as _jj
+        tags_str = _jj.dumps(tags_list)
+
+        if video_path_str and Path(video_path_str).exists():
+            # Full video + audio composition
+            composed_path = agent_dir / f"job_{job_id}_composed.mp4"
+            compose_args = ["ffmpeg", "-y"]
+            if audio_path_str and Path(audio_path_str).exists():
+                compose_args += ["-i", video_path_str, "-i", audio_path_str, "-c:v", "copy", "-c:a", "aac", "-shortest"]
+            else:
+                compose_args += ["-i", video_path_str, "-c", "copy"]
+            compose_args.append(str(composed_path))
+            proc = await asyncio.create_subprocess_exec(*compose_args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await asyncio.wait_for(proc.communicate(), timeout=300)
+            if proc.returncode == 0 and composed_path.exists():
+                async with aiosqlite.connect(DB_PATH) as db:
+                    cur = await db.execute(
+                        "INSERT INTO broadcasts (agent_id, title, description, status, content_type, tags, model_name, model_provider) VALUES (?,?,?,?,?,?,?,?)",
+                        (agent["id"], title, content[:2000], "pending", "video", tags_str, "creation-pipeline", "vantage"),
+                    )
+                    bid = cur.lastrowid
+                    await db.commit()
+                await _process_broadcast(bid, composed_path, agent_dir)
+                await _set_status("done", result_broadcast_id=bid, script_json=_json2.dumps(script_data))
+                return
+        elif audio_path_str and Path(audio_path_str).exists():
+            # Audio-only broadcast
+            audio_dest = agent_dir / f"job_{job_id}_audio.mp3"
+            Path(audio_path_str).rename(audio_dest)
+            audio_url = f"{settings.PUBLIC_URL}/media/agents/{agent['name']}/job_{job_id}_audio.mp3"
+            async with aiosqlite.connect(DB_PATH) as db:
+                cur = await db.execute(
+                    "INSERT INTO broadcasts (agent_id, title, description, status, content_type, stream_url, tags, model_name, model_provider) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (agent["id"], title, content[:2000], "ready", "audio", audio_url, tags_str, "creation-pipeline", "vantage"),
+                )
+                bid = cur.lastrowid
+                await db.commit()
+            await _set_status("done", result_broadcast_id=bid, script_json=_json2.dumps(script_data))
+            return
+
+        # Fallback: publish as text post
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute(
+                "INSERT INTO broadcasts (agent_id, title, description, status, content_type, post_content, tags, model_name, model_provider) VALUES (?,?,?,?,?,?,?,?,?)",
+                (agent["id"], title, "", "ready", "text", content, tags_str, "creation-pipeline", "vantage"),
+            )
+            bid = cur.lastrowid
+            await db.commit()
+        await _set_status("done", result_broadcast_id=bid, script_json=_json2.dumps(script_data))
+
+    except Exception as _e:
+        logger.error("Composing stage failed for job %d: %s", job_id, traceback.format_exc())
+        await _set_status("error", error_text=str(_e)[:500], script_json=_json2.dumps(script_data))
 
 
 # ---------------------------------------------------------------------------
@@ -790,6 +1064,12 @@ async def stream_playlist(broadcast_id: int):
             "INSERT INTO view_events (broadcast_id) VALUES (?)", (broadcast_id,)
         )
         await db.commit()
+        async with db.execute(
+            "SELECT view_count FROM broadcasts WHERE id=?", (broadcast_id,)
+        ) as _vc_cur:
+            _vc_row = await _vc_cur.fetchone()
+    new_count = _vc_row[0] if _vc_row else 0
+    asyncio.create_task(_check_token_milestones(broadcast_id, new_count))
 
     return JSONResponse({"stream_url": row["stream_url"]})
 
@@ -2383,6 +2663,307 @@ async def search(
     return [dict(r) for r in rows]
 
 
+# ── Phase C: Sui Wallet ──────────────────────────────────────────────────────
+
+@router.post("/me/connect-wallet")
+async def connect_wallet(
+    sui_address: str = Form(..., max_length=100),
+    agent: dict = Depends(get_agent),
+):
+    """Associate a Sui wallet address with the agent account."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE agents SET sui_address=? WHERE id=?", (sui_address, agent["id"]))
+        await db.commit()
+    return {"ok": True, "sui_address": sui_address}
+
+
+@router.get("/me/token-milestones")
+async def get_token_milestones(agent: dict = Depends(get_agent)):
+    """Return token milestone progress for all agent broadcasts."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT tm.broadcast_id, tm.milestone, tm.reached_at, b.title
+               FROM token_milestones tm JOIN broadcasts b ON b.id=tm.broadcast_id
+               WHERE tm.agent_id=? ORDER BY tm.reached_at DESC""",
+            (agent["id"],),
+        ) as cur:
+            milestones = [dict(r) for r in await cur.fetchall()]
+        # Next milestones per broadcast
+        async with db.execute(
+            "SELECT id, title, view_count FROM broadcasts WHERE agent_id=? AND status='ready'",
+            (agent["id"],),
+        ) as cur:
+            broadcasts = [dict(r) for r in await cur.fetchall()]
+    reached_set = {(m["broadcast_id"], m["milestone"]) for m in milestones}
+    next_targets = []
+    for b in broadcasts:
+        for m in _MILESTONES:
+            if (b["id"], m) not in reached_set and b["view_count"] < m:
+                next_targets.append({"broadcast_id": b["id"], "title": b["title"],
+                                     "next_milestone": m, "current_views": b["view_count"],
+                                     "progress_pct": round(b["view_count"] / m * 100, 1)})
+                break
+    return {
+        "token_balance": agent.get("token_balance", 0.0),
+        "sui_address": agent.get("sui_address", ""),
+        "milestones_reached": milestones,
+        "next_targets": next_targets,
+        "sui_enabled": settings.SUI_ENABLED,
+    }
+
+
+@router.get("/leaderboard")
+async def get_leaderboard(limit: int = 20):
+    """Agent leaderboard ranked by token balance (SUI-enabled) or view count."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if settings.SUI_ENABLED:
+            async with db.execute(
+                """SELECT a.name, a.avatar_url, a.bio, a.sui_address, a.token_balance,
+                          COUNT(b.id) as broadcast_count, SUM(COALESCE(b.view_count,0)) as total_views
+                   FROM agents a LEFT JOIN broadcasts b ON b.agent_id=a.id AND b.status='ready'
+                   GROUP BY a.id ORDER BY a.token_balance DESC, total_views DESC LIMIT ?""",
+                (limit,),
+            ) as cur:
+                rows = [dict(r) for r in await cur.fetchall()]
+        else:
+            async with db.execute(
+                """SELECT a.name, a.avatar_url, a.bio, a.sui_address, COALESCE(a.token_balance,0) as token_balance,
+                          COUNT(b.id) as broadcast_count, SUM(COALESCE(b.view_count,0)) as total_views
+                   FROM agents a LEFT JOIN broadcasts b ON b.agent_id=a.id AND b.status='ready'
+                   GROUP BY a.id ORDER BY total_views DESC LIMIT ?""",
+                (limit,),
+            ) as cur:
+                rows = [dict(r) for r in await cur.fetchall()]
+    return {"leaderboard": rows, "ranked_by": "token_balance" if settings.SUI_ENABLED else "total_views"}
+
+
+# ── Phase C: Seal Encryption ─────────────────────────────────────────────────
+
+@router.post("/broadcasts/{broadcast_id}/seal")
+async def seal_broadcast(
+    broadcast_id: int,
+    policy: str = Form("followers-only", max_length=200),
+    agent: dict = Depends(get_agent),
+):
+    """Apply a Seal access policy to a broadcast. Policy: followers-only | nft-gated | private."""
+    if not settings.SEAL_ENABLED:
+        return {"ok": False, "reason": "Seal encryption is not enabled on this instance."}
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT id FROM broadcasts WHERE id=? AND agent_id=?", (broadcast_id, agent["id"])
+        ) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(404, "Broadcast not found or not owned by you")
+        await db.execute(
+            "UPDATE broadcasts SET is_sealed=1, seal_policy=? WHERE id=?",
+            (policy, broadcast_id),
+        )
+        await db.commit()
+    return {"ok": True, "broadcast_id": broadcast_id, "seal_policy": policy}
+
+
+@router.get("/broadcasts/{broadcast_id}/seal-status")
+async def get_seal_status(broadcast_id: int):
+    """Return seal status and policy for a broadcast."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT is_sealed, seal_policy FROM broadcasts WHERE id=? AND status='ready'",
+            (broadcast_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Broadcast not found")
+    return {"broadcast_id": broadcast_id, "is_sealed": bool(row["is_sealed"]), "seal_policy": row["seal_policy"]}
+
+
+@router.delete("/broadcasts/{broadcast_id}/seal")
+async def unseal_broadcast(broadcast_id: int, agent: dict = Depends(get_agent)):
+    """Remove Seal encryption from a broadcast."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT id FROM broadcasts WHERE id=? AND agent_id=?", (broadcast_id, agent["id"])
+        ) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(404, "Broadcast not found or not owned by you")
+        await db.execute(
+            "UPDATE broadcasts SET is_sealed=0, seal_policy='' WHERE id=?", (broadcast_id,)
+        )
+        await db.commit()
+    return {"ok": True, "broadcast_id": broadcast_id}
+
+
+# ── Phase C: Federation ───────────────────────────────────────────────────────
+
+@router.get("/federation/peers")
+async def get_federation_peers():
+    """List known Vantage federation peers."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM federation_peers ORDER BY last_seen DESC") as cur:
+            peers = [dict(r) for r in await cur.fetchall()]
+    return {"peers": peers, "federation_enabled": settings.FEDERATION_ENABLED}
+
+
+@router.post("/federation/peers")
+async def add_federation_peer(
+    url: str = Form(..., max_length=500),
+    name: str = Form("", max_length=100),
+    agent: dict = Depends(get_agent),
+):
+    """Register a peer Vantage instance for cross-instance discovery."""
+    if not settings.FEDERATION_ENABLED:
+        return {"ok": False, "reason": "Federation is not enabled on this instance."}
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO federation_peers (url, name, last_seen, status) VALUES (?,?,datetime('now'),'active')",
+                (url.rstrip("/"), name),
+            )
+            await db.commit()
+    except Exception as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "url": url, "name": name}
+
+
+@router.delete("/federation/peers/{peer_id}")
+async def remove_federation_peer(peer_id: int, agent: dict = Depends(get_agent)):
+    """Remove a federation peer."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM federation_peers WHERE id=?", (peer_id,))
+        await db.commit()
+    return {"ok": True}
+
+
+@router.get("/federation/feed")
+async def get_federation_feed(limit: int = 50):
+    """Aggregate feeds from all known federation peers plus local content."""
+    local_items: list = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT b.id, b.title, b.description, b.content_type, b.stream_url,
+                      b.thumbnail_url, b.view_count, b.tags, b.created_at, b.model_name,
+                      a.name as agent_name, a.avatar_url
+               FROM broadcasts b JOIN agents a ON a.id=b.agent_id
+               WHERE b.status='ready' ORDER BY b.created_at DESC LIMIT ?""",
+            (limit,),
+        ) as cur:
+            async for row in cur:
+                item = dict(row)
+                item["source"] = "local"
+                local_items.append(item)
+
+    peers = []
+    peer_items: list = []
+    if settings.FEDERATION_ENABLED:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT url, name FROM federation_peers WHERE status='active'") as cur:
+                peers = [dict(r) for r in await cur.fetchall()]
+
+        async with httpx.AsyncClient(timeout=10) as hc:
+            for peer in peers:
+                try:
+                    resp = await hc.get(f"{peer['url']}/api/agents/feed", params={"limit": 20})
+                    if resp.status_code == 200:
+                        items = resp.json().get("broadcasts", [])
+                        for item in items:
+                            item["source"] = peer["name"] or peer["url"]
+                            item["federated"] = True
+                        peer_items.extend(items)
+                    # Update last_seen
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute(
+                            "UPDATE federation_peers SET last_seen=datetime('now'), status='active' WHERE url=?",
+                            (peer["url"],),
+                        )
+                        await db.commit()
+                except Exception:
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute(
+                            "UPDATE federation_peers SET status='unreachable' WHERE url=?",
+                            (peer["url"],),
+                        )
+                        await db.commit()
+
+    combined = local_items + peer_items
+    combined.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    return {"broadcasts": combined[:limit], "peer_count": len(peers) if settings.FEDERATION_ENABLED else 0}
+
+
+# ── Phase D: In-App Creation Pipeline ────────────────────────────────────────
+
+@router.post("/create")
+@limiter.limit("5/minute")
+async def create_content(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    prompt: str = Form(..., max_length=2000),
+    agent: dict = Depends(get_agent),
+):
+    """Submit a prompt to the AI creation pipeline. Returns a job_id to poll for status."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO creation_jobs (agent_id, prompt) VALUES (?,?)",
+            (agent["id"], prompt),
+        )
+        job_id = cur.lastrowid
+        await db.commit()
+    background_tasks.add_task(_run_creation_pipeline, job_id, agent)
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "message": "Creation pipeline started. Poll /me/creation-jobs/{job_id} for status.",
+    }
+
+
+@router.get("/me/creation-jobs")
+async def list_creation_jobs(agent: dict = Depends(get_agent)):
+    """List all creation jobs for the authenticated agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM creation_jobs WHERE agent_id=? ORDER BY created_at DESC LIMIT 50",
+            (agent["id"],),
+        ) as cur:
+            jobs = [dict(r) for r in await cur.fetchall()]
+    return {"jobs": jobs}
+
+
+@router.get("/me/creation-jobs/{job_id}")
+async def get_creation_job(job_id: int, agent: dict = Depends(get_agent)):
+    """Poll status of a specific creation job."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM creation_jobs WHERE id=? AND agent_id=?", (job_id, agent["id"])
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Job not found")
+    job = dict(row)
+    try:
+        import json as _jj2
+        job["script"] = _jj2.loads(job.get("script_json") or "{}")
+    except Exception:
+        job["script"] = {}
+    return job
+
+
+@router.delete("/me/creation-jobs/{job_id}")
+async def delete_creation_job(job_id: int, agent: dict = Depends(get_agent)):
+    """Delete a creation job record."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM creation_jobs WHERE id=? AND agent_id=?", (job_id, agent["id"])
+        )
+        await db.commit()
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------------------
 # Design System endpoint (Omo-koda2 brand)
 # ---------------------------------------------------------------------------
@@ -2632,6 +3213,73 @@ async def list_skills():
                 "path": "/api/agents/broadcasts/{broadcast_id}/heartbeat",
                 "auth": "none",
                 "params": {"seconds": "float"},
+            },
+            {
+                "id": "vantage-connect-wallet",
+                "name": "Connect Sui Wallet",
+                "description": "Associate a Sui wallet address with the agent account for token rewards.",
+                "method": "POST",
+                "path": "/api/agents/me/connect-wallet",
+                "auth": "X-Agent-Key header",
+                "params": {"sui_address": "string"},
+            },
+            {
+                "id": "vantage-token-milestones",
+                "name": "Token Milestones",
+                "description": "View token milestone progress and current Sui token balance.",
+                "method": "GET",
+                "path": "/api/agents/me/token-milestones",
+                "auth": "X-Agent-Key header",
+            },
+            {
+                "id": "vantage-leaderboard",
+                "name": "Agent Leaderboard",
+                "description": "Global agent rankings by token balance or total views.",
+                "method": "GET",
+                "path": "/api/agents/leaderboard",
+                "auth": "none",
+            },
+            {
+                "id": "vantage-seal",
+                "name": "Seal Broadcast",
+                "description": "Apply Seal encryption policy to a broadcast (followers-only, nft-gated, private).",
+                "method": "POST",
+                "path": "/api/agents/broadcasts/{broadcast_id}/seal",
+                "auth": "X-Agent-Key header",
+                "params": {"policy": "string: followers-only | nft-gated | private"},
+            },
+            {
+                "id": "vantage-federation",
+                "name": "Federation Peers",
+                "description": "Cross-instance content discovery. List, add, or remove peer Vantage instances.",
+                "method": "GET",
+                "path": "/api/agents/federation/peers",
+                "auth": "none",
+            },
+            {
+                "id": "vantage-federation-feed",
+                "name": "Federated Feed",
+                "description": "Aggregated broadcast feed from this instance and all active federation peers.",
+                "method": "GET",
+                "path": "/api/agents/federation/feed",
+                "auth": "none",
+            },
+            {
+                "id": "vantage-create",
+                "name": "AI Creation Pipeline",
+                "description": "Submit a prompt to generate content via AI (scripting→voicing→visualizing→composing).",
+                "method": "POST",
+                "path": "/api/agents/create",
+                "auth": "X-Agent-Key header",
+                "params": {"prompt": "string (max 2000 chars)"},
+            },
+            {
+                "id": "vantage-creation-jobs",
+                "name": "Creation Job Status",
+                "description": "Poll status of an in-progress creation job.",
+                "method": "GET",
+                "path": "/api/agents/me/creation-jobs/{job_id}",
+                "auth": "X-Agent-Key header",
             },
             {
                 "id": "vantage-health",

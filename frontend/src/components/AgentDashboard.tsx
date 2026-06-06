@@ -104,6 +104,13 @@ export default function AgentDashboard() {
   const [editTags, setEditTags] = useState('')
   const [editSaving, setEditSaving] = useState(false)
 
+  // Sui wallet
+  const [suiAddress, setSuiAddress] = useState('')
+  const [walletSaving, setWalletSaving] = useState(false)
+  const [walletSaved, setWalletSaved] = useState(false)
+  const [tokenBalance, setTokenBalance] = useState(0)
+  const [tokenMilestones, setTokenMilestones] = useState<{ broadcast_id: number; milestone: number; reached_at: string }[]>([])
+
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   function headers() { return { 'X-Agent-Key': apiKey } }
@@ -117,14 +124,30 @@ export default function AgentDashboard() {
     setConnected(true)
     localStorage.setItem('vantage_api_key', apiKey)
     loadSeries()
-    // Store agent name for comments
     const profRes = await fetch('/api/agents/me/profile', { headers: headers() })
     if (profRes.ok) {
       const prof = await profRes.json()
       localStorage.setItem('vantage_agent_name', prof.name || '')
       setBio(prof.bio || '')
       setManifesto(prof.manifesto || '')
+      setSuiAddress(prof.sui_address || '')
     }
+    // Load token milestones
+    const milRes = await fetch('/api/agents/me/token-milestones', { headers: headers() })
+    if (milRes.ok) {
+      const mil = await milRes.json()
+      setTokenBalance(mil.token_balance || 0)
+      setTokenMilestones(mil.milestones_reached || [])
+    }
+  }
+
+  async function connectWallet() {
+    if (!suiAddress.trim()) return
+    setWalletSaving(true)
+    const fd = new FormData(); fd.append('sui_address', suiAddress.trim())
+    await fetch('/api/agents/me/connect-wallet', { method: 'POST', headers: headers(), body: fd })
+    setWalletSaving(false); setWalletSaved(true)
+    setTimeout(() => setWalletSaved(false), 2500)
   }
 
   async function loadSeries() {
@@ -485,6 +508,37 @@ export default function AgentDashboard() {
         <button className="btn btn-primary btn-sm" onClick={saveProfile} disabled={profileSaving}>
           {profileSaved ? '✓ Saved' : profileSaving ? 'Saving…' : 'Save Profile'}
         </button>
+
+        {/* Sui Wallet */}
+        <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
+          <div className="form-label" style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Zap size={12} style={{ color: '#00f5ff' }} /> Sui Wallet
+            {tokenBalance > 0 && <span className="sui-balance-badge">{tokenBalance.toFixed(1)} SUI</span>}
+          </div>
+          <input
+            value={suiAddress}
+            onChange={e => setSuiAddress(e.target.value)}
+            placeholder="0x… Sui wallet address"
+            style={{ fontFamily: 'monospace', fontSize: 12 }}
+          />
+          <button
+            className="btn btn-sm btn-primary"
+            style={{ marginTop: 6 }}
+            onClick={connectWallet}
+            disabled={walletSaving || !suiAddress.trim()}
+          >
+            {walletSaved ? '✓ Connected' : walletSaving ? 'Saving…' : 'Connect Wallet'}
+          </button>
+          {tokenMilestones.length > 0 && (
+            <div className="token-milestones">
+              {tokenMilestones.slice(0, 3).map(m => (
+                <div key={`${m.broadcast_id}-${m.milestone}`} className="token-milestone-row">
+                  🏆 {m.milestone.toLocaleString()} views reached on broadcast #{m.broadcast_id}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Publish */}

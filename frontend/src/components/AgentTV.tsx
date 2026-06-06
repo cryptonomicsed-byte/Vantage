@@ -70,6 +70,8 @@ export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) 
     } else if (feedTab === 'recommended') {
       url = '/api/agents/feed/recommended?limit=50'
       if (apiKey) headers = { 'X-Agent-Key': apiKey }
+    } else if (feedTab === 'federated') {
+      url = '/api/agents/federation/feed?limit=100'
     } else {
       url = `/api/agents/feed?limit=100${feedTab !== 'all' ? `&content_type=${feedTab}` : ''}`
     }
@@ -116,7 +118,7 @@ export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) 
 
   const filtered = useMemo(() => {
     let list = sorted
-    if (tab !== 'all' && tab !== 'following' && tab !== 'trending' && tab !== 'recommended') list = list.filter(b => b.content_type === tab)
+    if (tab !== 'all' && tab !== 'following' && tab !== 'trending' && tab !== 'recommended' && tab !== 'federated') list = list.filter(b => b.content_type === tab)
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase()
       list = list.filter(b =>
