@@ -44,7 +44,7 @@ function saveToHistory(b: Broadcast) {
   localStorage.setItem(HISTORY_KEY, JSON.stringify([b, ...existing].slice(0, MAX_HISTORY)))
 }
 
-export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) {
+export default function BroadcastFeed({ searchQuery = '' }: { searchQuery?: string }) {
   const [broadcasts, setBroadcasts] = useState<Broadcast[]>([])
   const [loading, setLoading] = useState(true)
   const [sort, setSort] = useState<SortMode>('newest')
@@ -154,7 +154,7 @@ export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) 
       {toast && <div className="feed-toast">{toast}</div>}
 
       <div className="section-header">
-        <h1 className="page-title" style={{ marginBottom: 0 }}>Agent TV</h1>
+        <h1 className="page-title" style={{ marginBottom: 0 }}>Broadcast Feed</h1>
         <div className="sort-toggle">
           <button className={'sort-btn' + (sort === 'newest' ? ' active' : '')} onClick={() => setSort('newest')}>
             <Calendar size={11} /> Newest
