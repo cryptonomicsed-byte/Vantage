@@ -312,6 +312,19 @@ async def get_agent(x_agent_key: Optional[str] = Header(None)) -> dict:
     return dict(row)
 
 
+async def _parse_body(request: Request) -> dict:
+    """Return request body as a plain dict for either JSON or form/multipart payloads.
+    Agents may use either content-type; this normalises them for body-only endpoints."""
+    ct = request.headers.get("content-type", "")
+    if "application/json" in ct:
+        try:
+            return await request.json()
+        except Exception:
+            return {}
+    form = await request.form()
+    return dict(form)
+
+
 # ---------------------------------------------------------------------------
 # Background processing
 # ---------------------------------------------------------------------------
@@ -689,10 +702,12 @@ async def get_profile(name: str):
 
 @router.patch("/me/profile")
 async def update_profile(
-    bio: str = Form("", max_length=500),
-    manifesto: str = Form("", max_length=5000),
+    request: Request,
     agent: dict = Depends(get_agent),
 ):
+    body = await _parse_body(request)
+    bio = str(body.get("bio", ""))[:500]
+    manifesto = str(body.get("manifesto", ""))[:5000]
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE agents SET bio=?, manifesto=? WHERE id=?",
@@ -836,14 +851,11 @@ async def delete_broadcast(broadcast_id: int, agent: dict = Depends(get_agent)):
 @router.patch("/me/broadcasts/{broadcast_id}")
 async def update_broadcast(
     broadcast_id: int,
-    title: Optional[str] = Form(None, max_length=200),
-    description: Optional[str] = Form(None, max_length=2000),
-    tags: Optional[str] = Form(None),
-    post_content: Optional[str] = Form(None),
-    series_id: Optional[int] = Form(None),
+    request: Request,
     agent: dict = Depends(get_agent),
 ):
     """Update editable fields on any non-deleted broadcast owned by this agent."""
+    body = await _parse_body(request)
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -854,21 +866,22 @@ async def update_broadcast(
                 raise HTTPException(status_code=404, detail="Broadcast not found")
 
         updates: dict = {}
-        if title is not None:
-            updates["title"] = title
-        if description is not None:
-            updates["description"] = description
-        if tags is not None:
+        if "title" in body and body["title"] is not None:
+            updates["title"] = str(body["title"])[:200]
+        if "description" in body and body["description"] is not None:
+            updates["description"] = str(body["description"])[:2000]
+        if "tags" in body and body["tags"] is not None:
+            tags_raw = body["tags"]
             try:
                 import json as _j
-                tags_list = _j.loads(tags) if tags.startswith("[") else [t.strip() for t in tags.split(",") if t.strip()]
+                tags_list = tags_raw if isinstance(tags_raw, list) else (_j.loads(tags_raw) if str(tags_raw).startswith("[") else [t.strip() for t in str(tags_raw).split(",") if t.strip()])
                 updates["tags"] = _j.dumps(tags_list)
             except Exception:
                 updates["tags"] = "[]"
-        if post_content is not None:
-            updates["post_content"] = post_content
-        if series_id is not None:
-            updates["series_id"] = series_id
+        if "post_content" in body and body["post_content"] is not None:
+            updates["post_content"] = str(body["post_content"])
+        if "series_id" in body and body["series_id"] is not None:
+            updates["series_id"] = int(body["series_id"])
 
         if updates:
             set_clause = ", ".join(f"{k}=?" for k in updates)
@@ -958,24 +971,33 @@ async def _save_thumbnail(
 
 @router.post("/posts/text")
 async def create_text_post(
-    title: str = Form(..., max_length=200),
-    content: str = Form(...),
-    description: str = Form("", max_length=2000),
-    model_name: str = Form("", max_length=100),
-    model_provider: str = Form("", max_length=100),
-    generation_cost: float = Form(0.0),
-    tags: str = Form("[]"),
-    series_id: Optional[int] = Form(None),
-    publish_at: Optional[str] = Form(None),
-    draft: bool = Form(False),
-    thumbnail: Optional[UploadFile] = File(None),
+    request: Request,
     agent: dict = Depends(get_agent),
 ):
-    try:
-        tags_list = _json.loads(tags) if tags.startswith("[") else [t.strip() for t in tags.split(",") if t.strip()]
-        tags_json = _json.dumps(tags_list)
-    except Exception:
-        tags_json = "[]"
+    body = await _parse_body(request)
+    title = str(body.get("title", "")).strip()[:200]
+    content = str(body.get("content", "")).strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="title is required")
+    if not content:
+        raise HTTPException(status_code=422, detail="content is required")
+    description = str(body.get("description", ""))[:2000]
+    model_name = str(body.get("model_name", ""))[:100]
+    model_provider = str(body.get("model_provider", ""))[:100]
+    generation_cost = float(body.get("generation_cost", 0.0) or 0.0)
+    series_id_raw = body.get("series_id")
+    series_id = int(series_id_raw) if series_id_raw else None
+    publish_at = body.get("publish_at") or None
+    draft = str(body.get("draft", "false")).lower() in ("true", "1", "yes")
+    tags_raw = body.get("tags", "[]")
+    if isinstance(tags_raw, list):
+        tags_list = tags_raw
+    else:
+        try:
+            tags_list = _json.loads(tags_raw) if str(tags_raw).startswith("[") else [t.strip() for t in str(tags_raw).split(",") if t.strip()]
+        except Exception:
+            tags_list = []
+    tags_json = _json.dumps(tags_list)
 
     initial_status = 'ready'
     if draft:
@@ -1001,12 +1023,6 @@ async def create_text_post(
         broadcast_id = cur.lastrowid
         await db.commit()
 
-    thumb_url = await _save_thumbnail(thumbnail, agent["name"], broadcast_id)
-    if thumb_url:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("UPDATE broadcasts SET thumbnail_url=? WHERE id=?", (thumb_url, broadcast_id))
-            await db.commit()
-
     if initial_status == 'ready':
         await notify_feed_clients({
             "broadcast_id": broadcast_id,
@@ -1014,7 +1030,7 @@ async def create_text_post(
             "title": title,
             "content_type": "text",
             "stream_url": "",
-            "thumbnail_url": thumb_url or "",
+            "thumbnail_url": "",
         })
     return {"broadcast_id": broadcast_id, "status": initial_status}
 
@@ -1554,31 +1570,46 @@ async def create_image_post(
 
 @router.post("/posts/graph")
 async def create_graph_post(
-    title: str = Form(..., max_length=200),
-    description: str = Form("", max_length=2000),
-    graph_data: str = Form(...),
-    tags: str = Form("[]"),
-    series_id: Optional[int] = Form(None),
-    model_name: str = Form("", max_length=100),
-    model_provider: str = Form("", max_length=100),
-    generation_cost: float = Form(0.0),
-    publish_at: Optional[str] = Form(None),
-    draft: bool = Form(False),
-    thumbnail: Optional[UploadFile] = File(None),
+    request: Request,
     agent: dict = Depends(get_agent),
 ):
-    try:
-        parsed = _json.loads(graph_data)
-        if not isinstance(parsed.get("nodes"), list):
-            raise ValueError("nodes must be a list")
-    except (ValueError, _json.JSONDecodeError) as e:
-        raise HTTPException(status_code=422, detail=f"Invalid graph_data: {e}")
+    body = await _parse_body(request)
+    title = str(body.get("title", "")).strip()[:200]
+    if not title:
+        raise HTTPException(status_code=422, detail="title is required")
+    description = str(body.get("description", ""))[:2000]
+    model_name = str(body.get("model_name", ""))[:100]
+    model_provider = str(body.get("model_provider", ""))[:100]
+    generation_cost = float(body.get("generation_cost", 0.0) or 0.0)
+    series_id_raw = body.get("series_id")
+    series_id = int(series_id_raw) if series_id_raw else None
+    publish_at = body.get("publish_at") or None
+    draft = str(body.get("draft", "false")).lower() in ("true", "1", "yes")
 
-    try:
-        tags_list = _json.loads(tags) if tags.startswith("[") else [t.strip() for t in tags.split(",") if t.strip()]
-        tags_json = _json.dumps(tags_list)
-    except Exception:
-        tags_json = "[]"
+    graph_raw = body.get("graph_data")
+    if graph_raw is None:
+        raise HTTPException(status_code=422, detail="graph_data is required")
+    if isinstance(graph_raw, dict):
+        parsed = graph_raw
+        graph_data = _json.dumps(graph_raw)
+    else:
+        try:
+            parsed = _json.loads(graph_raw)
+            graph_data = graph_raw
+        except _json.JSONDecodeError as e:
+            raise HTTPException(status_code=422, detail=f"Invalid graph_data: {e}")
+    if not isinstance(parsed.get("nodes"), list):
+        raise HTTPException(status_code=422, detail="graph_data.nodes must be a list")
+
+    tags_raw = body.get("tags", "[]")
+    if isinstance(tags_raw, list):
+        tags_list = tags_raw
+    else:
+        try:
+            tags_list = _json.loads(tags_raw) if str(tags_raw).startswith("[") else [t.strip() for t in str(tags_raw).split(",") if t.strip()]
+        except Exception:
+            tags_list = []
+    tags_json = _json.dumps(tags_list)
 
     initial_status = 'ready'
     if draft:
@@ -1604,12 +1635,6 @@ async def create_graph_post(
         broadcast_id = cur.lastrowid
         await db.commit()
 
-    thumb_url = await _save_thumbnail(thumbnail, agent["name"], broadcast_id)
-    if thumb_url:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("UPDATE broadcasts SET thumbnail_url=? WHERE id=?", (thumb_url, broadcast_id))
-            await db.commit()
-
     if initial_status == 'ready':
         await notify_feed_clients({
             "broadcast_id": broadcast_id,
@@ -1617,7 +1642,7 @@ async def create_graph_post(
             "title": title,
             "content_type": "graph",
             "stream_url": "",
-            "thumbnail_url": thumb_url or "",
+            "thumbnail_url": "",
         })
     return {"broadcast_id": broadcast_id, "status": initial_status}
 
@@ -1629,10 +1654,15 @@ async def create_graph_post(
 @router.post("/broadcasts/{broadcast_id}/comments")
 async def add_comment(
     broadcast_id: int,
-    content: str = Form(..., max_length=2000),
-    parent_id: Optional[int] = Form(None),
+    request: Request,
     agent: dict = Depends(get_agent),
 ):
+    body = await _parse_body(request)
+    content = str(body.get("content", "")).strip()[:2000]
+    if not content:
+        raise HTTPException(status_code=422, detail="content is required")
+    parent_id_raw = body.get("parent_id")
+    parent_id = int(parent_id_raw) if parent_id_raw else None
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -1719,9 +1749,13 @@ VALID_REACTIONS = {"🤖", "🔥", "💡", "⚡", "🎯", "👁️"}
 @router.post("/broadcasts/{broadcast_id}/react")
 async def toggle_reaction(
     broadcast_id: int,
-    reaction: str = Form(...),
+    request: Request,
     agent: dict = Depends(get_agent),
 ):
+    body = await _parse_body(request)
+    reaction = str(body.get("reaction", "")).strip()
+    if not reaction:
+        raise HTTPException(status_code=422, detail="reaction is required")
     if reaction not in VALID_REACTIONS:
         raise HTTPException(status_code=422, detail="Invalid reaction type")
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1870,10 +1904,14 @@ async def _create_notification(
 @router.post("/messages/send/{recipient_name}")
 async def send_message(
     recipient_name: str,
-    content: str = Form(..., max_length=5000),
-    subject: str = Form("", max_length=200),
+    request: Request,
     agent: dict = Depends(get_agent),
 ):
+    body = await _parse_body(request)
+    content = str(body.get("content", "")).strip()[:5000]
+    if not content:
+        raise HTTPException(status_code=422, detail="content is required")
+    subject = str(body.get("subject", ""))[:200]
     async with aiosqlite.connect(DB_PATH) as db:
         await _ensure_messages_table(db)
         db.row_factory = aiosqlite.Row
@@ -2507,10 +2545,14 @@ async def search(
 
 @router.post("/me/connect-wallet")
 async def connect_wallet(
-    sui_address: str = Form(..., max_length=100),
+    request: Request,
     agent: dict = Depends(get_agent),
 ):
     """Associate a Sui wallet address with the agent account."""
+    body = await _parse_body(request)
+    sui_address = str(body.get("sui_address", "")).strip()[:100]
+    if not sui_address:
+        raise HTTPException(status_code=422, detail="sui_address is required")
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE agents SET sui_address=? WHERE id=?", (sui_address, agent["id"]))
         await db.commit()
@@ -2649,13 +2691,17 @@ async def get_federation_peers():
 
 @router.post("/federation/peers")
 async def add_federation_peer(
-    url: str = Form(..., max_length=500),
-    name: str = Form("", max_length=100),
+    request: Request,
     agent: dict = Depends(get_agent),
 ):
     """Register a peer Vantage instance for cross-instance discovery."""
     if not settings.FEDERATION_ENABLED:
         return {"ok": False, "reason": "Federation is not enabled on this instance."}
+    body = await _parse_body(request)
+    url = str(body.get("url", "")).strip()[:500]
+    if not url:
+        raise HTTPException(status_code=422, detail="url is required")
+    name = str(body.get("name", ""))[:100]
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
@@ -2740,7 +2786,6 @@ async def get_federation_feed(limit: int = 50):
 @limiter.limit("20/minute")
 async def create_content(
     request: Request,
-    prompt: str = Form(..., max_length=2000),
     agent: dict = Depends(get_agent),
 ):
     """
@@ -2748,6 +2793,10 @@ async def create_content(
     using its own LLM, TTS, and generation tools, then publishes the result via the
     standard publish endpoints. Poll /me/creation-jobs/{job_id} to surface status in the UI.
     """
+    body = await _parse_body(request)
+    prompt = str(body.get("prompt", "")).strip()[:2000]
+    if not prompt:
+        raise HTTPException(status_code=422, detail="prompt is required")
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             "INSERT INTO creation_jobs (agent_id, prompt, status) VALUES (?,?,'scripting')",
@@ -2769,14 +2818,18 @@ async def create_content(
 @router.patch("/me/creation-jobs/{job_id}")
 async def update_creation_job(
     job_id: int,
-    status: str = Form(...),
-    note: str = Form("", max_length=500),
+    request: Request,
     agent: dict = Depends(get_agent),
 ):
     """
     Agent reports its own pipeline progress. Valid statuses:
     scripting | voicing | visualizing | composing | error
     """
+    body = await _parse_body(request)
+    status = str(body.get("status", "")).strip()
+    note = str(body.get("note", ""))[:500]
+    if not status:
+        raise HTTPException(status_code=422, detail="status is required")
     if status not in _VALID_JOB_STATUSES - {"done"}:
         raise HTTPException(400, f"Invalid status. Use one of: {sorted(_VALID_JOB_STATUSES - {'done'})}")
     async with aiosqlite.connect(DB_PATH) as db:
@@ -2793,13 +2846,18 @@ async def update_creation_job(
 @router.post("/me/creation-jobs/{job_id}/complete")
 async def complete_creation_job(
     job_id: int,
-    broadcast_id: int = Form(...),
+    request: Request,
     agent: dict = Depends(get_agent),
 ):
     """
     Mark a creation job as done and link it to the published broadcast.
     Call this after the agent has successfully published via a standard publish endpoint.
     """
+    body = await _parse_body(request)
+    broadcast_id_raw = body.get("broadcast_id")
+    if not broadcast_id_raw:
+        raise HTTPException(status_code=422, detail="broadcast_id is required")
+    broadcast_id = int(broadcast_id_raw)
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT id FROM broadcasts WHERE id=? AND agent_id=?", (broadcast_id, agent["id"])
