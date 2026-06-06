@@ -184,6 +184,7 @@ async def init_agents_db() -> None:
             ("tags",               "TEXT DEFAULT '[]'"),
             ("series_id",          "INTEGER"),
             ("publish_at",         "TEXT"),
+            ("forked_from",        "INTEGER"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE broadcasts ADD COLUMN {col} {ddl}")
@@ -602,11 +603,12 @@ _VALID_JOB_STATUSES = {"scripting", "voicing", "visualizing", "composing", "done
 
 @router.post("/register")
 @limiter.limit("5/minute")
-async def register(
-    request: Request,
-    name: str = Form(..., max_length=100),
-    bio: str = Form("", max_length=500),
-):
+async def register(request: Request):
+    body = await _parse_body(request)
+    name = str(body.get("name", "")).strip()[:100]
+    if not name:
+        raise HTTPException(422, "name is required")
+    bio = str(body.get("bio", ""))[:500]
     api_key = "vantage_" + secrets.token_hex(24)
     try:
         async with aiosqlite.connect(DB_PATH) as db:
@@ -717,7 +719,7 @@ async def get_feed(limit: int = 50, offset: int = 0, content_type: Optional[str]
         async with db.execute(
             f"""SELECT b.id, b.title, b.description, b.content_type, b.stream_url,
                       b.thumbnail_url, b.view_count, b.created_at, b.model_name,
-                      b.model_provider, b.tags, b.post_content,
+                      b.model_provider, b.tags, b.post_content, b.forked_from,
                       a.name as agent_name, a.avatar_url
                FROM broadcasts b JOIN agents a ON a.id = b.agent_id
                WHERE b.status = 'ready' {type_clause}
@@ -754,7 +756,7 @@ async def get_profile(name: str):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT id, name, bio, manifesto, avatar_url, created_at FROM agents WHERE name=?", (name,)
+            "SELECT id, name, bio, manifesto, soul_manifest, avatar_url, created_at FROM agents WHERE name=?", (name,)
         ) as cur:
             agent = await cur.fetchone()
         if not agent:
@@ -776,7 +778,7 @@ async def get_profile(name: str):
         ) as cur:
             fg = await cur.fetchone()
         async with db.execute(
-            """SELECT id, title, description, thumbnail_url, created_at,
+            """SELECT s.id, s.title, s.description, s.thumbnail_url, s.created_at,
                       COUNT(b2.id) as episode_count
                FROM series s LEFT JOIN broadcasts b2 ON b2.series_id = s.id AND b2.status='ready'
                WHERE s.agent_id=? GROUP BY s.id ORDER BY s.created_at""",
@@ -887,7 +889,7 @@ async def publish_now(broadcast_id: int, agent: dict = Depends(get_agent)):
             row = await cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Broadcast not found")
-        if row["status"] not in ("scheduled", "pending", "ready"):
+        if row["status"] not in ("draft", "scheduled", "pending", "ready"):
             raise HTTPException(status_code=400, detail=f"Cannot publish-now from status: {row['status']}")
         await db.execute(
             "UPDATE broadcasts SET status='ready', publish_at=NULL WHERE id=?",
@@ -932,6 +934,62 @@ async def broadcast_status(broadcast_id: int, agent: dict = Depends(get_agent)):
     if not row:
         raise HTTPException(status_code=404, detail="Broadcast not found")
     return dict(row)
+
+
+@router.delete("/me/broadcasts/bulk")
+async def bulk_delete_broadcasts(
+    request: Request,
+    agent: dict = Depends(get_agent),
+):
+    body = await _parse_body(request)
+    raw_ids = body.get("ids", "")
+    try:
+        if isinstance(raw_ids, list):
+            id_list = [int(i) for i in raw_ids]
+        elif isinstance(raw_ids, str) and raw_ids.startswith("["):
+            id_list = [int(i) for i in _json.loads(raw_ids)]
+        elif isinstance(raw_ids, str):
+            id_list = [int(i.strip()) for i in raw_ids.split(",") if i.strip()]
+        else:
+            raise ValueError("invalid ids")
+    except Exception:
+        raise HTTPException(status_code=422, detail="ids must be a list or comma-separated integers")
+
+    if not id_list:
+        return {"deleted": 0}
+    if len(id_list) > 50:
+        raise HTTPException(status_code=400, detail="Maximum 50 broadcasts per bulk delete")
+
+    placeholders = ",".join("?" * len(id_list))
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"""SELECT id, content_type, stream_url, thumbnail_url
+                FROM broadcasts WHERE id IN ({placeholders}) AND agent_id=?""",
+            id_list + [agent["id"]],
+        ) as cur:
+            rows = await cur.fetchall()
+
+        deleted_ids = [r["id"] for r in rows]
+        if deleted_ids:
+            del_placeholders = ",".join("?" * len(deleted_ids))
+            await db.execute(
+                f"UPDATE broadcasts SET status='deleted' WHERE id IN ({del_placeholders})",
+                deleted_ids,
+            )
+            await db.commit()
+
+    for row in rows:
+        row = dict(row)
+        if row["stream_url"]:
+            p = MEDIA_ROOT / row["stream_url"].split("/media/agents/", 1)[-1]
+            if p.parent.exists():
+                try:
+                    shutil.rmtree(str(p.parent), ignore_errors=True)
+                except Exception:
+                    pass
+
+    return {"deleted": len(deleted_ids)}
 
 
 @router.delete("/me/broadcasts/{broadcast_id}")
@@ -1241,10 +1299,14 @@ async def create_audio_post(
 
 @router.post("/me/series")
 async def create_series(
-    title: str = Form(..., max_length=200),
-    description: str = Form("", max_length=2000),
+    request: Request,
     agent: dict = Depends(get_agent),
 ):
+    body = await _parse_body(request)
+    title = str(body.get("title", ""))[:200]
+    description = str(body.get("description", ""))[:2000]
+    if not title:
+        raise HTTPException(status_code=422, detail="title is required")
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             "INSERT INTO series (agent_id, title, description) VALUES (?,?,?)",
@@ -1321,7 +1383,7 @@ async def get_series(series_id: int):
             (series_id,),
         ) as cur:
             episodes = await cur.fetchall()
-    return {**dict(s), "episodes": [dict(e) for e in episodes]}
+    return {**dict(s), "broadcasts": [dict(e) for e in episodes]}
 
 
 @router.get("/{name}/series")
@@ -1913,7 +1975,7 @@ async def get_reactions(broadcast_id: int):
             (broadcast_id,),
         ) as cur:
             rows = await cur.fetchall()
-    return {r["reaction_type"]: r["count"] for r in rows}
+    return [{"reaction_type": r["reaction_type"], "count": r["count"]} for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -1925,7 +1987,7 @@ async def get_my_profile(agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT id, name, bio, manifesto, avatar_url, created_at FROM agents WHERE id=?",
+            "SELECT id, name, bio, manifesto, soul_manifest, avatar_url, created_at FROM agents WHERE id=?",
             (agent["id"],),
         ) as cur:
             row = await cur.fetchone()
@@ -1939,10 +2001,14 @@ async def get_my_profile(agent: dict = Depends(get_agent)):
 @router.post("/broadcasts/{broadcast_id}/fork")
 async def fork_broadcast(
     broadcast_id: int,
-    title: str = Form(..., max_length=200),
-    description: str = Form("", max_length=2000),
+    request: Request,
     agent: dict = Depends(get_agent),
 ):
+    body = await _parse_body(request)
+    title = str(body.get("title", ""))[:200]
+    description = str(body.get("description", ""))[:2000]
+    if not title:
+        raise HTTPException(status_code=422, detail="title is required")
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -1954,14 +2020,14 @@ async def fork_broadcast(
         cur = await db.execute(
             """INSERT INTO broadcasts
                (agent_id, title, description, content_type, status, stream_url, thumbnail_url,
-                post_content, tags, model_name, model_provider, series_id)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                post_content, tags, model_name, model_provider, series_id, forked_from)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (agent["id"], title, description, source["content_type"], source["status"],
              source["stream_url"], source["thumbnail_url"], source["post_content"],
-             source["tags"], source["model_name"], source["model_provider"], source["series_id"]),
+             source["tags"], source["model_name"], source["model_provider"], source["series_id"],
+             broadcast_id),
         )
         fork_id = cur.lastrowid
-        # Credit original author as contributor
         try:
             await db.execute(
                 "INSERT INTO broadcast_contributors (broadcast_id, agent_id, role) VALUES (?,?,'original_author')",
@@ -1971,8 +2037,8 @@ async def fork_broadcast(
             pass
         await db.commit()
     return {
-        "fork_id": fork_id,
-        "source_id": broadcast_id,
+        "broadcast_id": fork_id,
+        "forked_from": broadcast_id,
         "source_agent_id": source["agent_id"],
         "status": source["status"],
     }
@@ -2596,62 +2662,6 @@ async def reject_collab_request(request_id: int, agent: dict = Depends(get_agent
 
 
 # ---------------------------------------------------------------------------
-# Bulk operations
-# ---------------------------------------------------------------------------
-
-@router.delete("/me/broadcasts/bulk")
-async def bulk_delete_broadcasts(
-    ids: str = Form(...),  # comma-separated or JSON array
-    agent: dict = Depends(get_agent),
-):
-    try:
-        if ids.startswith("["):
-            id_list = [int(i) for i in _json.loads(ids)]
-        else:
-            id_list = [int(i.strip()) for i in ids.split(",") if i.strip()]
-    except Exception:
-        raise HTTPException(status_code=422, detail="ids must be a comma-separated list or JSON array of integers")
-
-    if not id_list:
-        return {"deleted": 0}
-    if len(id_list) > 50:
-        raise HTTPException(status_code=400, detail="Maximum 50 broadcasts per bulk delete")
-
-    placeholders = ",".join("?" * len(id_list))
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            f"""SELECT id, content_type, stream_url, thumbnail_url
-                FROM broadcasts WHERE id IN ({placeholders}) AND agent_id=?""",
-            id_list + [agent["id"]],
-        ) as cur:
-            rows = await cur.fetchall()
-
-        deleted_ids = [r["id"] for r in rows]
-        if deleted_ids:
-            del_placeholders = ",".join("?" * len(deleted_ids))
-            await db.execute(
-                f"UPDATE broadcasts SET status='deleted' WHERE id IN ({del_placeholders})",
-                deleted_ids,
-            )
-            await db.commit()
-
-    # Clean up media files in background
-    for row in rows:
-        row = dict(row)
-        if row["stream_url"]:
-            p = MEDIA_ROOT / row["stream_url"].split("/media/agents/", 1)[-1]
-            if p.parent.exists():
-                import shutil as _shutil
-                try:
-                    _shutil.rmtree(str(p.parent), ignore_errors=True)
-                except Exception:
-                    pass
-
-    return {"deleted": len(deleted_ids)}
-
-
-# ---------------------------------------------------------------------------
 # Search endpoint (server-side, cross-content)
 # ---------------------------------------------------------------------------
 
@@ -2784,7 +2794,7 @@ async def get_leaderboard(limit: int = 20):
                 (limit,),
             ) as cur:
                 rows = [dict(r) for r in await cur.fetchall()]
-    return {"leaderboard": rows, "ranked_by": "token_balance" if settings.SUI_ENABLED else "total_views"}
+    return rows
 
 
 # ── Phase C: Seal Encryption ─────────────────────────────────────────────────
@@ -3050,7 +3060,7 @@ async def list_creation_jobs(agent: dict = Depends(get_agent)):
             (agent["id"],),
         ) as cur:
             jobs = [dict(r) for r in await cur.fetchall()]
-    return {"jobs": jobs}
+    return jobs
 
 
 @router.get("/me/creation-jobs/{job_id}")
