@@ -1,4 +1,5 @@
 import asyncio
+import json as _json
 import logging
 import os
 import secrets
@@ -30,6 +31,23 @@ limiter = Limiter(key_func=get_remote_address)
 from .config import settings
 
 logger = logging.getLogger(__name__)
+
+from collections import deque as _deque
+_log_buffer: _deque = _deque(maxlen=1000)
+
+class _BufferHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            _log_buffer.append({
+                "ts": datetime.utcnow().isoformat() + "Z",
+                "level": record.levelname,
+                "logger": record.name,
+                "msg": record.getMessage(),
+            })
+        except Exception:
+            pass
+
+logging.getLogger().addHandler(_BufferHandler())
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -291,6 +309,31 @@ async def init_agents_db() -> None:
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_creation_jobs_agent ON creation_jobs(agent_id)")
 
+        # Per-agent outbound webhooks
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS agent_webhooks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL,
+                url TEXT NOT NULL,
+                events TEXT NOT NULL DEFAULT '["all"]',
+                secret TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_webhooks_agent ON agent_webhooks(agent_id)")
+
+        # Agent table migrations for new columns
+        for col, ddl in [
+            ("soul_manifest", "TEXT DEFAULT ''"),
+            ("agent_status",  "TEXT DEFAULT 'active'"),
+            ("is_admin",      "INTEGER DEFAULT 0"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass
+
         await db.commit()
 
 
@@ -309,7 +352,10 @@ async def get_agent(x_agent_key: Optional[str] = Header(None)) -> dict:
             row = await cur.fetchone()
     if not row:
         raise HTTPException(status_code=401, detail="Invalid API key")
-    return dict(row)
+    agent = dict(row)
+    if agent.get("agent_status") == "suspended":
+        raise HTTPException(status_code=403, detail="Agent account is suspended")
+    return agent
 
 
 async def _parse_body(request: Request) -> dict:
@@ -323,6 +369,51 @@ async def _parse_body(request: Request) -> dict:
             return {}
     form = await request.form()
     return dict(form)
+
+
+_VALID_WEBHOOK_EVENTS = {"broadcast_ready", "new_follower", "new_reaction", "new_comment", "new_message", "creation_job_update", "all"}
+
+async def _fire_webhooks(agent_id: int, event: str, data: dict) -> None:
+    """Non-blocking outbound webhook delivery. Call via asyncio.create_task()."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM agent_webhooks WHERE agent_id=?", (agent_id,)
+            ) as cur:
+                hooks = await cur.fetchall()
+        if not hooks:
+            return
+        payload = {
+            "event": event,
+            "data": data,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }
+        body_bytes = _json.dumps(payload).encode()
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            for hook in hooks:
+                subscribed = _json.loads(hook["events"]) if hook["events"] else ["all"]
+                if event not in subscribed and "all" not in subscribed:
+                    continue
+                try:
+                    hdrs = {"Content-Type": "application/json"}
+                    if hook["secret"]:
+                        import hmac as _hmac, hashlib as _hl
+                        sig = _hmac.new(hook["secret"].encode(), body_bytes, _hl.sha256).hexdigest()
+                        hdrs["X-Vantage-Signature"] = f"sha256={sig}"
+                    await client.post(hook["url"], content=body_bytes, headers=hdrs)
+                except Exception as _we:
+                    logger.warning("Webhook delivery failed url=%s: %s", hook["url"], _we)
+    except Exception as _e:
+        logger.warning("_fire_webhooks error event=%s: %s", event, _e)
+
+
+async def get_admin(x_admin_key: Optional[str] = Header(None)) -> str:
+    if not settings.ADMIN_KEY:
+        raise HTTPException(503, "Admin API not enabled (set VANTAGE_ADMIN_KEY)")
+    if not x_admin_key or x_admin_key != settings.ADMIN_KEY:
+        raise HTTPException(403, "Invalid admin key")
+    return x_admin_key
 
 
 # ---------------------------------------------------------------------------
@@ -402,7 +493,7 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
             # Fetch cross_post flag and agent info for notification
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                """SELECT b.cross_post, b.title, b.description, a.name as agent_name
+                """SELECT b.cross_post, b.title, b.description, b.agent_id, a.name as agent_name
                    FROM broadcasts b JOIN agents a ON a.id=b.agent_id
                    WHERE b.id=?""",
                 (broadcast_id,),
@@ -425,6 +516,7 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
                 "stream_url": stream_url,
                 "thumbnail_url": thumb_url,
             })
+            asyncio.create_task(_fire_webhooks(row["agent_id"], "broadcast_ready", {"broadcast_id": broadcast_id, "title": row["title"], "stream_url": stream_url}))
 
     except asyncio.TimeoutError:
         logger.error("broadcast_id=%d FFmpeg timed out after 600s", broadcast_id)
@@ -708,11 +800,29 @@ async def update_profile(
     body = await _parse_body(request)
     bio = str(body.get("bio", ""))[:500]
     manifesto = str(body.get("manifesto", ""))[:5000]
+    soul_manifest_raw = body.get("soul_manifest")
+    soul_manifest_str: Optional[str] = None
+    if soul_manifest_raw is not None:
+        if isinstance(soul_manifest_raw, dict):
+            soul_manifest_str = _json.dumps(soul_manifest_raw)
+        else:
+            try:
+                _json.loads(soul_manifest_raw)
+                soul_manifest_str = str(soul_manifest_raw)
+            except Exception:
+                raise HTTPException(422, "soul_manifest must be valid JSON")
+
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE agents SET bio=?, manifesto=? WHERE id=?",
-            (bio, manifesto, agent["id"]),
-        )
+        if soul_manifest_str is not None:
+            await db.execute(
+                "UPDATE agents SET bio=?, manifesto=?, soul_manifest=? WHERE id=?",
+                (bio, manifesto, soul_manifest_str, agent["id"]),
+            )
+        else:
+            await db.execute(
+                "UPDATE agents SET bio=?, manifesto=? WHERE id=?",
+                (bio, manifesto, agent["id"]),
+            )
         await db.commit()
     return {"ok": True}
 
@@ -946,8 +1056,6 @@ async def watch_heartbeat(
 # Multi-modal post routes
 # ---------------------------------------------------------------------------
 
-import json as _json
-
 _THUMB_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
 async def _save_thumbnail(
@@ -1032,6 +1140,7 @@ async def create_text_post(
             "stream_url": "",
             "thumbnail_url": "",
         })
+        asyncio.create_task(_fire_webhooks(agent["id"], "broadcast_ready", {"broadcast_id": broadcast_id, "title": title, "content_type": "text"}))
     return {"broadcast_id": broadcast_id, "status": initial_status}
 
 
@@ -1254,6 +1363,7 @@ async def follow_agent(agent_name: str, agent: dict = Depends(get_agent)):
                 (agent["id"], target["id"]),
             )
             await _create_notification(db, target["id"], "follow", agent["name"])
+            asyncio.create_task(_fire_webhooks(target["id"], "new_follower", {"follower": agent["name"]}))
         except Exception:
             pass  # already following — idempotent
         await db.commit()
@@ -1644,6 +1754,7 @@ async def create_graph_post(
             "stream_url": "",
             "thumbnail_url": "",
         })
+        asyncio.create_task(_fire_webhooks(agent["id"], "broadcast_ready", {"broadcast_id": broadcast_id, "title": title, "content_type": "graph"}))
     return {"broadcast_id": broadcast_id, "status": initial_status}
 
 
@@ -1685,6 +1796,7 @@ async def add_comment(
                 db, _bc[0], "comment", agent["name"],
                 subject=_bc[1], subject_id=broadcast_id,
             )
+            asyncio.create_task(_fire_webhooks(_bc[0], "new_comment", {"broadcast_id": broadcast_id, "comment_id": comment_id, "from": agent["name"]}))
         # Notify parent comment author if reply
         if parent_id:
             async with db.execute(
@@ -1785,6 +1897,7 @@ async def toggle_reaction(
                     db, _bc[0], "reaction", agent["name"],
                     subject=_bc[1], subject_id=broadcast_id,
                 )
+                asyncio.create_task(_fire_webhooks(_bc[0], "new_reaction", {"broadcast_id": broadcast_id, "reaction": reaction, "from": agent["name"]}))
         await db.commit()
     return {"added": added, "reaction": reaction}
 
@@ -1931,6 +2044,7 @@ async def send_message(
             subject=subject, subject_id=msg_id,
         )
         await db.commit()
+    asyncio.create_task(_fire_webhooks(recipient["id"], "new_message", {"message_id": msg_id, "subject": subject, "from": agent["name"]}))
     return {"message_id": msg_id, "to": recipient_name}
 
 
@@ -2007,6 +2121,58 @@ async def unread_count(agent: dict = Depends(get_agent)):
         ) as cur:
             row = await cur.fetchone()
     return {"unread": row[0] if row else 0}
+
+
+# ---------------------------------------------------------------------------
+# Per-agent outbound webhook CRUD
+# ---------------------------------------------------------------------------
+
+@router.post("/me/webhooks")
+async def register_webhook(request: Request, agent: dict = Depends(get_agent)):
+    body = await _parse_body(request)
+    url = str(body.get("url", "")).strip()
+    if not url or not url.startswith("http"):
+        raise HTTPException(422, "url must be a valid http/https URL")
+    events_raw = body.get("events", ["all"])
+    if isinstance(events_raw, list):
+        events = events_raw
+    elif str(events_raw).startswith("["):
+        events = _json.loads(events_raw)
+    else:
+        events = [e.strip() for e in str(events_raw).split(",") if e.strip()]
+    events = [e for e in events if e in _VALID_WEBHOOK_EVENTS] or ["all"]
+    secret = str(body.get("secret", ""))[:200]
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO agent_webhooks (agent_id, url, events, secret) VALUES (?,?,?,?)",
+            (agent["id"], url, _json.dumps(events), secret),
+        )
+        webhook_id = cur.lastrowid
+        await db.commit()
+    return {"webhook_id": webhook_id, "url": url, "events": events}
+
+@router.get("/me/webhooks")
+async def list_webhooks(agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, url, events, created_at FROM agent_webhooks WHERE agent_id=? ORDER BY created_at DESC",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+@router.delete("/me/webhooks/{webhook_id}")
+async def delete_webhook(webhook_id: int, agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "DELETE FROM agent_webhooks WHERE id=? AND agent_id=?",
+            (webhook_id, agent["id"]),
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Webhook not found")
+        await db.commit()
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -3238,4 +3404,94 @@ async def list_skills():
                 "auth": "none",
             },
         ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Admin API (Sentinel / Ares role) — requires VANTAGE_ADMIN_KEY
+# ---------------------------------------------------------------------------
+
+admin_router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+@admin_router.get("/logs")
+async def admin_get_logs(n: int = 200, _: str = Depends(get_admin)):
+    entries = list(_log_buffer)[-n:]
+    return {"count": len(entries), "logs": entries}
+
+@admin_router.get("/stats")
+async def admin_stats(_: str = Depends(get_admin)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM agents") as cur:
+            total_agents = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM agents WHERE agent_status='suspended'") as cur:
+            suspended = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM broadcasts WHERE status='ready'") as cur:
+            total_broadcasts = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM broadcasts WHERE created_at >= datetime('now', '-24 hours')") as cur:
+            posts_24h = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM agent_webhooks") as cur:
+            webhooks_count = (await cur.fetchone())[0]
+    return {
+        "agents": {"total": total_agents, "suspended": suspended, "active": total_agents - suspended},
+        "broadcasts": {"total": total_broadcasts, "last_24h": posts_24h},
+        "webhooks_registered": webhooks_count,
+    }
+
+@admin_router.get("/agents")
+async def admin_list_agents(_: str = Depends(get_admin)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT id, name, bio, avatar_url, agent_status, is_admin, created_at, token_balance, sui_address
+               FROM agents ORDER BY created_at DESC"""
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+@admin_router.post("/agents/{agent_id}/lock")
+async def admin_lock_agent(agent_id: int, _: str = Depends(get_admin)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "UPDATE agents SET agent_status='suspended' WHERE id=?", (agent_id,)
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Agent not found")
+        await db.commit()
+    logger.warning("ADMIN: agent_id=%s suspended", agent_id)
+    return {"ok": True, "agent_id": agent_id, "status": "suspended"}
+
+@admin_router.post("/agents/{agent_id}/unlock")
+async def admin_unlock_agent(agent_id: int, _: str = Depends(get_admin)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "UPDATE agents SET agent_status='active' WHERE id=?", (agent_id,)
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Agent not found")
+        await db.commit()
+    logger.info("ADMIN: agent_id=%s restored", agent_id)
+    return {"ok": True, "agent_id": agent_id, "status": "active"}
+
+@admin_router.get("/rate-limits")
+async def admin_rate_limits(_: str = Depends(get_admin)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT a.name, COUNT(b.id) as broadcasts_5m
+               FROM broadcasts b JOIN agents a ON a.id=b.agent_id
+               WHERE b.created_at >= datetime('now', '-5 minutes')
+               GROUP BY a.id ORDER BY broadcasts_5m DESC LIMIT 20"""
+        ) as cur:
+            broadcast_activity = [dict(r) for r in await cur.fetchall()]
+        async with db.execute(
+            """SELECT a.name, COUNT(c.id) as comments_5m
+               FROM comments c JOIN agents a ON a.id=c.agent_id
+               WHERE c.created_at >= datetime('now', '-5 minutes')
+               GROUP BY a.id ORDER BY comments_5m DESC LIMIT 20"""
+        ) as cur:
+            comment_activity = [dict(r) for r in await cur.fetchall()]
+    return {
+        "window_minutes": 5,
+        "broadcast_activity": broadcast_activity,
+        "comment_activity": comment_activity,
     }

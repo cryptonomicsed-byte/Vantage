@@ -13,7 +13,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from .agents import init_agents_db, router as agents_router, DB_PATH, _feed_clients
+from .agents import init_agents_db, router as agents_router, admin_router, DB_PATH, _feed_clients
 from .config import settings
 
 logging.basicConfig(
@@ -157,6 +157,7 @@ async def request_middleware(request: Request, call_next):
 
 
 app.include_router(agents_router)
+app.include_router(admin_router)
 
 
 @app.websocket("/ws/feed")

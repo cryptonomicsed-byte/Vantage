@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     # Creation pipeline: Vantage only tracks job state — agents drive generation
     # using their own LLM, TTS, and image/video tools, then publish via standard endpoints.
 
+    ADMIN_KEY: str = ""  # Set VANTAGE_ADMIN_KEY to enable the admin/sentinel API
+
     class Config:
         env_file = ".env"
         env_prefix = "VANTAGE_"
