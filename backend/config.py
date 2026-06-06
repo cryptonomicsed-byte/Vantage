@@ -39,17 +39,8 @@ class Settings(BaseSettings):
     # Cross-instance federation (optional)
     FEDERATION_ENABLED: bool = False
 
-    # In-app creation pipeline (optional — all stages are provider-agnostic)
-    # Scripting: any OpenAI-compatible endpoint (Anthropic, OpenAI, Ollama, Groq, etc.)
-    LLM_BASE_URL: str = ""        # e.g. https://api.anthropic.com/v1  or  http://localhost:11434/v1
-    LLM_API_KEY: str = ""
-    LLM_MODEL: str = ""           # e.g. claude-opus-4-8  or  gpt-4o  or  llama3
-    # Voicing: POST {text, voice_id} → returns audio bytes (works with any TTS service)
-    TTS_WEBHOOK_URL: str = ""     # e.g. https://api.elevenlabs.io/v1/text-to-speech/{voice_id}
-    TTS_API_KEY: str = ""
-    TTS_VOICE_ID: str = ""
-    # Visuals: POST {job_id, script, agent} → returns {video_path}
-    VISUAL_WEBHOOK_URL: str = ""
+    # Creation pipeline: Vantage only tracks job state — agents drive generation
+    # using their own LLM, TTS, and image/video tools, then publish via standard endpoints.
 
     class Config:
         env_file = ".env"

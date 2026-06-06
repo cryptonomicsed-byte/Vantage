@@ -488,169 +488,7 @@ async def _check_token_milestones(broadcast_id: int, view_count: int) -> None:
         await db.commit()
 
 
-async def _run_creation_pipeline(job_id: int, agent: dict) -> None:
-    """Multi-stage AI content creation pipeline."""
-    import json as _json2
-
-    async def _set_status(status: str, **kwargs):
-        async with aiosqlite.connect(DB_PATH) as _db:
-            extra = ", ".join(f"{k}=?" for k in kwargs)
-            vals = list(kwargs.values()) + [status, datetime.utcnow().isoformat(), job_id]
-            q = f"UPDATE creation_jobs SET {extra + ', ' if extra else ''}status=?, updated_at=? WHERE id=?"
-            await _db.execute(q, vals)
-            await _db.commit()
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM creation_jobs WHERE id=?", (job_id,)) as cur:
-            job = await cur.fetchone()
-    if not job:
-        return
-
-    prompt = job["prompt"]
-    agent_dir = MEDIA_ROOT / agent["name"]
-    agent_dir.mkdir(parents=True, exist_ok=True)
-
-    # Stage 1 — Scripting (OpenAI-compatible: works with Anthropic, OpenAI, Ollama, Groq, etc.)
-    script_data: dict = {"title": prompt[:200], "content": prompt, "tags": []}
-    try:
-        await _set_status("scripting")
-        if settings.LLM_BASE_URL and settings.LLM_API_KEY:
-            llm_url = settings.LLM_BASE_URL.rstrip("/") + "/chat/completions"
-            llm_model = settings.LLM_MODEL or "gpt-4o"
-            async with httpx.AsyncClient(timeout=60) as hc:
-                resp = await hc.post(
-                    llm_url,
-                    headers={
-                        "Authorization": f"Bearer {settings.LLM_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": llm_model,
-                        "max_tokens": 2048,
-                        "messages": [{
-                            "role": "user",
-                            "content": (
-                                f"You are a creative AI content writer for the Vantage platform. "
-                                f"Given this prompt, produce a JSON object with keys: "
-                                f"title (string, max 200 chars), content (markdown string), "
-                                f"tags (array of strings, max 5). Respond with ONLY valid JSON.\n\n"
-                                f"Prompt: {prompt}"
-                            ),
-                        }],
-                    },
-                )
-            if resp.status_code == 200:
-                raw = resp.json()["choices"][0]["message"]["content"].strip()
-                if raw.startswith("```"):
-                    raw = raw.split("```")[1]
-                    if raw.startswith("json"):
-                        raw = raw[4:]
-                script_data = _json2.loads(raw.strip())
-    except Exception as _e:
-        logger.warning("Scripting stage failed for job %d: %s", job_id, _e)
-
-    await _set_status("scripting", script_json=_json2.dumps(script_data))
-
-    # Stage 2 — Voicing (generic TTS webhook — works with any provider)
-    # Expects: POST {text, voice_id} with Authorization header → audio bytes
-    audio_path_str = ""
-    try:
-        await _set_status("voicing", script_json=_json2.dumps(script_data))
-        if settings.TTS_WEBHOOK_URL:
-            tts_text = script_data.get("content", prompt)[:3000]
-            headers: dict = {"Content-Type": "application/json"}
-            if settings.TTS_API_KEY:
-                headers["Authorization"] = f"Bearer {settings.TTS_API_KEY}"
-            async with httpx.AsyncClient(timeout=120) as hc:
-                resp = await hc.post(
-                    settings.TTS_WEBHOOK_URL,
-                    headers=headers,
-                    json={"text": tts_text, "voice_id": settings.TTS_VOICE_ID},
-                )
-            if resp.status_code == 200:
-                audio_file = agent_dir / f"job_{job_id}_voice.mp3"
-                audio_file.write_bytes(resp.content)
-                audio_path_str = str(audio_file)
-    except Exception as _e:
-        logger.warning("Voicing stage failed for job %d: %s", job_id, _e)
-
-    await _set_status("voicing", audio_path=audio_path_str, script_json=_json2.dumps(script_data))
-
-    # Stage 3 — Visualizing (external webhook)
-    video_path_str = ""
-    try:
-        await _set_status("visualizing", audio_path=audio_path_str, script_json=_json2.dumps(script_data))
-        if settings.VISUAL_WEBHOOK_URL:
-            async with httpx.AsyncClient(timeout=300) as hc:
-                resp = await hc.post(
-                    settings.VISUAL_WEBHOOK_URL,
-                    json={"job_id": job_id, "script": script_data, "agent": agent["name"]},
-                )
-            if resp.status_code == 200:
-                video_path_str = resp.json().get("video_path", "")
-    except Exception as _e:
-        logger.warning("Visualizing stage failed for job %d: %s", job_id, _e)
-
-    # Stage 4 — Composing
-    try:
-        await _set_status("composing", video_path=video_path_str, audio_path=audio_path_str, script_json=_json2.dumps(script_data))
-        title = script_data.get("title", prompt[:200])
-        content = script_data.get("content", prompt)
-        tags_list = script_data.get("tags", [])
-        import json as _jj
-        tags_str = _jj.dumps(tags_list)
-
-        if video_path_str and Path(video_path_str).exists():
-            # Full video + audio composition
-            composed_path = agent_dir / f"job_{job_id}_composed.mp4"
-            compose_args = ["ffmpeg", "-y"]
-            if audio_path_str and Path(audio_path_str).exists():
-                compose_args += ["-i", video_path_str, "-i", audio_path_str, "-c:v", "copy", "-c:a", "aac", "-shortest"]
-            else:
-                compose_args += ["-i", video_path_str, "-c", "copy"]
-            compose_args.append(str(composed_path))
-            proc = await asyncio.create_subprocess_exec(*compose_args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-            await asyncio.wait_for(proc.communicate(), timeout=300)
-            if proc.returncode == 0 and composed_path.exists():
-                async with aiosqlite.connect(DB_PATH) as db:
-                    cur = await db.execute(
-                        "INSERT INTO broadcasts (agent_id, title, description, status, content_type, tags, model_name, model_provider) VALUES (?,?,?,?,?,?,?,?)",
-                        (agent["id"], title, content[:2000], "pending", "video", tags_str, "creation-pipeline", "vantage"),
-                    )
-                    bid = cur.lastrowid
-                    await db.commit()
-                await _process_broadcast(bid, composed_path, agent_dir)
-                await _set_status("done", result_broadcast_id=bid, script_json=_json2.dumps(script_data))
-                return
-        elif audio_path_str and Path(audio_path_str).exists():
-            # Audio-only broadcast
-            audio_dest = agent_dir / f"job_{job_id}_audio.mp3"
-            Path(audio_path_str).rename(audio_dest)
-            audio_url = f"{settings.PUBLIC_URL}/media/agents/{agent['name']}/job_{job_id}_audio.mp3"
-            async with aiosqlite.connect(DB_PATH) as db:
-                cur = await db.execute(
-                    "INSERT INTO broadcasts (agent_id, title, description, status, content_type, stream_url, tags, model_name, model_provider) VALUES (?,?,?,?,?,?,?,?,?)",
-                    (agent["id"], title, content[:2000], "ready", "audio", audio_url, tags_str, "creation-pipeline", "vantage"),
-                )
-                bid = cur.lastrowid
-                await db.commit()
-            await _set_status("done", result_broadcast_id=bid, script_json=_json2.dumps(script_data))
-            return
-
-        # Fallback: publish as text post
-        async with aiosqlite.connect(DB_PATH) as db:
-            cur = await db.execute(
-                "INSERT INTO broadcasts (agent_id, title, description, status, content_type, post_content, tags, model_name, model_provider) VALUES (?,?,?,?,?,?,?,?,?)",
-                (agent["id"], title, "", "ready", "text", content, tags_str, "creation-pipeline", "vantage"),
-            )
-            bid = cur.lastrowid
-            await db.commit()
-        await _set_status("done", result_broadcast_id=bid, script_json=_json2.dumps(script_data))
-
-    except Exception as _e:
-        logger.error("Composing stage failed for job %d: %s", job_id, traceback.format_exc())
-        await _set_status("error", error_text=str(_e)[:500], script_json=_json2.dumps(script_data))
+_VALID_JOB_STATUSES = {"scripting", "voicing", "visualizing", "composing", "done", "error"}
 
 
 # ---------------------------------------------------------------------------
@@ -2899,27 +2737,83 @@ async def get_federation_feed(limit: int = 50):
 # ── Phase D: In-App Creation Pipeline ────────────────────────────────────────
 
 @router.post("/create")
-@limiter.limit("5/minute")
+@limiter.limit("20/minute")
 async def create_content(
     request: Request,
-    background_tasks: BackgroundTasks,
     prompt: str = Form(..., max_length=2000),
     agent: dict = Depends(get_agent),
 ):
-    """Submit a prompt to the AI creation pipeline. Returns a job_id to poll for status."""
+    """
+    Register a creation job. Vantage tracks progress; the agent drives the pipeline
+    using its own LLM, TTS, and generation tools, then publishes the result via the
+    standard publish endpoints. Poll /me/creation-jobs/{job_id} to surface status in the UI.
+    """
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "INSERT INTO creation_jobs (agent_id, prompt) VALUES (?,?)",
+            "INSERT INTO creation_jobs (agent_id, prompt, status) VALUES (?,?,'scripting')",
             (agent["id"], prompt),
         )
         job_id = cur.lastrowid
         await db.commit()
-    background_tasks.add_task(_run_creation_pipeline, job_id, agent)
     return {
         "job_id": job_id,
-        "status": "queued",
-        "message": "Creation pipeline started. Poll /me/creation-jobs/{job_id} for status.",
+        "status": "scripting",
+        "message": (
+            "Job registered. Use PATCH /me/creation-jobs/{job_id} to report stage progress, "
+            "then publish your finished content via the standard publish endpoints and call "
+            "POST /me/creation-jobs/{job_id}/complete with the broadcast_id."
+        ),
     }
+
+
+@router.patch("/me/creation-jobs/{job_id}")
+async def update_creation_job(
+    job_id: int,
+    status: str = Form(...),
+    note: str = Form("", max_length=500),
+    agent: dict = Depends(get_agent),
+):
+    """
+    Agent reports its own pipeline progress. Valid statuses:
+    scripting | voicing | visualizing | composing | error
+    """
+    if status not in _VALID_JOB_STATUSES - {"done"}:
+        raise HTTPException(400, f"Invalid status. Use one of: {sorted(_VALID_JOB_STATUSES - {'done'})}")
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "UPDATE creation_jobs SET status=?, error_text=?, updated_at=datetime('now') WHERE id=? AND agent_id=?",
+            (status, note if status == "error" else "", job_id, agent["id"]),
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Job not found")
+        await db.commit()
+    return {"job_id": job_id, "status": status}
+
+
+@router.post("/me/creation-jobs/{job_id}/complete")
+async def complete_creation_job(
+    job_id: int,
+    broadcast_id: int = Form(...),
+    agent: dict = Depends(get_agent),
+):
+    """
+    Mark a creation job as done and link it to the published broadcast.
+    Call this after the agent has successfully published via a standard publish endpoint.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT id FROM broadcasts WHERE id=? AND agent_id=?", (broadcast_id, agent["id"])
+        ) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(404, "Broadcast not found or not owned by you")
+        res = await db.execute(
+            "UPDATE creation_jobs SET status='done', result_broadcast_id=?, updated_at=datetime('now') WHERE id=? AND agent_id=?",
+            (broadcast_id, job_id, agent["id"]),
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Job not found")
+        await db.commit()
+    return {"job_id": job_id, "status": "done", "broadcast_id": broadcast_id}
 
 
 @router.get("/me/creation-jobs")
@@ -2946,13 +2840,7 @@ async def get_creation_job(job_id: int, agent: dict = Depends(get_agent)):
             row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "Job not found")
-    job = dict(row)
-    try:
-        import json as _jj2
-        job["script"] = _jj2.loads(job.get("script_json") or "{}")
-    except Exception:
-        job["script"] = {}
-    return job
+    return dict(row)
 
 
 @router.delete("/me/creation-jobs/{job_id}")
