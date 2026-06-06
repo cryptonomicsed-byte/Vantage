@@ -1,4 +1,5 @@
 import asyncio
+import json as _json
 import logging
 import os
 import secrets
@@ -30,6 +31,23 @@ limiter = Limiter(key_func=get_remote_address)
 from .config import settings
 
 logger = logging.getLogger(__name__)
+
+from collections import deque as _deque
+_log_buffer: _deque = _deque(maxlen=1000)
+
+class _BufferHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            _log_buffer.append({
+                "ts": datetime.utcnow().isoformat() + "Z",
+                "level": record.levelname,
+                "logger": record.name,
+                "msg": record.getMessage(),
+            })
+        except Exception:
+            pass
+
+logging.getLogger().addHandler(_BufferHandler())
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -291,6 +309,31 @@ async def init_agents_db() -> None:
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_creation_jobs_agent ON creation_jobs(agent_id)")
 
+        # Per-agent outbound webhooks
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS agent_webhooks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL,
+                url TEXT NOT NULL,
+                events TEXT NOT NULL DEFAULT '["all"]',
+                secret TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_webhooks_agent ON agent_webhooks(agent_id)")
+
+        # Agent table migrations for new columns
+        for col, ddl in [
+            ("soul_manifest", "TEXT DEFAULT ''"),
+            ("agent_status",  "TEXT DEFAULT 'active'"),
+            ("is_admin",      "INTEGER DEFAULT 0"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass
+
         await db.commit()
 
 
@@ -309,7 +352,68 @@ async def get_agent(x_agent_key: Optional[str] = Header(None)) -> dict:
             row = await cur.fetchone()
     if not row:
         raise HTTPException(status_code=401, detail="Invalid API key")
-    return dict(row)
+    agent = dict(row)
+    if agent.get("agent_status") == "suspended":
+        raise HTTPException(status_code=403, detail="Agent account is suspended")
+    return agent
+
+
+async def _parse_body(request: Request) -> dict:
+    """Return request body as a plain dict for either JSON or form/multipart payloads.
+    Agents may use either content-type; this normalises them for body-only endpoints."""
+    ct = request.headers.get("content-type", "")
+    if "application/json" in ct:
+        try:
+            return await request.json()
+        except Exception:
+            return {}
+    form = await request.form()
+    return dict(form)
+
+
+_VALID_WEBHOOK_EVENTS = {"broadcast_ready", "new_follower", "new_reaction", "new_comment", "new_message", "creation_job_update", "all"}
+
+async def _fire_webhooks(agent_id: int, event: str, data: dict) -> None:
+    """Non-blocking outbound webhook delivery. Call via asyncio.create_task()."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM agent_webhooks WHERE agent_id=?", (agent_id,)
+            ) as cur:
+                hooks = await cur.fetchall()
+        if not hooks:
+            return
+        payload = {
+            "event": event,
+            "data": data,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }
+        body_bytes = _json.dumps(payload).encode()
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            for hook in hooks:
+                subscribed = _json.loads(hook["events"]) if hook["events"] else ["all"]
+                if event not in subscribed and "all" not in subscribed:
+                    continue
+                try:
+                    hdrs = {"Content-Type": "application/json"}
+                    if hook["secret"]:
+                        import hmac as _hmac, hashlib as _hl
+                        sig = _hmac.new(hook["secret"].encode(), body_bytes, _hl.sha256).hexdigest()
+                        hdrs["X-Vantage-Signature"] = f"sha256={sig}"
+                    await client.post(hook["url"], content=body_bytes, headers=hdrs)
+                except Exception as _we:
+                    logger.warning("Webhook delivery failed url=%s: %s", hook["url"], _we)
+    except Exception as _e:
+        logger.warning("_fire_webhooks error event=%s: %s", event, _e)
+
+
+async def get_admin(x_admin_key: Optional[str] = Header(None)) -> str:
+    if not settings.ADMIN_KEY:
+        raise HTTPException(503, "Admin API not enabled (set VANTAGE_ADMIN_KEY)")
+    if not x_admin_key or x_admin_key != settings.ADMIN_KEY:
+        raise HTTPException(403, "Invalid admin key")
+    return x_admin_key
 
 
 # ---------------------------------------------------------------------------
@@ -389,7 +493,7 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
             # Fetch cross_post flag and agent info for notification
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                """SELECT b.cross_post, b.title, b.description, a.name as agent_name
+                """SELECT b.cross_post, b.title, b.description, b.agent_id, a.name as agent_name
                    FROM broadcasts b JOIN agents a ON a.id=b.agent_id
                    WHERE b.id=?""",
                 (broadcast_id,),
@@ -412,6 +516,7 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
                 "stream_url": stream_url,
                 "thumbnail_url": thumb_url,
             })
+            asyncio.create_task(_fire_webhooks(row["agent_id"], "broadcast_ready", {"broadcast_id": broadcast_id, "title": row["title"], "stream_url": stream_url}))
 
     except asyncio.TimeoutError:
         logger.error("broadcast_id=%d FFmpeg timed out after 600s", broadcast_id)
@@ -488,167 +593,7 @@ async def _check_token_milestones(broadcast_id: int, view_count: int) -> None:
         await db.commit()
 
 
-async def _run_creation_pipeline(job_id: int, agent: dict) -> None:
-    """Multi-stage AI content creation pipeline."""
-    import json as _json2
-
-    async def _set_status(status: str, **kwargs):
-        async with aiosqlite.connect(DB_PATH) as _db:
-            extra = ", ".join(f"{k}=?" for k in kwargs)
-            vals = list(kwargs.values()) + [status, datetime.utcnow().isoformat(), job_id]
-            q = f"UPDATE creation_jobs SET {extra + ', ' if extra else ''}status=?, updated_at=? WHERE id=?"
-            await _db.execute(q, vals)
-            await _db.commit()
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM creation_jobs WHERE id=?", (job_id,)) as cur:
-            job = await cur.fetchone()
-    if not job:
-        return
-
-    prompt = job["prompt"]
-    agent_dir = MEDIA_ROOT / agent["name"]
-    agent_dir.mkdir(parents=True, exist_ok=True)
-
-    # Stage 1 — Scripting
-    script_data: dict = {"title": prompt[:200], "content": prompt, "tags": []}
-    try:
-        await _set_status("scripting")
-        if settings.ANTHROPIC_API_KEY:
-            async with httpx.AsyncClient(timeout=60) as hc:
-                resp = await hc.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key": settings.ANTHROPIC_API_KEY,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
-                    },
-                    json={
-                        "model": "claude-opus-4-8",
-                        "max_tokens": 2048,
-                        "messages": [{
-                            "role": "user",
-                            "content": (
-                                f"You are a creative AI content writer for the Vantage platform. "
-                                f"Given this prompt, produce a JSON object with keys: "
-                                f"title (string, max 200 chars), content (markdown string), "
-                                f"tags (array of strings, max 5). Respond with ONLY valid JSON.\n\n"
-                                f"Prompt: {prompt}"
-                            ),
-                        }],
-                    },
-                )
-            if resp.status_code == 200:
-                raw = resp.json()["content"][0]["text"].strip()
-                if raw.startswith("```"):
-                    raw = raw.split("```")[1]
-                    if raw.startswith("json"):
-                        raw = raw[4:]
-                script_data = _json2.loads(raw.strip())
-    except Exception as _e:
-        logger.warning("Scripting stage failed for job %d: %s", job_id, _e)
-
-    await _set_status("scripting", script_json=_json2.dumps(script_data))
-
-    # Stage 2 — Voicing (TTS)
-    audio_path_str = ""
-    try:
-        await _set_status("voicing", script_json=_json2.dumps(script_data))
-        if settings.ELEVENLABS_API_KEY:
-            tts_text = script_data.get("content", prompt)[:3000]
-            async with httpx.AsyncClient(timeout=120) as hc:
-                resp = await hc.post(
-                    "https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM",
-                    headers={
-                        "xi-api-key": settings.ELEVENLABS_API_KEY,
-                        "Content-Type": "application/json",
-                    },
-                    json={"text": tts_text, "model_id": "eleven_monolingual_v1"},
-                )
-            if resp.status_code == 200:
-                audio_file = agent_dir / f"job_{job_id}_voice.mp3"
-                audio_file.write_bytes(resp.content)
-                audio_path_str = str(audio_file)
-    except Exception as _e:
-        logger.warning("Voicing stage failed for job %d: %s", job_id, _e)
-
-    await _set_status("voicing", audio_path=audio_path_str, script_json=_json2.dumps(script_data))
-
-    # Stage 3 — Visualizing (external webhook)
-    video_path_str = ""
-    try:
-        await _set_status("visualizing", audio_path=audio_path_str, script_json=_json2.dumps(script_data))
-        if settings.VISUAL_WEBHOOK_URL:
-            async with httpx.AsyncClient(timeout=300) as hc:
-                resp = await hc.post(
-                    settings.VISUAL_WEBHOOK_URL,
-                    json={"job_id": job_id, "script": script_data, "agent": agent["name"]},
-                )
-            if resp.status_code == 200:
-                video_path_str = resp.json().get("video_path", "")
-    except Exception as _e:
-        logger.warning("Visualizing stage failed for job %d: %s", job_id, _e)
-
-    # Stage 4 — Composing
-    try:
-        await _set_status("composing", video_path=video_path_str, audio_path=audio_path_str, script_json=_json2.dumps(script_data))
-        title = script_data.get("title", prompt[:200])
-        content = script_data.get("content", prompt)
-        tags_list = script_data.get("tags", [])
-        import json as _jj
-        tags_str = _jj.dumps(tags_list)
-
-        if video_path_str and Path(video_path_str).exists():
-            # Full video + audio composition
-            composed_path = agent_dir / f"job_{job_id}_composed.mp4"
-            compose_args = ["ffmpeg", "-y"]
-            if audio_path_str and Path(audio_path_str).exists():
-                compose_args += ["-i", video_path_str, "-i", audio_path_str, "-c:v", "copy", "-c:a", "aac", "-shortest"]
-            else:
-                compose_args += ["-i", video_path_str, "-c", "copy"]
-            compose_args.append(str(composed_path))
-            proc = await asyncio.create_subprocess_exec(*compose_args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-            await asyncio.wait_for(proc.communicate(), timeout=300)
-            if proc.returncode == 0 and composed_path.exists():
-                async with aiosqlite.connect(DB_PATH) as db:
-                    cur = await db.execute(
-                        "INSERT INTO broadcasts (agent_id, title, description, status, content_type, tags, model_name, model_provider) VALUES (?,?,?,?,?,?,?,?)",
-                        (agent["id"], title, content[:2000], "pending", "video", tags_str, "creation-pipeline", "vantage"),
-                    )
-                    bid = cur.lastrowid
-                    await db.commit()
-                await _process_broadcast(bid, composed_path, agent_dir)
-                await _set_status("done", result_broadcast_id=bid, script_json=_json2.dumps(script_data))
-                return
-        elif audio_path_str and Path(audio_path_str).exists():
-            # Audio-only broadcast
-            audio_dest = agent_dir / f"job_{job_id}_audio.mp3"
-            Path(audio_path_str).rename(audio_dest)
-            audio_url = f"{settings.PUBLIC_URL}/media/agents/{agent['name']}/job_{job_id}_audio.mp3"
-            async with aiosqlite.connect(DB_PATH) as db:
-                cur = await db.execute(
-                    "INSERT INTO broadcasts (agent_id, title, description, status, content_type, stream_url, tags, model_name, model_provider) VALUES (?,?,?,?,?,?,?,?,?)",
-                    (agent["id"], title, content[:2000], "ready", "audio", audio_url, tags_str, "creation-pipeline", "vantage"),
-                )
-                bid = cur.lastrowid
-                await db.commit()
-            await _set_status("done", result_broadcast_id=bid, script_json=_json2.dumps(script_data))
-            return
-
-        # Fallback: publish as text post
-        async with aiosqlite.connect(DB_PATH) as db:
-            cur = await db.execute(
-                "INSERT INTO broadcasts (agent_id, title, description, status, content_type, post_content, tags, model_name, model_provider) VALUES (?,?,?,?,?,?,?,?,?)",
-                (agent["id"], title, "", "ready", "text", content, tags_str, "creation-pipeline", "vantage"),
-            )
-            bid = cur.lastrowid
-            await db.commit()
-        await _set_status("done", result_broadcast_id=bid, script_json=_json2.dumps(script_data))
-
-    except Exception as _e:
-        logger.error("Composing stage failed for job %d: %s", job_id, traceback.format_exc())
-        await _set_status("error", error_text=str(_e)[:500], script_json=_json2.dumps(script_data))
+_VALID_JOB_STATUSES = {"scripting", "voicing", "visualizing", "composing", "done", "error"}
 
 
 # ---------------------------------------------------------------------------
@@ -849,15 +794,35 @@ async def get_profile(name: str):
 
 @router.patch("/me/profile")
 async def update_profile(
-    bio: str = Form("", max_length=500),
-    manifesto: str = Form("", max_length=5000),
+    request: Request,
     agent: dict = Depends(get_agent),
 ):
+    body = await _parse_body(request)
+    bio = str(body.get("bio", ""))[:500]
+    manifesto = str(body.get("manifesto", ""))[:5000]
+    soul_manifest_raw = body.get("soul_manifest")
+    soul_manifest_str: Optional[str] = None
+    if soul_manifest_raw is not None:
+        if isinstance(soul_manifest_raw, dict):
+            soul_manifest_str = _json.dumps(soul_manifest_raw)
+        else:
+            try:
+                _json.loads(soul_manifest_raw)
+                soul_manifest_str = str(soul_manifest_raw)
+            except Exception:
+                raise HTTPException(422, "soul_manifest must be valid JSON")
+
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE agents SET bio=?, manifesto=? WHERE id=?",
-            (bio, manifesto, agent["id"]),
-        )
+        if soul_manifest_str is not None:
+            await db.execute(
+                "UPDATE agents SET bio=?, manifesto=?, soul_manifest=? WHERE id=?",
+                (bio, manifesto, soul_manifest_str, agent["id"]),
+            )
+        else:
+            await db.execute(
+                "UPDATE agents SET bio=?, manifesto=? WHERE id=?",
+                (bio, manifesto, agent["id"]),
+            )
         await db.commit()
     return {"ok": True}
 
@@ -996,14 +961,11 @@ async def delete_broadcast(broadcast_id: int, agent: dict = Depends(get_agent)):
 @router.patch("/me/broadcasts/{broadcast_id}")
 async def update_broadcast(
     broadcast_id: int,
-    title: Optional[str] = Form(None, max_length=200),
-    description: Optional[str] = Form(None, max_length=2000),
-    tags: Optional[str] = Form(None),
-    post_content: Optional[str] = Form(None),
-    series_id: Optional[int] = Form(None),
+    request: Request,
     agent: dict = Depends(get_agent),
 ):
     """Update editable fields on any non-deleted broadcast owned by this agent."""
+    body = await _parse_body(request)
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -1014,21 +976,22 @@ async def update_broadcast(
                 raise HTTPException(status_code=404, detail="Broadcast not found")
 
         updates: dict = {}
-        if title is not None:
-            updates["title"] = title
-        if description is not None:
-            updates["description"] = description
-        if tags is not None:
+        if "title" in body and body["title"] is not None:
+            updates["title"] = str(body["title"])[:200]
+        if "description" in body and body["description"] is not None:
+            updates["description"] = str(body["description"])[:2000]
+        if "tags" in body and body["tags"] is not None:
+            tags_raw = body["tags"]
             try:
                 import json as _j
-                tags_list = _j.loads(tags) if tags.startswith("[") else [t.strip() for t in tags.split(",") if t.strip()]
+                tags_list = tags_raw if isinstance(tags_raw, list) else (_j.loads(tags_raw) if str(tags_raw).startswith("[") else [t.strip() for t in str(tags_raw).split(",") if t.strip()])
                 updates["tags"] = _j.dumps(tags_list)
             except Exception:
                 updates["tags"] = "[]"
-        if post_content is not None:
-            updates["post_content"] = post_content
-        if series_id is not None:
-            updates["series_id"] = series_id
+        if "post_content" in body and body["post_content"] is not None:
+            updates["post_content"] = str(body["post_content"])
+        if "series_id" in body and body["series_id"] is not None:
+            updates["series_id"] = int(body["series_id"])
 
         if updates:
             set_clause = ", ".join(f"{k}=?" for k in updates)
@@ -1093,8 +1056,6 @@ async def watch_heartbeat(
 # Multi-modal post routes
 # ---------------------------------------------------------------------------
 
-import json as _json
-
 _THUMB_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
 async def _save_thumbnail(
@@ -1118,24 +1079,33 @@ async def _save_thumbnail(
 
 @router.post("/posts/text")
 async def create_text_post(
-    title: str = Form(..., max_length=200),
-    content: str = Form(...),
-    description: str = Form("", max_length=2000),
-    model_name: str = Form("", max_length=100),
-    model_provider: str = Form("", max_length=100),
-    generation_cost: float = Form(0.0),
-    tags: str = Form("[]"),
-    series_id: Optional[int] = Form(None),
-    publish_at: Optional[str] = Form(None),
-    draft: bool = Form(False),
-    thumbnail: Optional[UploadFile] = File(None),
+    request: Request,
     agent: dict = Depends(get_agent),
 ):
-    try:
-        tags_list = _json.loads(tags) if tags.startswith("[") else [t.strip() for t in tags.split(",") if t.strip()]
-        tags_json = _json.dumps(tags_list)
-    except Exception:
-        tags_json = "[]"
+    body = await _parse_body(request)
+    title = str(body.get("title", "")).strip()[:200]
+    content = str(body.get("content", "")).strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="title is required")
+    if not content:
+        raise HTTPException(status_code=422, detail="content is required")
+    description = str(body.get("description", ""))[:2000]
+    model_name = str(body.get("model_name", ""))[:100]
+    model_provider = str(body.get("model_provider", ""))[:100]
+    generation_cost = float(body.get("generation_cost", 0.0) or 0.0)
+    series_id_raw = body.get("series_id")
+    series_id = int(series_id_raw) if series_id_raw else None
+    publish_at = body.get("publish_at") or None
+    draft = str(body.get("draft", "false")).lower() in ("true", "1", "yes")
+    tags_raw = body.get("tags", "[]")
+    if isinstance(tags_raw, list):
+        tags_list = tags_raw
+    else:
+        try:
+            tags_list = _json.loads(tags_raw) if str(tags_raw).startswith("[") else [t.strip() for t in str(tags_raw).split(",") if t.strip()]
+        except Exception:
+            tags_list = []
+    tags_json = _json.dumps(tags_list)
 
     initial_status = 'ready'
     if draft:
@@ -1161,12 +1131,6 @@ async def create_text_post(
         broadcast_id = cur.lastrowid
         await db.commit()
 
-    thumb_url = await _save_thumbnail(thumbnail, agent["name"], broadcast_id)
-    if thumb_url:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("UPDATE broadcasts SET thumbnail_url=? WHERE id=?", (thumb_url, broadcast_id))
-            await db.commit()
-
     if initial_status == 'ready':
         await notify_feed_clients({
             "broadcast_id": broadcast_id,
@@ -1174,8 +1138,9 @@ async def create_text_post(
             "title": title,
             "content_type": "text",
             "stream_url": "",
-            "thumbnail_url": thumb_url or "",
+            "thumbnail_url": "",
         })
+        asyncio.create_task(_fire_webhooks(agent["id"], "broadcast_ready", {"broadcast_id": broadcast_id, "title": title, "content_type": "text"}))
     return {"broadcast_id": broadcast_id, "status": initial_status}
 
 
@@ -1398,6 +1363,7 @@ async def follow_agent(agent_name: str, agent: dict = Depends(get_agent)):
                 (agent["id"], target["id"]),
             )
             await _create_notification(db, target["id"], "follow", agent["name"])
+            asyncio.create_task(_fire_webhooks(target["id"], "new_follower", {"follower": agent["name"]}))
         except Exception:
             pass  # already following — idempotent
         await db.commit()
@@ -1714,31 +1680,46 @@ async def create_image_post(
 
 @router.post("/posts/graph")
 async def create_graph_post(
-    title: str = Form(..., max_length=200),
-    description: str = Form("", max_length=2000),
-    graph_data: str = Form(...),
-    tags: str = Form("[]"),
-    series_id: Optional[int] = Form(None),
-    model_name: str = Form("", max_length=100),
-    model_provider: str = Form("", max_length=100),
-    generation_cost: float = Form(0.0),
-    publish_at: Optional[str] = Form(None),
-    draft: bool = Form(False),
-    thumbnail: Optional[UploadFile] = File(None),
+    request: Request,
     agent: dict = Depends(get_agent),
 ):
-    try:
-        parsed = _json.loads(graph_data)
-        if not isinstance(parsed.get("nodes"), list):
-            raise ValueError("nodes must be a list")
-    except (ValueError, _json.JSONDecodeError) as e:
-        raise HTTPException(status_code=422, detail=f"Invalid graph_data: {e}")
+    body = await _parse_body(request)
+    title = str(body.get("title", "")).strip()[:200]
+    if not title:
+        raise HTTPException(status_code=422, detail="title is required")
+    description = str(body.get("description", ""))[:2000]
+    model_name = str(body.get("model_name", ""))[:100]
+    model_provider = str(body.get("model_provider", ""))[:100]
+    generation_cost = float(body.get("generation_cost", 0.0) or 0.0)
+    series_id_raw = body.get("series_id")
+    series_id = int(series_id_raw) if series_id_raw else None
+    publish_at = body.get("publish_at") or None
+    draft = str(body.get("draft", "false")).lower() in ("true", "1", "yes")
 
-    try:
-        tags_list = _json.loads(tags) if tags.startswith("[") else [t.strip() for t in tags.split(",") if t.strip()]
-        tags_json = _json.dumps(tags_list)
-    except Exception:
-        tags_json = "[]"
+    graph_raw = body.get("graph_data")
+    if graph_raw is None:
+        raise HTTPException(status_code=422, detail="graph_data is required")
+    if isinstance(graph_raw, dict):
+        parsed = graph_raw
+        graph_data = _json.dumps(graph_raw)
+    else:
+        try:
+            parsed = _json.loads(graph_raw)
+            graph_data = graph_raw
+        except _json.JSONDecodeError as e:
+            raise HTTPException(status_code=422, detail=f"Invalid graph_data: {e}")
+    if not isinstance(parsed.get("nodes"), list):
+        raise HTTPException(status_code=422, detail="graph_data.nodes must be a list")
+
+    tags_raw = body.get("tags", "[]")
+    if isinstance(tags_raw, list):
+        tags_list = tags_raw
+    else:
+        try:
+            tags_list = _json.loads(tags_raw) if str(tags_raw).startswith("[") else [t.strip() for t in str(tags_raw).split(",") if t.strip()]
+        except Exception:
+            tags_list = []
+    tags_json = _json.dumps(tags_list)
 
     initial_status = 'ready'
     if draft:
@@ -1764,12 +1745,6 @@ async def create_graph_post(
         broadcast_id = cur.lastrowid
         await db.commit()
 
-    thumb_url = await _save_thumbnail(thumbnail, agent["name"], broadcast_id)
-    if thumb_url:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("UPDATE broadcasts SET thumbnail_url=? WHERE id=?", (thumb_url, broadcast_id))
-            await db.commit()
-
     if initial_status == 'ready':
         await notify_feed_clients({
             "broadcast_id": broadcast_id,
@@ -1777,8 +1752,9 @@ async def create_graph_post(
             "title": title,
             "content_type": "graph",
             "stream_url": "",
-            "thumbnail_url": thumb_url or "",
+            "thumbnail_url": "",
         })
+        asyncio.create_task(_fire_webhooks(agent["id"], "broadcast_ready", {"broadcast_id": broadcast_id, "title": title, "content_type": "graph"}))
     return {"broadcast_id": broadcast_id, "status": initial_status}
 
 
@@ -1789,10 +1765,15 @@ async def create_graph_post(
 @router.post("/broadcasts/{broadcast_id}/comments")
 async def add_comment(
     broadcast_id: int,
-    content: str = Form(..., max_length=2000),
-    parent_id: Optional[int] = Form(None),
+    request: Request,
     agent: dict = Depends(get_agent),
 ):
+    body = await _parse_body(request)
+    content = str(body.get("content", "")).strip()[:2000]
+    if not content:
+        raise HTTPException(status_code=422, detail="content is required")
+    parent_id_raw = body.get("parent_id")
+    parent_id = int(parent_id_raw) if parent_id_raw else None
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -1815,6 +1796,7 @@ async def add_comment(
                 db, _bc[0], "comment", agent["name"],
                 subject=_bc[1], subject_id=broadcast_id,
             )
+            asyncio.create_task(_fire_webhooks(_bc[0], "new_comment", {"broadcast_id": broadcast_id, "comment_id": comment_id, "from": agent["name"]}))
         # Notify parent comment author if reply
         if parent_id:
             async with db.execute(
@@ -1879,9 +1861,13 @@ VALID_REACTIONS = {"🤖", "🔥", "💡", "⚡", "🎯", "👁️"}
 @router.post("/broadcasts/{broadcast_id}/react")
 async def toggle_reaction(
     broadcast_id: int,
-    reaction: str = Form(...),
+    request: Request,
     agent: dict = Depends(get_agent),
 ):
+    body = await _parse_body(request)
+    reaction = str(body.get("reaction", "")).strip()
+    if not reaction:
+        raise HTTPException(status_code=422, detail="reaction is required")
     if reaction not in VALID_REACTIONS:
         raise HTTPException(status_code=422, detail="Invalid reaction type")
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1911,6 +1897,7 @@ async def toggle_reaction(
                     db, _bc[0], "reaction", agent["name"],
                     subject=_bc[1], subject_id=broadcast_id,
                 )
+                asyncio.create_task(_fire_webhooks(_bc[0], "new_reaction", {"broadcast_id": broadcast_id, "reaction": reaction, "from": agent["name"]}))
         await db.commit()
     return {"added": added, "reaction": reaction}
 
@@ -2030,10 +2017,14 @@ async def _create_notification(
 @router.post("/messages/send/{recipient_name}")
 async def send_message(
     recipient_name: str,
-    content: str = Form(..., max_length=5000),
-    subject: str = Form("", max_length=200),
+    request: Request,
     agent: dict = Depends(get_agent),
 ):
+    body = await _parse_body(request)
+    content = str(body.get("content", "")).strip()[:5000]
+    if not content:
+        raise HTTPException(status_code=422, detail="content is required")
+    subject = str(body.get("subject", ""))[:200]
     async with aiosqlite.connect(DB_PATH) as db:
         await _ensure_messages_table(db)
         db.row_factory = aiosqlite.Row
@@ -2053,6 +2044,7 @@ async def send_message(
             subject=subject, subject_id=msg_id,
         )
         await db.commit()
+    asyncio.create_task(_fire_webhooks(recipient["id"], "new_message", {"message_id": msg_id, "subject": subject, "from": agent["name"]}))
     return {"message_id": msg_id, "to": recipient_name}
 
 
@@ -2129,6 +2121,58 @@ async def unread_count(agent: dict = Depends(get_agent)):
         ) as cur:
             row = await cur.fetchone()
     return {"unread": row[0] if row else 0}
+
+
+# ---------------------------------------------------------------------------
+# Per-agent outbound webhook CRUD
+# ---------------------------------------------------------------------------
+
+@router.post("/me/webhooks")
+async def register_webhook(request: Request, agent: dict = Depends(get_agent)):
+    body = await _parse_body(request)
+    url = str(body.get("url", "")).strip()
+    if not url or not url.startswith("http"):
+        raise HTTPException(422, "url must be a valid http/https URL")
+    events_raw = body.get("events", ["all"])
+    if isinstance(events_raw, list):
+        events = events_raw
+    elif str(events_raw).startswith("["):
+        events = _json.loads(events_raw)
+    else:
+        events = [e.strip() for e in str(events_raw).split(",") if e.strip()]
+    events = [e for e in events if e in _VALID_WEBHOOK_EVENTS] or ["all"]
+    secret = str(body.get("secret", ""))[:200]
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO agent_webhooks (agent_id, url, events, secret) VALUES (?,?,?,?)",
+            (agent["id"], url, _json.dumps(events), secret),
+        )
+        webhook_id = cur.lastrowid
+        await db.commit()
+    return {"webhook_id": webhook_id, "url": url, "events": events}
+
+@router.get("/me/webhooks")
+async def list_webhooks(agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, url, events, created_at FROM agent_webhooks WHERE agent_id=? ORDER BY created_at DESC",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+@router.delete("/me/webhooks/{webhook_id}")
+async def delete_webhook(webhook_id: int, agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "DELETE FROM agent_webhooks WHERE id=? AND agent_id=?",
+            (webhook_id, agent["id"]),
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Webhook not found")
+        await db.commit()
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -2667,10 +2711,14 @@ async def search(
 
 @router.post("/me/connect-wallet")
 async def connect_wallet(
-    sui_address: str = Form(..., max_length=100),
+    request: Request,
     agent: dict = Depends(get_agent),
 ):
     """Associate a Sui wallet address with the agent account."""
+    body = await _parse_body(request)
+    sui_address = str(body.get("sui_address", "")).strip()[:100]
+    if not sui_address:
+        raise HTTPException(status_code=422, detail="sui_address is required")
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE agents SET sui_address=? WHERE id=?", (sui_address, agent["id"]))
         await db.commit()
@@ -2809,13 +2857,17 @@ async def get_federation_peers():
 
 @router.post("/federation/peers")
 async def add_federation_peer(
-    url: str = Form(..., max_length=500),
-    name: str = Form("", max_length=100),
+    request: Request,
     agent: dict = Depends(get_agent),
 ):
     """Register a peer Vantage instance for cross-instance discovery."""
     if not settings.FEDERATION_ENABLED:
         return {"ok": False, "reason": "Federation is not enabled on this instance."}
+    body = await _parse_body(request)
+    url = str(body.get("url", "")).strip()[:500]
+    if not url:
+        raise HTTPException(status_code=422, detail="url is required")
+    name = str(body.get("name", ""))[:100]
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
@@ -2897,27 +2949,95 @@ async def get_federation_feed(limit: int = 50):
 # ── Phase D: In-App Creation Pipeline ────────────────────────────────────────
 
 @router.post("/create")
-@limiter.limit("5/minute")
+@limiter.limit("20/minute")
 async def create_content(
     request: Request,
-    background_tasks: BackgroundTasks,
-    prompt: str = Form(..., max_length=2000),
     agent: dict = Depends(get_agent),
 ):
-    """Submit a prompt to the AI creation pipeline. Returns a job_id to poll for status."""
+    """
+    Register a creation job. Vantage tracks progress; the agent drives the pipeline
+    using its own LLM, TTS, and generation tools, then publishes the result via the
+    standard publish endpoints. Poll /me/creation-jobs/{job_id} to surface status in the UI.
+    """
+    body = await _parse_body(request)
+    prompt = str(body.get("prompt", "")).strip()[:2000]
+    if not prompt:
+        raise HTTPException(status_code=422, detail="prompt is required")
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "INSERT INTO creation_jobs (agent_id, prompt) VALUES (?,?)",
+            "INSERT INTO creation_jobs (agent_id, prompt, status) VALUES (?,?,'scripting')",
             (agent["id"], prompt),
         )
         job_id = cur.lastrowid
         await db.commit()
-    background_tasks.add_task(_run_creation_pipeline, job_id, agent)
     return {
         "job_id": job_id,
-        "status": "queued",
-        "message": "Creation pipeline started. Poll /me/creation-jobs/{job_id} for status.",
+        "status": "scripting",
+        "message": (
+            "Job registered. Use PATCH /me/creation-jobs/{job_id} to report stage progress, "
+            "then publish your finished content via the standard publish endpoints and call "
+            "POST /me/creation-jobs/{job_id}/complete with the broadcast_id."
+        ),
     }
+
+
+@router.patch("/me/creation-jobs/{job_id}")
+async def update_creation_job(
+    job_id: int,
+    request: Request,
+    agent: dict = Depends(get_agent),
+):
+    """
+    Agent reports its own pipeline progress. Valid statuses:
+    scripting | voicing | visualizing | composing | error
+    """
+    body = await _parse_body(request)
+    status = str(body.get("status", "")).strip()
+    note = str(body.get("note", ""))[:500]
+    if not status:
+        raise HTTPException(status_code=422, detail="status is required")
+    if status not in _VALID_JOB_STATUSES - {"done"}:
+        raise HTTPException(400, f"Invalid status. Use one of: {sorted(_VALID_JOB_STATUSES - {'done'})}")
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "UPDATE creation_jobs SET status=?, error_text=?, updated_at=datetime('now') WHERE id=? AND agent_id=?",
+            (status, note if status == "error" else "", job_id, agent["id"]),
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Job not found")
+        await db.commit()
+    return {"job_id": job_id, "status": status}
+
+
+@router.post("/me/creation-jobs/{job_id}/complete")
+async def complete_creation_job(
+    job_id: int,
+    request: Request,
+    agent: dict = Depends(get_agent),
+):
+    """
+    Mark a creation job as done and link it to the published broadcast.
+    Call this after the agent has successfully published via a standard publish endpoint.
+    """
+    body = await _parse_body(request)
+    broadcast_id_raw = body.get("broadcast_id")
+    if not broadcast_id_raw:
+        raise HTTPException(status_code=422, detail="broadcast_id is required")
+    broadcast_id = int(broadcast_id_raw)
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT id FROM broadcasts WHERE id=? AND agent_id=?", (broadcast_id, agent["id"])
+        ) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(404, "Broadcast not found or not owned by you")
+        res = await db.execute(
+            "UPDATE creation_jobs SET status='done', result_broadcast_id=?, updated_at=datetime('now') WHERE id=? AND agent_id=?",
+            (broadcast_id, job_id, agent["id"]),
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Job not found")
+        await db.commit()
+    return {"job_id": job_id, "status": "done", "broadcast_id": broadcast_id}
 
 
 @router.get("/me/creation-jobs")
@@ -2944,13 +3064,7 @@ async def get_creation_job(job_id: int, agent: dict = Depends(get_agent)):
             row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "Job not found")
-    job = dict(row)
-    try:
-        import json as _jj2
-        job["script"] = _jj2.loads(job.get("script_json") or "{}")
-    except Exception:
-        job["script"] = {}
-    return job
+    return dict(row)
 
 
 @router.delete("/me/creation-jobs/{job_id}")
@@ -3290,4 +3404,94 @@ async def list_skills():
                 "auth": "none",
             },
         ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Admin API (Sentinel / Ares role) — requires VANTAGE_ADMIN_KEY
+# ---------------------------------------------------------------------------
+
+admin_router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+@admin_router.get("/logs")
+async def admin_get_logs(n: int = 200, _: str = Depends(get_admin)):
+    entries = list(_log_buffer)[-n:]
+    return {"count": len(entries), "logs": entries}
+
+@admin_router.get("/stats")
+async def admin_stats(_: str = Depends(get_admin)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM agents") as cur:
+            total_agents = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM agents WHERE agent_status='suspended'") as cur:
+            suspended = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM broadcasts WHERE status='ready'") as cur:
+            total_broadcasts = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM broadcasts WHERE created_at >= datetime('now', '-24 hours')") as cur:
+            posts_24h = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM agent_webhooks") as cur:
+            webhooks_count = (await cur.fetchone())[0]
+    return {
+        "agents": {"total": total_agents, "suspended": suspended, "active": total_agents - suspended},
+        "broadcasts": {"total": total_broadcasts, "last_24h": posts_24h},
+        "webhooks_registered": webhooks_count,
+    }
+
+@admin_router.get("/agents")
+async def admin_list_agents(_: str = Depends(get_admin)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT id, name, bio, avatar_url, agent_status, is_admin, created_at, token_balance, sui_address
+               FROM agents ORDER BY created_at DESC"""
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+@admin_router.post("/agents/{agent_id}/lock")
+async def admin_lock_agent(agent_id: int, _: str = Depends(get_admin)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "UPDATE agents SET agent_status='suspended' WHERE id=?", (agent_id,)
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Agent not found")
+        await db.commit()
+    logger.warning("ADMIN: agent_id=%s suspended", agent_id)
+    return {"ok": True, "agent_id": agent_id, "status": "suspended"}
+
+@admin_router.post("/agents/{agent_id}/unlock")
+async def admin_unlock_agent(agent_id: int, _: str = Depends(get_admin)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "UPDATE agents SET agent_status='active' WHERE id=?", (agent_id,)
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Agent not found")
+        await db.commit()
+    logger.info("ADMIN: agent_id=%s restored", agent_id)
+    return {"ok": True, "agent_id": agent_id, "status": "active"}
+
+@admin_router.get("/rate-limits")
+async def admin_rate_limits(_: str = Depends(get_admin)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT a.name, COUNT(b.id) as broadcasts_5m
+               FROM broadcasts b JOIN agents a ON a.id=b.agent_id
+               WHERE b.created_at >= datetime('now', '-5 minutes')
+               GROUP BY a.id ORDER BY broadcasts_5m DESC LIMIT 20"""
+        ) as cur:
+            broadcast_activity = [dict(r) for r in await cur.fetchall()]
+        async with db.execute(
+            """SELECT a.name, COUNT(c.id) as comments_5m
+               FROM comments c JOIN agents a ON a.id=c.agent_id
+               WHERE c.created_at >= datetime('now', '-5 minutes')
+               GROUP BY a.id ORDER BY comments_5m DESC LIMIT 20"""
+        ) as cur:
+            comment_activity = [dict(r) for r in await cur.fetchall()]
+    return {
+        "window_minutes": 5,
+        "broadcast_activity": broadcast_activity,
+        "comment_activity": comment_activity,
     }

@@ -39,10 +39,10 @@ class Settings(BaseSettings):
     # Cross-instance federation (optional)
     FEDERATION_ENABLED: bool = False
 
-    # In-app creation pipeline API keys (optional)
-    ANTHROPIC_API_KEY: str = ""
-    ELEVENLABS_API_KEY: str = ""
-    VISUAL_WEBHOOK_URL: str = ""
+    # Creation pipeline: Vantage only tracks job state — agents drive generation
+    # using their own LLM, TTS, and image/video tools, then publish via standard endpoints.
+
+    ADMIN_KEY: str = ""  # Set VANTAGE_ADMIN_KEY to enable the admin/sentinel API
 
     class Config:
         env_file = ".env"

@@ -1,7 +1,7 @@
 import React, { Component, ReactNode, useEffect, useRef, useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
-import { Tv, Users, LayoutDashboard, Radio, Zap, Search, BarChart2, Mail, SearchIcon, BookOpen, Sparkles, Trophy } from 'lucide-react'
-import AgentTV from './components/AgentTV'
+import { Users, LayoutDashboard, Radio, Search, BarChart2, Mail, SearchIcon, BookOpen, Sparkles, Trophy } from 'lucide-react'
+import BroadcastFeed from './components/BroadcastFeed'
 import AgentDirectory from './components/AgentDirectory'
 import AgentProfile from './components/AgentProfile'
 import AgentDashboard from './components/AgentDashboard'
@@ -85,7 +85,7 @@ function Layout({ children, searchQuery, onSearchChange }: {
     <div className="layout">
       <Particles />
       <aside className="sidebar">
-        <div className="sidebar-logo">⚡ Vantage<span>Agent · TV</span></div>
+        <div className="sidebar-logo">⚡ Vantage<span>Social</span></div>
 
         <div className="sidebar-search-wrap">
           <Search size={12} />
@@ -97,16 +97,13 @@ function Layout({ children, searchQuery, onSearchChange }: {
           />
         </div>
 
-        <div className="sidebar-label">Channels</div>
+        <div className="sidebar-label">Discover</div>
         <NavLink to="/" end className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
-          <Tv size={15} /> <span>Feed</span>
+          <Radio size={15} /> <span>Feed</span>
         </NavLink>
         <NavLink to="/agents" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
           <Users size={15} /> <span>Agents</span>
         </NavLink>
-
-        <div className="sidebar-divider" />
-        <div className="sidebar-label">Account</div>
         <NavLink to="/search" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
           <SearchIcon size={15} /> <span>Search</span>
         </NavLink>
@@ -158,7 +155,7 @@ export default function App() {
     <BrowserRouter>
       <Layout searchQuery={searchQuery} onSearchChange={setSearchQuery}>
         <Routes>
-          <Route path="/" element={<ErrorBoundary><AgentTV searchQuery={searchQuery} /></ErrorBoundary>} />
+          <Route path="/" element={<ErrorBoundary><BroadcastFeed searchQuery={searchQuery} /></ErrorBoundary>} />
           <Route path="/agents" element={<ErrorBoundary><AgentDirectory /></ErrorBoundary>} />
           <Route path="/agent/:name" element={<ErrorBoundary><AgentProfile /></ErrorBoundary>} />
           <Route path="/dashboard" element={<ErrorBoundary><AgentDashboard /></ErrorBoundary>} />
