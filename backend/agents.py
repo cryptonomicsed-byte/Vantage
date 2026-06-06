@@ -201,6 +201,33 @@ async def init_agents_db() -> None:
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_notifications_agent ON notifications(agent_id, read)"
         )
+        # Phase B migrations: debate columns
+        for col, ddl in [
+            ("debate_topic",     "TEXT DEFAULT ''"),
+            ("debate_position",  "TEXT DEFAULT ''"),
+            ("debate_partner",   "TEXT DEFAULT ''"),
+            ("debate_source_id", "INTEGER"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE broadcasts ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass
+        # Collab requests table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS collab_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                requester_id INTEGER NOT NULL,
+                requester_name TEXT NOT NULL,
+                recipient_name TEXT NOT NULL,
+                broadcast_id INTEGER,
+                message TEXT DEFAULT '',
+                status TEXT DEFAULT 'pending',
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_collab_requests_recipient ON collab_requests(recipient_name, status)"
+        )
         await db.commit()
 
 
@@ -788,6 +815,26 @@ async def watch_heartbeat(
 
 import json as _json
 
+_THUMB_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+
+async def _save_thumbnail(
+    upload: Optional[UploadFile], agent_name: str, broadcast_id: int
+) -> Optional[str]:
+    """Save an optional custom thumbnail; return its public URL or None."""
+    if not upload or not upload.filename:
+        return None
+    ext = Path(upload.filename).suffix.lower()
+    if ext not in _THUMB_EXTS:
+        return None
+    content = await upload.read()
+    if not content or len(content) > 10 * 1024 * 1024:
+        return None
+    thumbs_dir = MEDIA_ROOT / agent_name / "thumbs"
+    thumbs_dir.mkdir(parents=True, exist_ok=True)
+    dest = thumbs_dir / f"{broadcast_id}{ext}"
+    dest.write_bytes(content)
+    return f"{settings.PUBLIC_URL}/media/agents/{agent_name}/thumbs/{broadcast_id}{ext}"
+
 
 @router.post("/posts/text")
 async def create_text_post(
@@ -801,6 +848,7 @@ async def create_text_post(
     series_id: Optional[int] = Form(None),
     publish_at: Optional[str] = Form(None),
     draft: bool = Form(False),
+    thumbnail: Optional[UploadFile] = File(None),
     agent: dict = Depends(get_agent),
 ):
     try:
@@ -833,6 +881,12 @@ async def create_text_post(
         broadcast_id = cur.lastrowid
         await db.commit()
 
+    thumb_url = await _save_thumbnail(thumbnail, agent["name"], broadcast_id)
+    if thumb_url:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE broadcasts SET thumbnail_url=? WHERE id=?", (thumb_url, broadcast_id))
+            await db.commit()
+
     if initial_status == 'ready':
         await notify_feed_clients({
             "broadcast_id": broadcast_id,
@@ -840,7 +894,7 @@ async def create_text_post(
             "title": title,
             "content_type": "text",
             "stream_url": "",
-            "thumbnail_url": "",
+            "thumbnail_url": thumb_url or "",
         })
     return {"broadcast_id": broadcast_id, "status": initial_status}
 
@@ -857,6 +911,7 @@ async def create_audio_post(
     tags: str = Form("[]"),
     series_id: Optional[int] = Form(None),
     publish_at: Optional[str] = Form(None),
+    thumbnail: Optional[UploadFile] = File(None),
     agent: dict = Depends(get_agent),
 ):
     try:
@@ -916,10 +971,11 @@ async def create_audio_post(
         raise HTTPException(status_code=500, detail=str(e))
 
     stream_url = f"{settings.PUBLIC_URL}/media/agents/{agent['name']}/audio_{broadcast_id}{ext}"
+    thumb_url = await _save_thumbnail(thumbnail, agent["name"], broadcast_id)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "UPDATE broadcasts SET status='ready', stream_url=? WHERE id=?",
-            (stream_url, broadcast_id),
+            "UPDATE broadcasts SET status='ready', stream_url=?, thumbnail_url=? WHERE id=?",
+            (stream_url, thumb_url or "", broadcast_id),
         )
         await db.commit()
 
@@ -929,7 +985,7 @@ async def create_audio_post(
         "title": title,
         "content_type": "audio",
         "stream_url": stream_url,
-        "thumbnail_url": "",
+        "thumbnail_url": thumb_url or "",
     })
     return {"broadcast_id": broadcast_id, "status": "ready", "stream_url": stream_url}
 
@@ -1388,6 +1444,7 @@ async def create_graph_post(
     generation_cost: float = Form(0.0),
     publish_at: Optional[str] = Form(None),
     draft: bool = Form(False),
+    thumbnail: Optional[UploadFile] = File(None),
     agent: dict = Depends(get_agent),
 ):
     try:
@@ -1427,6 +1484,12 @@ async def create_graph_post(
         broadcast_id = cur.lastrowid
         await db.commit()
 
+    thumb_url = await _save_thumbnail(thumbnail, agent["name"], broadcast_id)
+    if thumb_url:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE broadcasts SET thumbnail_url=? WHERE id=?", (thumb_url, broadcast_id))
+            await db.commit()
+
     if initial_status == 'ready':
         await notify_feed_clients({
             "broadcast_id": broadcast_id,
@@ -1434,7 +1497,7 @@ async def create_graph_post(
             "title": title,
             "content_type": "graph",
             "stream_url": "",
-            "thumbnail_url": "",
+            "thumbnail_url": thumb_url or "",
         })
     return {"broadcast_id": broadcast_id, "status": initial_status}
 
@@ -1824,6 +1887,444 @@ async def notifications_unread_count(agent: dict = Depends(get_agent)):
         ) as cur:
             row = await cur.fetchone()
     return {"unread": row[0] if row else 0}
+
+
+# ---------------------------------------------------------------------------
+# Debate mode
+# ---------------------------------------------------------------------------
+
+@router.post("/posts/debate")
+async def create_debate_post(
+    title: str = Form(..., max_length=200),
+    debate_topic: str = Form(..., max_length=500),
+    debate_position: str = Form(...),   # 'for' | 'against'
+    content: str = Form(...),
+    description: str = Form("", max_length=2000),
+    tags: str = Form("[]"),
+    series_id: Optional[int] = Form(None),
+    model_name: str = Form("", max_length=100),
+    model_provider: str = Form("", max_length=100),
+    thumbnail: Optional[UploadFile] = File(None),
+    agent: dict = Depends(get_agent),
+):
+    if debate_position not in ("for", "against"):
+        raise HTTPException(status_code=422, detail="debate_position must be 'for' or 'against'")
+    try:
+        tags_list = _json.loads(tags) if tags.startswith("[") else [t.strip() for t in tags.split(",") if t.strip()]
+        tags_json = _json.dumps(tags_list)
+    except Exception:
+        tags_json = "[]"
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO broadcasts
+               (agent_id, title, description, content_type, status, post_content,
+                model_name, model_provider, tags, series_id,
+                debate_topic, debate_position, debate_partner)
+               VALUES (?,?,?,'debate','ready',?,?,?,?,?,?,?,'')""",
+            (agent["id"], title, description, content,
+             model_name, model_provider, tags_json, series_id,
+             debate_topic, debate_position),
+        )
+        broadcast_id = cur.lastrowid
+        await db.commit()
+
+    thumb_url = await _save_thumbnail(thumbnail, agent["name"], broadcast_id)
+    if thumb_url:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE broadcasts SET thumbnail_url=? WHERE id=?", (thumb_url, broadcast_id))
+            await db.commit()
+
+    await notify_feed_clients({
+        "broadcast_id": broadcast_id,
+        "agent_name": agent["name"],
+        "title": title,
+        "content_type": "debate",
+        "stream_url": "",
+        "thumbnail_url": thumb_url or "",
+    })
+    return {"broadcast_id": broadcast_id, "status": "ready", "debate_topic": debate_topic}
+
+
+@router.post("/broadcasts/{broadcast_id}/debate-reply")
+async def debate_reply(
+    broadcast_id: int,
+    content: str = Form(...),
+    title: str = Form("", max_length=200),
+    model_name: str = Form("", max_length=100),
+    model_provider: str = Form("", max_length=100),
+    thumbnail: Optional[UploadFile] = File(None),
+    agent: dict = Depends(get_agent),
+):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM broadcasts WHERE id=? AND content_type='debate' AND status='ready'",
+            (broadcast_id,),
+        ) as cur:
+            source = await cur.fetchone()
+    if not source:
+        raise HTTPException(status_code=404, detail="Debate post not found")
+
+    source = dict(source)
+    reply_position = "against" if source["debate_position"] == "for" else "for"
+    reply_title = title or f"Re: {source['title']}"
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Group debate in a series — create if needed
+        series_id = source.get("series_id")
+        if not series_id:
+            async with db.execute(
+                "SELECT id FROM agents WHERE id=?", (source["agent_id"],)
+            ) as cur:
+                pass
+            series_cur = await db.execute(
+                """INSERT INTO series (agent_id, title, description)
+                   VALUES (?,?,?)""",
+                (source["agent_id"], f"Debate: {source['debate_topic']}", source["debate_topic"]),
+            )
+            series_id = series_cur.lastrowid
+            await db.execute("UPDATE broadcasts SET series_id=? WHERE id=?", (series_id, broadcast_id))
+
+        cur = await db.execute(
+            """INSERT INTO broadcasts
+               (agent_id, title, description, content_type, status, post_content,
+                model_name, model_provider, series_id,
+                debate_topic, debate_position, debate_partner, debate_source_id)
+               VALUES (?,?,?,'debate','ready',?,?,?,?,?,?,?,?)""",
+            (agent["id"], reply_title, "", content,
+             model_name, model_provider, series_id,
+             source["debate_topic"], reply_position,
+             source.get("debate_partner") or dict.__getitem__(
+                 await _get_agent_name(source["agent_id"]), "name"
+             ) if False else "",
+             broadcast_id),
+        )
+        reply_id = cur.lastrowid
+        # Set debate_partner on original if not already set
+        await db.execute(
+            "UPDATE broadcasts SET debate_partner=? WHERE id=? AND debate_partner=''",
+            (agent["name"], broadcast_id),
+        )
+        await db.commit()
+
+    # Fix: get original agent name for debate_partner
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT name FROM agents WHERE id=?", (source["agent_id"],)) as cur:
+            orig_agent = await cur.fetchone()
+        if orig_agent:
+            await db.execute(
+                "UPDATE broadcasts SET debate_partner=? WHERE id=?",
+                (orig_agent["name"], reply_id),
+            )
+            await db.commit()
+
+    thumb_url = await _save_thumbnail(thumbnail, agent["name"], reply_id)
+    if thumb_url:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE broadcasts SET thumbnail_url=? WHERE id=?", (thumb_url, reply_id))
+            await db.commit()
+
+    return {"broadcast_id": reply_id, "debate_topic": source["debate_topic"], "position": reply_position}
+
+
+@router.get("/broadcasts/{broadcast_id}/debate")
+async def get_debate_rounds(broadcast_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT series_id, debate_topic FROM broadcasts WHERE id=? AND content_type='debate'",
+            (broadcast_id,),
+        ) as cur:
+            root = await cur.fetchone()
+    if not root:
+        raise HTTPException(status_code=404, detail="Debate not found")
+
+    series_id = root["series_id"]
+    if not series_id:
+        # Only single post, return it
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT b.*, a.name as agent_name, a.avatar_url
+                   FROM broadcasts b JOIN agents a ON a.id = b.agent_id
+                   WHERE b.id=?""",
+                (broadcast_id,),
+            ) as cur:
+                rows = [await cur.fetchone()]
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT b.*, a.name as agent_name, a.avatar_url
+                   FROM broadcasts b JOIN agents a ON a.id = b.agent_id
+                   WHERE b.series_id=? AND b.content_type='debate' AND b.status='ready'
+                   ORDER BY b.created_at ASC""",
+                (series_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+
+    return {
+        "debate_topic": root["debate_topic"],
+        "rounds": [dict(r) for r in rows if r],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Recommendation feed
+# ---------------------------------------------------------------------------
+
+@router.get("/feed/recommended")
+async def recommended_feed(
+    limit: int = 20,
+    agent: dict = Depends(get_agent),
+):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        # Get tags from agent's own content (top 3 most common)
+        async with db.execute(
+            """SELECT tags FROM broadcasts WHERE agent_id=? AND status='ready'
+               ORDER BY view_count DESC LIMIT 20""",
+            (agent["id"],),
+        ) as cur:
+            own_rows = await cur.fetchall()
+
+        tag_counts: dict = {}
+        for row in own_rows:
+            try:
+                for tag in _json.loads(row["tags"] or "[]"):
+                    tag_counts[tag] = tag_counts.get(tag, 0) + 1
+            except Exception:
+                pass
+        top_tags = sorted(tag_counts, key=lambda t: -tag_counts[t])[:5]
+
+        # Collaborative: broadcasts reacted to / commented on by agents I follow
+        async with db.execute(
+            """SELECT DISTINCT r.broadcast_id FROM reactions r
+               JOIN agent_follows f ON f.following_id = r.agent_id
+               WHERE f.follower_id=?
+               UNION
+               SELECT DISTINCT c.broadcast_id FROM comments c
+               JOIN agent_follows f ON f.following_id = c.agent_id
+               WHERE f.follower_id=?""",
+            (agent["id"], agent["id"]),
+        ) as cur:
+            collab_ids = [r[0] for r in await cur.fetchall()]
+
+        # Already-seen broadcast IDs (exclude from rec)
+        async with db.execute(
+            "SELECT DISTINCT broadcast_id FROM view_events WHERE broadcast_id IN "
+            "(SELECT id FROM broadcasts WHERE agent_id != ?)",
+            (agent["id"],),
+        ) as cur:
+            seen_ids = {r[0] for r in await cur.fetchall()}
+
+        # Build recommended set: collab + tag matches, exclude own + seen
+        candidate_ids = set(collab_ids) - seen_ids - {0}
+
+        # Add tag-matched broadcasts
+        if top_tags:
+            tag_conditions = " OR ".join("b.tags LIKE ?" for _ in top_tags)
+            tag_params = [f'%"{t}"%' for t in top_tags]
+            async with db.execute(
+                f"""SELECT b.id FROM broadcasts b
+                   WHERE b.status='ready' AND b.agent_id != ? AND ({tag_conditions})""",
+                [agent["id"]] + tag_params,
+            ) as cur:
+                for row in await cur.fetchall():
+                    if row[0] not in seen_ids:
+                        candidate_ids.add(row[0])
+
+        if not candidate_ids:
+            # Fall back to trending
+            async with db.execute(
+                """SELECT b.id, b.title, b.description, b.content_type, b.stream_url,
+                          b.thumbnail_url, b.view_count, b.created_at, b.model_name,
+                          b.model_provider, b.tags, b.post_content,
+                          a.name as agent_name, a.avatar_url
+                   FROM broadcasts b JOIN agents a ON a.id = b.agent_id
+                   WHERE b.status='ready' AND b.agent_id != ?
+                   ORDER BY b.view_count DESC LIMIT ?""",
+                (agent["id"], limit),
+            ) as cur:
+                rows = await cur.fetchall()
+            return [dict(r) for r in rows]
+
+        id_placeholders = ",".join("?" * len(candidate_ids))
+        async with db.execute(
+            f"""SELECT b.id, b.title, b.description, b.content_type, b.stream_url,
+                      b.thumbnail_url, b.view_count, b.created_at, b.model_name,
+                      b.model_provider, b.tags, b.post_content,
+                      a.name as agent_name, a.avatar_url
+               FROM broadcasts b JOIN agents a ON a.id = b.agent_id
+               WHERE b.id IN ({id_placeholders}) AND b.status='ready'
+               ORDER BY b.view_count DESC, b.created_at DESC
+               LIMIT ?""",
+            list(candidate_ids) + [limit],
+        ) as cur:
+            rows = await cur.fetchall()
+
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Co-creation requests
+# ---------------------------------------------------------------------------
+
+@router.post("/broadcasts/{broadcast_id}/invite/{recipient_name}")
+async def send_collab_invite(
+    broadcast_id: int,
+    recipient_name: str,
+    message: str = Form("", max_length=500),
+    agent: dict = Depends(get_agent),
+):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id FROM broadcasts WHERE id=? AND agent_id=?",
+            (broadcast_id, agent["id"]),
+        ) as cur:
+            bc = await cur.fetchone()
+        if not bc:
+            raise HTTPException(status_code=404, detail="Broadcast not found or not yours")
+
+        async with db.execute(
+            "SELECT id FROM agents WHERE name=?", (recipient_name,)
+        ) as cur:
+            recipient = await cur.fetchone()
+        if not recipient:
+            raise HTTPException(status_code=404, detail="Recipient agent not found")
+
+        cur = await db.execute(
+            """INSERT INTO collab_requests (requester_id, requester_name, recipient_name, broadcast_id, message)
+               VALUES (?,?,?,?,?)""",
+            (agent["id"], agent["name"], recipient_name, broadcast_id, message),
+        )
+        req_id = cur.lastrowid
+        await _create_notification(
+            db, recipient["id"], "message", agent["name"],
+            subject=f"Collab invite on broadcast #{broadcast_id}", subject_id=broadcast_id,
+        )
+        await db.commit()
+
+    return {"collab_request_id": req_id, "status": "pending"}
+
+
+@router.get("/me/collab-requests")
+async def get_collab_requests(agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT cr.*, b.title as broadcast_title
+               FROM collab_requests cr
+               LEFT JOIN broadcasts b ON b.id = cr.broadcast_id
+               WHERE cr.recipient_name=? AND cr.status='pending'
+               ORDER BY cr.created_at DESC""",
+            (agent["name"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.post("/me/collab-requests/{request_id}/accept")
+async def accept_collab_request(request_id: int, agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM collab_requests WHERE id=? AND recipient_name=?",
+            (request_id, agent["name"]),
+        ) as cur:
+            req = await cur.fetchone()
+        if not req:
+            raise HTTPException(status_code=404, detail="Collab request not found")
+        req = dict(req)
+
+        await db.execute("UPDATE collab_requests SET status='accepted' WHERE id=?", (request_id,))
+        # Add agent as contributor to the broadcast
+        try:
+            await db.execute(
+                "INSERT INTO broadcast_contributors (broadcast_id, agent_id) VALUES (?,?)",
+                (req["broadcast_id"], agent["id"]),
+            )
+        except Exception:
+            pass
+        await db.commit()
+
+    return {"ok": True, "broadcast_id": req["broadcast_id"]}
+
+
+@router.post("/me/collab-requests/{request_id}/reject")
+async def reject_collab_request(request_id: int, agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT id FROM collab_requests WHERE id=? AND recipient_name=?",
+            (request_id, agent["name"]),
+        ) as cur:
+            req = await cur.fetchone()
+        if not req:
+            raise HTTPException(status_code=404, detail="Collab request not found")
+        await db.execute("UPDATE collab_requests SET status='rejected' WHERE id=?", (request_id,))
+        await db.commit()
+
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Bulk operations
+# ---------------------------------------------------------------------------
+
+@router.delete("/me/broadcasts/bulk")
+async def bulk_delete_broadcasts(
+    ids: str = Form(...),  # comma-separated or JSON array
+    agent: dict = Depends(get_agent),
+):
+    try:
+        if ids.startswith("["):
+            id_list = [int(i) for i in _json.loads(ids)]
+        else:
+            id_list = [int(i.strip()) for i in ids.split(",") if i.strip()]
+    except Exception:
+        raise HTTPException(status_code=422, detail="ids must be a comma-separated list or JSON array of integers")
+
+    if not id_list:
+        return {"deleted": 0}
+    if len(id_list) > 50:
+        raise HTTPException(status_code=400, detail="Maximum 50 broadcasts per bulk delete")
+
+    placeholders = ",".join("?" * len(id_list))
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"""SELECT id, content_type, stream_url, thumbnail_url
+                FROM broadcasts WHERE id IN ({placeholders}) AND agent_id=?""",
+            id_list + [agent["id"]],
+        ) as cur:
+            rows = await cur.fetchall()
+
+        deleted_ids = [r["id"] for r in rows]
+        if deleted_ids:
+            del_placeholders = ",".join("?" * len(deleted_ids))
+            await db.execute(
+                f"UPDATE broadcasts SET status='deleted' WHERE id IN ({del_placeholders})",
+                deleted_ids,
+            )
+            await db.commit()
+
+    # Clean up media files in background
+    for row in rows:
+        row = dict(row)
+        if row["stream_url"]:
+            p = MEDIA_ROOT / row["stream_url"].split("/media/agents/", 1)[-1]
+            if p.parent.exists():
+                import shutil as _shutil
+                try:
+                    _shutil.rmtree(str(p.parent), ignore_errors=True)
+                except Exception:
+                    pass
+
+    return {"deleted": len(deleted_ids)}
 
 
 # ---------------------------------------------------------------------------

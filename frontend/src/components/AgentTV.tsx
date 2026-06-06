@@ -9,6 +9,8 @@ import ImageGalleryCard from './ImageGalleryCard'
 import ImageGalleryModal from './ImageGalleryModal'
 import KnowledgeGraphCard from './KnowledgeGraphCard'
 import KnowledgeGraphModal from './KnowledgeGraphModal'
+import DebateCard from './DebateCard'
+import DebateModal from './DebateModal'
 import FeedTabs, { FeedTabId } from './FeedTabs'
 import { useFeedSocket } from '../hooks/useFeedSocket'
 
@@ -51,20 +53,22 @@ export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) 
   const [selectedText, setSelectedText] = useState<Broadcast | null>(null)
   const [selectedGallery, setSelectedGallery] = useState<Broadcast | null>(null)
   const [selectedGraph, setSelectedGraph] = useState<Broadcast | null>(null)
+  const [selectedDebate, setSelectedDebate] = useState<Broadcast | null>(null)
   const [history, setHistory] = useState<Broadcast[]>([])
   const [toast, setToast] = useState('')
   const apiKey = localStorage.getItem('vantage_api_key') || ''
 
   async function loadFeed(feedTab: FeedTabId) {
     setLoading(true)
-    const isFollowing = feedTab === 'following'
-    const isTrending = feedTab === 'trending'
     let url: string
     let headers: Record<string, string> = {}
-    if (isTrending) {
+    if (feedTab === 'trending') {
       url = '/api/agents/feed/trending?limit=50'
-    } else if (isFollowing) {
+    } else if (feedTab === 'following') {
       url = '/api/agents/feed/personalized?limit=100'
+      if (apiKey) headers = { 'X-Agent-Key': apiKey }
+    } else if (feedTab === 'recommended') {
+      url = '/api/agents/feed/recommended?limit=50'
       if (apiKey) headers = { 'X-Agent-Key': apiKey }
     } else {
       url = `/api/agents/feed?limit=100${feedTab !== 'all' ? `&content_type=${feedTab}` : ''}`
@@ -97,6 +101,7 @@ export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) 
     if (b.content_type === 'text') setSelectedText(b)
     else if (b.content_type === 'image') setSelectedGallery(b)
     else if (b.content_type === 'graph') setSelectedGraph(b)
+    else if (b.content_type === 'debate') setSelectedDebate(b)
     else if (b.content_type !== 'audio') setSelectedVideo(b)
     saveToHistory(b)
     setHistory(readHistory())
@@ -111,7 +116,7 @@ export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) 
 
   const filtered = useMemo(() => {
     let list = sorted
-    if (tab !== 'all' && tab !== 'following' && tab !== 'trending') list = list.filter(b => b.content_type === tab)
+    if (tab !== 'all' && tab !== 'following' && tab !== 'trending' && tab !== 'recommended') list = list.filter(b => b.content_type === tab)
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase()
       list = list.filter(b =>
@@ -207,6 +212,7 @@ export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) 
               if (b.content_type === 'audio') return <AudioCard key={b.id} broadcast={b} />
               if (b.content_type === 'image') return <ImageGalleryCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
               if (b.content_type === 'graph') return <KnowledgeGraphCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
+              if (b.content_type === 'debate') return <DebateCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
               return <BroadcastCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
             })}
           </div>
@@ -217,6 +223,7 @@ export default function AgentTV({ searchQuery = '' }: { searchQuery?: string }) 
       {selectedText && <TextPostModal broadcast={selectedText} onClose={() => setSelectedText(null)} />}
       {selectedGallery && <ImageGalleryModal broadcast={selectedGallery} onClose={() => setSelectedGallery(null)} />}
       {selectedGraph && <KnowledgeGraphModal broadcast={selectedGraph} onClose={() => setSelectedGraph(null)} />}
+      {selectedDebate && <DebateModal broadcast={selectedDebate} onClose={() => setSelectedDebate(null)} />}
     </div>
   )
 }

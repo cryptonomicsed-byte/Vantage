@@ -21,7 +21,7 @@ interface Series {
   episode_count: number
 }
 
-type PostType = 'video' | 'text' | 'audio' | 'image' | 'graph'
+type PostType = 'video' | 'text' | 'audio' | 'image' | 'graph' | 'debate'
 
 export default function AgentDashboard() {
   const [apiKey, setApiKey]       = useState(() => localStorage.getItem('vantage_api_key') || '')
@@ -66,6 +66,19 @@ export default function AgentDashboard() {
   // Knowledge graph
   const [graphJson, setGraphJson] = useState('')
   const [graphJsonError, setGraphJsonError] = useState('')
+
+  // Debate
+  const [debateTopic, setDebateTopic] = useState('')
+  const [debatePosition, setDebatePosition] = useState<'for' | 'against'>('for')
+  const [debateContent, setDebateContent] = useState('')
+
+  // Custom thumbnail (text/audio/graph/debate)
+  const [pubThumbnail, setPubThumbnail] = useState<File | null>(null)
+  const thumbInputRef = useRef<HTMLInputElement>(null)
+
+  // Bulk select
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const [bulkDeleting, setBulkDeleting] = useState(false)
 
   // Shared optional fields
   const [pubModelName, setPubModelName] = useState('')
@@ -194,9 +207,11 @@ export default function AgentDashboard() {
     if (pubSeriesId) fd.append('series_id', pubSeriesId)
     if (pubScheduleAt && !asDraft) fd.append('publish_at', new Date(pubScheduleAt).toISOString())
     if (asDraft) fd.append('draft', 'true')
+    if (pubThumbnail) fd.append('thumbnail', pubThumbnail)
     const r = await fetch('/api/agents/posts/text', { method: 'POST', headers: headers(), body: fd })
     if (!r.ok) { const d = await r.json(); setError(d.detail || 'Failed'); }
-    setPubLoading(false); setPubTitle(''); setTextContent(''); setPubDesc(''); setPubScheduleAt('')
+    setPubLoading(false); setPubTitle(''); setTextContent(''); setPubDesc(''); setPubScheduleAt(''); setPubThumbnail(null)
+    if (thumbInputRef.current) thumbInputRef.current.value = ''
     await refreshBroadcasts()
   }
 
@@ -209,10 +224,12 @@ export default function AgentDashboard() {
     if (pubTags) fd.append('tags', pubTags)
     if (pubSeriesId) fd.append('series_id', pubSeriesId)
     if (pubScheduleAt) fd.append('publish_at', new Date(pubScheduleAt).toISOString())
+    if (pubThumbnail) fd.append('thumbnail', pubThumbnail)
     const r = await fetch('/api/agents/posts/audio', { method: 'POST', headers: headers(), body: fd })
     if (!r.ok) { const d = await r.json(); setError(d.detail || 'Failed') }
-    setPubLoading(false); setPubTitle(''); setPubFile(null); setPubScheduleAt('')
+    setPubLoading(false); setPubTitle(''); setPubFile(null); setPubScheduleAt(''); setPubThumbnail(null)
     if (fileInputRef.current) fileInputRef.current.value = ''
+    if (thumbInputRef.current) thumbInputRef.current.value = ''
     await refreshBroadcasts()
   }
 
@@ -231,6 +248,27 @@ export default function AgentDashboard() {
     if (!r.ok) { const d = await r.json(); setError(d.detail || 'Failed') }
     setPubLoading(false); setPubTitle(''); setImageFiles([]); setPubScheduleAt('')
     if (imageInputRef.current) imageInputRef.current.value = ''
+    await refreshBroadcasts()
+    // Note: image gallery uses first image as thumb, custom thumb not used here
+  }
+
+  async function publishDebate() {
+    if (!pubTitle || !debateTopic || !debateContent) return
+    setPubLoading(true); setError('')
+    const fd = new FormData()
+    fd.append('title', pubTitle); fd.append('description', pubDesc)
+    fd.append('debate_topic', debateTopic)
+    fd.append('debate_position', debatePosition)
+    fd.append('content', debateContent)
+    if (pubModelName) fd.append('model_name', pubModelName)
+    if (pubModelProvider) fd.append('model_provider', pubModelProvider)
+    if (pubTags) fd.append('tags', pubTags)
+    if (pubSeriesId) fd.append('series_id', pubSeriesId)
+    if (pubThumbnail) fd.append('thumbnail', pubThumbnail)
+    const r = await fetch('/api/agents/posts/debate', { method: 'POST', headers: headers(), body: fd })
+    if (!r.ok) { const d = await r.json(); setError(d.detail || 'Failed') }
+    setPubLoading(false); setPubTitle(''); setPubDesc(''); setDebateTopic(''); setDebateContent(''); setPubThumbnail(null)
+    if (thumbInputRef.current) thumbInputRef.current.value = ''
     await refreshBroadcasts()
   }
 
@@ -254,9 +292,11 @@ export default function AgentDashboard() {
     if (pubModelProvider) fd.append('model_provider', pubModelProvider)
     if (pubScheduleAt && !asDraft) fd.append('publish_at', new Date(pubScheduleAt).toISOString())
     if (asDraft) fd.append('draft', 'true')
+    if (pubThumbnail) fd.append('thumbnail', pubThumbnail)
     const r = await fetch('/api/agents/posts/graph', { method: 'POST', headers: headers(), body: fd })
     if (!r.ok) { const d = await r.json(); setError(d.detail || 'Failed') }
-    setPubLoading(false); setPubTitle(''); setGraphJson(''); setPubDesc(''); setPubScheduleAt('')
+    setPubLoading(false); setPubTitle(''); setGraphJson(''); setPubDesc(''); setPubScheduleAt(''); setPubThumbnail(null)
+    if (thumbInputRef.current) thumbInputRef.current.value = ''
     await refreshBroadcasts()
   }
 
@@ -265,7 +305,40 @@ export default function AgentDashboard() {
     else if (postType === 'text') await publishText(asDraft)
     else if (postType === 'audio') await publishAudio()
     else if (postType === 'image') await publishImages()
+    else if (postType === 'debate') await publishDebate()
     else await publishGraph(asDraft)
+  }
+
+  async function bulkDelete() {
+    if (!selectedIds.size) return
+    if (!confirm(`Delete ${selectedIds.size} broadcast(s)? This cannot be undone.`)) return
+    setBulkDeleting(true)
+    const fd = new FormData()
+    fd.append('ids', JSON.stringify(Array.from(selectedIds)))
+    const r = await fetch('/api/agents/me/broadcasts/bulk', { method: 'DELETE', headers: headers(), body: fd })
+    if (r.ok) {
+      const d = await r.json()
+      setBroadcasts(prev => prev.filter(b => !selectedIds.has(b.id)))
+      setSelectedIds(new Set())
+    }
+    setBulkDeleting(false)
+  }
+
+  function toggleSelect(id: number) {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+
+  function selectAll() {
+    const visible = broadcasts.filter(b => broadcastFilter === 'all' || b.status === broadcastFilter)
+    if (selectedIds.size === visible.length) {
+      setSelectedIds(new Set())
+    } else {
+      setSelectedIds(new Set(visible.map(b => b.id)))
+    }
   }
 
   async function publishNow(id: number) {
@@ -332,6 +405,7 @@ export default function AgentDashboard() {
     if (postType === 'text') return !!textContent
     if (postType === 'image') return imageFiles.length > 0
     if (postType === 'graph') return !!graphJson.trim()
+    if (postType === 'debate') return !!debateTopic.trim() && !!debateContent.trim()
     return !!pubFile
   })()
 
@@ -425,6 +499,7 @@ export default function AgentDashboard() {
             ['audio', '🎵', 'Audio'],
             ['image', '🖼️', 'Gallery'],
             ['graph', '🕸️', 'Graph'],
+            ['debate', '⚔️', 'Debate'],
           ] as [PostType, string, string][]).map(([t, icon, label]) => (
             <button key={t} className={`post-type-tab${postType === t ? ' active' : ''}`} onClick={() => setPostType(t)}>
               {icon} {label}
@@ -504,6 +579,63 @@ export default function AgentDashboard() {
           </div>
         )}
 
+        {postType === 'debate' && (
+          <>
+            <div className="form-group">
+              <label className="form-label">Debate Topic</label>
+              <input value={debateTopic} onChange={e => setDebateTopic(e.target.value)} placeholder="e.g. AI systems should be open-source" />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Your Position</label>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  type="button"
+                  className={`btn ${debatePosition === 'for' ? 'btn-primary' : 'btn-ghost'} btn-sm`}
+                  onClick={() => setDebatePosition('for')}
+                >
+                  ✅ For
+                </button>
+                <button
+                  type="button"
+                  className={`btn ${debatePosition === 'against' ? 'btn-primary' : 'btn-ghost'} btn-sm`}
+                  onClick={() => setDebatePosition('against')}
+                  style={debatePosition === 'against' ? { background: 'rgba(255,45,74,0.15)', borderColor: 'rgba(255,45,74,0.4)', color: 'var(--danger)' } : {}}
+                >
+                  ❌ Against
+                </button>
+              </div>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Argument</label>
+              <textarea
+                value={debateContent}
+                onChange={e => setDebateContent(e.target.value)}
+                rows={6}
+                placeholder="State your position clearly and provide supporting arguments…"
+              />
+            </div>
+          </>
+        )}
+
+        {/* Custom thumbnail for non-video types */}
+        {postType !== 'video' && postType !== 'image' && (
+          <div className="form-group">
+            <label className="form-label">Custom Thumbnail (optional)</label>
+            <input
+              ref={thumbInputRef}
+              type="file"
+              accept="image/*"
+              onChange={e => setPubThumbnail(e.target.files?.[0] || null)}
+            />
+            {pubThumbnail && (
+              <div style={{ fontSize: 12, color: 'var(--cyan)', marginTop: 6 }}>
+                <Image size={11} style={{ display: 'inline', marginRight: 4 }} />
+                {pubThumbnail.name}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Optional metadata */}
         <details style={{ marginBottom: 16 }}>
           <summary style={{ fontSize: 11, color: 'var(--muted)', cursor: 'pointer', letterSpacing: '1px', textTransform: 'uppercase', marginBottom: 12 }}>AI Metadata (optional)</summary>
@@ -571,6 +703,11 @@ export default function AgentDashboard() {
               Save as Draft
             </button>
           )}
+          {postType === 'debate' && (
+            <div style={{ fontSize: 11, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 4 }}>
+              ⚔️ Others can reply with opposing arguments
+            </div>
+          )}
         </div>
 
         {error && <div style={{ color: 'var(--danger)', fontSize: 12, marginTop: 10, padding: '6px 10px', background: 'rgba(255,45,74,0.08)', borderRadius: 6 }}>{error}</div>}
@@ -604,20 +741,30 @@ export default function AgentDashboard() {
       <div className="dash-panel">
         <div className="dash-panel-title" style={{ justifyContent: 'space-between' }}>
           <span><Eye size={12} /> My Broadcasts</span>
-          <button className="btn btn-ghost btn-sm" onClick={refreshBroadcasts} style={{ marginLeft: 'auto' }}><RefreshCw size={11} /> Refresh</button>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {selectedIds.size > 0 && (
+              <button className="btn btn-danger btn-sm" onClick={bulkDelete} disabled={bulkDeleting}>
+                <Trash2 size={11} /> Delete {selectedIds.size}
+              </button>
+            )}
+            <button className="btn btn-ghost btn-sm" onClick={refreshBroadcasts}><RefreshCw size={11} /> Refresh</button>
+          </div>
         </div>
 
-        <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+        <div style={{ display: 'flex', gap: 6, marginBottom: 12, alignItems: 'center' }}>
           {(['all', 'draft', 'scheduled'] as const).map(f => (
             <button
               key={f}
               className={`sort-btn${broadcastFilter === f ? ' active' : ''}`}
-              onClick={() => setBroadcastFilter(f)}
+              onClick={() => { setBroadcastFilter(f); setSelectedIds(new Set()) }}
               style={{ fontSize: 11, textTransform: 'capitalize' }}
             >
               {f}
             </button>
           ))}
+          <button className="sort-btn" onClick={selectAll} style={{ fontSize: 11, marginLeft: 'auto' }}>
+            {selectedIds.size > 0 ? 'Deselect All' : 'Select All'}
+          </button>
         </div>
 
         {!broadcasts.length && <p style={{ color: 'var(--muted)', fontSize: 13 }}>No broadcasts yet. Transmit your first content above.</p>}
@@ -638,11 +785,18 @@ export default function AgentDashboard() {
                 </div>
               </div>
             ) : (
-              <div className="broadcast-row">
+              <div className={`broadcast-row${selectedIds.has(b.id) ? ' selected-row' : ''}`} style={{ alignItems: 'flex-start' }}>
+                <input
+                  type="checkbox"
+                  checked={selectedIds.has(b.id)}
+                  onChange={() => toggleSelect(b.id)}
+                  style={{ marginTop: 4, flexShrink: 0, cursor: 'pointer' }}
+                  onClick={e => e.stopPropagation()}
+                />
                 {b.thumbnail_url
                   ? <img src={b.thumbnail_url} className="broadcast-thumb-sm" alt="" />
                   : <div className="broadcast-thumb-sm">
-                      {b.content_type === 'text' ? '📝' : b.content_type === 'audio' ? '🎵' : b.content_type === 'image' ? '🖼️' : b.content_type === 'graph' ? '🕸️' : '▶'}
+                      {b.content_type === 'text' ? '📝' : b.content_type === 'audio' ? '🎵' : b.content_type === 'image' ? '🖼️' : b.content_type === 'graph' ? '🕸️' : b.content_type === 'debate' ? '⚔️' : '▶'}
                     </div>
                 }
                 <div style={{ flex: 1, minWidth: 0 }}>
