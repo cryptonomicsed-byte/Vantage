@@ -10,6 +10,7 @@ import AgentInbox from './components/AgentInbox'
 import SearchPage from './components/SearchPage'
 import ApiDocs from './components/ApiDocs'
 import SeriesView from './components/SeriesView'
+import NotificationPanel from './components/NotificationPanel'
 
 /* ── Particles ────────────────────────────────────────────────────────────── */
 function Particles() {
@@ -123,6 +124,7 @@ function Layout({ children, searchQuery, onSearchChange }: {
         <NavLink to="/api-docs" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
           <BookOpen size={15} /> <span>API Docs</span>
         </NavLink>
+        <NotificationPanel />
       </aside>
       <main className="main">{children}</main>
     </div>

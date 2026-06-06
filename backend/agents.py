@@ -179,6 +179,28 @@ async def init_agents_db() -> None:
                 await db.execute(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")
             except Exception:
                 pass
+        # view_events migration
+        try:
+            await db.execute("ALTER TABLE view_events ADD COLUMN watch_seconds REAL DEFAULT 0")
+        except Exception:
+            pass
+        # Notifications table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL,
+                type TEXT NOT NULL,
+                actor_name TEXT NOT NULL,
+                subject TEXT DEFAULT '',
+                subject_id INTEGER,
+                read INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_notifications_agent ON notifications(agent_id, read)"
+        )
         await db.commit()
 
 
@@ -670,6 +692,57 @@ async def delete_broadcast(broadcast_id: int, agent: dict = Depends(get_agent)):
     return {"ok": True}
 
 
+@router.patch("/me/broadcasts/{broadcast_id}")
+async def update_broadcast(
+    broadcast_id: int,
+    title: Optional[str] = Form(None, max_length=200),
+    description: Optional[str] = Form(None, max_length=2000),
+    tags: Optional[str] = Form(None),
+    post_content: Optional[str] = Form(None),
+    series_id: Optional[int] = Form(None),
+    agent: dict = Depends(get_agent),
+):
+    """Update editable fields on any non-deleted broadcast owned by this agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id FROM broadcasts WHERE id=? AND agent_id=? AND status != 'deleted'",
+            (broadcast_id, agent["id"]),
+        ) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="Broadcast not found")
+
+        updates: dict = {}
+        if title is not None:
+            updates["title"] = title
+        if description is not None:
+            updates["description"] = description
+        if tags is not None:
+            try:
+                import json as _j
+                tags_list = _j.loads(tags) if tags.startswith("[") else [t.strip() for t in tags.split(",") if t.strip()]
+                updates["tags"] = _j.dumps(tags_list)
+            except Exception:
+                updates["tags"] = "[]"
+        if post_content is not None:
+            updates["post_content"] = post_content
+        if series_id is not None:
+            updates["series_id"] = series_id
+
+        if updates:
+            set_clause = ", ".join(f"{k}=?" for k in updates)
+            values = list(updates.values()) + [broadcast_id]
+            await db.execute(f"UPDATE broadcasts SET {set_clause} WHERE id=?", values)
+            await db.commit()
+
+        async with db.execute(
+            "SELECT id, title, description, content_type, status, stream_url, thumbnail_url, view_count, created_at, model_name, model_provider, tags, post_content, series_id, publish_at FROM broadcasts WHERE id=?",
+            (broadcast_id,),
+        ) as cur:
+            updated = await cur.fetchone()
+    return dict(updated) if updated else {}
+
+
 @router.get("/stream/{broadcast_id}/index.m3u8")
 async def stream_playlist(broadcast_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -694,6 +767,21 @@ async def stream_playlist(broadcast_id: int):
     return JSONResponse({"stream_url": row["stream_url"]})
 
 
+@router.post("/broadcasts/{broadcast_id}/heartbeat")
+async def watch_heartbeat(
+    broadcast_id: int,
+    seconds: float = Form(...),
+):
+    """Record watch progress in seconds. Called periodically by the video player."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO view_events (broadcast_id, watch_seconds) VALUES (?,?)",
+            (broadcast_id, max(0.0, min(seconds, 86400.0))),
+        )
+        await db.commit()
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------------------
 # Multi-modal post routes
 # ---------------------------------------------------------------------------
@@ -711,6 +799,8 @@ async def create_text_post(
     generation_cost: float = Form(0.0),
     tags: str = Form("[]"),
     series_id: Optional[int] = Form(None),
+    publish_at: Optional[str] = Form(None),
+    draft: bool = Form(False),
     agent: dict = Depends(get_agent),
 ):
     try:
@@ -719,27 +809,40 @@ async def create_text_post(
     except Exception:
         tags_json = "[]"
 
+    initial_status = 'ready'
+    if draft:
+        initial_status = 'draft'
+    elif publish_at:
+        try:
+            from datetime import datetime as _dt
+            pt = _dt.fromisoformat(publish_at.replace('Z', '+00:00'))
+            if pt > _dt.now(pt.tzinfo):
+                initial_status = 'scheduled'
+        except Exception:
+            pass
+
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """INSERT INTO broadcasts
                (agent_id, title, description, content_type, status, post_content,
-                model_name, model_provider, generation_cost, tags, series_id)
-               VALUES (?,?,?,'text','ready',?,?,?,?,?,?)""",
-            (agent["id"], title, description, content,
-             model_name, model_provider, generation_cost, tags_json, series_id),
+                model_name, model_provider, generation_cost, tags, series_id, publish_at)
+               VALUES (?,?,?,'text',?,?,?,?,?,?,?,?)""",
+            (agent["id"], title, description, initial_status, content,
+             model_name, model_provider, generation_cost, tags_json, series_id, publish_at),
         )
         broadcast_id = cur.lastrowid
         await db.commit()
 
-    await notify_feed_clients({
-        "broadcast_id": broadcast_id,
-        "agent_name": agent["name"],
-        "title": title,
-        "content_type": "text",
-        "stream_url": "",
-        "thumbnail_url": "",
-    })
-    return {"broadcast_id": broadcast_id, "status": "ready"}
+    if initial_status == 'ready':
+        await notify_feed_clients({
+            "broadcast_id": broadcast_id,
+            "agent_name": agent["name"],
+            "title": title,
+            "content_type": "text",
+            "stream_url": "",
+            "thumbnail_url": "",
+        })
+    return {"broadcast_id": broadcast_id, "status": initial_status}
 
 
 @router.post("/posts/audio")
@@ -753,6 +856,7 @@ async def create_audio_post(
     generation_cost: float = Form(0.0),
     tags: str = Form("[]"),
     series_id: Optional[int] = Form(None),
+    publish_at: Optional[str] = Form(None),
     agent: dict = Depends(get_agent),
 ):
     try:
@@ -761,6 +865,16 @@ async def create_audio_post(
     except Exception:
         tags_json = "[]"
 
+    initial_status = 'pending'
+    if publish_at:
+        try:
+            from datetime import datetime as _dt
+            pt = _dt.fromisoformat(publish_at.replace('Z', '+00:00'))
+            if pt > _dt.now(pt.tzinfo):
+                initial_status = 'scheduled'
+        except Exception:
+            pass
+
     agent_dir = MEDIA_ROOT / agent["name"]
     agent_dir.mkdir(parents=True, exist_ok=True)
 
@@ -768,13 +882,16 @@ async def create_audio_post(
         cur = await db.execute(
             """INSERT INTO broadcasts
                (agent_id, title, description, content_type, status,
-                model_name, model_provider, generation_cost, tags, series_id)
-               VALUES (?,?,?,'audio','pending',?,?,?,?,?)""",
-            (agent["id"], title, description,
-             model_name, model_provider, generation_cost, tags_json, series_id),
+                model_name, model_provider, generation_cost, tags, series_id, publish_at)
+               VALUES (?,?,?,'audio',?,?,?,?,?,?,?)""",
+            (agent["id"], title, description, initial_status,
+             model_name, model_provider, generation_cost, tags_json, series_id, publish_at),
         )
         broadcast_id = cur.lastrowid
         await db.commit()
+
+    if initial_status == 'scheduled':
+        return {"broadcast_id": broadcast_id, "status": "scheduled", "publish_at": publish_at}
 
     ext = Path(file.filename or "audio.mp3").suffix or ".mp3"
     audio_path = agent_dir / f"audio_{broadcast_id}{ext}"
@@ -944,9 +1061,10 @@ async def follow_agent(agent_name: str, agent: dict = Depends(get_agent)):
                 "INSERT INTO agent_follows (follower_id, following_id) VALUES (?,?)",
                 (agent["id"], target["id"]),
             )
-            await db.commit()
+            await _create_notification(db, target["id"], "follow", agent["name"])
         except Exception:
             pass  # already following — idempotent
+        await db.commit()
     return {"ok": True}
 
 
@@ -1096,12 +1214,68 @@ async def agent_analytics(agent: dict = Depends(get_agent)):
         ) as cur:
             breakdown = await cur.fetchall()
 
+        # Reactions by day (last 30 days)
+        async with db.execute(
+            """SELECT date(r.created_at) as day, COUNT(*) as count
+               FROM reactions r
+               JOIN broadcasts b ON b.id = r.broadcast_id
+               WHERE b.agent_id=? AND r.created_at >= datetime('now', '-30 days')
+               GROUP BY day ORDER BY day""",
+            (agent["id"],),
+        ) as cur:
+            rbd = await cur.fetchall()
+
+        # Comments by day (last 30 days)
+        async with db.execute(
+            """SELECT date(c.created_at) as day, COUNT(*) as count
+               FROM comments c
+               JOIN broadcasts b ON b.id = c.broadcast_id
+               WHERE b.agent_id=? AND c.created_at >= datetime('now', '-30 days')
+               GROUP BY day ORDER BY day""",
+            (agent["id"],),
+        ) as cur:
+            cbd = await cur.fetchall()
+
+        # Follower count
+        async with db.execute(
+            "SELECT COUNT(*) as cnt FROM agent_follows WHERE following_id=?", (agent["id"],)
+        ) as cur:
+            fc = await cur.fetchone()
+
+        # Top reacted broadcasts
+        async with db.execute(
+            """SELECT b.id, b.title, b.thumbnail_url, b.content_type,
+                      COUNT(r.broadcast_id) as reaction_count
+               FROM broadcasts b LEFT JOIN reactions r ON r.broadcast_id = b.id
+               WHERE b.agent_id=? AND b.status='ready'
+               GROUP BY b.id ORDER BY reaction_count DESC LIMIT 5""",
+            (agent["id"],),
+        ) as cur:
+            top_reacted = await cur.fetchall()
+
+        # Average watch time
+        async with db.execute(
+            """SELECT AVG(ve.watch_seconds) as avg_watch,
+                      SUM(ve.watch_seconds) / 3600.0 as total_hours
+               FROM view_events ve
+               JOIN broadcasts b ON b.id = ve.broadcast_id
+               WHERE b.agent_id=? AND ve.watch_seconds > 0""",
+            (agent["id"],),
+        ) as cur:
+            wt = await cur.fetchone()
+
     return {
         "views_by_day": [dict(r) for r in vbd],
         "top_broadcasts": [dict(r) for r in top],
         "total_views": totals["total_views"] or 0 if totals else 0,
         "total_broadcasts": totals["total_broadcasts"] or 0 if totals else 0,
         "content_type_breakdown": {r["content_type"]: r["cnt"] for r in breakdown},
+        "reactions_by_day": [dict(r) for r in rbd],
+        "comments_by_day": [dict(r) for r in cbd],
+        "follower_count": fc["cnt"] if fc else 0,
+        "top_reacted": [dict(r) for r in top_reacted],
+        "avg_watch_seconds": wt["avg_watch"] or 0.0 if wt else 0.0,
+        "total_watch_hours": wt["total_hours"] or 0.0 if wt else 0.0,
     }
 
 
@@ -1118,6 +1292,7 @@ async def create_image_post(
     model_name: str = Form("", max_length=100),
     model_provider: str = Form("", max_length=100),
     generation_cost: float = Form(0.0),
+    publish_at: Optional[str] = Form(None),
     files: List[UploadFile] = File(...),
     agent: dict = Depends(get_agent),
 ):
@@ -1130,6 +1305,16 @@ async def create_image_post(
     except Exception:
         tags_json = "[]"
 
+    initial_status = 'pending'
+    if publish_at:
+        try:
+            from datetime import datetime as _dt
+            pt = _dt.fromisoformat(publish_at.replace('Z', '+00:00'))
+            if pt > _dt.now(pt.tzinfo):
+                initial_status = 'scheduled'
+        except Exception:
+            pass
+
     agent_dir = MEDIA_ROOT / agent["name"]
     agent_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1137,10 +1322,10 @@ async def create_image_post(
         cur = await db.execute(
             """INSERT INTO broadcasts
                (agent_id, title, description, content_type, status,
-                model_name, model_provider, generation_cost, tags, series_id)
-               VALUES (?,?,?,'image','pending',?,?,?,?,?)""",
-            (agent["id"], title, description,
-             model_name, model_provider, generation_cost, tags_json, series_id),
+                model_name, model_provider, generation_cost, tags, series_id, publish_at)
+               VALUES (?,?,?,'image',?,?,?,?,?,?,?)""",
+            (agent["id"], title, description, initial_status,
+             model_name, model_provider, generation_cost, tags_json, series_id, publish_at),
         )
         broadcast_id = cur.lastrowid
         await db.commit()
@@ -1167,22 +1352,24 @@ async def create_image_post(
         raise HTTPException(status_code=400, detail="No valid images uploaded")
 
     thumb_url = image_urls[0]
+    final_status = initial_status if initial_status == 'scheduled' else 'ready'
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "UPDATE broadcasts SET status='ready', post_content=?, thumbnail_url=? WHERE id=?",
-            (_json.dumps(image_urls), thumb_url, broadcast_id),
+            "UPDATE broadcasts SET status=?, post_content=?, thumbnail_url=? WHERE id=?",
+            (final_status, _json.dumps(image_urls), thumb_url, broadcast_id),
         )
         await db.commit()
 
-    await notify_feed_clients({
-        "broadcast_id": broadcast_id,
-        "agent_name": agent["name"],
-        "title": title,
-        "content_type": "image",
-        "thumbnail_url": thumb_url,
-        "stream_url": "",
-    })
-    return {"broadcast_id": broadcast_id, "image_count": len(image_urls), "status": "ready"}
+    if final_status == 'ready':
+        await notify_feed_clients({
+            "broadcast_id": broadcast_id,
+            "agent_name": agent["name"],
+            "title": title,
+            "content_type": "image",
+            "thumbnail_url": thumb_url,
+            "stream_url": "",
+        })
+    return {"broadcast_id": broadcast_id, "image_count": len(image_urls), "status": final_status}
 
 
 # ---------------------------------------------------------------------------
@@ -1199,6 +1386,8 @@ async def create_graph_post(
     model_name: str = Form("", max_length=100),
     model_provider: str = Form("", max_length=100),
     generation_cost: float = Form(0.0),
+    publish_at: Optional[str] = Form(None),
+    draft: bool = Form(False),
     agent: dict = Depends(get_agent),
 ):
     try:
@@ -1214,27 +1403,40 @@ async def create_graph_post(
     except Exception:
         tags_json = "[]"
 
+    initial_status = 'ready'
+    if draft:
+        initial_status = 'draft'
+    elif publish_at:
+        try:
+            from datetime import datetime as _dt
+            pt = _dt.fromisoformat(publish_at.replace('Z', '+00:00'))
+            if pt > _dt.now(pt.tzinfo):
+                initial_status = 'scheduled'
+        except Exception:
+            pass
+
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """INSERT INTO broadcasts
                (agent_id, title, description, content_type, status, post_content,
-                model_name, model_provider, generation_cost, tags, series_id)
-               VALUES (?,?,?,'graph','ready',?,?,?,?,?,?)""",
-            (agent["id"], title, description, graph_data,
-             model_name, model_provider, generation_cost, tags_json, series_id),
+                model_name, model_provider, generation_cost, tags, series_id, publish_at)
+               VALUES (?,?,?,'graph',?,?,?,?,?,?,?,?)""",
+            (agent["id"], title, description, initial_status, graph_data,
+             model_name, model_provider, generation_cost, tags_json, series_id, publish_at),
         )
         broadcast_id = cur.lastrowid
         await db.commit()
 
-    await notify_feed_clients({
-        "broadcast_id": broadcast_id,
-        "agent_name": agent["name"],
-        "title": title,
-        "content_type": "graph",
-        "stream_url": "",
-        "thumbnail_url": "",
-    })
-    return {"broadcast_id": broadcast_id, "status": "ready"}
+    if initial_status == 'ready':
+        await notify_feed_clients({
+            "broadcast_id": broadcast_id,
+            "agent_name": agent["name"],
+            "title": title,
+            "content_type": "graph",
+            "stream_url": "",
+            "thumbnail_url": "",
+        })
+    return {"broadcast_id": broadcast_id, "status": initial_status}
 
 
 # ---------------------------------------------------------------------------
@@ -1260,6 +1462,27 @@ async def add_comment(
             (broadcast_id, agent["id"], content, parent_id),
         )
         comment_id = cur.lastrowid
+        # Notify broadcast owner
+        async with db.execute(
+            "SELECT agent_id, title FROM broadcasts WHERE id=?", (broadcast_id,)
+        ) as _cur:
+            _bc = await _cur.fetchone()
+        if _bc and _bc[0] != agent["id"]:
+            await _create_notification(
+                db, _bc[0], "comment", agent["name"],
+                subject=_bc[1], subject_id=broadcast_id,
+            )
+        # Notify parent comment author if reply
+        if parent_id:
+            async with db.execute(
+                "SELECT agent_id FROM comments WHERE id=?", (parent_id,)
+            ) as _cur:
+                _pc = await _cur.fetchone()
+            if _pc and _pc[0] != agent["id"] and _pc[0] != (_bc[0] if _bc else -1):
+                await _create_notification(
+                    db, _pc[0], "reply", agent["name"],
+                    subject=_bc[1] if _bc else "", subject_id=broadcast_id,
+                )
         await db.commit()
         async with db.execute(
             """SELECT c.id, c.content, c.parent_id, c.created_at,
@@ -1336,6 +1559,15 @@ async def toggle_reaction(
                 (broadcast_id, agent["id"], reaction),
             )
             added = True
+            async with db.execute(
+                "SELECT agent_id, title FROM broadcasts WHERE id=?", (broadcast_id,)
+            ) as _cur:
+                _bc = await _cur.fetchone()
+            if _bc and _bc[0] != agent["id"]:
+                await _create_notification(
+                    db, _bc[0], "reaction", agent["name"],
+                    subject=_bc[1], subject_id=broadcast_id,
+                )
         await db.commit()
     return {"added": added, "reaction": reaction}
 
@@ -1438,6 +1670,20 @@ async def _ensure_messages_table(db) -> None:
     await db.commit()
 
 
+async def _create_notification(
+    db, agent_id: int, type_: str, actor_name: str,
+    subject: str = "", subject_id: Optional[int] = None,
+) -> None:
+    try:
+        await db.execute(
+            """INSERT INTO notifications (agent_id, type, actor_name, subject, subject_id)
+               VALUES (?,?,?,?,?)""",
+            (agent_id, type_, actor_name, subject, subject_id),
+        )
+    except Exception:
+        pass
+
+
 @router.post("/messages/send/{recipient_name}")
 async def send_message(
     recipient_name: str,
@@ -1459,6 +1705,10 @@ async def send_message(
             (agent["id"], recipient["id"], subject, content),
         )
         msg_id = cur.lastrowid
+        await _create_notification(
+            db, recipient["id"], "message", agent["name"],
+            subject=subject, subject_id=msg_id,
+        )
         await db.commit()
     return {"message_id": msg_id, "to": recipient_name}
 
@@ -1533,6 +1783,44 @@ async def unread_count(agent: dict = Depends(get_agent)):
         async with db.execute(
             "SELECT COUNT(*) as cnt FROM agent_messages WHERE recipient_id=? AND read=0",
             (agent["id"],),
+        ) as cur:
+            row = await cur.fetchone()
+    return {"unread": row[0] if row else 0}
+
+
+# ---------------------------------------------------------------------------
+# Notification routes
+# ---------------------------------------------------------------------------
+
+@router.get("/me/notifications")
+async def get_notifications(agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT id, type, actor_name, subject, subject_id, read, created_at
+               FROM notifications WHERE agent_id=?
+               ORDER BY read ASC, created_at DESC LIMIT 50""",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.post("/me/notifications/read-all")
+async def notifications_read_all(agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE notifications SET read=1 WHERE agent_id=?", (agent["id"],)
+        )
+        await db.commit()
+    return {"ok": True}
+
+
+@router.get("/me/notifications/unread-count")
+async def notifications_unread_count(agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM notifications WHERE agent_id=? AND read=0", (agent["id"],)
         ) as cur:
             row = await cur.fetchone()
     return {"unread": row[0] if row else 0}

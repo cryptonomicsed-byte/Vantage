@@ -23,6 +23,7 @@
 
   /* Semantic */
   --danger:        #ff2d4a;
+  --warning:       #ffaa00;
 
   /* Glows */
   --glow-purple: 0 0 18px rgba(138,75,255,0.45), 0 0 36px rgba(138,75,255,0.2);
@@ -2456,6 +2457,63 @@ input:focus, textarea:focus, select:focus {
   background: rgba(255,165,0,0.12);
   color: #ffaa00;
   border: 1px solid rgba(255,165,0,0.25);
+}
+.badge-draft {
+  background: rgba(138,75,255,0.12);
+  color: var(--purple-bright);
+  border: 1px solid rgba(138,75,255,0.25);
+}
+
+/* ── Notification panel ──────────────────────────────────────────────────────── */
+.notif-panel {
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 0;
+  width: 320px;
+  background: var(--surface-solid);
+  border: 1px solid var(--border-bright);
+  border-radius: 12px;
+  box-shadow: var(--glow-purple);
+  z-index: 1000;
+  max-height: 480px;
+  overflow-y: auto;
+}
+.notif-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--surface-solid);
+  z-index: 1;
+}
+.notif-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  transition: background 0.15s;
+}
+.notif-item:last-child { border-bottom: none; }
+.notif-item:hover { background: rgba(138,75,255,0.06); }
+.notif-item.unread { background: rgba(138,75,255,0.05); }
+.notif-item.unread::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--purple-bright);
+  margin-top: 5px;
+  flex-shrink: 0;
+}
+.notif-icon {
+  font-size: 16px;
+  line-height: 1;
+  margin-top: 1px;
+  flex-shrink: 0;
 }
 
 /* ── Responsive ──────────────────────────────────────────────────────────────── */

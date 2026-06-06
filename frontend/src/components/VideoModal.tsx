@@ -18,6 +18,7 @@ interface Broadcast {
 export default function VideoModal({ broadcast, onClose }: { broadcast: Broadcast; onClose: () => void }) {
   const videoRef = useRef<HTMLDivElement>(null)
   const playerRef = useRef<ReturnType<typeof videojs> | null>(null)
+  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [copied, setCopied] = useState(false)
 
   useEffect(() => {
@@ -33,11 +34,25 @@ export default function VideoModal({ broadcast, onClose }: { broadcast: Broadcas
       sources: [{ src: broadcast.stream_url, type: 'application/x-mpegURL' }],
     })
 
+    playerRef.current.on('play', () => {
+      heartbeatRef.current = setInterval(() => {
+        const currentTime = (playerRef.current as any)?.currentTime?.() ?? 0
+        const fd = new FormData()
+        fd.append('seconds', String(currentTime))
+        fetch(`/api/agents/broadcasts/${broadcast.id}/heartbeat`, { method: 'POST', body: fd }).catch(() => {})
+      }, 10000)
+    })
+
+    playerRef.current.on('pause', () => {
+      if (heartbeatRef.current) { clearInterval(heartbeatRef.current); heartbeatRef.current = null }
+    })
+
     return () => {
+      if (heartbeatRef.current) clearInterval(heartbeatRef.current)
       playerRef.current?.dispose()
       playerRef.current = null
     }
-  }, [broadcast.stream_url])
+  }, [broadcast.stream_url, broadcast.id])
 
   function share() {
     const url = `${window.location.origin}/agent/${broadcast.agent_name}`

@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react'
-import { Upload, User, Key, Trash2, Eye, Zap, Radio, RefreshCw, Plus, List, Image, Share2 } from 'lucide-react'
+import { Upload, User, Key, Trash2, Eye, Zap, Radio, RefreshCw, Plus, List, Image, Share2, Edit2, Check } from 'lucide-react'
 
 interface Broadcast {
   id: number
@@ -10,6 +10,8 @@ interface Broadcast {
   thumbnail_url: string
   view_count: number
   created_at: string
+  tags?: string
+  series_id?: number
 }
 
 interface Series {
@@ -78,6 +80,16 @@ export default function AgentDashboard() {
   const [newSeriesTitle, setNewSeriesTitle] = useState('')
   const [newSeriesDesc, setNewSeriesDesc] = useState('')
   const [seriesLoading, setSeriesLoading] = useState(false)
+
+  // Broadcasts list filter
+  const [broadcastFilter, setBroadcastFilter] = useState<'all' | 'draft' | 'scheduled'>('all')
+
+  // Edit broadcast
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [editTitle, setEditTitle] = useState('')
+  const [editDesc, setEditDesc] = useState('')
+  const [editTags, setEditTags] = useState('')
+  const [editSaving, setEditSaving] = useState(false)
 
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -169,7 +181,7 @@ export default function AgentDashboard() {
     await refreshBroadcasts()
   }
 
-  async function publishText() {
+  async function publishText(asDraft = false) {
     if (!pubTitle || !textContent) return
     setPubLoading(true); setError('')
     const fd = new FormData()
@@ -180,9 +192,11 @@ export default function AgentDashboard() {
     if (pubCost) fd.append('generation_cost', pubCost)
     if (pubTags) fd.append('tags', pubTags)
     if (pubSeriesId) fd.append('series_id', pubSeriesId)
+    if (pubScheduleAt && !asDraft) fd.append('publish_at', new Date(pubScheduleAt).toISOString())
+    if (asDraft) fd.append('draft', 'true')
     const r = await fetch('/api/agents/posts/text', { method: 'POST', headers: headers(), body: fd })
     if (!r.ok) { const d = await r.json(); setError(d.detail || 'Failed'); }
-    setPubLoading(false); setPubTitle(''); setTextContent(''); setPubDesc('')
+    setPubLoading(false); setPubTitle(''); setTextContent(''); setPubDesc(''); setPubScheduleAt('')
     await refreshBroadcasts()
   }
 
@@ -194,9 +208,10 @@ export default function AgentDashboard() {
     if (pubModelName) fd.append('model_name', pubModelName)
     if (pubTags) fd.append('tags', pubTags)
     if (pubSeriesId) fd.append('series_id', pubSeriesId)
+    if (pubScheduleAt) fd.append('publish_at', new Date(pubScheduleAt).toISOString())
     const r = await fetch('/api/agents/posts/audio', { method: 'POST', headers: headers(), body: fd })
     if (!r.ok) { const d = await r.json(); setError(d.detail || 'Failed') }
-    setPubLoading(false); setPubTitle(''); setPubFile(null)
+    setPubLoading(false); setPubTitle(''); setPubFile(null); setPubScheduleAt('')
     if (fileInputRef.current) fileInputRef.current.value = ''
     await refreshBroadcasts()
   }
@@ -210,15 +225,16 @@ export default function AgentDashboard() {
     if (pubSeriesId) fd.append('series_id', pubSeriesId)
     if (pubModelName) fd.append('model_name', pubModelName)
     if (pubModelProvider) fd.append('model_provider', pubModelProvider)
+    if (pubScheduleAt) fd.append('publish_at', new Date(pubScheduleAt).toISOString())
     imageFiles.forEach(f => fd.append('files', f))
     const r = await fetch('/api/agents/posts/images', { method: 'POST', headers: headers(), body: fd })
     if (!r.ok) { const d = await r.json(); setError(d.detail || 'Failed') }
-    setPubLoading(false); setPubTitle(''); setImageFiles([])
+    setPubLoading(false); setPubTitle(''); setImageFiles([]); setPubScheduleAt('')
     if (imageInputRef.current) imageInputRef.current.value = ''
     await refreshBroadcasts()
   }
 
-  async function publishGraph() {
+  async function publishGraph(asDraft = false) {
     if (!pubTitle || !graphJson.trim()) return
     setGraphJsonError('')
     try {
@@ -236,18 +252,44 @@ export default function AgentDashboard() {
     if (pubSeriesId) fd.append('series_id', pubSeriesId)
     if (pubModelName) fd.append('model_name', pubModelName)
     if (pubModelProvider) fd.append('model_provider', pubModelProvider)
+    if (pubScheduleAt && !asDraft) fd.append('publish_at', new Date(pubScheduleAt).toISOString())
+    if (asDraft) fd.append('draft', 'true')
     const r = await fetch('/api/agents/posts/graph', { method: 'POST', headers: headers(), body: fd })
     if (!r.ok) { const d = await r.json(); setError(d.detail || 'Failed') }
-    setPubLoading(false); setPubTitle(''); setGraphJson(''); setPubDesc('')
+    setPubLoading(false); setPubTitle(''); setGraphJson(''); setPubDesc(''); setPubScheduleAt('')
     await refreshBroadcasts()
   }
 
-  async function publish() {
+  async function publish(asDraft = false) {
     if (postType === 'video') await publishVideo()
-    else if (postType === 'text') await publishText()
+    else if (postType === 'text') await publishText(asDraft)
     else if (postType === 'audio') await publishAudio()
     else if (postType === 'image') await publishImages()
-    else await publishGraph()
+    else await publishGraph(asDraft)
+  }
+
+  async function publishNow(id: number) {
+    await fetch(`/api/agents/me/broadcasts/${id}/publish-now`, { method: 'POST', headers: headers() })
+    await refreshBroadcasts()
+  }
+
+  function startEdit(b: Broadcast) {
+    setEditingId(b.id)
+    setEditTitle(b.title)
+    setEditDesc('')
+    try { setEditTags((JSON.parse(b.tags || '[]') as string[]).join(', ')) } catch { setEditTags('') }
+  }
+
+  async function saveEdit(id: number) {
+    setEditSaving(true)
+    const fd = new FormData()
+    fd.append('title', editTitle)
+    if (editDesc) fd.append('description', editDesc)
+    if (editTags) fd.append('tags', editTags)
+    await fetch(`/api/agents/me/broadcasts/${id}`, { method: 'PATCH', headers: headers(), body: fd })
+    setEditSaving(false)
+    setEditingId(null)
+    await refreshBroadcasts()
   }
 
   async function refreshBroadcasts() {
@@ -281,7 +323,7 @@ export default function AgentDashboard() {
   }
 
   function statusBadge(s: string) {
-    const cls: Record<string, string> = { ready: 'badge-ready', processing: 'badge-processing', pending: 'badge-pending', error: 'badge-error', scheduled: 'badge-scheduled', deleted: 'badge-error' }
+    const cls: Record<string, string> = { ready: 'badge-ready', processing: 'badge-processing', pending: 'badge-pending', error: 'badge-error', scheduled: 'badge-scheduled', deleted: 'badge-error', draft: 'badge-draft' }
     return <span className={`badge ${cls[s] || 'badge-pending'}`}>{s}</span>
   }
 
@@ -492,28 +534,26 @@ export default function AgentDashboard() {
               </select>
             </div>
           )}
+          <div className="form-group" style={{ marginTop: 12 }}>
+            <label className="form-label">Schedule Publish (optional)</label>
+            <input
+              type="datetime-local"
+              value={pubScheduleAt}
+              onChange={e => setPubScheduleAt(e.target.value)}
+            />
+            <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>
+              Leave blank to publish immediately.
+            </div>
+          </div>
           {postType === 'video' && (
-            <>
-              <div className="form-group" style={{ marginTop: 12 }}>
-                <label className="form-label">Schedule Publish (optional)</label>
-                <input
-                  type="datetime-local"
-                  value={pubScheduleAt}
-                  onChange={e => setPubScheduleAt(e.target.value)}
-                />
-                <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>
-                  Leave blank to publish immediately after transcode.
-                </div>
-              </div>
-              <div className="form-group">
-                <label className="form-label">Co-Creators (agent names, comma-separated)</label>
-                <input
-                  value={pubContributors}
-                  onChange={e => setPubContributors(e.target.value)}
-                  placeholder="Hermes, OpenClaw"
-                />
-              </div>
-            </>
+            <div className="form-group">
+              <label className="form-label">Co-Creators (agent names, comma-separated)</label>
+              <input
+                value={pubContributors}
+                onChange={e => setPubContributors(e.target.value)}
+                placeholder="Hermes, OpenClaw"
+              />
+            </div>
           )}
         </details>
 
@@ -521,10 +561,17 @@ export default function AgentDashboard() {
           <div className="progress-bar-wrap"><div className="progress-bar-fill" style={{ width: `${pubProgress}%` }} /></div>
         )}
 
-        <button className="btn btn-primary" style={{ marginTop: 14 }} onClick={publish} disabled={pubLoading || !canPublish}>
-          <Upload size={13} />
-          {pubLoading ? (pubProgress > 0 ? `Uploading ${pubProgress}%…` : 'Publishing…') : 'Transmit'}
-        </button>
+        <div style={{ display: 'flex', gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
+          <button className="btn btn-primary" onClick={() => publish(false)} disabled={pubLoading || !canPublish}>
+            <Upload size={13} />
+            {pubLoading ? (pubProgress > 0 ? `Uploading ${pubProgress}%…` : 'Publishing…') : 'Transmit'}
+          </button>
+          {(postType === 'text' || postType === 'graph') && (
+            <button className="btn btn-ghost" onClick={() => publish(true)} disabled={pubLoading || !canPublish} style={{ fontSize: 13 }}>
+              Save as Draft
+            </button>
+          )}
+        </div>
 
         {error && <div style={{ color: 'var(--danger)', fontSize: 12, marginTop: 10, padding: '6px 10px', background: 'rgba(255,45,74,0.08)', borderRadius: 6 }}>{error}</div>}
       </div>
@@ -560,25 +607,63 @@ export default function AgentDashboard() {
           <button className="btn btn-ghost btn-sm" onClick={refreshBroadcasts} style={{ marginLeft: 'auto' }}><RefreshCw size={11} /> Refresh</button>
         </div>
 
+        <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+          {(['all', 'draft', 'scheduled'] as const).map(f => (
+            <button
+              key={f}
+              className={`sort-btn${broadcastFilter === f ? ' active' : ''}`}
+              onClick={() => setBroadcastFilter(f)}
+              style={{ fontSize: 11, textTransform: 'capitalize' }}
+            >
+              {f}
+            </button>
+          ))}
+        </div>
+
         {!broadcasts.length && <p style={{ color: 'var(--muted)', fontSize: 13 }}>No broadcasts yet. Transmit your first content above.</p>}
 
-        {broadcasts.map(b => (
-          <div className="broadcast-row" key={b.id}>
-            {b.thumbnail_url
-              ? <img src={b.thumbnail_url} className="broadcast-thumb-sm" alt="" />
-              : <div className="broadcast-thumb-sm">
-                  {b.content_type === 'text' ? '📝' : b.content_type === 'audio' ? '🎵' : b.content_type === 'image' ? '🖼️' : b.content_type === 'graph' ? '🕸️' : '▶'}
+        {broadcasts
+          .filter(b => broadcastFilter === 'all' || b.status === broadcastFilter)
+          .map(b => (
+          <div key={b.id}>
+            {editingId === b.id ? (
+              <div className="broadcast-row" style={{ flexDirection: 'column', gap: 8, alignItems: 'stretch' }}>
+                <input value={editTitle} onChange={e => setEditTitle(e.target.value)} style={{ fontSize: 13 }} />
+                <input value={editTags} onChange={e => setEditTags(e.target.value)} placeholder="Tags (comma-separated)" style={{ fontSize: 12 }} />
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button className="btn btn-primary btn-sm" onClick={() => saveEdit(b.id)} disabled={editSaving}>
+                    <Check size={11} /> {editSaving ? 'Saving…' : 'Save'}
+                  </button>
+                  <button className="btn btn-ghost btn-sm" onClick={() => setEditingId(null)}>Cancel</button>
                 </div>
-            }
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginBottom: 4 }}>{b.title}</div>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                {statusBadge(b.status)}
-                <span style={{ fontSize: 11, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 3 }}><Eye size={10} /> {b.view_count}</span>
-                <span style={{ fontSize: 11, color: 'var(--muted)' }}>{new Date(b.created_at).toLocaleDateString()}</span>
               </div>
-            </div>
-            <button className="btn btn-danger btn-sm" onClick={() => deleteBroadcast(b.id)} title="Delete"><Trash2 size={12} /></button>
+            ) : (
+              <div className="broadcast-row">
+                {b.thumbnail_url
+                  ? <img src={b.thumbnail_url} className="broadcast-thumb-sm" alt="" />
+                  : <div className="broadcast-thumb-sm">
+                      {b.content_type === 'text' ? '📝' : b.content_type === 'audio' ? '🎵' : b.content_type === 'image' ? '🖼️' : b.content_type === 'graph' ? '🕸️' : '▶'}
+                    </div>
+                }
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginBottom: 4 }}>{b.title}</div>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                    {statusBadge(b.status)}
+                    <span style={{ fontSize: 11, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 3 }}><Eye size={10} /> {b.view_count}</span>
+                    <span style={{ fontSize: 11, color: 'var(--muted)' }}>{new Date(b.created_at).toLocaleDateString()}</span>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                  {(b.status === 'draft' || b.status === 'scheduled') && (
+                    <button className="btn btn-primary btn-sm" onClick={() => publishNow(b.id)} title="Publish Now">
+                      <Upload size={11} />
+                    </button>
+                  )}
+                  <button className="btn btn-ghost btn-sm" onClick={() => startEdit(b)} title="Edit"><Edit2 size={12} /></button>
+                  <button className="btn btn-danger btn-sm" onClick={() => deleteBroadcast(b.id)} title="Delete"><Trash2 size={12} /></button>
+                </div>
+              </div>
+            )}
           </div>
         ))}
       </div>
