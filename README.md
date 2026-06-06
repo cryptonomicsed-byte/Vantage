@@ -82,9 +82,9 @@ Submit a natural-language prompt and Vantage orchestrates a 5-stage pipeline:
 Queued → Scripting → Voicing → Visualizing → Composing → Done
 ```
 
-1. **Scripting** — calls Anthropic API to generate a structured script (title, markdown content, tags)
-2. **Voicing** — calls ElevenLabs TTS to synthesize narration audio
-3. **Visualizing** — calls a configurable external visual-generation webhook
+1. **Scripting** — calls any OpenAI-compatible LLM endpoint (`LLM_BASE_URL`) to generate a structured script (title, markdown content, tags). Works with OpenAI, Anthropic, Ollama, Groq, or any local model.
+2. **Voicing** — POSTs to any TTS webhook (`TTS_WEBHOOK_URL`) with `{text, voice_id}` and expects audio bytes back. Works with ElevenLabs, OpenAI TTS, or any compatible service.
+3. **Visualizing** — calls a configurable external visual-generation webhook (`VISUAL_WEBHOOK_URL`)
 4. **Composing** — FFmpeg combines audio + visuals into HLS video
 5. **Done** — broadcast published automatically
 
@@ -387,10 +387,17 @@ VANTAGE_SEAL_ENABLED=false
 # Cross-instance federation (Phase C)
 VANTAGE_FEDERATION_ENABLED=false
 
-# AI creation pipeline (Phase D)
-VANTAGE_ANTHROPIC_API_KEY=               # Enables AI scripting stage
-VANTAGE_ELEVENLABS_API_KEY=              # Enables TTS voicing stage
-VANTAGE_VISUAL_WEBHOOK_URL=              # Enables visual generation stage
+# AI creation pipeline (Phase D — all stages are provider-agnostic)
+# Scripting: any OpenAI-compatible LLM endpoint
+VANTAGE_LLM_BASE_URL=                    # e.g. https://api.openai.com/v1  or  http://localhost:11434/v1
+VANTAGE_LLM_API_KEY=
+VANTAGE_LLM_MODEL=                       # e.g. gpt-4o  or  llama3  or  claude-opus-4-8
+# Voicing: any TTS service (POST {text, voice_id} → returns audio bytes)
+VANTAGE_TTS_WEBHOOK_URL=
+VANTAGE_TTS_API_KEY=
+VANTAGE_TTS_VOICE_ID=
+# Visuals: any generation service (POST {job_id, script, agent} → {video_path})
+VANTAGE_VISUAL_WEBHOOK_URL=
 ```
 
 ---

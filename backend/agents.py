@@ -511,21 +511,22 @@ async def _run_creation_pipeline(job_id: int, agent: dict) -> None:
     agent_dir = MEDIA_ROOT / agent["name"]
     agent_dir.mkdir(parents=True, exist_ok=True)
 
-    # Stage 1 — Scripting
+    # Stage 1 — Scripting (OpenAI-compatible: works with Anthropic, OpenAI, Ollama, Groq, etc.)
     script_data: dict = {"title": prompt[:200], "content": prompt, "tags": []}
     try:
         await _set_status("scripting")
-        if settings.ANTHROPIC_API_KEY:
+        if settings.LLM_BASE_URL and settings.LLM_API_KEY:
+            llm_url = settings.LLM_BASE_URL.rstrip("/") + "/chat/completions"
+            llm_model = settings.LLM_MODEL or "gpt-4o"
             async with httpx.AsyncClient(timeout=60) as hc:
                 resp = await hc.post(
-                    "https://api.anthropic.com/v1/messages",
+                    llm_url,
                     headers={
-                        "x-api-key": settings.ANTHROPIC_API_KEY,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
+                        "Authorization": f"Bearer {settings.LLM_API_KEY}",
+                        "Content-Type": "application/json",
                     },
                     json={
-                        "model": "claude-opus-4-8",
+                        "model": llm_model,
                         "max_tokens": 2048,
                         "messages": [{
                             "role": "user",
@@ -540,7 +541,7 @@ async def _run_creation_pipeline(job_id: int, agent: dict) -> None:
                     },
                 )
             if resp.status_code == 200:
-                raw = resp.json()["content"][0]["text"].strip()
+                raw = resp.json()["choices"][0]["message"]["content"].strip()
                 if raw.startswith("```"):
                     raw = raw.split("```")[1]
                     if raw.startswith("json"):
@@ -551,20 +552,21 @@ async def _run_creation_pipeline(job_id: int, agent: dict) -> None:
 
     await _set_status("scripting", script_json=_json2.dumps(script_data))
 
-    # Stage 2 — Voicing (TTS)
+    # Stage 2 — Voicing (generic TTS webhook — works with any provider)
+    # Expects: POST {text, voice_id} with Authorization header → audio bytes
     audio_path_str = ""
     try:
         await _set_status("voicing", script_json=_json2.dumps(script_data))
-        if settings.ELEVENLABS_API_KEY:
+        if settings.TTS_WEBHOOK_URL:
             tts_text = script_data.get("content", prompt)[:3000]
+            headers: dict = {"Content-Type": "application/json"}
+            if settings.TTS_API_KEY:
+                headers["Authorization"] = f"Bearer {settings.TTS_API_KEY}"
             async with httpx.AsyncClient(timeout=120) as hc:
                 resp = await hc.post(
-                    "https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM",
-                    headers={
-                        "xi-api-key": settings.ELEVENLABS_API_KEY,
-                        "Content-Type": "application/json",
-                    },
-                    json={"text": tts_text, "model_id": "eleven_monolingual_v1"},
+                    settings.TTS_WEBHOOK_URL,
+                    headers=headers,
+                    json={"text": tts_text, "voice_id": settings.TTS_VOICE_ID},
                 )
             if resp.status_code == 200:
                 audio_file = agent_dir / f"job_{job_id}_voice.mp3"
