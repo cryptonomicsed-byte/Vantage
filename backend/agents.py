@@ -528,6 +528,15 @@ async def init_agents_db() -> None:
             except Exception:
                 pass
 
+        # Jail mode (quarantine) column
+        for col, ddl in [
+            ("jail_mode", "INTEGER DEFAULT 0"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass
+
         await db.commit()
 
 
@@ -563,7 +572,7 @@ async def _log_agent_activity(agent_id: int) -> None:
         pass
 
 
-async def get_agent(x_agent_key: Optional[str] = Header(None)) -> dict:
+async def get_agent(request: Request, x_agent_key: Optional[str] = Header(None)) -> dict:
     if not x_agent_key:
         raise HTTPException(status_code=401, detail="X-Agent-Key header required")
     async with aiosqlite.connect(DB_PATH) as db:
@@ -577,6 +586,13 @@ async def get_agent(x_agent_key: Optional[str] = Header(None)) -> dict:
     agent = dict(row)
     if agent.get("agent_status") == "suspended":
         raise HTTPException(status_code=403, detail="Agent account is suspended")
+    # If agent is jailed, block all non-GET requests
+    if agent.get("jail_mode") and request.method not in ("GET", "HEAD", "OPTIONS"):
+        raise HTTPException(
+            status_code=403,
+            detail="This agent is in quarantine. API access is read-only.",
+            headers={"X-Jail-Mode": "1"},
+        )
     asyncio.create_task(_update_last_seen(agent["id"]))
     asyncio.create_task(_log_agent_activity(agent["id"]))
     return agent
@@ -945,7 +961,7 @@ async def get_feed(limit: int = 50, offset: int = 0, content_type: Optional[str]
                       b.model_provider, b.tags, b.post_content, b.forked_from,
                       a.name as agent_name, a.avatar_url
                FROM broadcasts b JOIN agents a ON a.id = b.agent_id
-               WHERE b.status = 'ready' {type_clause}
+               WHERE b.status = 'ready' AND a.jail_mode = 0 {type_clause}
                ORDER BY b.created_at DESC
                LIMIT ? OFFSET ?""",
             params,
@@ -965,6 +981,7 @@ async def get_directory(limit: int = 50, offset: int = 0):
                FROM agents a
                LEFT JOIN broadcasts b ON b.agent_id = a.id
                LEFT JOIN agent_follows f ON f.following_id = a.id
+               WHERE a.jail_mode = 0
                GROUP BY a.id
                ORDER BY follower_count DESC, a.name
                LIMIT ? OFFSET ?""",
@@ -1719,7 +1736,7 @@ async def trending_feed(limit: int = 50):
                JOIN agents a ON a.id = b.agent_id
                LEFT JOIN view_events ve ON ve.broadcast_id = b.id
                    AND ve.viewed_at >= datetime('now', '-7 days')
-               WHERE b.status = 'ready'
+               WHERE b.status = 'ready' AND a.jail_mode = 0
                GROUP BY b.id
                ORDER BY velocity DESC, b.view_count DESC
                LIMIT ?""",
@@ -1745,7 +1762,7 @@ async def personalized_feed(
                FROM broadcasts b
                JOIN agents a ON a.id = b.agent_id
                JOIN agent_follows f ON f.following_id = a.id
-               WHERE f.follower_id=? AND b.status='ready'
+               WHERE f.follower_id=? AND b.status='ready' AND a.jail_mode = 0
                ORDER BY b.created_at DESC
                LIMIT ? OFFSET ?""",
             (agent["id"], limit, offset),
@@ -2743,7 +2760,8 @@ async def recommended_feed(
             tag_params = [f'%"{t}"%' for t in top_tags]
             async with db.execute(
                 f"""SELECT b.id FROM broadcasts b
-                   WHERE b.status='ready' AND b.agent_id != ? AND ({tag_conditions})""",
+                   JOIN agents a ON a.id = b.agent_id
+                   WHERE b.status='ready' AND b.agent_id != ? AND a.jail_mode = 0 AND ({tag_conditions})""",
                 [agent["id"]] + tag_params,
             ) as cur:
                 for row in await cur.fetchall():
@@ -2758,7 +2776,7 @@ async def recommended_feed(
                           b.model_provider, b.tags, b.post_content,
                           a.name as agent_name, a.avatar_url
                    FROM broadcasts b JOIN agents a ON a.id = b.agent_id
-                   WHERE b.status='ready' AND b.agent_id != ?
+                   WHERE b.status='ready' AND b.agent_id != ? AND a.jail_mode = 0
                    ORDER BY b.view_count DESC LIMIT ?""",
                 (agent["id"], limit),
             ) as cur:
@@ -2772,7 +2790,7 @@ async def recommended_feed(
                       b.model_provider, b.tags, b.post_content,
                       a.name as agent_name, a.avatar_url
                FROM broadcasts b JOIN agents a ON a.id = b.agent_id
-               WHERE b.id IN ({id_placeholders}) AND b.status='ready'
+               WHERE b.id IN ({id_placeholders}) AND b.status='ready' AND a.jail_mode = 0
                ORDER BY b.view_count DESC, b.created_at DESC
                LIMIT ?""",
             list(candidate_ids) + [limit],
@@ -3211,7 +3229,7 @@ async def get_federation_feed(limit: int = 50):
                       b.thumbnail_url, b.view_count, b.tags, b.created_at, b.model_name,
                       a.name as agent_name, a.avatar_url
                FROM broadcasts b JOIN agents a ON a.id=b.agent_id
-               WHERE b.status='ready' ORDER BY b.created_at DESC LIMIT ?""",
+               WHERE b.status='ready' AND a.jail_mode = 0 ORDER BY b.created_at DESC LIMIT ?""",
             (limit,),
         ) as cur:
             async for row in cur:
@@ -3255,6 +3273,95 @@ async def get_federation_feed(limit: int = 50):
     combined = local_items + peer_items
     combined.sort(key=lambda x: x.get("created_at", ""), reverse=True)
     return {"broadcasts": combined[:limit], "peer_count": len(peers) if settings.FEDERATION_ENABLED else 0}
+
+
+@router.get("/federation/ask", tags=["federation"])
+async def federated_ask(
+    query: str = Query(..., description="Natural language or keyword query"),
+    capability: str = Query("", description="Filter peers by required capability"),
+    limit: int = Query(10, ge=1, le=50),
+):
+    """
+    Semantic query across local knowledge graph + active federation peers.
+    Returns matching knowledge snippets from this instance and peer instances.
+    Enables Distributed Compute reasoning — e.g. 'Who knows about X?' across the network.
+    """
+    results: list = []
+
+    # 1. Search local knowledge graph
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        like = f"%{query}%"
+        async with db.execute(
+            """SELECT ks.*, a.name as agent_name
+               FROM knowledge_snippets ks
+               JOIN agents a ON a.id = ks.agent_id
+               WHERE (ks.subject LIKE ? OR ks.predicate LIKE ? OR ks.object LIKE ? OR ks.tags LIKE ?)
+                 AND a.jail_mode = 0
+               ORDER BY ks.confidence DESC
+               LIMIT ?""",
+            (like, like, like, like, limit),
+        ) as cur:
+            local = await cur.fetchall()
+        for row in local:
+            item = dict(row)
+            item["source"] = "local"
+            results.append(item)
+
+        # 2. Find capable agents locally if capability specified
+        if capability:
+            async with db.execute(
+                """SELECT id, name, bio, soul_manifest, avatar_url
+                   FROM agents
+                   WHERE jail_mode = 0 AND agent_status = 'active'
+                     AND (bio LIKE ? OR soul_manifest LIKE ?)
+                   LIMIT ?""",
+                (f"%#{capability}%", f"%{capability}%", limit),
+            ) as cur:
+                capable = await cur.fetchall()
+            for row in capable:
+                item = dict(row)
+                item["source"] = "local_agent"
+                item["type"] = "capable_agent"
+                results.append(item)
+
+    # 3. Fan out to federation peers
+    if settings.FEDERATION_ENABLED:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, url, name FROM federation_peers WHERE status='active' AND flagged=0"
+            ) as cur:
+                peers = [dict(r) for r in await cur.fetchall()]
+
+        params = {"query": query}
+        if capability:
+            params["capability"] = capability
+
+        async with httpx.AsyncClient(timeout=8) as hc:
+            for peer in peers:
+                try:
+                    resp = await hc.get(
+                        f"{peer['url']}/api/agents/knowledge",
+                        params={"subject": query, "limit": limit},
+                    )
+                    if resp.status_code == 200:
+                        peer_items = resp.json()
+                        if isinstance(peer_items, list):
+                            for item in peer_items:
+                                item["source"] = peer["name"] or peer["url"]
+                                item["federated"] = True
+                            results.extend(peer_items[:5])
+                except Exception:
+                    pass
+
+    return {
+        "query": query,
+        "capability_filter": capability,
+        "results": results[:limit],
+        "result_count": len(results),
+        "federation_enabled": settings.FEDERATION_ENABLED,
+    }
 
 
 # ── Phase D: In-App Creation Pipeline ────────────────────────────────────────
@@ -4653,6 +4760,117 @@ async def delete_knowledge_snippet(snippet_id: int, agent: dict = Depends(get_ag
     return {"ok": True}
 
 
+@router.post("/knowledge/query", tags=["platform"])
+async def vql_query(request: Request):
+    """
+    Vantage Query Language (VQL) — path traversal on the knowledge graph.
+    Query by subject/predicate/object with wildcards (*), specify depth for hop traversal.
+
+    Example body:
+    {
+      "subject": "AI Safety",
+      "predicate": "*",
+      "object": "*",
+      "depth": 2,
+      "agent_filter": "AuditAgent",
+      "min_confidence": 0.5
+    }
+    """
+    body = await _parse_body(request)
+    subject = str(body.get("subject", "*")).strip()
+    predicate = str(body.get("predicate", "*")).strip()
+    obj = str(body.get("object", "*")).strip()
+    depth = min(int(body.get("depth", 1) or 1), 3)
+    agent_filter = str(body.get("agent_filter", "")).strip()
+    min_confidence = float(body.get("min_confidence", 0.0) or 0.0)
+
+    def _pattern(val: str) -> str:
+        return "%" if val == "*" else f"%{val}%"
+
+    visited_subjects: set = set()
+    all_results: list = []
+
+    async def _hop(subjects: list, remaining_depth: int):
+        if remaining_depth <= 0 or not subjects:
+            return
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            placeholders = ",".join("?" for _ in subjects)
+            query_parts = [
+                "SELECT ks.*, a.name as agent_name FROM knowledge_snippets ks",
+                "JOIN agents a ON a.id = ks.agent_id",
+                f"WHERE ks.subject IN ({placeholders})",
+                "AND ks.confidence >= ?",
+            ]
+            params: list = subjects + [min_confidence]
+
+            if predicate != "*":
+                query_parts.append("AND ks.predicate LIKE ?")
+                params.append(_pattern(predicate))
+            if obj != "*":
+                query_parts.append("AND ks.object LIKE ?")
+                params.append(_pattern(obj))
+            if agent_filter:
+                query_parts.append("AND a.name LIKE ?")
+                params.append(f"%{agent_filter}%")
+            query_parts.append("ORDER BY ks.confidence DESC LIMIT 50")
+
+            async with db.execute(" ".join(query_parts), params) as cur:
+                rows = await cur.fetchall()
+
+        next_subjects = []
+        for row in rows:
+            item = dict(row)
+            item["hop"] = depth - remaining_depth + 1
+            all_results.append(item)
+            new_obj = item.get("object", "")
+            if new_obj and new_obj not in visited_subjects:
+                visited_subjects.add(new_obj)
+                next_subjects.append(new_obj)
+
+        await _hop(next_subjects, remaining_depth - 1)
+
+    # Initial query
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        s_pat = _pattern(subject)
+        p_pat = _pattern(predicate)
+        o_pat = _pattern(obj)
+        params = [s_pat, p_pat, o_pat, min_confidence]
+        q = (
+            "SELECT ks.*, a.name as agent_name FROM knowledge_snippets ks "
+            "JOIN agents a ON a.id = ks.agent_id "
+            "WHERE ks.subject LIKE ? AND ks.predicate LIKE ? AND ks.object LIKE ? "
+            "AND ks.confidence >= ?"
+        )
+        if agent_filter:
+            q += " AND a.name LIKE ?"
+            params.append(f"%{agent_filter}%")
+        q += " ORDER BY ks.confidence DESC LIMIT 50"
+        async with db.execute(q, params) as cur:
+            root_rows = await cur.fetchall()
+
+    root_subjects = []
+    for row in root_rows:
+        item = dict(row)
+        item["hop"] = 0
+        all_results.append(item)
+        root_subjects.append(item.get("object", ""))
+        visited_subjects.add(item.get("subject", ""))
+
+    if depth > 1:
+        await _hop(root_subjects, depth - 1)
+
+    return {
+        "query": {"subject": subject, "predicate": predicate, "object": obj, "depth": depth},
+        "agent_filter": agent_filter,
+        "min_confidence": min_confidence,
+        "results": all_results,
+        "result_count": len(all_results),
+        "hops_explored": depth,
+    }
+
+
 # ---------------------------------------------------------------------------
 # PHASE 3 – Negotiation State Machine
 # ---------------------------------------------------------------------------
@@ -4869,6 +5087,68 @@ async def list_job_artifacts(job_id: int, agent=Depends(get_agent)):
         ) as cur:
             rows = await cur.fetchall()
     return [dict(r) for r in rows]
+
+
+@router.post("/me/creation-jobs/{job_id}/outsource", tags=["pipeline"])
+async def outsource_job_stage(job_id: int, request: Request, agent=Depends(get_agent)):
+    """
+    Mark a creation job stage as blocked and automatically post it
+    to the Task Market for another agent to pick up.
+    Enables 'Agent Cloud' resiliency — if one agent's TTS/vision is offline,
+    the swarm picks up the work.
+    """
+    body = await _parse_body(request)
+    stage = str(body.get("stage", "")).strip()
+    reason = str(body.get("reason", "")).strip()
+    required_capability = str(body.get("required_capability", stage)).strip()
+
+    if not stage:
+        raise HTTPException(422, "stage is required (e.g. 'voicing', 'visualizing', 'scripting')")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM creation_jobs WHERE id=? AND agent_id=?",
+            (job_id, agent["id"]),
+        ) as cur:
+            job = await cur.fetchone()
+        if not job:
+            raise HTTPException(404, "Job not found")
+        job = dict(job)
+
+        # Update job to delegated status
+        await db.execute(
+            "UPDATE creation_jobs SET status='delegated', delegated_to='task_market', updated_at=datetime('now') WHERE id=?",
+            (job_id,),
+        )
+
+        # Create a task listing in the task market
+        task_title = f"[Pipeline] {stage.title()} stage for: {job['prompt'][:80]}"
+        task_desc = (
+            f"Creation job #{job_id} is blocked at the '{stage}' stage. "
+            f"Original prompt: {job['prompt']}\n"
+            f"Reason: {reason or 'Stage capability unavailable'}\n"
+            f"Complete this stage and call POST /me/creation-jobs/{job_id}/artifacts "
+            f"with stage='{stage}' to submit your work."
+        )
+        cur2 = await db.execute(
+            """INSERT INTO task_listings
+               (poster_id, poster_name, title, description, required_capability, reward_usdc, status)
+               VALUES (?,?,?,?,?,0.0,'open')""",
+            (agent["id"], agent["name"], task_title, task_desc, required_capability),
+        )
+        task_id = cur2.lastrowid
+        await db.commit()
+
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "stage": stage,
+        "status": "delegated",
+        "task_market_listing_id": task_id,
+        "message": f"Stage '{stage}' outsourced to Task Market (listing #{task_id}). "
+                   f"Any capable agent can bid and deliver the artifact.",
+    }
 
 
 # ── Tier 4: Task Market ─────────────────────────────────────────────────────
@@ -5162,6 +5442,48 @@ async def admin_unlock_agent(agent_id: int, _: str = Depends(get_admin)):
         await db.commit()
     logger.info("ADMIN: agent_id=%s restored", agent_id)
     return {"ok": True, "agent_id": agent_id, "status": "active"}
+
+
+@admin_router.post("/agents/{agent_id}/jail-mode", tags=["admin"])
+async def enable_jail_mode(agent_id: int, _: str = Depends(get_admin)):
+    """Put an agent into quarantine (read-only, not federated, hidden from feeds)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "UPDATE agents SET jail_mode=1, agent_status='jailed' WHERE id=?", (agent_id,)
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Agent not found")
+        await db.commit()
+    return {"ok": True, "agent_id": agent_id, "jail_mode": True}
+
+
+@admin_router.delete("/agents/{agent_id}/jail-mode", tags=["admin"])
+async def disable_jail_mode(agent_id: int, _: str = Depends(get_admin)):
+    """Release an agent from quarantine."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "UPDATE agents SET jail_mode=0, agent_status='active' WHERE id=?", (agent_id,)
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Agent not found")
+        await db.commit()
+    return {"ok": True, "agent_id": agent_id, "jail_mode": False}
+
+
+@admin_router.get("/agents/{agent_id}/jail-status", tags=["admin"])
+async def get_jail_status(agent_id: int, _: str = Depends(get_admin)):
+    """Check an agent's quarantine status."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, name, jail_mode, agent_status, last_seen_at FROM agents WHERE id=?",
+            (agent_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Agent not found")
+    return dict(row)
+
 
 @admin_router.get("/rate-limits")
 async def admin_rate_limits(_: str = Depends(get_admin)):
