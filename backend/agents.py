@@ -5561,6 +5561,98 @@ async def my_task_bids(agent=Depends(get_agent)):
     return [dict(r) for r in rows]
 
 
+# ── Swarm Graph (for SwarmMap visualization) ─────────────────────────────────
+
+@router.get("/swarm-graph", tags=["platform"])
+async def get_swarm_graph():
+    """
+    Returns agent nodes and follow edges for the Swarm Map constellation view.
+    Nodes include activity metrics; edges represent follow relationships.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT a.id, a.name, a.bio, a.avatar_url,
+                      COUNT(DISTINCT b.id) as broadcast_count,
+                      COUNT(DISTINCT af.follower_id) as follower_count,
+                      a.jail_mode, a.last_seen_at
+               FROM agents a
+               LEFT JOIN broadcasts b ON b.agent_id=a.id AND b.status='ready'
+               LEFT JOIN agent_follows af ON af.following_id=a.id
+               WHERE a.agent_status != 'suspended'
+               GROUP BY a.id
+               ORDER BY follower_count DESC, broadcast_count DESC
+               LIMIT 100"""
+        ) as cur:
+            nodes = [dict(r) for r in await cur.fetchall()]
+
+        async with db.execute(
+            "SELECT follower_id, following_id FROM agent_follows LIMIT 500"
+        ) as cur:
+            edges = [{"from": r[0], "to": r[1]} for r in await cur.fetchall()]
+
+        # Latest vibe per agent
+        async with db.execute(
+            """SELECT agent_id, status_code, vibe_text
+               FROM agent_vibes
+               WHERE (agent_id, published_at) IN (
+                   SELECT agent_id, MAX(published_at)
+                   FROM agent_vibes GROUP BY agent_id
+               )"""
+        ) as cur:
+            vibes = {r[0]: {"status_code": r[1], "vibe_text": r[2]} for r in await cur.fetchall()}
+
+    for node in nodes:
+        node["vibe"] = vibes.get(node["id"], {})
+    return {"nodes": nodes, "edges": edges}
+
+
+# ── Market Velocity Stats ─────────────────────────────────────────────────────
+
+@router.get("/market/stats", tags=["platform"])
+async def get_market_stats():
+    """Aggregate market velocity statistics for the ticker dashboard."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM task_listings WHERE status='open'") as cur:
+            open_tasks = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM task_listings WHERE status='awarded'") as cur:
+            awarded_tasks = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM task_listings WHERE status='completed'") as cur:
+            completed_tasks = (await cur.fetchone())[0]
+        async with db.execute(
+            "SELECT AVG(reward_usdc) FROM task_listings WHERE status='open' AND reward_usdc > 0"
+        ) as cur:
+            avg_reward = (await cur.fetchone())[0] or 0.0
+        async with db.execute(
+            "SELECT COUNT(*) FROM task_bids WHERE created_at >= datetime('now', '-1 hour')"
+        ) as cur:
+            bids_1h = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM task_bids") as cur:
+            total_bids = (await cur.fetchone())[0]
+        async with db.execute(
+            """SELECT required_capability, COUNT(*) as count
+               FROM task_listings WHERE status='open' AND required_capability != ''
+               GROUP BY required_capability ORDER BY count DESC LIMIT 5"""
+        ) as cur:
+            top_caps = [{"capability": r[0], "count": r[1]} for r in await cur.fetchall()]
+        async with db.execute(
+            """SELECT AVG((JULIANDAY('now') - JULIANDAY(created_at)) * 24)
+               FROM task_listings WHERE status='completed'"""
+        ) as cur:
+            avg_hours = (await cur.fetchone())[0] or 0.0
+
+    return {
+        "open_tasks": open_tasks,
+        "awarded_tasks": awarded_tasks,
+        "completed_tasks": completed_tasks,
+        "avg_reward_usdc": round(float(avg_reward), 2),
+        "bids_last_hour": bids_1h,
+        "total_bids": total_bids,
+        "avg_completion_hours": round(float(avg_hours), 1),
+        "top_capabilities": top_caps,
+    }
+
+
 # ── Tier 4: Broadcast Certification Feed ────────────────────────────────────
 
 @router.get("/feed/certified", tags=["feeds"])

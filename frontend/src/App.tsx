@@ -1,6 +1,6 @@
 import React, { Component, ReactNode, useEffect, useRef, useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
-import { Users, LayoutDashboard, Radio, Search, BarChart2, Mail, SearchIcon, BookOpen, Sparkles, Trophy, GitBranch, Shield } from 'lucide-react'
+import { Users, LayoutDashboard, Radio, Search, BarChart2, Mail, SearchIcon, BookOpen, Sparkles, Trophy, GitBranch, Shield, Network, TrendingUp, Globe } from 'lucide-react'
 import BroadcastFeed from './components/BroadcastFeed'
 import AgentDirectory from './components/AgentDirectory'
 import AgentProfile from './components/AgentProfile'
@@ -15,6 +15,9 @@ import CreationStudio from './components/CreationStudio'
 import Leaderboard from './components/Leaderboard'
 import WorkflowCanvas from './components/WorkflowCanvas'
 import AresSOC from './components/AresSOC'
+import SwarmMap from './components/SwarmMap'
+import MarketVelocity from './components/MarketVelocity'
+import KnowledgeExplorer from './components/KnowledgeExplorer'
 
 /* ── Particles ────────────────────────────────────────────────────────────── */
 function Particles() {
@@ -134,6 +137,15 @@ function Layout({ children, searchQuery, onSearchChange }: {
         <NavLink to="/pipeline" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
           <GitBranch size={15} /> <span>Pipeline</span>
         </NavLink>
+        <NavLink to="/swarm" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
+          <Globe size={15} /> <span>Swarm</span>
+        </NavLink>
+        <NavLink to="/market" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
+          <TrendingUp size={15} /> <span>Market</span>
+        </NavLink>
+        <NavLink to="/knowledge" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
+          <Network size={15} /> <span>Knowledge</span>
+        </NavLink>
         <NotificationPanel />
 
         <div className="sidebar-divider" />
@@ -175,6 +187,12 @@ function AresPage() {
   return <AresSOC />
 }
 
+/* ── Market velocity page ─────────────────────────────────────────────────── */
+function MarketPage() {
+  const [apiKey] = useState(() => localStorage.getItem('vantage_api_key') || '')
+  return <MarketVelocity apiKey={apiKey || undefined} />
+}
+
 /* ── App ──────────────────────────────────────────────────────────────────── */
 export default function App() {
   const [searchQuery, setSearchQuery] = useState('')
@@ -200,6 +218,9 @@ export default function App() {
               <Route path="/leaderboard" element={<ErrorBoundary><Leaderboard /></ErrorBoundary>} />
               <Route path="/create" element={<ErrorBoundary><CreationStudioPage /></ErrorBoundary>} />
               <Route path="/pipeline" element={<ErrorBoundary><PipelinePage /></ErrorBoundary>} />
+              <Route path="/swarm" element={<ErrorBoundary><SwarmMap /></ErrorBoundary>} />
+              <Route path="/market" element={<ErrorBoundary><MarketPage /></ErrorBoundary>} />
+              <Route path="/knowledge" element={<ErrorBoundary><KnowledgeExplorer /></ErrorBoundary>} />
               <Route path="*" element={
                 <div className="not-found">
                   <h1>404</h1><h2>Channel Not Found</h2>
