@@ -12,6 +12,8 @@ interface Broadcast {
   created_at: string
   tags?: string
   series_id?: number
+  is_sealed?: number
+  seal_policy?: string
 }
 
 interface Series {
@@ -96,6 +98,10 @@ export default function AgentDashboard() {
 
   // Broadcasts list filter
   const [broadcastFilter, setBroadcastFilter] = useState<'all' | 'draft' | 'scheduled'>('all')
+
+  // Seal / access control
+  const [sealPolicy, setSealPolicy] = useState<'none' | 'followers-only' | 'private'>('none')
+  const [sealing, setSealing] = useState(false)
 
   // Edit broadcast
   const [editingId, setEditingId] = useState<number | null>(null)
@@ -233,6 +239,15 @@ export default function AgentDashboard() {
     if (pubThumbnail) fd.append('thumbnail', pubThumbnail)
     const r = await fetch('/api/agents/posts/text', { method: 'POST', headers: headers(), body: fd })
     if (!r.ok) { const d = await r.json(); setError(d.detail || 'Failed'); }
+    if (r.ok && sealPolicy !== 'none') {
+      const d = await r.json()
+      if (d.broadcast_id) {
+        const sealFd = new FormData()
+        sealFd.append('policy', sealPolicy)
+        await fetch(`/api/agents/broadcasts/${d.broadcast_id}/seal`, { method: 'POST', headers: headers(), body: sealFd })
+        setSealPolicy('none')
+      }
+    }
     setPubLoading(false); setPubTitle(''); setTextContent(''); setPubDesc(''); setPubScheduleAt(''); setPubThumbnail(null)
     if (thumbInputRef.current) thumbInputRef.current.value = ''
     await refreshBroadcasts()
@@ -318,6 +333,15 @@ export default function AgentDashboard() {
     if (pubThumbnail) fd.append('thumbnail', pubThumbnail)
     const r = await fetch('/api/agents/posts/graph', { method: 'POST', headers: headers(), body: fd })
     if (!r.ok) { const d = await r.json(); setError(d.detail || 'Failed') }
+    if (r.ok && sealPolicy !== 'none') {
+      const d = await r.json()
+      if (d.broadcast_id) {
+        const sealFd = new FormData()
+        sealFd.append('policy', sealPolicy)
+        await fetch(`/api/agents/broadcasts/${d.broadcast_id}/seal`, { method: 'POST', headers: headers(), body: sealFd })
+        setSealPolicy('none')
+      }
+    }
     setPubLoading(false); setPubTitle(''); setGraphJson(''); setPubDesc(''); setPubScheduleAt(''); setPubThumbnail(null)
     if (thumbInputRef.current) thumbInputRef.current.value = ''
     await refreshBroadcasts()
@@ -397,6 +421,20 @@ export default function AgentDashboard() {
     if (!confirm('Delete this broadcast? This cannot be undone.')) return
     await fetch(`/api/agents/me/broadcasts/${id}`, { method: 'DELETE', headers: headers() })
     setBroadcasts(prev => prev.filter(b => b.id !== id))
+  }
+
+  async function sealBroadcast(id: number, policy: string) {
+    setSealing(true)
+    const fd = new FormData()
+    fd.append('policy', policy)
+    await fetch(`/api/agents/broadcasts/${id}/seal`, { method: 'POST', headers: headers(), body: fd })
+    setSealing(false)
+    await refreshBroadcasts()
+  }
+
+  async function unsealBroadcast(id: number) {
+    await fetch(`/api/agents/broadcasts/${id}/seal`, { method: 'DELETE', headers: headers() })
+    await refreshBroadcasts()
   }
 
   async function createSeries() {
@@ -743,6 +781,31 @@ export default function AgentDashboard() {
           )}
         </details>
 
+        {/* Access Control */}
+        <div className="form-group" style={{ marginTop: 12 }}>
+          <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            🔐 Access Control
+          </label>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {(['none', 'followers-only', 'private'] as const).map(p => (
+              <button
+                key={p}
+                type="button"
+                className={`btn btn-sm ${sealPolicy === p ? 'btn-primary' : 'btn-ghost'}`}
+                onClick={() => setSealPolicy(p)}
+                style={{ fontSize: 12 }}
+              >
+                {p === 'none' ? '🌐 Public' : p === 'followers-only' ? '⭐ Followers Only' : '🔒 Private'}
+              </button>
+            ))}
+          </div>
+          {sealPolicy !== 'none' && (
+            <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 6 }}>
+              Content will be Seal-encrypted with <strong>{sealPolicy}</strong> access policy after publishing.
+            </div>
+          )}
+        </div>
+
         {pubProgress > 0 && pubProgress < 100 && (
           <div className="progress-bar-wrap"><div className="progress-bar-fill" style={{ width: `${pubProgress}%` }} /></div>
         )}
@@ -857,6 +920,7 @@ export default function AgentDashboard() {
                   <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginBottom: 4 }}>{b.title}</div>
                   <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                     {statusBadge(b.status)}
+                    {b.is_sealed ? <span className="badge" style={{ background: 'rgba(138,75,255,0.15)', color: '#8a4bff', borderColor: 'rgba(138,75,255,0.3)', fontSize: 10 }}>🔒 Sealed</span> : null}
                     <span style={{ fontSize: 11, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 3 }}><Eye size={10} /> {b.view_count}</span>
                     <span style={{ fontSize: 11, color: 'var(--muted)' }}>{new Date(b.created_at).toLocaleDateString()}</span>
                   </div>
@@ -868,6 +932,16 @@ export default function AgentDashboard() {
                     </button>
                   )}
                   <button className="btn btn-ghost btn-sm" onClick={() => startEdit(b)} title="Edit"><Edit2 size={12} /></button>
+                  {b.status === 'ready' && (
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => b.is_sealed ? unsealBroadcast(b.id) : sealBroadcast(b.id, 'followers-only')}
+                      title={b.is_sealed ? 'Remove seal' : 'Seal (followers-only)'}
+                      disabled={sealing}
+                    >
+                      {b.is_sealed ? '🔓' : '🔒'}
+                    </button>
+                  )}
                   <button className="btn btn-danger btn-sm" onClick={() => deleteBroadcast(b.id)} title="Delete"><Trash2 size={12} /></button>
                 </div>
               </div>

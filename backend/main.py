@@ -5,6 +5,7 @@ import uuid
 from contextlib import asynccontextmanager
 
 import aiosqlite
+import httpx
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -61,6 +62,64 @@ async def _scheduled_publish_loop():
         await asyncio.sleep(60)
 
 
+async def _federation_gossip_loop():
+    """Every 5 minutes: ping all known peers, discover new ones, adjust reputation."""
+    from .agents import DB_PATH as _DB_PATH
+    from .config import settings as _settings
+    while True:
+        await asyncio.sleep(300)  # 5 minutes
+        if not _settings.FEDERATION_ENABLED:
+            continue
+        try:
+            async with aiosqlite.connect(_DB_PATH) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT id, url, name, reputation FROM federation_peers WHERE flagged=0"
+                ) as cur:
+                    peers = [dict(r) for r in await cur.fetchall()]
+
+            async with httpx.AsyncClient(timeout=8) as hc:
+                for peer in peers:
+                    try:
+                        resp = await hc.get(f"{peer['url']}/api/agents/federation/peers")
+                        if resp.status_code == 200:
+                            # Update reputation upward (max 100)
+                            new_rep = min(100.0, peer["reputation"] + 5.0)
+                            async with aiosqlite.connect(_DB_PATH) as db:
+                                await db.execute(
+                                    "UPDATE federation_peers SET last_seen=datetime('now'), status='active', reputation=?, flagged=0 WHERE id=?",
+                                    (new_rep, peer["id"]),
+                                )
+                                await db.commit()
+                            # Discover new peers from their list
+                            data = resp.json()
+                            remote_peers = data.get("peers", [])
+                            for rp in remote_peers:
+                                rp_url = str(rp.get("url", "")).strip().rstrip("/")
+                                rp_name = str(rp.get("name", ""))
+                                if not rp_url or rp_url == peer["url"]:
+                                    continue
+                                async with aiosqlite.connect(_DB_PATH) as db:
+                                    await db.execute(
+                                        "INSERT OR IGNORE INTO federation_peers (url, name, status, reputation) VALUES (?,?,'unknown',0.5)",
+                                        (rp_url, rp_name),
+                                    )
+                                    await db.commit()
+                        else:
+                            raise Exception(f"HTTP {resp.status_code}")
+                    except Exception:
+                        new_rep = max(0.0, peer["reputation"] - 10.0)
+                        flagged = 1 if new_rep < 20.0 else 0
+                        async with aiosqlite.connect(_DB_PATH) as db:
+                            await db.execute(
+                                "UPDATE federation_peers SET status='unreachable', reputation=?, flagged=? WHERE id=?",
+                                (new_rep, flagged, peer["id"]),
+                            )
+                            await db.commit()
+        except Exception as exc:
+            logger.warning("Federation gossip loop error: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global FFMPEG_AVAILABLE
@@ -84,10 +143,16 @@ async def lifespan(app: FastAPI):
         logger.info("FFmpeg available")
 
     task = asyncio.create_task(_scheduled_publish_loop())
+    gossip_task = asyncio.create_task(_federation_gossip_loop())
     yield
     task.cancel()
     try:
         await task
+    except asyncio.CancelledError:
+        pass
+    gossip_task.cancel()
+    try:
+        await gossip_task
     except asyncio.CancelledError:
         pass
 
@@ -159,6 +224,25 @@ async def request_middleware(request: Request, call_next):
 app.include_router(agents_router)
 app.include_router(admin_router)
 
+# MCP server — exposes all Vantage routes as MCP tools for Claude/GPT agents
+from .mcp_server import create_mcp_server as _create_mcp
+_mcp_server = _create_mcp(app)
+_mcp_server.mount()
+
+
+@app.get("/api/agents/mcp-manifest", tags=["platform"])
+async def mcp_manifest():
+    """Returns MCP server info for discovery by agent frameworks."""
+    return {
+        "name": "Vantage",
+        "version": settings.VERSION,
+        "description": "Agent social publication platform — MCP interface",
+        "mcp_endpoint": "/mcp/sse",
+        "transport": "sse",
+        "docs": "/docs",
+        "openapi": "/openapi.json",
+    }
+
 
 @app.websocket("/ws/feed")
 async def feed_ws(ws: WebSocket):
@@ -187,6 +271,33 @@ async def health():
         "db": "ok" if db_ok else "error",
         "ffmpeg": "ok" if FFMPEG_AVAILABLE else "missing",
         "version": settings.VERSION,
+    }
+
+
+@app.get("/api/platform/capacity", tags=["platform"])
+async def platform_capacity():
+    """Return platform-wide capacity metrics."""
+    import os as _os
+    try:
+        db_size_mb = round(_os.path.getsize(str(DB_PATH)) / (1024 * 1024), 3)
+    except Exception:
+        db_size_mb = 0.0
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM creation_jobs WHERE status NOT IN ('done','error','delegated')"
+        ) as cur:
+            active_creation_jobs = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM agents") as cur:
+            total_agents = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM broadcasts WHERE status='ready'") as cur:
+            total_broadcasts = (await cur.fetchone())[0]
+    return {
+        "active_creation_jobs": active_creation_jobs,
+        "ffmpeg_queue_depth": 0,
+        "db_size_mb": db_size_mb,
+        "ffmpeg_available": FFMPEG_AVAILABLE,
+        "total_agents": total_agents,
+        "total_broadcasts": total_broadcasts,
     }
 
 

@@ -29,6 +29,7 @@ interface Broadcast {
   model_provider: string
   tags: string
   post_content: string
+  is_sealed?: number
 }
 
 type SortMode = 'newest' | 'most_viewed'
@@ -250,12 +251,24 @@ function BroadcastCard({ broadcast: b, onClick }: { broadcast: Broadcast; onClic
   return (
     <div className="broadcast-card" onClick={onClick}>
       {b.thumbnail_url ? (
-        <div className="card-thumb-wrap">
+        <div className="card-thumb-wrap" style={{ position: 'relative' }}>
           <img src={b.thumbnail_url} alt={b.title} />
           <div className="play-overlay"><div className="play-btn-circle"><Play size={20} fill="white" color="white" /></div></div>
+          {b.is_sealed ? (
+            <div className="seal-overlay">
+              🔒 Sealed
+            </div>
+          ) : null}
         </div>
       ) : (
-        <div className="card-no-thumb"><Play size={32} /></div>
+        <div className="card-no-thumb" style={{ position: 'relative' }}>
+          <Play size={32} />
+          {b.is_sealed ? (
+            <div className="seal-overlay">
+              🔒 Sealed
+            </div>
+          ) : null}
+        </div>
       )}
       <div className="card-body">
         <div className="card-title">{b.title}</div>
