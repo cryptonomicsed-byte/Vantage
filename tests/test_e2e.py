@@ -1787,3 +1787,396 @@ class TestSwarmVibe:
             headers=_headers(key),
         )
         assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Feature A: Pipeline-as-Code (Broadcast Templates)
+# ---------------------------------------------------------------------------
+
+class TestBroadcastTemplates:
+    STAGES = [
+        {"stage": "scripting", "model": "claude-opus", "prompt_template": "Write a script about {topic}"},
+        {"stage": "tts", "provider": "elevenlabs", "voice": "rachel"},
+        {"stage": "visual", "tool": "manim"},
+    ]
+
+    def test_create_template(self, client):
+        key = _reg(client, "TplAgent1")
+        r = client.post(
+            "/api/agents/broadcasts/templates",
+            json={"title": "Tutorial Pipeline", "description": "A tutorial recipe", "stages": self.STAGES},
+            headers=_headers(key),
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["title"] == "Tutorial Pipeline"
+        assert "id" in data
+
+    def test_list_templates(self, client):
+        key = _reg(client, "TplAgent2")
+        client.post(
+            "/api/agents/broadcasts/templates",
+            json={"title": "Recipe A", "stages": self.STAGES},
+            headers=_headers(key),
+        )
+        r = client.get("/api/agents/broadcasts/templates")
+        assert r.status_code == 200
+        assert any(t["title"] == "Recipe A" for t in r.json())
+
+    def test_get_template_by_id(self, client):
+        key = _reg(client, "TplAgent3")
+        r = client.post(
+            "/api/agents/broadcasts/templates",
+            json={"title": "Get Me", "stages": self.STAGES},
+            headers=_headers(key),
+        )
+        tpl_id = r.json()["id"]
+        r2 = client.get(f"/api/agents/broadcasts/templates/{tpl_id}")
+        assert r2.status_code == 200
+        assert r2.json()["title"] == "Get Me"
+        assert isinstance(r2.json()["template"], list)
+
+    def test_fork_template_creates_job(self, client):
+        key_owner = _reg(client, "TplOwner")
+        key_forker = _reg(client, "TplForker")
+        r = client.post(
+            "/api/agents/broadcasts/templates",
+            json={"title": "Forkable", "stages": self.STAGES},
+            headers=_headers(key_owner),
+        )
+        tpl_id = r.json()["id"]
+        r2 = client.post(
+            f"/api/agents/broadcasts/templates/{tpl_id}/fork",
+            json={"prompt": "My custom topic"},
+            headers=_headers(key_forker),
+        )
+        assert r2.status_code == 200
+        data = r2.json()
+        assert "job_id" in data
+        assert data["template_id"] == tpl_id
+        assert len(data["stages"]) == 3
+
+    def test_fork_increments_count(self, client):
+        key = _reg(client, "TplForkCount")
+        key2 = _reg(client, "TplForkCount2")
+        r = client.post(
+            "/api/agents/broadcasts/templates",
+            json={"title": "Popular Recipe", "stages": self.STAGES},
+            headers=_headers(key),
+        )
+        tpl_id = r.json()["id"]
+        client.post(f"/api/agents/broadcasts/templates/{tpl_id}/fork", json={}, headers=_headers(key2))
+        r2 = client.get(f"/api/agents/broadcasts/templates/{tpl_id}")
+        assert r2.json()["fork_count"] == 1
+
+    def test_delete_own_template(self, client):
+        key = _reg(client, "TplDelAgent")
+        r = client.post(
+            "/api/agents/broadcasts/templates",
+            json={"title": "To Delete", "stages": []},
+            headers=_headers(key),
+        )
+        tpl_id = r.json()["id"]
+        r2 = client.delete(f"/api/agents/broadcasts/templates/{tpl_id}", headers=_headers(key))
+        assert r2.status_code == 200
+        r3 = client.get(f"/api/agents/broadcasts/templates/{tpl_id}")
+        assert r3.status_code == 404
+
+    def test_delete_others_template_returns_403(self, client):
+        key1 = _reg(client, "TplOwner2")
+        key2 = _reg(client, "TplThief")
+        r = client.post(
+            "/api/agents/broadcasts/templates",
+            json={"title": "Protected", "stages": []},
+            headers=_headers(key1),
+        )
+        tpl_id = r.json()["id"]
+        r2 = client.delete(f"/api/agents/broadcasts/templates/{tpl_id}", headers=_headers(key2))
+        assert r2.status_code == 403
+
+    def test_filter_templates_by_content_type(self, client):
+        key = _reg(client, "TplTypeFilter")
+        client.post(
+            "/api/agents/broadcasts/templates",
+            json={"title": "Audio Recipe", "stages": [], "content_type": "audio"},
+            headers=_headers(key),
+        )
+        r = client.get("/api/agents/broadcasts/templates", params={"content_type": "audio"})
+        assert r.status_code == 200
+        assert all(t["content_type"] == "audio" for t in r.json())
+
+
+# ---------------------------------------------------------------------------
+# Feature B: Agent-to-Agent Handshake
+# ---------------------------------------------------------------------------
+
+class TestHandshake:
+    def test_initiate_handshake(self, client):
+        key_a = _reg(client, "HandshakeA1")
+        _reg(client, "HandshakeB1")
+        r = client.post(
+            "/api/agents/handshake/HandshakeB1",
+            json={"message": "Let's collaborate", "terms": {"deliverable": "audio"}},
+            headers=_headers(key_a),
+        )
+        assert r.status_code == 200
+        assert r.json()["status"] == "pending"
+
+    def test_accept_handshake_creates_task(self, client):
+        key_a = _reg(client, "HandshakeA2")
+        key_b = _reg(client, "HandshakeB2")
+        r = client.post(
+            "/api/agents/handshake/HandshakeB2",
+            json={"message": "I provide visuals, you provide voice", "terms": {}},
+            headers=_headers(key_a),
+        )
+        hs_id = r.json()["id"]
+        r2 = client.post(f"/api/agents/me/handshakes/{hs_id}/accept", headers=_headers(key_b))
+        assert r2.status_code == 200
+        assert "private_task_id" in r2.json()
+
+    def test_reject_handshake(self, client):
+        key_a = _reg(client, "HandshakeA3")
+        key_b = _reg(client, "HandshakeB3")
+        r = client.post(
+            "/api/agents/handshake/HandshakeB3",
+            json={"message": "Collab?", "terms": {}},
+            headers=_headers(key_a),
+        )
+        hs_id = r.json()["id"]
+        r2 = client.post(f"/api/agents/me/handshakes/{hs_id}/reject", headers=_headers(key_b))
+        assert r2.status_code == 200
+        assert r2.json()["status"] == "rejected"
+
+    def test_list_handshakes(self, client):
+        key_a = _reg(client, "HandshakeA4")
+        key_b = _reg(client, "HandshakeB4")
+        client.post(
+            "/api/agents/handshake/HandshakeB4",
+            json={"message": "test", "terms": {}},
+            headers=_headers(key_a),
+        )
+        r_a = client.get("/api/agents/me/handshakes", headers=_headers(key_a))
+        r_b = client.get("/api/agents/me/handshakes", headers=_headers(key_b))
+        assert r_a.status_code == 200
+        assert r_b.status_code == 200
+        assert len(r_a.json()) >= 1
+        assert any(h["recipient_name"] == "HandshakeB4" for h in r_b.json())
+
+    def test_self_handshake_returns_400(self, client):
+        key = _reg(client, "HandshakeSelf")
+        r = client.post(
+            "/api/agents/handshake/HandshakeSelf",
+            json={"terms": {}},
+            headers=_headers(key),
+        )
+        assert r.status_code == 400
+
+    def test_handshake_nonexistent_agent_returns_404(self, client):
+        key = _reg(client, "HandshakeGhost")
+        r = client.post(
+            "/api/agents/handshake/NobodyXYZ999",
+            json={"terms": {}},
+            headers=_headers(key),
+        )
+        assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Feature C: Semantic Agent Search
+# ---------------------------------------------------------------------------
+
+class TestSemanticSearch:
+    def test_basic_search_returns_structure(self, client):
+        _reg(client, "SemanticAgent1", bio="I do audio synthesis #tts #audio")
+        r = client.get("/api/agents/semantic-search", params={"query": "audio"})
+        assert r.status_code == 200
+        data = r.json()
+        assert "agents" in data
+        assert "result_count" in data
+        assert "query" in data
+
+    def test_capability_filter(self, client):
+        _reg(client, "SemanticAgent2", bio="Vision specialist #vision #image")
+        r = client.get("/api/agents/semantic-search", params={"capability": "vision"})
+        assert r.status_code == 200
+        names = [a["name"] for a in r.json()["agents"]]
+        assert "SemanticAgent2" in names
+
+    def test_min_broadcasts_filter(self, client):
+        key = _reg(client, "SemanticAgent3")
+        # Publish 2 broadcasts
+        _text_post(client, key, title="Post 1")
+        _text_post(client, key, title="Post 2")
+        r = client.get("/api/agents/semantic-search", params={"min_broadcasts": 2})
+        assert r.status_code == 200
+        names = [a["name"] for a in r.json()["agents"]]
+        assert "SemanticAgent3" in names
+
+    def test_min_broadcasts_excludes_low_activity(self, client):
+        _reg(client, "SemanticAgent4")
+        r = client.get(
+            "/api/agents/semantic-search",
+            params={"query": "SemanticAgent4", "min_broadcasts": 100},
+        )
+        assert r.status_code == 200
+        names = [a["name"] for a in r.json()["agents"]]
+        assert "SemanticAgent4" not in names
+
+    def test_search_returns_empty_for_no_match(self, client):
+        r = client.get(
+            "/api/agents/semantic-search",
+            params={"query": "XYZIMPOSSIBLEMATCH9999"},
+        )
+        assert r.status_code == 200
+        assert r.json()["result_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Feature D: Sentinel Policy Engine (admin)
+# ---------------------------------------------------------------------------
+
+SENTINEL_ADMIN_KEY = "test-sentinel-admin-key"
+
+
+class TestSentinelPolicy:
+    @pytest.fixture(autouse=True)
+    def patch_admin_key(self):
+        with patch.object(settings, "ADMIN_KEY", SENTINEL_ADMIN_KEY):
+            yield
+
+    def _ah(self):
+        return {"X-Admin-Key": SENTINEL_ADMIN_KEY}
+
+    def test_create_rule(self, client):
+        r = client.post(
+            "/api/admin/sentinel/rules",
+            json={
+                "name": "Archive zero-view videos",
+                "target": "broadcasts",
+                "action": "archive",
+                "condition": {"field": "view_count", "op": "<", "value": 1, "age_hours": 0},
+            },
+            headers=self._ah(),
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["name"] == "Archive zero-view videos"
+        assert data["enabled"] == 1
+
+    def test_list_rules(self, client):
+        client.post(
+            "/api/admin/sentinel/rules",
+            json={"name": "Test Rule", "target": "broadcasts", "action": "flag",
+                  "condition": {"field": "view_count", "op": "<", "value": 0}},
+            headers=self._ah(),
+        )
+        r = client.get("/api/admin/sentinel/rules", headers=self._ah())
+        assert r.status_code == 200
+        assert isinstance(r.json(), list)
+        assert len(r.json()) >= 1
+
+    def test_toggle_rule(self, client):
+        r = client.post(
+            "/api/admin/sentinel/rules",
+            json={"name": "Toggle Me", "target": "broadcasts", "action": "flag",
+                  "condition": {}},
+            headers=self._ah(),
+        )
+        rule_id = r.json()["id"]
+        r2 = client.patch(f"/api/admin/sentinel/rules/{rule_id}/toggle", headers=self._ah())
+        assert r2.status_code == 200
+        assert r2.json()["enabled"] is False
+
+    def test_delete_rule(self, client):
+        r = client.post(
+            "/api/admin/sentinel/rules",
+            json={"name": "Delete Me", "target": "broadcasts", "action": "archive", "condition": {}},
+            headers=self._ah(),
+        )
+        rule_id = r.json()["id"]
+        r2 = client.delete(f"/api/admin/sentinel/rules/{rule_id}", headers=self._ah())
+        assert r2.status_code == 200
+
+    def test_enforce_sweep(self, client):
+        # Create a zero-view broadcast
+        key = _reg(client, "SentinelTarget")
+        _text_post(client, key, title="Zero view post")
+        # Create the rule
+        client.post(
+            "/api/admin/sentinel/rules",
+            json={"name": "Archive Zero Views", "target": "broadcasts", "action": "archive",
+                  "condition": {"field": "view_count", "op": "<", "value": 1}},
+            headers=self._ah(),
+        )
+        r = client.post("/api/admin/sentinel/rules/enforce", headers=self._ah())
+        assert r.status_code == 200
+        data = r.json()
+        assert "rules_run" in data
+        assert "total_matches" in data
+
+    def test_invalid_action_returns_422(self, client):
+        r = client.post(
+            "/api/admin/sentinel/rules",
+            json={"name": "Bad Action", "target": "broadcasts", "action": "explode", "condition": {}},
+            headers=self._ah(),
+        )
+        assert r.status_code == 422
+
+    def test_create_rule_requires_admin(self, client):
+        r = client.post(
+            "/api/admin/sentinel/rules",
+            json={"name": "Unauth", "target": "broadcasts", "action": "flag", "condition": {}},
+        )
+        assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Feature E: Cross-Agent Swarm Trace
+# ---------------------------------------------------------------------------
+
+TRACE_ADMIN_KEY = "test-trace-admin-key"
+
+
+class TestSwarmTrace:
+    @pytest.fixture(autouse=True)
+    def patch_admin_key(self):
+        with patch.object(settings, "ADMIN_KEY", TRACE_ADMIN_KEY):
+            yield
+
+    def _ah(self):
+        return {"X-Admin-Key": TRACE_ADMIN_KEY}
+
+    def test_admin_swarm_trace_existing_broadcast(self, client):
+        key = _reg(client, "TraceAgent1")
+        bid = _text_post(client, key, title="Traceable Broadcast")
+        r = client.get(f"/api/admin/swarm/trace/{bid}", headers=self._ah())
+        assert r.status_code == 200
+        data = r.json()
+        assert data["broadcast"]["id"] == bid
+        assert "pipeline" in data
+        assert "engagement" in data
+
+    def test_admin_swarm_trace_404_missing(self, client):
+        r = client.get("/api/admin/swarm/trace/99999", headers=self._ah())
+        assert r.status_code == 404
+
+    def test_admin_swarm_trace_requires_admin(self, client):
+        key = _reg(client, "TraceAgent2")
+        bid = _text_post(client, key)
+        r = client.get(f"/api/admin/swarm/trace/{bid}")
+        assert r.status_code == 403
+
+    def test_public_broadcast_trace(self, client):
+        key = _reg(client, "TraceAgent3")
+        bid = _text_post(client, key, title="Public Trace")
+        r = client.get(f"/api/agents/broadcasts/{bid}/trace")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["broadcast"]["id"] == bid
+        assert "pipeline_jobs" in data
+        assert "credits" in data
+
+    def test_public_trace_not_found_for_deleted(self, client):
+        r = client.get("/api/agents/broadcasts/88888/trace")
+        assert r.status_code == 404
