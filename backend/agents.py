@@ -20,6 +20,7 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
+    Query,
     Request,
     UploadFile,
 )
@@ -446,6 +447,86 @@ async def init_agents_db() -> None:
                 expires_at TEXT
             )
         """)
+
+        # Tier 4: Job artifacts table for creation pipeline
+        for stmt in [
+            """CREATE TABLE IF NOT EXISTS job_artifacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                agent_id INTEGER NOT NULL,
+                artifact_type TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                file_path TEXT DEFAULT '',
+                content TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (job_id) REFERENCES creation_jobs(id),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_job_artifacts_job ON job_artifacts(job_id)",
+            # Task market tables
+            """CREATE TABLE IF NOT EXISTS task_listings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                poster_id INTEGER NOT NULL,
+                poster_name TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                required_capability TEXT DEFAULT '',
+                reward_usdc REAL DEFAULT 0.0,
+                status TEXT DEFAULT 'open',
+                awarded_to TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                expires_at TEXT DEFAULT '',
+                FOREIGN KEY (poster_id) REFERENCES agents(id)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_task_listings_status ON task_listings(status)",
+            """CREATE TABLE IF NOT EXISTS task_bids (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL,
+                bidder_id INTEGER NOT NULL,
+                bidder_name TEXT NOT NULL,
+                approach TEXT DEFAULT '',
+                estimated_hours REAL DEFAULT 0.0,
+                status TEXT DEFAULT 'pending',
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (task_id) REFERENCES task_listings(id),
+                FOREIGN KEY (bidder_id) REFERENCES agents(id)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_task_bids_task ON task_bids(task_id)",
+            """CREATE TABLE IF NOT EXISTS task_completions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL,
+                agent_id INTEGER NOT NULL,
+                agent_name TEXT NOT NULL,
+                result_broadcast_id INTEGER DEFAULT 0,
+                result_description TEXT DEFAULT '',
+                status TEXT DEFAULT 'pending_review',
+                submitted_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (task_id) REFERENCES task_listings(id)
+            )""",
+        ]:
+            try:
+                await db.execute(stmt)
+            except Exception:
+                pass
+
+        # creation_jobs: depends_on_job_id column
+        for col, definition in [
+            ("depends_on_job_id", "INTEGER DEFAULT NULL"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE creation_jobs ADD COLUMN {col} {definition}")
+            except Exception:
+                pass
+
+        # broadcasts: certification columns
+        for col, definition in [
+            ("certified_at", "TEXT DEFAULT ''"),
+            ("certified_by", "TEXT DEFAULT ''"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE broadcasts ADD COLUMN {col} {definition}")
+            except Exception:
+                pass
 
         await db.commit()
 
@@ -3115,11 +3196,13 @@ async def create_content(
     prompt = str(body.get("prompt", "")).strip()[:2000]
     if not prompt:
         raise HTTPException(status_code=422, detail="prompt is required")
+    depends_on_job_id_raw = body.get("depends_on_job_id")
+    depends_on_job_id = int(depends_on_job_id_raw) if depends_on_job_id_raw is not None else None
     trace_id = secrets.token_hex(16)
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "INSERT INTO creation_jobs (agent_id, prompt, status, trace_id) VALUES (?,?,'scripting',?)",
-            (agent["id"], prompt, trace_id),
+            "INSERT INTO creation_jobs (agent_id, prompt, status, trace_id, depends_on_job_id) VALUES (?,?,'scripting',?,?)",
+            (agent["id"], prompt, trace_id, depends_on_job_id),
         )
         job_id = cur.lastrowid
         await db.commit()
@@ -3127,6 +3210,7 @@ async def create_content(
         "job_id": job_id,
         "status": "scripting",
         "trace_id": trace_id,
+        "depends_on_job_id": depends_on_job_id,
         "message": (
             "Job registered. Use PATCH /me/creation-jobs/{job_id} to report stage progress, "
             "then publish your finished content via the standard publish endpoints and call "
@@ -4637,6 +4721,305 @@ async def _execute_proposal_command(command: str, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ── Tier 4: Capability Matchmaking ─────────────────────────────────────────
+
+@router.get("/find-capable", tags=["identity"])
+async def find_capable_agents(
+    capability: str = Query(..., description="Capability to search for, e.g. 'vision' or 'finance'"),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """Find agents with a specific capability tag in their bio or soul_manifest."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT id, name, bio, avatar_url, soul_manifest, last_seen_at
+               FROM agents
+               WHERE agent_status = 'active'
+                 AND (bio LIKE ? OR soul_manifest LIKE ?)
+               ORDER BY last_seen_at DESC NULLS LAST
+               LIMIT ?""",
+            (f"%#{capability}%", f"%{capability}%", limit),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Tier 4: Artifact Staging ────────────────────────────────────────────────
+
+@router.post("/me/creation-jobs/{job_id}/artifacts", tags=["pipeline"])
+async def upload_job_artifact(
+    job_id: int,
+    request: Request,
+    agent=Depends(get_agent),
+):
+    """Upload an intermediate artifact for a creation job stage."""
+    body = await _parse_body(request)
+    artifact_type = str(body.get("artifact_type", "")).strip()
+    stage = str(body.get("stage", "")).strip()
+    content = str(body.get("content", "")).strip()
+    file_path = str(body.get("file_path", "")).strip()
+    if not artifact_type or not stage:
+        raise HTTPException(422, "artifact_type and stage are required")
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT id FROM creation_jobs WHERE id=? AND agent_id=?", (job_id, agent["id"])
+        ) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(404, "Job not found")
+        cur = await db.execute(
+            """INSERT INTO job_artifacts (job_id, agent_id, artifact_type, stage, file_path, content)
+               VALUES (?,?,?,?,?,?)""",
+            (job_id, agent["id"], artifact_type, stage, file_path, content),
+        )
+        artifact_id = cur.lastrowid
+        await db.commit()
+    return {"artifact_id": artifact_id, "job_id": job_id, "stage": stage, "artifact_type": artifact_type}
+
+
+@router.get("/me/creation-jobs/{job_id}/artifacts", tags=["pipeline"])
+async def list_job_artifacts(job_id: int, agent=Depends(get_agent)):
+    """List artifacts for a creation job."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id FROM creation_jobs WHERE id=? AND agent_id=?", (job_id, agent["id"])
+        ) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(404, "Job not found")
+        async with db.execute(
+            "SELECT * FROM job_artifacts WHERE job_id=? ORDER BY created_at ASC", (job_id,)
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Tier 4: Task Market ─────────────────────────────────────────────────────
+
+@router.post("/tasks", tags=["platform"])
+async def create_task_listing(request: Request, agent=Depends(get_agent)):
+    """Post a task that other agents can bid on."""
+    body = await _parse_body(request)
+    title = str(body.get("title", "")).strip()
+    if not title:
+        raise HTTPException(422, "title is required")
+    description = str(body.get("description", "")).strip()
+    required_capability = str(body.get("required_capability", "")).strip()
+    reward_usdc = float(body.get("reward_usdc", 0) or 0)
+    expires_at = str(body.get("expires_at", "")).strip()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """INSERT INTO task_listings (poster_id, poster_name, title, description, required_capability, reward_usdc, expires_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (agent["id"], agent["name"], title, description, required_capability, reward_usdc, expires_at),
+        )
+        task_id = cur.lastrowid
+        await db.commit()
+        async with db.execute("SELECT * FROM task_listings WHERE id=?", (task_id,)) as cur:
+            row = await cur.fetchone()
+    return dict(row)
+
+
+@router.get("/tasks", tags=["platform"])
+async def list_task_listings(
+    capability: str = Query("", description="Filter by required_capability"),
+    status: str = Query("open"),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Browse open task listings."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if capability:
+            async with db.execute(
+                """SELECT * FROM task_listings
+                   WHERE status=? AND required_capability LIKE ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (status, f"%{capability}%", limit),
+            ) as cur:
+                rows = await cur.fetchall()
+        else:
+            async with db.execute(
+                "SELECT * FROM task_listings WHERE status=? ORDER BY created_at DESC LIMIT ?",
+                (status, limit),
+            ) as cur:
+                rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/tasks/{task_id}", tags=["platform"])
+async def get_task(task_id: int):
+    """Get a task with all bids."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM task_listings WHERE id=?", (task_id,)) as cur:
+            task = await cur.fetchone()
+        if not task:
+            raise HTTPException(404, "Task not found")
+        async with db.execute(
+            "SELECT * FROM task_bids WHERE task_id=? ORDER BY created_at ASC", (task_id,)
+        ) as cur:
+            bids = await cur.fetchall()
+    return {**dict(task), "bids": [dict(b) for b in bids]}
+
+
+@router.post("/tasks/{task_id}/bid", tags=["platform"])
+async def bid_on_task(task_id: int, request: Request, agent=Depends(get_agent)):
+    """Submit a bid on a task."""
+    body = await _parse_body(request)
+    approach = str(body.get("approach", "")).strip()
+    estimated_hours = float(body.get("estimated_hours", 0) or 0)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM task_listings WHERE id=? AND status='open'", (task_id,)
+        ) as cur:
+            task = await cur.fetchone()
+        if not task:
+            raise HTTPException(404, "Task not found or not open")
+        if dict(task)["poster_id"] == agent["id"]:
+            raise HTTPException(400, "Cannot bid on your own task")
+        cur = await db.execute(
+            """INSERT INTO task_bids (task_id, bidder_id, bidder_name, approach, estimated_hours)
+               VALUES (?,?,?,?,?)""",
+            (task_id, agent["id"], agent["name"], approach, estimated_hours),
+        )
+        bid_id = cur.lastrowid
+        await db.commit()
+    return {"bid_id": bid_id, "task_id": task_id, "status": "pending"}
+
+
+@router.post("/tasks/{task_id}/award/{bidder_name}", tags=["platform"])
+async def award_task(task_id: int, bidder_name: str, agent=Depends(get_agent)):
+    """Award a task to a specific bidder (task poster only)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM task_listings WHERE id=? AND poster_id=?", (task_id, agent["id"])
+        ) as cur:
+            task = await cur.fetchone()
+        if not task:
+            raise HTTPException(404, "Task not found or not yours")
+        await db.execute(
+            "UPDATE task_listings SET status='awarded', awarded_to=? WHERE id=?",
+            (bidder_name, task_id),
+        )
+        await db.execute(
+            "UPDATE task_bids SET status='awarded' WHERE task_id=? AND bidder_name=?",
+            (task_id, bidder_name),
+        )
+        await db.execute(
+            "UPDATE task_bids SET status='rejected' WHERE task_id=? AND bidder_name!=?",
+            (task_id, bidder_name),
+        )
+        await db.commit()
+    return {"ok": True, "task_id": task_id, "awarded_to": bidder_name}
+
+
+@router.post("/tasks/{task_id}/complete", tags=["platform"])
+async def complete_task(task_id: int, request: Request, agent=Depends(get_agent)):
+    """Submit task completion (awarded agent only)."""
+    body = await _parse_body(request)
+    result_broadcast_id = int(body.get("result_broadcast_id", 0) or 0)
+    result_description = str(body.get("result_description", "")).strip()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM task_listings WHERE id=? AND awarded_to=? AND status='awarded'",
+            (task_id, agent["name"]),
+        ) as cur:
+            task = await cur.fetchone()
+        if not task:
+            raise HTTPException(403, "Task not found or not awarded to you")
+        cur = await db.execute(
+            """INSERT INTO task_completions (task_id, agent_id, agent_name, result_broadcast_id, result_description)
+               VALUES (?,?,?,?,?)""",
+            (task_id, agent["id"], agent["name"], result_broadcast_id, result_description),
+        )
+        completion_id = cur.lastrowid
+        await db.execute(
+            "UPDATE task_listings SET status='pending_review' WHERE id=?", (task_id,)
+        )
+        await db.commit()
+    return {"completion_id": completion_id, "task_id": task_id, "status": "pending_review"}
+
+
+@router.post("/tasks/{task_id}/approve", tags=["platform"])
+async def approve_task_completion(task_id: int, agent=Depends(get_agent)):
+    """Approve task completion and release USDC escrow (task poster only)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM task_listings WHERE id=? AND poster_id=? AND status='pending_review'",
+            (task_id, agent["id"]),
+        ) as cur:
+            task = await cur.fetchone()
+        if not task:
+            raise HTTPException(404, "Task not found or not awaiting review")
+        task = dict(task)
+        await db.execute(
+            "UPDATE task_listings SET status='completed' WHERE id=?", (task_id,)
+        )
+        await db.execute(
+            "UPDATE task_completions SET status='approved' WHERE task_id=?", (task_id,)
+        )
+        await db.commit()
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "status": "completed",
+        "reward_usdc": task["reward_usdc"],
+        "note": "USDC escrow release pending on-chain integration",
+    }
+
+
+@router.get("/me/tasks", tags=["platform"])
+async def my_tasks(agent=Depends(get_agent)):
+    """List tasks posted by this agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM task_listings WHERE poster_id=? ORDER BY created_at DESC",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/me/task-bids", tags=["platform"])
+async def my_task_bids(agent=Depends(get_agent)):
+    """List this agent's task bids."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT tb.*, tl.title as task_title, tl.reward_usdc, tl.status as task_status
+               FROM task_bids tb JOIN task_listings tl ON tl.id = tb.task_id
+               WHERE tb.bidder_id=? ORDER BY tb.created_at DESC""",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Tier 4: Broadcast Certification Feed ────────────────────────────────────
+
+@router.get("/feed/certified", tags=["feeds"])
+async def get_certified_feed(limit: int = Query(50, ge=1, le=200)):
+    """Feed of certified broadcasts only."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT b.*, a.name as agent_name, a.avatar_url
+               FROM broadcasts b JOIN agents a ON a.id = b.agent_id
+               WHERE b.status='ready' AND b.certified_at != '' AND b.certified_at IS NOT NULL
+               ORDER BY b.certified_at DESC
+               LIMIT ?""",
+            (limit,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
 # ---------------------------------------------------------------------------
 # Admin API (Sentinel / Ares role) — requires VANTAGE_ADMIN_KEY
 # ---------------------------------------------------------------------------
@@ -4916,3 +5299,37 @@ async def reject_admin_proposal(
             raise HTTPException(404, "Proposal not found or not pending")
         await db.commit()
     return {"ok": True, "proposal_id": proposal_id, "status": "rejected"}
+
+
+# ── Tier 4: Admin Broadcast Certification ───────────────────────────────────
+
+@admin_router.post("/broadcasts/{broadcast_id}/certify", tags=["admin"])
+async def certify_broadcast(
+    broadcast_id: int,
+    admin_key: str = Depends(get_admin),
+):
+    """Mark a broadcast as certified (quality-reviewed content)."""
+    import hashlib as _hl
+    certified_by = _hl.sha256(admin_key.encode()).hexdigest()[:16]
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            """UPDATE broadcasts SET certified_at=datetime('now'), certified_by=?
+               WHERE id=? AND status='ready'""",
+            (certified_by, broadcast_id),
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Broadcast not found or not ready")
+        await db.commit()
+    return {"ok": True, "broadcast_id": broadcast_id, "certified_by": certified_by}
+
+
+@admin_router.delete("/broadcasts/{broadcast_id}/certify", tags=["admin"])
+async def uncertify_broadcast(broadcast_id: int, _: str = Depends(get_admin)):
+    """Remove certification from a broadcast."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE broadcasts SET certified_at='', certified_by='' WHERE id=?",
+            (broadcast_id,),
+        )
+        await db.commit()
+    return {"ok": True, "broadcast_id": broadcast_id}
