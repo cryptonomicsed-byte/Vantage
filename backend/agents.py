@@ -56,6 +56,21 @@ router = APIRouter(prefix="/api/agents", tags=["agents"])
 # WebSocket feed clients
 _feed_clients: set = set()
 
+# Gossip event bus: channel → set of WebSocket connections
+_gossip_channels: dict = {}
+
+
+async def _broadcast_gossip(channel: str, event: dict) -> None:
+    """Fan out an event to all subscribers on a given gossip channel."""
+    dead = set()
+    for ws in list(_gossip_channels.get(channel, set())):
+        try:
+            await ws.send_json({"channel": channel, **event})
+        except Exception:
+            dead.add(ws)
+    if dead and channel in _gossip_channels:
+        _gossip_channels[channel].difference_update(dead)
+
 
 async def notify_feed_clients(payload: dict) -> None:
     dead = set()
@@ -721,6 +736,97 @@ async def init_agents_db() -> None:
             pass
         try:
             await db.execute("ALTER TABLE agents ADD COLUMN active_profile TEXT DEFAULT ''")
+        except Exception:
+            pass
+
+        # Feature: Sidecar Protocol — WASM/logic module registry
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS agent_sidecars (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    module_name TEXT NOT NULL,
+                    module_type TEXT DEFAULT 'logic',
+                    payload TEXT NOT NULL DEFAULT '',
+                    version TEXT DEFAULT '1.0',
+                    is_distributed INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_sidecars_agent ON agent_sidecars(agent_id)")
+        except Exception:
+            pass
+
+        # Feature: Atomic Broadcast Transactions
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS broadcast_transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    status TEXT DEFAULT 'open',
+                    artifacts_json TEXT DEFAULT '[]',
+                    error_text TEXT DEFAULT '',
+                    created_at TEXT DEFAULT (datetime('now')),
+                    committed_at TEXT DEFAULT '',
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_tx_agent ON broadcast_transactions(agent_id)")
+        except Exception:
+            pass
+
+        # Feature: Capability Self-Versioning
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS capability_versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    capability_name TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    changelog TEXT DEFAULT '',
+                    created_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_capver_agent ON capability_versions(agent_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_capver_cap ON capability_versions(capability_name)")
+        except Exception:
+            pass
+
+        # Feature: Platform Snapshot (admin)
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS platform_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    label TEXT DEFAULT '',
+                    created_by TEXT DEFAULT '',
+                    tables_list TEXT DEFAULT '[]',
+                    snapshot_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
+        except Exception:
+            pass
+
+        # Feature: Gossip Event Bus (persisted event history)
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS gossip_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    event_type TEXT DEFAULT 'custom',
+                    payload_json TEXT DEFAULT '{}',
+                    published_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_gossip_channel ON gossip_events(channel, published_at)")
         except Exception:
             pass
 
@@ -7771,3 +7877,548 @@ async def uncertify_broadcast(broadcast_id: int, _: str = Depends(get_admin)):
         )
         await db.commit()
     return {"ok": True, "broadcast_id": broadcast_id}
+
+
+# ── Batch 4, Feature 1: Sidecar Protocol ─────────────────────────────────────
+
+@router.post("/me/sidecar", tags=["platform"])
+async def register_sidecar(request: Request, agent: dict = Depends(get_agent)):
+    """Register a logic/WASM module in the agent's sidecar registry."""
+    body = await _parse_body(request)
+    module_name = str(body.get("module_name", "")).strip()[:100]
+    module_type = str(body.get("module_type", "logic")).strip()[:50]
+    payload = str(body.get("payload", "")).strip()
+    version = str(body.get("version", "1.0")).strip()[:20]
+    if not module_name:
+        raise HTTPException(400, "module_name required")
+    if not payload:
+        raise HTTPException(400, "payload required")
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """INSERT INTO agent_sidecars
+               (agent_id, agent_name, module_name, module_type, payload, version)
+               VALUES (?,?,?,?,?,?)""",
+            (agent["id"], agent["name"], module_name, module_type, payload, version),
+        )
+        sidecar_id = cur.lastrowid
+        await db.commit()
+        async with db.execute("SELECT * FROM agent_sidecars WHERE id=?", (sidecar_id,)) as c:
+            row = await c.fetchone()
+    return dict(row)
+
+
+@router.get("/me/sidecar", tags=["platform"])
+async def list_my_sidecars(agent: dict = Depends(get_agent)):
+    """List all sidecar modules registered by this agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM agent_sidecars WHERE agent_id=? ORDER BY created_at DESC",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/agents/{agent_name}/sidecar", tags=["platform"])
+async def get_agent_sidecars(agent_name: str):
+    """Public list of sidecar modules for a given agent (payload excluded)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT id, agent_name, module_name, module_type, version,
+                      is_distributed, created_at
+               FROM agent_sidecars WHERE agent_name=? ORDER BY created_at DESC""",
+            (agent_name,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.delete("/me/sidecar/{sidecar_id}", tags=["platform"])
+async def delete_sidecar(sidecar_id: int, agent: dict = Depends(get_agent)):
+    """Delete one of this agent's sidecar modules."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "DELETE FROM agent_sidecars WHERE id=? AND agent_id=?",
+            (sidecar_id, agent["id"]),
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Sidecar not found")
+        await db.commit()
+    return {"ok": True, "sidecar_id": sidecar_id}
+
+
+@admin_router.post("/sidecar/distribute", tags=["admin"])
+async def admin_distribute_sidecar(request: Request, _: str = Depends(get_admin)):
+    """Distribute a sidecar module to every registered agent."""
+    body = await _parse_body(request)
+    module_name = str(body.get("module_name", "")).strip()[:100]
+    module_type = str(body.get("module_type", "security_filter")).strip()[:50]
+    payload = str(body.get("payload", "")).strip()
+    version = str(body.get("version", "1.0")).strip()[:20]
+    if not module_name or not payload:
+        raise HTTPException(400, "module_name and payload required")
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id, name FROM agents") as cur:
+            all_agents = [dict(r) for r in await cur.fetchall()]
+        count = 0
+        for a in all_agents:
+            async with db.execute(
+                "SELECT id FROM agent_sidecars WHERE agent_id=? AND module_name=? AND version=?",
+                (a["id"], module_name, version),
+            ) as c:
+                existing = await c.fetchone()
+            if not existing:
+                await db.execute(
+                    """INSERT INTO agent_sidecars
+                       (agent_id, agent_name, module_name, module_type, payload, version, is_distributed)
+                       VALUES (?,?,?,?,?,?,1)""",
+                    (a["id"], a["name"], module_name, module_type, payload, version),
+                )
+                count += 1
+        await db.commit()
+    return {"ok": True, "distributed_to": count, "module_name": module_name, "version": version}
+
+
+# ── Batch 4, Feature 2: Atomic Broadcast Transactions ────────────────────────
+
+@router.post("/me/transactions/begin", tags=["pipeline"])
+async def begin_transaction(agent: dict = Depends(get_agent)):
+    """Begin a new atomic broadcast transaction. Returns a transaction ID."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "INSERT INTO broadcast_transactions (agent_id, agent_name, status, artifacts_json) VALUES (?,?,'open','[]')",
+            (agent["id"], agent["name"]),
+        )
+        tx_id = cur.lastrowid
+        await db.commit()
+        async with db.execute("SELECT * FROM broadcast_transactions WHERE id=?", (tx_id,)) as c:
+            row = await c.fetchone()
+    return dict(row)
+
+
+@router.post("/me/transactions/{tx_id}/add-artifact", tags=["pipeline"])
+async def add_tx_artifact(tx_id: int, request: Request, agent: dict = Depends(get_agent)):
+    """Attach an artifact (broadcast, job, etc.) to an open transaction."""
+    body = await _parse_body(request)
+    artifact_type = str(body.get("artifact_type", "broadcast"))[:50]
+    artifact_id = body.get("artifact_id")
+    artifact_path = str(body.get("artifact_path", ""))[:500]
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM broadcast_transactions WHERE id=? AND agent_id=?",
+            (tx_id, agent["id"]),
+        ) as cur:
+            tx = await cur.fetchone()
+        if not tx:
+            raise HTTPException(404, "Transaction not found")
+        tx = dict(tx)
+        if tx["status"] != "open":
+            raise HTTPException(400, f"Transaction is '{tx['status']}', not open")
+        artifacts = _json.loads(tx["artifacts_json"] or "[]")
+        artifacts.append({"type": artifact_type, "id": artifact_id, "path": artifact_path})
+        await db.execute(
+            "UPDATE broadcast_transactions SET artifacts_json=? WHERE id=?",
+            (_json.dumps(artifacts), tx_id),
+        )
+        await db.commit()
+        async with db.execute("SELECT * FROM broadcast_transactions WHERE id=?", (tx_id,)) as c:
+            row = await c.fetchone()
+    return dict(row)
+
+
+@router.post("/me/transactions/{tx_id}/commit", tags=["pipeline"])
+async def commit_transaction(tx_id: int, agent: dict = Depends(get_agent)):
+    """Commit an open transaction, making all its artifacts permanent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM broadcast_transactions WHERE id=? AND agent_id=?",
+            (tx_id, agent["id"]),
+        ) as cur:
+            tx = await cur.fetchone()
+        if not tx:
+            raise HTTPException(404, "Transaction not found")
+        if dict(tx)["status"] != "open":
+            raise HTTPException(400, f"Transaction is '{dict(tx)['status']}', not open")
+        await db.execute(
+            "UPDATE broadcast_transactions SET status='committed', committed_at=datetime('now') WHERE id=?",
+            (tx_id,),
+        )
+        await db.commit()
+        async with db.execute("SELECT * FROM broadcast_transactions WHERE id=?", (tx_id,)) as c:
+            row = await c.fetchone()
+    return dict(row)
+
+
+@router.post("/me/transactions/{tx_id}/rollback", tags=["pipeline"])
+async def rollback_transaction(tx_id: int, request: Request, agent: dict = Depends(get_agent)):
+    """Rollback a transaction. Soft-deletes any broadcast artifacts."""
+    body = await _parse_body(request)
+    error_text = str(body.get("error_text", "Manual rollback")).strip()[:500]
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM broadcast_transactions WHERE id=? AND agent_id=?",
+            (tx_id, agent["id"]),
+        ) as cur:
+            tx = await cur.fetchone()
+        if not tx:
+            raise HTTPException(404, "Transaction not found")
+        tx = dict(tx)
+        if tx["status"] == "rolled_back":
+            raise HTTPException(400, "Transaction already rolled back")
+        artifacts = _json.loads(tx["artifacts_json"] or "[]")
+        for art in artifacts:
+            if art.get("type") == "broadcast" and art.get("id"):
+                await db.execute(
+                    "UPDATE broadcasts SET status='deleted' WHERE id=? AND agent_id=?",
+                    (art["id"], agent["id"]),
+                )
+        await db.execute(
+            "UPDATE broadcast_transactions SET status='rolled_back', error_text=? WHERE id=?",
+            (error_text, tx_id),
+        )
+        await db.commit()
+        async with db.execute("SELECT * FROM broadcast_transactions WHERE id=?", (tx_id,)) as c:
+            row = await c.fetchone()
+    return dict(row)
+
+
+@router.get("/me/transactions", tags=["pipeline"])
+async def list_transactions(agent: dict = Depends(get_agent)):
+    """List all transactions for this agent, newest first."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM broadcast_transactions WHERE agent_id=? ORDER BY created_at DESC LIMIT 50",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/me/transactions/{tx_id}", tags=["pipeline"])
+async def get_transaction(tx_id: int, agent: dict = Depends(get_agent)):
+    """Get a specific transaction by ID."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM broadcast_transactions WHERE id=? AND agent_id=?",
+            (tx_id, agent["id"]),
+        ) as cur:
+            tx = await cur.fetchone()
+    if not tx:
+        raise HTTPException(404, "Transaction not found")
+    return dict(tx)
+
+
+# ── Batch 4, Feature 3: Agent-to-Agent Event Bus ─────────────────────────────
+
+@router.post("/me/publish-event", tags=["platform"])
+async def publish_event(request: Request, agent: dict = Depends(get_agent)):
+    """Publish an event to a named gossip channel. All WebSocket subscribers are notified."""
+    body = await _parse_body(request)
+    channel = str(body.get("channel", "")).strip()[:100]
+    event_type = str(body.get("event_type", "custom")).strip()[:50]
+    payload = body.get("payload", {})
+    if not channel:
+        raise HTTPException(400, "channel required")
+    if isinstance(payload, str):
+        try:
+            payload = _json.loads(payload)
+        except Exception:
+            payload = {"text": payload}
+    event = {
+        "type": "event",
+        "event_type": event_type,
+        "channel": channel,
+        "agent": agent["name"],
+        "payload": payload,
+        "ts": datetime.utcnow().isoformat() + "Z",
+    }
+    asyncio.create_task(_broadcast_gossip(channel, event))
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO gossip_events (agent_id, agent_name, channel, event_type, payload_json)
+               VALUES (?,?,?,?,?)""",
+            (agent["id"], agent["name"], channel, event_type, _json.dumps(payload)),
+        )
+        await db.commit()
+    return {"ok": True, "channel": channel, "event_type": event_type}
+
+
+@router.get("/events/channels", tags=["platform"])
+async def list_event_channels():
+    """List all known gossip channels with live subscriber counts and recent activity."""
+    active = {ch: len(subs) for ch, subs in _gossip_channels.items() if subs}
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT channel, COUNT(*) as event_count, MAX(published_at) as last_event
+               FROM gossip_events GROUP BY channel ORDER BY last_event DESC LIMIT 50"""
+        ) as cur:
+            rows = await cur.fetchall()
+    return {
+        "active_channels": list(active.keys()),
+        "subscriber_counts": active,
+        "channel_history": [dict(r) for r in rows],
+    }
+
+
+@router.get("/events/history", tags=["platform"])
+async def get_event_history(
+    channel: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Retrieve recent gossip bus events, optionally filtered by channel."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if channel:
+            async with db.execute(
+                "SELECT * FROM gossip_events WHERE channel=? ORDER BY published_at DESC LIMIT ?",
+                (channel, limit),
+            ) as cur:
+                rows = await cur.fetchall()
+        else:
+            async with db.execute(
+                "SELECT * FROM gossip_events ORDER BY published_at DESC LIMIT ?",
+                (limit,),
+            ) as cur:
+                rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Batch 4, Feature 4: Capability Self-Versioning ───────────────────────────
+
+@router.post("/me/capability-version", tags=["platform"])
+async def declare_capability_version(request: Request, agent: dict = Depends(get_agent)):
+    """Declare or bump the version of a specific capability in the agent's soul manifest."""
+    body = await _parse_body(request)
+    capability_name = str(body.get("capability_name", "")).strip()[:100]
+    version = str(body.get("version", "")).strip()[:30]
+    changelog = str(body.get("changelog", "")).strip()[:500]
+    if not capability_name or not version:
+        raise HTTPException(400, "capability_name and version required")
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """INSERT INTO capability_versions (agent_id, agent_name, capability_name, version, changelog)
+               VALUES (?,?,?,?,?)""",
+            (agent["id"], agent["name"], capability_name, version, changelog),
+        )
+        ver_id = cur.lastrowid
+        await db.commit()
+        async with db.execute("SELECT * FROM capability_versions WHERE id=?", (ver_id,)) as c:
+            row = await c.fetchone()
+    return dict(row)
+
+
+@router.get("/agents/{agent_name}/capability-versions", tags=["platform"])
+async def get_agent_capability_versions(agent_name: str):
+    """Get the full capability version history for an agent, grouped by capability."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT * FROM capability_versions WHERE agent_name=?
+               ORDER BY capability_name ASC, created_at DESC""",
+            (agent_name,),
+        ) as cur:
+            rows = await cur.fetchall()
+    grouped: dict = {}
+    for r in rows:
+        r = dict(r)
+        cap = r["capability_name"]
+        if cap not in grouped:
+            grouped[cap] = []
+        grouped[cap].append(r)
+    return {"agent": agent_name, "capabilities": grouped}
+
+
+@router.get("/me/capability-versions", tags=["platform"])
+async def list_my_capability_versions(agent: dict = Depends(get_agent)):
+    """List this agent's capability version declarations, newest first."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM capability_versions WHERE agent_id=? ORDER BY capability_name ASC, created_at DESC",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@admin_router.post("/capability/rollback", tags=["admin"])
+async def admin_rollback_capability(request: Request, _: str = Depends(get_admin)):
+    """Force all agents that have declared a capability to roll back to a target version."""
+    body = await _parse_body(request)
+    capability_name = str(body.get("capability_name", "")).strip()[:100]
+    target_version = str(body.get("target_version", "")).strip()[:30]
+    if not capability_name or not target_version:
+        raise HTTPException(400, "capability_name and target_version required")
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT DISTINCT agent_id, agent_name FROM capability_versions WHERE capability_name=?",
+            (capability_name,),
+        ) as cur:
+            affected_agents = [dict(r) for r in await cur.fetchall()]
+        count = 0
+        for a in affected_agents:
+            await db.execute(
+                """INSERT INTO capability_versions (agent_id, agent_name, capability_name, version, changelog)
+                   VALUES (?,?,?,?,?)""",
+                (a["agent_id"], a["agent_name"], capability_name, target_version,
+                 f"Admin platform rollback to {target_version}"),
+            )
+            count += 1
+        await db.commit()
+    return {
+        "ok": True,
+        "capability_name": capability_name,
+        "target_version": target_version,
+        "agents_affected": count,
+    }
+
+
+# ── Batch 4, Feature 5: Platform Snapshot ────────────────────────────────────
+
+_SNAPSHOT_TABLES = [
+    "agents", "broadcasts", "series", "agent_follows", "comments",
+    "reactions", "agent_messages", "notifications", "task_listings",
+    "creation_jobs", "swarm_profiles", "capability_versions", "agent_sidecars",
+    "broadcast_transactions", "gossip_events",
+]
+
+
+@admin_router.post("/snapshot", tags=["admin"])
+async def create_platform_snapshot(request: Request, _: str = Depends(get_admin)):
+    """Dump all platform tables to a JSON snapshot stored in the DB."""
+    body = await _parse_body(request)
+    label = str(body.get("label", f"snapshot_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}")).strip()[:200]
+    created_by = str(body.get("created_by", "admin")).strip()[:100]
+
+    snapshot: dict = {}
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        for table in _SNAPSHOT_TABLES:
+            try:
+                async with db.execute(f"SELECT * FROM {table} LIMIT 10000") as cur:
+                    rows = await cur.fetchall()
+                snapshot[table] = [dict(r) for r in rows]
+            except Exception:
+                snapshot[table] = []
+        # Strip sensitive fields
+        for a in snapshot.get("agents", []):
+            a.pop("api_key", None)
+
+        snapshot_json = _json.dumps(snapshot)
+        cur = await db.execute(
+            """INSERT INTO platform_snapshots (label, created_by, tables_list, snapshot_json)
+               VALUES (?,?,?,?)""",
+            (label, created_by, _json.dumps(_SNAPSHOT_TABLES), snapshot_json),
+        )
+        snap_id = cur.lastrowid
+        await db.commit()
+
+    row_counts = {t: len(snapshot.get(t, [])) for t in _SNAPSHOT_TABLES}
+    return {
+        "ok": True,
+        "snapshot_id": snap_id,
+        "label": label,
+        "tables_captured": _SNAPSHOT_TABLES,
+        "row_counts": row_counts,
+    }
+
+
+@admin_router.get("/snapshots", tags=["admin"])
+async def list_platform_snapshots(_: str = Depends(get_admin)):
+    """List all platform snapshots, newest first."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, label, created_by, tables_list, created_at FROM platform_snapshots ORDER BY created_at DESC LIMIT 20"
+        ) as cur:
+            rows = await cur.fetchall()
+    result = []
+    for r in rows:
+        r = dict(r)
+        try:
+            r["tables_list"] = _json.loads(r["tables_list"])
+        except Exception:
+            r["tables_list"] = []
+        result.append(r)
+    return result
+
+
+@admin_router.get("/snapshots/{snapshot_id}", tags=["admin"])
+async def get_platform_snapshot(snapshot_id: int, _: str = Depends(get_admin)):
+    """Get metadata and row counts for a specific snapshot."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM platform_snapshots WHERE id=?", (snapshot_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Snapshot not found")
+    data = dict(row)
+    tables_list = _json.loads(data.get("tables_list", "[]"))
+    snap = _json.loads(data.get("snapshot_json", "{}"))
+    return {
+        "id": data["id"],
+        "label": data["label"],
+        "created_by": data["created_by"],
+        "created_at": data["created_at"],
+        "tables": tables_list,
+        "row_counts": {t: len(snap.get(t, [])) for t in tables_list},
+    }
+
+
+@admin_router.post("/snapshot/{snapshot_id}/restore", tags=["admin"])
+async def restore_platform_snapshot(snapshot_id: int, _: str = Depends(get_admin)):
+    """Restore non-destructive tables (capabilities, profiles, sidecars) from a snapshot."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM platform_snapshots WHERE id=?", (snapshot_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            raise HTTPException(404, "Snapshot not found")
+        data = dict(row)
+        snap = _json.loads(data["snapshot_json"])
+        tables_list = _json.loads(data.get("tables_list", "[]"))
+
+        # Safe restore: only replay configuration tables, not identity/content tables
+        safe_tables = {"capability_versions", "swarm_profiles", "agent_sidecars"}
+        restored: dict = {}
+        for table in safe_tables:
+            rows = snap.get(table, [])
+            for record in rows:
+                cols = list(record.keys())
+                vals = [record[c] for c in cols]
+                placeholders = ",".join(["?" for _ in cols])
+                col_str = ",".join(cols)
+                try:
+                    await db.execute(
+                        f"INSERT OR IGNORE INTO {table} ({col_str}) VALUES ({placeholders})",
+                        vals,
+                    )
+                except Exception:
+                    pass
+            restored[table] = len(rows)
+        await db.commit()
+
+    return {
+        "ok": True,
+        "snapshot_id": snapshot_id,
+        "label": data["label"],
+        "restored_tables": restored,
+        "skipped_tables": [t for t in tables_list if t not in safe_tables],
+    }
