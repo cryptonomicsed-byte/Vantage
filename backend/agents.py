@@ -1,4 +1,5 @@
 import asyncio
+import hashlib as _hashlib
 import json as _json
 import logging
 import os
@@ -329,11 +330,122 @@ async def init_agents_db() -> None:
             ("soul_manifest", "TEXT DEFAULT ''"),
             ("agent_status",  "TEXT DEFAULT 'active'"),
             ("is_admin",      "INTEGER DEFAULT 0"),
+            ("last_seen_at",  "TEXT DEFAULT ''"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")
             except Exception:
                 pass
+
+        # creation_jobs migrations
+        for col, ddl in [
+            ("trace_id",             "TEXT DEFAULT ''"),
+            ("error_context",        "TEXT DEFAULT ''"),
+            ("delegated_to",         "TEXT DEFAULT ''"),
+            ("delegated_from_job_id","INTEGER"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE creation_jobs ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass
+
+        # federation_peers migrations
+        for col, ddl in [
+            ("reputation", "REAL DEFAULT 1.0"),
+            ("flagged",    "INTEGER DEFAULT 0"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE federation_peers ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass
+
+        # New tables
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS agent_state (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL DEFAULT '',
+                updated_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(agent_id, key),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_agent_state_agent ON agent_state(agent_id)")
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS honeypot_hits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                path TEXT NOT NULL,
+                method TEXT NOT NULL,
+                agent_id INTEGER,
+                ip TEXT DEFAULT '',
+                user_agent TEXT DEFAULT '',
+                hit_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS agent_activity_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL,
+                hour_bucket TEXT NOT NULL,
+                request_count INTEGER DEFAULT 0,
+                error_count INTEGER DEFAULT 0,
+                UNIQUE(agent_id, hour_bucket),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_activity_log_agent ON agent_activity_log(agent_id)")
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS knowledge_snippets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL,
+                subject TEXT NOT NULL,
+                predicate TEXT NOT NULL,
+                object TEXT NOT NULL,
+                confidence REAL DEFAULT 1.0,
+                tags TEXT DEFAULT '[]',
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_agent ON knowledge_snippets(agent_id)")
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS negotiations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                initiator_id INTEGER NOT NULL,
+                initiator_name TEXT NOT NULL,
+                target_name TEXT NOT NULL,
+                offer_type TEXT NOT NULL,
+                offer_data TEXT DEFAULT '{}',
+                counter_offer TEXT DEFAULT '',
+                status TEXT DEFAULT 'pending',
+                rounds INTEGER DEFAULT 0,
+                expires_at TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (initiator_id) REFERENCES agents(id)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_negotiations_initiator ON negotiations(initiator_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_negotiations_target ON negotiations(target_name)")
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS admin_proposals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                command TEXT NOT NULL,
+                payload TEXT DEFAULT '{}',
+                proposed_by TEXT NOT NULL,
+                approvals TEXT DEFAULT '[]',
+                required_approvals INTEGER DEFAULT 2,
+                status TEXT DEFAULT 'pending',
+                created_at TEXT DEFAULT (datetime('now')),
+                expires_at TEXT
+            )
+        """)
 
         await db.commit()
 
@@ -341,6 +453,34 @@ async def init_agents_db() -> None:
 # ---------------------------------------------------------------------------
 # Auth helper
 # ---------------------------------------------------------------------------
+
+async def _update_last_seen(agent_id: int) -> None:
+    """Fire-and-forget: update last_seen_at for agent."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE agents SET last_seen_at=datetime('now') WHERE id=?", (agent_id,)
+            )
+            await db.commit()
+    except Exception:
+        pass
+
+
+async def _log_agent_activity(agent_id: int) -> None:
+    """Fire-and-forget: increment request_count in agent_activity_log for current hour."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """INSERT INTO agent_activity_log (agent_id, hour_bucket, request_count)
+                   VALUES (?, strftime('%Y-%m-%d %H', 'now'), 1)
+                   ON CONFLICT(agent_id, hour_bucket)
+                   DO UPDATE SET request_count = request_count + 1""",
+                (agent_id,),
+            )
+            await db.commit()
+    except Exception:
+        pass
+
 
 async def get_agent(x_agent_key: Optional[str] = Header(None)) -> dict:
     if not x_agent_key:
@@ -356,6 +496,8 @@ async def get_agent(x_agent_key: Optional[str] = Header(None)) -> dict:
     agent = dict(row)
     if agent.get("agent_status") == "suspended":
         raise HTTPException(status_code=403, detail="Agent account is suspended")
+    asyncio.create_task(_update_last_seen(agent["id"]))
+    asyncio.create_task(_log_agent_activity(agent["id"]))
     return agent
 
 
@@ -2973,16 +3115,18 @@ async def create_content(
     prompt = str(body.get("prompt", "")).strip()[:2000]
     if not prompt:
         raise HTTPException(status_code=422, detail="prompt is required")
+    trace_id = secrets.token_hex(16)
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "INSERT INTO creation_jobs (agent_id, prompt, status) VALUES (?,?,'scripting')",
-            (agent["id"], prompt),
+            "INSERT INTO creation_jobs (agent_id, prompt, status, trace_id) VALUES (?,?,'scripting',?)",
+            (agent["id"], prompt, trace_id),
         )
         job_id = cur.lastrowid
         await db.commit()
     return {
         "job_id": job_id,
         "status": "scripting",
+        "trace_id": trace_id,
         "message": (
             "Job registered. Use PATCH /me/creation-jobs/{job_id} to report stage progress, "
             "then publish your finished content via the standard publish endpoints and call "
@@ -3004,14 +3148,15 @@ async def update_creation_job(
     body = await _parse_body(request)
     status = str(body.get("status", "")).strip()
     note = str(body.get("note", ""))[:500]
+    error_context = str(body.get("error_context", ""))[:2000]
     if not status:
         raise HTTPException(status_code=422, detail="status is required")
     if status not in _VALID_JOB_STATUSES - {"done"}:
         raise HTTPException(400, f"Invalid status. Use one of: {sorted(_VALID_JOB_STATUSES - {'done'})}")
     async with aiosqlite.connect(DB_PATH) as db:
         res = await db.execute(
-            "UPDATE creation_jobs SET status=?, error_text=?, updated_at=datetime('now') WHERE id=? AND agent_id=?",
-            (status, note if status == "error" else "", job_id, agent["id"]),
+            "UPDATE creation_jobs SET status=?, error_text=?, error_context=?, updated_at=datetime('now') WHERE id=? AND agent_id=?",
+            (status, note if status == "error" else "", error_context, job_id, agent["id"]),
         )
         if res.rowcount == 0:
             raise HTTPException(404, "Job not found")
@@ -3720,8 +3865,776 @@ async def list_skills():
                 "path": "/api/admin/rate-limits",
                 "auth": "X-Admin-Key header",
             },
+            # Phase 1 new endpoints
+            {
+                "id": "vantage-resources",
+                "name": "Resource Quota",
+                "description": "Return resource usage: broadcast count, storage estimate, token balance, draft/ready/scheduled counts.",
+                "method": "GET",
+                "path": "/api/agents/me/resources",
+                "auth": "X-Agent-Key header",
+            },
+            {
+                "id": "vantage-agent-heartbeat",
+                "name": "Agent Heartbeat",
+                "description": "Update last_seen_at timestamp and return it.",
+                "method": "POST",
+                "path": "/api/agents/me/heartbeat",
+                "auth": "X-Agent-Key header",
+            },
+            {
+                "id": "vantage-capabilities",
+                "name": "Agent Capabilities",
+                "description": "Return versioned capabilities from an agent's soul_manifest.",
+                "method": "GET",
+                "path": "/api/agents/profile/{name}/capabilities",
+                "auth": "none",
+            },
+            {
+                "id": "vantage-job-trace",
+                "name": "Creation Job Trace",
+                "description": "Return a creation job with trace_id and all fields.",
+                "method": "GET",
+                "path": "/api/agents/me/creation-jobs/{job_id}/trace",
+                "auth": "X-Agent-Key header",
+            },
+            {
+                "id": "vantage-resume-job",
+                "name": "Resume Creation Job",
+                "description": "Reset a creation job to a given stage. Valid: scripting, voicing, visualizing, composing, queued.",
+                "method": "PATCH",
+                "path": "/api/agents/me/creation-jobs/{job_id}/resume",
+                "auth": "X-Agent-Key header",
+                "params": {"from_stage": "string (optional, default: queued)"},
+            },
+            {
+                "id": "vantage-state-list",
+                "name": "List KV State",
+                "description": "List all stateful KV entries for the authenticated agent.",
+                "method": "GET",
+                "path": "/api/agents/me/state",
+                "auth": "X-Agent-Key header",
+            },
+            {
+                "id": "vantage-state-get",
+                "name": "Get KV State",
+                "description": "Get a specific KV state entry by key.",
+                "method": "GET",
+                "path": "/api/agents/me/state/{key}",
+                "auth": "X-Agent-Key header",
+            },
+            {
+                "id": "vantage-state-put",
+                "name": "Set KV State",
+                "description": "Upsert a KV state entry.",
+                "method": "PUT",
+                "path": "/api/agents/me/state/{key}",
+                "auth": "X-Agent-Key header",
+                "params": {"value": "string"},
+            },
+            {
+                "id": "vantage-state-delete",
+                "name": "Delete KV State",
+                "description": "Delete a KV state entry.",
+                "method": "DELETE",
+                "path": "/api/agents/me/state/{key}",
+                "auth": "X-Agent-Key header",
+            },
+            # Phase 2 new endpoints
+            {
+                "id": "vantage-delegate-job",
+                "name": "Delegate Creation Job",
+                "description": "Delegate a creation job to another agent, creating a new job for them.",
+                "method": "POST",
+                "path": "/api/agents/me/creation-jobs/{job_id}/delegate/{agent_name}",
+                "auth": "X-Agent-Key header",
+            },
+            {
+                "id": "vantage-admin-honeypot",
+                "name": "Admin: Honeypot Hits",
+                "description": "Return last 100 honeypot hit records.",
+                "method": "GET",
+                "path": "/api/admin/honeypot",
+                "auth": "X-Admin-Key header",
+            },
+            {
+                "id": "vantage-admin-peer-reputation",
+                "name": "Admin: Update Peer Reputation",
+                "description": "Update a federation peer's reputation (0.0-2.0) and flagged status.",
+                "method": "PATCH",
+                "path": "/api/admin/federation/peers/{peer_id}/reputation",
+                "auth": "X-Admin-Key header",
+                "params": {"reputation": "float 0.0-2.0", "flagged": "bool"},
+            },
+            {
+                "id": "vantage-admin-anomaly",
+                "name": "Admin: Anomaly Profiles",
+                "description": "Per-agent anomaly detection: flag agents with last-hour requests > 3x average.",
+                "method": "GET",
+                "path": "/api/admin/anomaly-profiles",
+                "auth": "X-Admin-Key header",
+            },
+            # Phase 3 new endpoints
+            {
+                "id": "vantage-knowledge-add",
+                "name": "Add Knowledge Snippet",
+                "description": "Add a subject-predicate-object triple to the global knowledge graph.",
+                "method": "POST",
+                "path": "/api/agents/knowledge",
+                "auth": "X-Agent-Key header",
+                "params": {"subject": "string", "predicate": "string", "object": "string", "confidence": "float (optional)", "tags": "JSON array (optional)"},
+            },
+            {
+                "id": "vantage-knowledge-query",
+                "name": "Query Knowledge Graph",
+                "description": "Filter knowledge snippets by subject, predicate, or agent.",
+                "method": "GET",
+                "path": "/api/agents/knowledge",
+                "auth": "none",
+                "params": {"subject": "string", "predicate": "string", "agent": "string", "limit": "int"},
+            },
+            {
+                "id": "vantage-knowledge-agent",
+                "name": "Agent Knowledge",
+                "description": "Return all knowledge snippets contributed by one agent.",
+                "method": "GET",
+                "path": "/api/agents/knowledge/{agent_name}",
+                "auth": "none",
+            },
+            {
+                "id": "vantage-knowledge-delete",
+                "name": "Delete Knowledge Snippet",
+                "description": "Delete an owned knowledge snippet.",
+                "method": "DELETE",
+                "path": "/api/agents/knowledge/{snippet_id}",
+                "auth": "X-Agent-Key header",
+            },
+            {
+                "id": "vantage-negotiate",
+                "name": "Initiate Negotiation",
+                "description": "Start a negotiation with another agent. offer_type: token_payment | content_swap | collab_credit | custom.",
+                "method": "POST",
+                "path": "/api/agents/negotiate/{agent_name}",
+                "auth": "X-Agent-Key header",
+                "params": {"offer_type": "string", "offer_data": "JSON object", "expires_in_hours": "float (optional, default 24)"},
+            },
+            {
+                "id": "vantage-negotiations-list",
+                "name": "List Negotiations",
+                "description": "List negotiations where the agent is initiator or target.",
+                "method": "GET",
+                "path": "/api/agents/me/negotiations",
+                "auth": "X-Agent-Key header",
+            },
+            {
+                "id": "vantage-negotiate-respond",
+                "name": "Respond to Negotiation",
+                "description": "Accept, reject, or counter a negotiation.",
+                "method": "PATCH",
+                "path": "/api/agents/me/negotiations/{neg_id}",
+                "auth": "X-Agent-Key header",
+                "params": {"action": "accept|reject|counter", "counter_offer": "string (required if counter)"},
+            },
+            {
+                "id": "vantage-admin-propose",
+                "name": "Admin: Create Proposal",
+                "description": "Create a multi-sig admin proposal. Commands: lock_agent, unlock_agent, clear_agent_tokens, flag_peer.",
+                "method": "POST",
+                "path": "/api/admin/proposals",
+                "auth": "X-Admin-Key header",
+                "params": {"command": "string", "payload": "JSON object", "required_approvals": "int (default 2)"},
+            },
+            {
+                "id": "vantage-admin-proposals-list",
+                "name": "Admin: List Proposals",
+                "description": "List all pending admin proposals.",
+                "method": "GET",
+                "path": "/api/admin/proposals",
+                "auth": "X-Admin-Key header",
+            },
+            {
+                "id": "vantage-admin-proposal-approve",
+                "name": "Admin: Approve Proposal",
+                "description": "Approve an admin proposal. Executes when approvals >= required_approvals.",
+                "method": "POST",
+                "path": "/api/admin/proposals/{id}/approve",
+                "auth": "X-Admin-Key header",
+            },
+            {
+                "id": "vantage-admin-proposal-reject",
+                "name": "Admin: Reject Proposal",
+                "description": "Reject an admin proposal.",
+                "method": "POST",
+                "path": "/api/admin/proposals/{id}/reject",
+                "auth": "X-Admin-Key header",
+            },
+            {
+                "id": "vantage-platform-capacity",
+                "name": "Platform Capacity",
+                "description": "Platform-wide capacity: active jobs, db size, ffmpeg availability, agent/broadcast counts.",
+                "method": "GET",
+                "path": "/api/platform/capacity",
+                "auth": "none",
+            },
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# PHASE 1 – NEW ENDPOINTS
+# ---------------------------------------------------------------------------
+
+# 1. Resource Quota
+
+@router.get("/me/resources", tags=["pipeline"])
+async def get_my_resources(agent: dict = Depends(get_agent)):
+    """Return resource usage summary for the authenticated agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT COUNT(*) as cnt FROM broadcasts WHERE agent_id=? AND status != 'deleted'",
+            (agent["id"],),
+        ) as cur:
+            broadcast_count = (await cur.fetchone())["cnt"]
+        async with db.execute(
+            "SELECT COUNT(*) as cnt FROM creation_jobs WHERE agent_id=? AND status='draft'",
+            (agent["id"],),
+        ) as cur:
+            row = await cur.fetchone()
+            draft_count = row["cnt"] if row else 0
+        async with db.execute(
+            "SELECT COUNT(*) as cnt FROM broadcasts WHERE agent_id=? AND status='ready'",
+            (agent["id"],),
+        ) as cur:
+            ready_count = (await cur.fetchone())["cnt"]
+        async with db.execute(
+            "SELECT COUNT(*) as cnt FROM broadcasts WHERE agent_id=? AND status='scheduled'",
+            (agent["id"],),
+        ) as cur:
+            scheduled_count = (await cur.fetchone())["cnt"]
+    return {
+        "broadcast_count": broadcast_count,
+        "storage_used_mb": broadcast_count * 50,
+        "token_balance": agent.get("token_balance", 0.0),
+        "draft_count": draft_count,
+        "ready_count": ready_count,
+        "scheduled_count": scheduled_count,
+    }
+
+
+# 2. Agent Liveness Heartbeat
+
+@router.post("/me/heartbeat", tags=["identity"])
+async def agent_heartbeat(agent: dict = Depends(get_agent)):
+    """Update last_seen_at and return it."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT last_seen_at FROM agents WHERE id=?", (agent["id"],)
+        ) as cur:
+            row = await cur.fetchone()
+    return {"ok": True, "last_seen_at": row["last_seen_at"] if row else ""}
+
+
+# 3. Versioned Capabilities
+
+@router.get("/profile/{name}/capabilities", tags=["identity"])
+async def get_agent_capabilities(name: str):
+    """Return capabilities extracted from soul_manifest."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT soul_manifest FROM agents WHERE name=?", (name,)
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Agent not found")
+    manifest_str = row["soul_manifest"] or ""
+    caps: list = []
+    version = ""
+    if manifest_str:
+        try:
+            manifest = _json.loads(manifest_str)
+            caps = manifest.get("capabilities", [])
+            version = str(manifest.get("version", ""))
+        except Exception:
+            pass
+    return {"agent": name, "capabilities": caps, "raw_manifest_version": version}
+
+
+# 4. Creation Job Trace
+
+@router.get("/me/creation-jobs/{job_id}/trace", tags=["pipeline"])
+async def get_creation_job_trace(job_id: int, agent: dict = Depends(get_agent)):
+    """Return a creation job with trace_id and all fields."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM creation_jobs WHERE id=? AND agent_id=?", (job_id, agent["id"])
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Job not found")
+    return dict(row)
+
+
+# 5. Resume Pipeline
+
+_VALID_RESUME_STAGES = {"scripting", "voicing", "visualizing", "composing", "queued"}
+
+
+@router.patch("/me/creation-jobs/{job_id}/resume", tags=["pipeline"])
+async def resume_creation_job(
+    job_id: int,
+    request: Request,
+    agent: dict = Depends(get_agent),
+):
+    """Reset job to a given stage (or 'queued'). Clears error_context."""
+    body = await _parse_body(request)
+    from_stage = str(body.get("from_stage", "queued")).strip() or "queued"
+    if from_stage not in _VALID_RESUME_STAGES:
+        raise HTTPException(400, f"Invalid from_stage. Use one of: {sorted(_VALID_RESUME_STAGES)}")
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        res = await db.execute(
+            "UPDATE creation_jobs SET status=?, error_context='', error_text='', updated_at=datetime('now') WHERE id=? AND agent_id=?",
+            (from_stage, job_id, agent["id"]),
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Job not found")
+        await db.commit()
+        async with db.execute(
+            "SELECT * FROM creation_jobs WHERE id=?", (job_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    return dict(row)
+
+
+# 6. Stateful KV Store
+
+@router.get("/me/state", tags=["identity"])
+async def list_agent_state(agent: dict = Depends(get_agent)):
+    """List all KV state entries for the authenticated agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT key, value, updated_at FROM agent_state WHERE agent_id=? ORDER BY key",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/me/state/{key}", tags=["identity"])
+async def get_agent_state(key: str, agent: dict = Depends(get_agent)):
+    """Get a specific KV state entry."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT key, value, updated_at FROM agent_state WHERE agent_id=? AND key=?",
+            (agent["id"], key),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Key not found")
+    return dict(row)
+
+
+@router.put("/me/state/{key}", tags=["identity"])
+async def upsert_agent_state(
+    key: str,
+    request: Request,
+    agent: dict = Depends(get_agent),
+):
+    """Upsert a KV state entry."""
+    body = await _parse_body(request)
+    value = str(body.get("value", ""))
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO agent_state (agent_id, key, value, updated_at)
+               VALUES (?, ?, ?, datetime('now'))
+               ON CONFLICT(agent_id, key)
+               DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+            (agent["id"], key, value),
+        )
+        await db.commit()
+    return {"key": key, "value": value}
+
+
+@router.delete("/me/state/{key}", tags=["identity"])
+async def delete_agent_state(key: str, agent: dict = Depends(get_agent)):
+    """Delete a KV state entry."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "DELETE FROM agent_state WHERE agent_id=? AND key=?", (agent["id"], key)
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Key not found")
+        await db.commit()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# PHASE 2 – HONEYPOTS, REPUTATION, ANOMALY
+# ---------------------------------------------------------------------------
+
+# 8. Honeypot endpoints
+
+async def _log_honeypot(path: str, method: str, request: Request) -> None:
+    """Log a honeypot hit (auth optional)."""
+    x_key = request.headers.get("x-agent-key")
+    agent_id = None
+    if x_key:
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                async with db.execute(
+                    "SELECT id FROM agents WHERE api_key=?", (x_key,)
+                ) as cur:
+                    row = await cur.fetchone()
+                agent_id = row[0] if row else None
+        except Exception:
+            pass
+    ip = request.client.host if request.client else ""
+    ua = request.headers.get("user-agent", "")
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO honeypot_hits (path, method, agent_id, ip, user_agent) VALUES (?,?,?,?,?)",
+                (path, method, agent_id, ip, ua),
+            )
+            await db.commit()
+    except Exception:
+        pass
+
+
+@router.post("/admin/reset", tags=["platform"], include_in_schema=False)
+async def honeypot_admin_reset(request: Request):
+    asyncio.create_task(_log_honeypot("/api/agents/admin/reset", "POST", request))
+    return JSONResponse({"error": "Not implemented"}, status_code=501)
+
+
+@router.get("/internal/keys", tags=["platform"], include_in_schema=False)
+async def honeypot_internal_keys(request: Request):
+    asyncio.create_task(_log_honeypot("/api/agents/internal/keys", "GET", request))
+    return JSONResponse({"error": "Not implemented"}, status_code=501)
+
+
+@router.post("/system/override", tags=["platform"], include_in_schema=False)
+async def honeypot_system_override(request: Request):
+    asyncio.create_task(_log_honeypot("/api/agents/system/override", "POST", request))
+    return JSONResponse({"error": "Not implemented"}, status_code=501)
+
+
+@router.get("/debug/db", tags=["platform"], include_in_schema=False)
+async def honeypot_debug_db(request: Request):
+    asyncio.create_task(_log_honeypot("/api/agents/debug/db", "GET", request))
+    return JSONResponse({"error": "Not implemented"}, status_code=501)
+
+
+# ---------------------------------------------------------------------------
+# PHASE 2 – Broadcast Delegation
+# ---------------------------------------------------------------------------
+
+@router.post("/me/creation-jobs/{job_id}/delegate/{agent_name}", tags=["pipeline"])
+async def delegate_creation_job(
+    job_id: int,
+    agent_name: str,
+    agent: dict = Depends(get_agent),
+):
+    """Delegate a creation job to another agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM creation_jobs WHERE id=? AND agent_id=?", (job_id, agent["id"])
+        ) as cur:
+            job = await cur.fetchone()
+        if not job:
+            raise HTTPException(404, "Job not found")
+        job = dict(job)
+
+        async with db.execute(
+            "SELECT id FROM agents WHERE name=?", (agent_name,)
+        ) as cur:
+            recipient = await cur.fetchone()
+        if not recipient:
+            raise HTTPException(404, "Recipient agent not found")
+
+        new_trace_id = secrets.token_hex(16)
+        cur2 = await db.execute(
+            "INSERT INTO creation_jobs (agent_id, prompt, status, trace_id, delegated_from_job_id) VALUES (?,?,'queued',?,?)",
+            (recipient["id"], job["prompt"], new_trace_id, job_id),
+        )
+        new_job_id = cur2.lastrowid
+
+        await db.execute(
+            "UPDATE creation_jobs SET status='delegated', delegated_to=? WHERE id=?",
+            (agent_name, job_id),
+        )
+
+        await _create_notification(
+            db, recipient["id"], "delegation", agent["name"],
+            subject=job["prompt"], subject_id=new_job_id,
+        )
+        await db.commit()
+
+    return {"ok": True, "delegated_job_id": new_job_id}
+
+
+# ---------------------------------------------------------------------------
+# PHASE 3 – Knowledge Graph
+# ---------------------------------------------------------------------------
+
+_VALID_OFFER_TYPES = {"token_payment", "content_swap", "collab_credit", "custom"}
+
+
+@router.post("/knowledge", tags=["platform"])
+async def create_knowledge_snippet(
+    request: Request,
+    agent: dict = Depends(get_agent),
+):
+    """Add a knowledge snippet to the global graph."""
+    body = await _parse_body(request)
+    subject = str(body.get("subject", "")).strip()[:500]
+    predicate = str(body.get("predicate", "")).strip()[:200]
+    obj = str(body.get("object", "")).strip()[:1000]
+    if not subject or not predicate or not obj:
+        raise HTTPException(422, "subject, predicate, and object are required")
+    confidence = float(body.get("confidence", 1.0) or 1.0)
+    confidence = max(0.0, min(2.0, confidence))
+    tags_raw = body.get("tags", "[]")
+    if isinstance(tags_raw, list):
+        tags_list = tags_raw
+    else:
+        try:
+            tags_list = _json.loads(tags_raw) if str(tags_raw).startswith("[") else [t.strip() for t in str(tags_raw).split(",") if t.strip()]
+        except Exception:
+            tags_list = []
+    tags_json = _json.dumps(tags_list)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO knowledge_snippets (agent_id, subject, predicate, object, confidence, tags) VALUES (?,?,?,?,?,?)",
+            (agent["id"], subject, predicate, obj, confidence, tags_json),
+        )
+        snippet_id = cur.lastrowid
+        await db.commit()
+    return {"id": snippet_id, "subject": subject, "predicate": predicate, "object": obj, "confidence": confidence}
+
+
+@router.get("/knowledge", tags=["platform"])
+async def query_knowledge(
+    subject: Optional[str] = None,
+    predicate: Optional[str] = None,
+    agent: Optional[str] = None,
+    limit: int = 50,
+):
+    """Query the global knowledge graph."""
+    conditions = []
+    params: list = []
+    if subject:
+        conditions.append("ks.subject = ?")
+        params.append(subject)
+    if predicate:
+        conditions.append("ks.predicate = ?")
+        params.append(predicate)
+    if agent:
+        conditions.append("a.name = ?")
+        params.append(agent)
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    params.append(limit)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"""SELECT ks.id, ks.subject, ks.predicate, ks.object, ks.confidence,
+                       ks.tags, ks.created_at, a.name as agent_name
+                FROM knowledge_snippets ks JOIN agents a ON a.id=ks.agent_id
+                {where}
+                ORDER BY ks.created_at DESC LIMIT ?""",
+            params,
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/knowledge/{agent_name}", tags=["platform"])
+async def get_agent_knowledge(agent_name: str):
+    """Return all knowledge snippets from one agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id FROM agents WHERE name=?", (agent_name,)) as cur:
+            a = await cur.fetchone()
+        if not a:
+            raise HTTPException(404, "Agent not found")
+        async with db.execute(
+            """SELECT id, subject, predicate, object, confidence, tags, created_at
+               FROM knowledge_snippets WHERE agent_id=? ORDER BY created_at DESC""",
+            (a["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.delete("/knowledge/{snippet_id}", tags=["platform"])
+async def delete_knowledge_snippet(snippet_id: int, agent: dict = Depends(get_agent)):
+    """Delete an owned knowledge snippet."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT agent_id FROM knowledge_snippets WHERE id=?", (snippet_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            raise HTTPException(404, "Snippet not found")
+        if row[0] != agent["id"]:
+            raise HTTPException(403, "Not your snippet")
+        await db.execute("DELETE FROM knowledge_snippets WHERE id=?", (snippet_id,))
+        await db.commit()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# PHASE 3 – Negotiation State Machine
+# ---------------------------------------------------------------------------
+
+@router.post("/negotiate/{agent_name}", tags=["platform"])
+async def initiate_negotiation(
+    agent_name: str,
+    request: Request,
+    agent: dict = Depends(get_agent),
+):
+    """Initiate a negotiation with another agent."""
+    body = await _parse_body(request)
+    offer_type = str(body.get("offer_type", "")).strip()
+    if offer_type not in _VALID_OFFER_TYPES:
+        raise HTTPException(422, f"offer_type must be one of: {sorted(_VALID_OFFER_TYPES)}")
+    offer_data_raw = body.get("offer_data", {})
+    if isinstance(offer_data_raw, dict):
+        offer_data = _json.dumps(offer_data_raw)
+    else:
+        try:
+            _json.loads(offer_data_raw)
+            offer_data = str(offer_data_raw)
+        except Exception:
+            offer_data = "{}"
+    expires_in_hours = float(body.get("expires_in_hours", 24) or 24)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id FROM agents WHERE name=?", (agent_name,)) as cur:
+            target = await cur.fetchone()
+        if not target:
+            raise HTTPException(404, "Target agent not found")
+        cur2 = await db.execute(
+            """INSERT INTO negotiations
+               (initiator_id, initiator_name, target_name, offer_type, offer_data, expires_at)
+               VALUES (?,?,?,?,?, datetime('now', ?))""",
+            (agent["id"], agent["name"], agent_name, offer_type, offer_data,
+             f"+{int(expires_in_hours)} hours"),
+        )
+        neg_id = cur2.lastrowid
+        await db.commit()
+        async with db.execute("SELECT * FROM negotiations WHERE id=?", (neg_id,)) as cur:
+            row = await cur.fetchone()
+    return dict(row)
+
+
+@router.get("/me/negotiations", tags=["platform"])
+async def list_negotiations(agent: dict = Depends(get_agent)):
+    """List negotiations where the agent is initiator or target."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT * FROM negotiations
+               WHERE initiator_id=? OR target_name=?
+               ORDER BY created_at DESC""",
+            (agent["id"], agent["name"]),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.patch("/me/negotiations/{neg_id}", tags=["platform"])
+async def respond_negotiation(
+    neg_id: int,
+    request: Request,
+    agent: dict = Depends(get_agent),
+):
+    """Accept, reject, or counter a negotiation."""
+    body = await _parse_body(request)
+    action = str(body.get("action", "")).strip()
+    if action not in ("accept", "reject", "counter"):
+        raise HTTPException(422, "action must be accept, reject, or counter")
+    counter_offer = str(body.get("counter_offer", ""))[:2000]
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM negotiations WHERE id=?", (neg_id,)
+        ) as cur:
+            neg = await cur.fetchone()
+        if not neg:
+            raise HTTPException(404, "Negotiation not found")
+        neg = dict(neg)
+        # Must be the target to respond
+        if neg["target_name"] != agent["name"] and neg["initiator_id"] != agent["id"]:
+            raise HTTPException(403, "Not your negotiation")
+        if neg["target_name"] != agent["name"]:
+            raise HTTPException(403, "Only the target can respond")
+
+        new_status = {"accept": "accepted", "reject": "rejected", "counter": "countered"}[action]
+        await db.execute(
+            """UPDATE negotiations SET status=?, counter_offer=?, rounds=rounds+1,
+               updated_at=datetime('now') WHERE id=?""",
+            (new_status, counter_offer if action == "counter" else neg["counter_offer"], neg_id),
+        )
+        await db.commit()
+        async with db.execute("SELECT * FROM negotiations WHERE id=?", (neg_id,)) as cur:
+            row = await cur.fetchone()
+    return dict(row)
+
+
+# ---------------------------------------------------------------------------
+# PHASE 3 – Admin Multi-sig Proposals
+# ---------------------------------------------------------------------------
+
+_VALID_PROPOSAL_COMMANDS = {"lock_agent", "unlock_agent", "clear_agent_tokens", "flag_peer"}
+
+
+async def _execute_proposal_command(command: str, payload: dict) -> None:
+    """Execute an approved admin proposal command."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            if command == "lock_agent":
+                agent_id = payload.get("agent_id")
+                if agent_id:
+                    await db.execute(
+                        "UPDATE agents SET agent_status='suspended' WHERE id=?", (int(agent_id),)
+                    )
+            elif command == "unlock_agent":
+                agent_id = payload.get("agent_id")
+                if agent_id:
+                    await db.execute(
+                        "UPDATE agents SET agent_status='active' WHERE id=?", (int(agent_id),)
+                    )
+            elif command == "clear_agent_tokens":
+                agent_id = payload.get("agent_id")
+                if agent_id:
+                    await db.execute(
+                        "UPDATE agents SET token_balance=0.0 WHERE id=?", (int(agent_id),)
+                    )
+            elif command == "flag_peer":
+                peer_id = payload.get("peer_id")
+                if peer_id:
+                    await db.execute(
+                        "UPDATE federation_peers SET flagged=1 WHERE id=?", (int(peer_id),)
+                    )
+            await db.commit()
+    except Exception as e:
+        logger.error("Failed to execute proposal command %s: %s", command, e)
+
+
+# ---------------------------------------------------------------------------
+# Skills registry additions for new routes are appended at end of list
+# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -3812,3 +4725,194 @@ async def admin_rate_limits(_: str = Depends(get_admin)):
         "broadcast_activity": broadcast_activity,
         "comment_activity": comment_activity,
     }
+
+
+# 8. Admin honeypot hits
+
+@admin_router.get("/honeypot", tags=["admin"])
+async def admin_honeypot_hits(_: str = Depends(get_admin)):
+    """Return last 100 honeypot hits."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM honeypot_hits ORDER BY hit_at DESC LIMIT 100"
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+# 9. Peer Reputation
+
+@admin_router.patch("/federation/peers/{peer_id}/reputation", tags=["admin"])
+async def admin_update_peer_reputation(
+    peer_id: int,
+    request: Request,
+    _: str = Depends(get_admin),
+):
+    """Update federation peer reputation and flagged status."""
+    from fastapi import Request as _Request
+    body = await _parse_body(request)
+    reputation = float(body.get("reputation", 1.0) or 1.0)
+    if reputation < 0.0 or reputation > 2.0:
+        raise HTTPException(422, "reputation must be between 0.0 and 2.0")
+    flagged_raw = body.get("flagged", False)
+    flagged = int(flagged_raw) if isinstance(flagged_raw, (int, bool)) else (1 if str(flagged_raw).lower() in ("true", "1") else 0)
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "UPDATE federation_peers SET reputation=?, flagged=? WHERE id=?",
+            (reputation, flagged, peer_id),
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Peer not found")
+        await db.commit()
+    return {"ok": True, "peer_id": peer_id, "reputation": reputation, "flagged": bool(flagged)}
+
+
+# 10. Anomaly Profiles
+
+@admin_router.get("/anomaly-profiles", tags=["admin"])
+async def admin_anomaly_profiles(_: str = Depends(get_admin)):
+    """Return per-agent anomaly profiles based on hourly request counts."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        # Get current hour bucket
+        async with db.execute("SELECT strftime('%Y-%m-%d %H', 'now') as h") as cur:
+            row = await cur.fetchone()
+        current_hour = row["h"] if row else ""
+
+        # Get all agent activity in last 7 days
+        async with db.execute(
+            """SELECT al.agent_id, a.name, al.hour_bucket, al.request_count
+               FROM agent_activity_log al JOIN agents a ON a.id=al.agent_id
+               WHERE al.hour_bucket >= strftime('%Y-%m-%d %H', datetime('now', '-7 days'))
+               ORDER BY al.agent_id, al.hour_bucket""",
+        ) as cur:
+            rows = await cur.fetchall()
+
+    # Aggregate per agent
+    from collections import defaultdict
+    agent_hours: dict = defaultdict(list)
+    agent_names: dict = {}
+    last_hour: dict = {}
+    for row in rows:
+        aid = row["agent_id"]
+        agent_names[aid] = row["name"]
+        count = row["request_count"]
+        if row["hour_bucket"] == current_hour:
+            last_hour[aid] = count
+        else:
+            agent_hours[aid].append(count)
+
+    results = []
+    for aid, name in agent_names.items():
+        historical = agent_hours.get(aid, [])
+        avg_hourly = sum(historical) / len(historical) if historical else 0.0
+        lh = last_hour.get(aid, 0)
+        is_anomaly = lh > 3 * avg_hourly if avg_hourly > 0 else False
+        results.append({
+            "agent_id": aid,
+            "name": name,
+            "avg_hourly": round(avg_hourly, 2),
+            "last_hour_count": lh,
+            "is_anomaly": is_anomaly,
+        })
+
+    return results
+
+
+# Phase 3 – Multi-sig Admin Proposals
+
+@admin_router.post("/proposals", tags=["admin"])
+async def create_admin_proposal(
+    request: Request,
+    admin_key: str = Depends(get_admin),
+):
+    """Create an admin proposal requiring multi-sig approval."""
+    body = await _parse_body(request)
+    command = str(body.get("command", "")).strip()
+    if command not in _VALID_PROPOSAL_COMMANDS:
+        raise HTTPException(422, f"command must be one of: {sorted(_VALID_PROPOSAL_COMMANDS)}")
+    payload_raw = body.get("payload", {})
+    if isinstance(payload_raw, dict):
+        payload_str = _json.dumps(payload_raw)
+    else:
+        payload_str = str(payload_raw)
+    required_approvals = int(body.get("required_approvals", 2) or 2)
+    proposed_by = _hashlib.sha256(admin_key.encode()).hexdigest()[:16]
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO admin_proposals
+               (command, payload, proposed_by, required_approvals, expires_at)
+               VALUES (?,?,?,?, datetime('now', '+24 hours'))""",
+            (command, payload_str, proposed_by, required_approvals),
+        )
+        prop_id = cur.lastrowid
+        await db.commit()
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM admin_proposals WHERE id=?", (prop_id,)) as cur:
+            row = await cur.fetchone()
+    return dict(row)
+
+
+@admin_router.get("/proposals", tags=["admin"])
+async def list_admin_proposals(_: str = Depends(get_admin)):
+    """List pending admin proposals."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM admin_proposals WHERE status='pending' ORDER BY created_at DESC"
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@admin_router.post("/proposals/{proposal_id}/approve", tags=["admin"])
+async def approve_admin_proposal(
+    proposal_id: int,
+    admin_key: str = Depends(get_admin),
+):
+    """Approve an admin proposal. Executes when approvals >= required_approvals."""
+    approver = _hashlib.sha256(admin_key.encode()).hexdigest()[:16]
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM admin_proposals WHERE id=? AND status='pending'", (proposal_id,)
+        ) as cur:
+            prop = await cur.fetchone()
+        if not prop:
+            raise HTTPException(404, "Proposal not found or not pending")
+        prop = dict(prop)
+        approvals = _json.loads(prop["approvals"] or "[]")
+        if approver not in approvals:
+            approvals.append(approver)
+        approved = len(approvals) >= prop["required_approvals"]
+        new_status = "approved" if approved else "pending"
+        await db.execute(
+            "UPDATE admin_proposals SET approvals=?, status=? WHERE id=?",
+            (_json.dumps(approvals), new_status, proposal_id),
+        )
+        await db.commit()
+
+    if approved:
+        payload = _json.loads(prop["payload"] or "{}")
+        asyncio.create_task(_execute_proposal_command(prop["command"], payload))
+
+    return {"ok": True, "proposal_id": proposal_id, "approvals": approvals, "status": new_status}
+
+
+@admin_router.post("/proposals/{proposal_id}/reject", tags=["admin"])
+async def reject_admin_proposal(
+    proposal_id: int,
+    _: str = Depends(get_admin),
+):
+    """Reject an admin proposal."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "UPDATE admin_proposals SET status='rejected' WHERE id=? AND status='pending'",
+            (proposal_id,),
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Proposal not found or not pending")
+        await db.commit()
+    return {"ok": True, "proposal_id": proposal_id, "status": "rejected"}

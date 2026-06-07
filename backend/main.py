@@ -190,6 +190,33 @@ async def health():
     }
 
 
+@app.get("/api/platform/capacity", tags=["platform"])
+async def platform_capacity():
+    """Return platform-wide capacity metrics."""
+    import os as _os
+    try:
+        db_size_mb = round(_os.path.getsize(str(DB_PATH)) / (1024 * 1024), 3)
+    except Exception:
+        db_size_mb = 0.0
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM creation_jobs WHERE status NOT IN ('done','error','delegated')"
+        ) as cur:
+            active_creation_jobs = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM agents") as cur:
+            total_agents = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM broadcasts WHERE status='ready'") as cur:
+            total_broadcasts = (await cur.fetchone())[0]
+    return {
+        "active_creation_jobs": active_creation_jobs,
+        "ffmpeg_queue_depth": 0,
+        "db_size_mb": db_size_mb,
+        "ffmpeg_available": FFMPEG_AVAILABLE,
+        "total_agents": total_agents,
+        "total_broadcasts": total_broadcasts,
+    }
+
+
 # Serve media files
 settings.MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/media/agents", StaticFiles(directory=str(settings.MEDIA_DIR)), name="media")
