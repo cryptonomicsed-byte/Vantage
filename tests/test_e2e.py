@@ -2180,3 +2180,607 @@ class TestSwarmTrace:
     def test_public_trace_not_found_for_deleted(self, client):
         r = client.get("/api/agents/broadcasts/88888/trace")
         assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Feature: Agent Self-Diagnostics Error Map
+# ---------------------------------------------------------------------------
+
+class TestSelfDiagnostics:
+    @pytest.fixture(autouse=True)
+    def patch_admin(self):
+        with patch.object(settings, "ADMIN_KEY", ADMIN_KEY):
+            yield
+
+    def _ah(self):
+        return {"X-Admin-Key": ADMIN_KEY}
+
+    def test_report_error_basic(self, client):
+        key = _reg(client, "DiagAgent1")
+        r = client.post(
+            "/api/agents/me/report-error",
+            json={"error_type": "pipeline", "message": "FFmpeg timed out on stage 2", "error_code": "TIMEOUT"},
+            headers=_headers(key),
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert "report_id" in data
+        assert data["error_type"] == "pipeline"
+
+    def test_report_error_requires_message(self, client):
+        key = _reg(client, "DiagAgent2")
+        r = client.post(
+            "/api/agents/me/report-error",
+            json={"error_type": "pipeline"},
+            headers=_headers(key),
+        )
+        assert r.status_code == 422
+
+    def test_report_error_requires_auth(self, client):
+        r = client.post(
+            "/api/agents/me/report-error",
+            json={"error_type": "pipeline", "message": "test"},
+        )
+        assert r.status_code == 401
+
+    def test_list_my_error_reports(self, client):
+        key = _reg(client, "DiagAgent3")
+        client.post(
+            "/api/agents/me/report-error",
+            json={"error_type": "task", "message": "Bid failed"},
+            headers=_headers(key),
+        )
+        r = client.get("/api/agents/me/error-reports", headers=_headers(key))
+        assert r.status_code == 200
+        reports = r.json()
+        assert isinstance(reports, list)
+        messages = [rep["message"] for rep in reports]
+        assert "Bid failed" in messages
+
+    def test_list_error_reports_filter_resolved(self, client):
+        key = _reg(client, "DiagAgent4")
+        client.post(
+            "/api/agents/me/report-error",
+            json={"error_type": "network", "message": "Connection reset"},
+            headers=_headers(key),
+        )
+        r = client.get("/api/agents/me/error-reports", params={"resolved": 0}, headers=_headers(key))
+        assert r.status_code == 200
+        assert all(rep["resolved"] == 0 for rep in r.json())
+
+    def test_admin_error_map(self, client):
+        key = _reg(client, "DiagAgent5")
+        client.post(
+            "/api/agents/me/report-error",
+            json={"error_type": "pipeline", "message": "Stage failure"},
+            headers=_headers(key),
+        )
+        r = client.get("/api/admin/error-map", headers=self._ah())
+        assert r.status_code == 200
+        data = r.json()
+        assert "hotspots" in data
+        assert "total" in data
+        assert isinstance(data["hotspots"], list)
+
+    def test_admin_error_map_requires_admin(self, client):
+        key = _reg(client, "DiagAgent6")
+        r = client.get("/api/admin/error-map", headers=_headers(key))
+        assert r.status_code == 403
+
+    def test_admin_resolve_error(self, client):
+        key = _reg(client, "DiagAgent7")
+        rr = client.post(
+            "/api/agents/me/report-error",
+            json={"error_type": "data", "message": "Corrupt artifact"},
+            headers=_headers(key),
+        )
+        report_id = rr.json()["report_id"]
+        r = client.post(f"/api/admin/error-map/{report_id}/resolve", headers=self._ah())
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+    def test_admin_resolve_sets_resolved_flag(self, client):
+        key = _reg(client, "DiagAgent8")
+        rr = client.post(
+            "/api/agents/me/report-error",
+            json={"error_type": "data", "message": "Corrupt artifact 2"},
+            headers=_headers(key),
+        )
+        report_id = rr.json()["report_id"]
+        client.post(f"/api/admin/error-map/{report_id}/resolve", headers=self._ah())
+        r2 = client.get("/api/agents/me/error-reports", params={"resolved": 1}, headers=_headers(key))
+        assert any(rep["id"] == report_id for rep in r2.json())
+
+    def test_unknown_error_type_normalised(self, client):
+        key = _reg(client, "DiagAgent9")
+        r = client.post(
+            "/api/agents/me/report-error",
+            json={"error_type": "totally_made_up", "message": "Bad type"},
+            headers=_headers(key),
+        )
+        assert r.status_code == 200
+        assert r.json()["error_type"] == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Feature: Task-Chain Dependency Tracking
+# ---------------------------------------------------------------------------
+
+class TestTaskChain:
+    def _create_task(self, client, key, title="Chain Task"):
+        r = client.post(
+            "/api/agents/tasks",
+            json={"title": title, "description": "test"},
+            headers=_headers(key),
+        )
+        assert r.status_code == 200
+        return r.json()["id"]
+
+    def test_set_dependency(self, client):
+        key = _reg(client, "ChainAgent1")
+        task_a = self._create_task(client, key, "Task A")
+        task_b = self._create_task(client, key, "Task B")
+        r = client.post(
+            f"/api/agents/tasks/{task_b}/dependencies",
+            json={"depends_on_task_id": task_a},
+            headers=_headers(key),
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["depends_on_task_id"] == task_a
+
+    def test_set_dependency_requires_auth(self, client):
+        key = _reg(client, "ChainAgent2")
+        task_a = self._create_task(client, key, "Task A2")
+        task_b = self._create_task(client, key, "Task B2")
+        r = client.post(
+            f"/api/agents/tasks/{task_b}/dependencies",
+            json={"depends_on_task_id": task_a},
+        )
+        assert r.status_code == 401
+
+    def test_set_dependency_missing_param(self, client):
+        key = _reg(client, "ChainAgent3")
+        task = self._create_task(client, key, "Lonely Task")
+        r = client.post(
+            f"/api/agents/tasks/{task}/dependencies",
+            json={},
+            headers=_headers(key),
+        )
+        assert r.status_code == 422
+
+    def test_get_chain(self, client):
+        key = _reg(client, "ChainAgent4")
+        task_a = self._create_task(client, key, "Chain A4")
+        task_b = self._create_task(client, key, "Chain B4")
+        client.post(
+            f"/api/agents/tasks/{task_b}/dependencies",
+            json={"depends_on_task_id": task_a},
+            headers=_headers(key),
+        )
+        r = client.get(f"/api/agents/tasks/{task_b}/chain")
+        assert r.status_code == 200
+        data = r.json()
+        assert "chain" in data
+        assert data["task_id"] == task_b
+        assert data["chain_length"] >= 1
+
+    def test_chain_includes_dependency(self, client):
+        key = _reg(client, "ChainAgent5")
+        task_a = self._create_task(client, key, "Root5")
+        task_b = self._create_task(client, key, "Leaf5")
+        client.post(
+            f"/api/agents/tasks/{task_b}/dependencies",
+            json={"depends_on_task_id": task_a},
+            headers=_headers(key),
+        )
+        r = client.get(f"/api/agents/tasks/{task_b}/chain")
+        chain_ids = [t["id"] for t in r.json()["chain"]]
+        assert task_a in chain_ids
+
+    def test_chain_not_found(self, client):
+        r = client.get("/api/agents/tasks/99999/chain")
+        # nonexistent task returns empty chain rather than 404
+        assert r.status_code in (200, 404)
+
+    def test_dependency_on_nonexistent_task(self, client):
+        key = _reg(client, "ChainAgent6")
+        task = self._create_task(client, key, "Orphan")
+        r = client.post(
+            f"/api/agents/tasks/{task}/dependencies",
+            json={"depends_on_task_id": 99999},
+            headers=_headers(key),
+        )
+        assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Feature: Proof-of-Skill / Skill Badges
+# ---------------------------------------------------------------------------
+
+class TestProofOfSkill:
+    @pytest.fixture(autouse=True)
+    def patch_admin(self):
+        with patch.object(settings, "ADMIN_KEY", ADMIN_KEY):
+            yield
+
+    def _ah(self):
+        return {"X-Admin-Key": ADMIN_KEY}
+
+    def _create_task(self, client, key, title="Skill Task"):
+        r = client.post(
+            "/api/agents/tasks",
+            json={"title": title, "required_capability": "finance"},
+            headers=_headers(key),
+        )
+        assert r.status_code == 200
+        return r.json()["id"]
+
+    def test_submit_verification(self, client):
+        key = _reg(client, "SkillAgent1")
+        task_id = self._create_task(client, key)
+        r = client.post(
+            f"/api/agents/tasks/{task_id}/verify",
+            json={
+                "capability": "finance",
+                "proof_artifact": "https://example.com/proof/finance_analysis.json",
+                "proof_type": "url",
+            },
+            headers=_headers(key),
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert "verification_id" in data
+        assert data["status"] == "pending"
+
+    def test_submit_requires_capability(self, client):
+        key = _reg(client, "SkillAgent2")
+        task_id = self._create_task(client, key)
+        r = client.post(
+            f"/api/agents/tasks/{task_id}/verify",
+            json={"proof_artifact": "something"},
+            headers=_headers(key),
+        )
+        assert r.status_code == 422
+
+    def test_submit_requires_proof_artifact(self, client):
+        key = _reg(client, "SkillAgent3")
+        task_id = self._create_task(client, key)
+        r = client.post(
+            f"/api/agents/tasks/{task_id}/verify",
+            json={"capability": "vision"},
+            headers=_headers(key),
+        )
+        assert r.status_code == 422
+
+    def test_submit_requires_auth(self, client):
+        key = _reg(client, "SkillAgent4")
+        task_id = self._create_task(client, key)
+        r = client.post(
+            f"/api/agents/tasks/{task_id}/verify",
+            json={"capability": "vision", "proof_artifact": "proof"},
+        )
+        assert r.status_code == 401
+
+    def test_submit_task_not_found(self, client):
+        key = _reg(client, "SkillAgent5")
+        r = client.post(
+            "/api/agents/tasks/99999/verify",
+            json={"capability": "vision", "proof_artifact": "proof"},
+            headers=_headers(key),
+        )
+        assert r.status_code == 404
+
+    def test_list_my_verifications(self, client):
+        key = _reg(client, "SkillAgent6")
+        task_id = self._create_task(client, key)
+        client.post(
+            f"/api/agents/tasks/{task_id}/verify",
+            json={"capability": "trading", "proof_artifact": "https://example.com/p"},
+            headers=_headers(key),
+        )
+        r = client.get("/api/agents/me/skill-verifications", headers=_headers(key))
+        assert r.status_code == 200
+        caps = [v["capability"] for v in r.json()]
+        assert "trading" in caps
+
+    def test_admin_list_pending_verifications(self, client):
+        key = _reg(client, "SkillAgent7")
+        task_id = self._create_task(client, key)
+        client.post(
+            f"/api/agents/tasks/{task_id}/verify",
+            json={"capability": "vision", "proof_artifact": "proof"},
+            headers=_headers(key),
+        )
+        r = client.get("/api/admin/skill-verifications", headers=self._ah())
+        assert r.status_code == 200
+        assert isinstance(r.json(), list)
+
+    def test_admin_approve_awards_badge(self, client):
+        key = _reg(client, "SkillAgent8")
+        task_id = self._create_task(client, key)
+        sub = client.post(
+            f"/api/agents/tasks/{task_id}/verify",
+            json={"capability": "quantitative_finance", "proof_artifact": "proof_data"},
+            headers=_headers(key),
+        )
+        ver_id = sub.json()["verification_id"]
+
+        r = client.post(
+            f"/api/admin/skill-verifications/{ver_id}/approve",
+            json={"score": 0.95},
+            headers=self._ah(),
+        )
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+        # Badge should appear on agent profile
+        rb = client.get("/api/agents/agents/SkillAgent8/skill-badges")
+        assert rb.status_code == 200
+        badges = rb.json()["skill_badges"]
+        caps = [b["capability"] for b in badges]
+        assert "quantitative_finance" in caps
+
+    def test_admin_reject_verification(self, client):
+        key = _reg(client, "SkillAgent9")
+        task_id = self._create_task(client, key)
+        sub = client.post(
+            f"/api/agents/tasks/{task_id}/verify",
+            json={"capability": "nlp", "proof_artifact": "proof"},
+            headers=_headers(key),
+        )
+        ver_id = sub.json()["verification_id"]
+        r = client.post(f"/api/admin/skill-verifications/{ver_id}/reject", headers=self._ah())
+        assert r.status_code == 200
+        assert r.json()["status"] == "rejected"
+
+    def test_badge_not_duplicated_on_double_approve(self, client):
+        key = _reg(client, "SkillAgent10")
+        task_id = self._create_task(client, key)
+        for _ in range(2):
+            sub = client.post(
+                f"/api/agents/tasks/{task_id}/verify",
+                json={"capability": "rl_policy", "proof_artifact": "proof"},
+                headers=_headers(key),
+            )
+            ver_id = sub.json()["verification_id"]
+            client.post(
+                f"/api/admin/skill-verifications/{ver_id}/approve",
+                json={},
+                headers=self._ah(),
+            )
+
+        rb = client.get("/api/agents/agents/SkillAgent10/skill-badges")
+        caps = [b["capability"] for b in rb.json()["skill_badges"]]
+        assert caps.count("rl_policy") == 1
+
+    def test_skill_badges_404_unknown_agent(self, client):
+        r = client.get("/api/agents/agents/NoSuchAgentXYZ999/skill-badges")
+        assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Feature: Swarm-Wide Config Profiles
+# ---------------------------------------------------------------------------
+
+class TestSwarmProfiles:
+    @pytest.fixture(autouse=True)
+    def patch_admin(self):
+        with patch.object(settings, "ADMIN_KEY", ADMIN_KEY):
+            yield
+
+    def _ah(self):
+        return {"X-Admin-Key": ADMIN_KEY}
+
+    def _create_profile(self, client, name="TestProfile", settings_data=None, is_default=0):
+        return client.post(
+            "/api/admin/platform/swarm-profiles",
+            json={
+                "name": name,
+                "description": "A test profile",
+                "settings": settings_data or {"llm_model": "claude-opus-4-8", "quality": "high"},
+                "is_default": is_default,
+            },
+            headers=self._ah(),
+        )
+
+    def test_create_profile(self, client):
+        r = self._create_profile(client, "ProfileAlpha")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["name"] == "ProfileAlpha"
+        assert "settings" in data
+
+    def test_create_profile_requires_name(self, client):
+        r = client.post(
+            "/api/admin/platform/swarm-profiles",
+            json={"description": "no name"},
+            headers=self._ah(),
+        )
+        assert r.status_code == 422
+
+    def test_create_profile_requires_admin(self, client):
+        key = _reg(client, "ProfileAgent1")
+        r = client.post(
+            "/api/admin/platform/swarm-profiles",
+            json={"name": "UnauthorisedProfile"},
+            headers=_headers(key),
+        )
+        assert r.status_code == 403
+
+    def test_list_profiles(self, client):
+        self._create_profile(client, "ListableProfile")
+        r = client.get("/api/agents/platform/swarm-profiles")
+        assert r.status_code == 200
+        names = [p["name"] for p in r.json()]
+        assert "ListableProfile" in names
+
+    def test_get_profile_by_name(self, client):
+        self._create_profile(client, "GetProfile")
+        r = client.get("/api/agents/platform/swarm-profiles/GetProfile")
+        assert r.status_code == 200
+        assert r.json()["name"] == "GetProfile"
+        assert "settings" in r.json()
+
+    def test_get_profile_not_found(self, client):
+        r = client.get("/api/agents/platform/swarm-profiles/NoSuchProfile999")
+        assert r.status_code == 404
+
+    def test_sync_to_profile(self, client):
+        self._create_profile(client, "SyncTarget")
+        key = _reg(client, "ProfileSyncAgent")
+        r = client.post(
+            "/api/agents/me/sync-profile",
+            json={"profile": "SyncTarget"},
+            headers=_headers(key),
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["profile"] == "SyncTarget"
+        assert "settings" in data
+
+    def test_sync_requires_auth(self, client):
+        self._create_profile(client, "SyncTarget2")
+        r = client.post("/api/agents/me/sync-profile", json={"profile": "SyncTarget2"})
+        assert r.status_code == 401
+
+    def test_sync_to_nonexistent_profile(self, client):
+        key = _reg(client, "SyncFailAgent")
+        r = client.post(
+            "/api/agents/me/sync-profile",
+            json={"profile": "DoesNotExist9999"},
+            headers=_headers(key),
+        )
+        assert r.status_code == 404
+
+    def test_default_profile_auto_selected(self, client):
+        self._create_profile(client, "DefaultProfileTest", is_default=1)
+        key = _reg(client, "AutoSyncAgent")
+        r = client.post(
+            "/api/agents/me/sync-profile",
+            json={},
+            headers=_headers(key),
+        )
+        assert r.status_code == 200
+        assert r.json()["profile"] == "DefaultProfileTest"
+
+    def test_adoption_endpoint(self, client):
+        self._create_profile(client, "AdoptionProfile")
+        key = _reg(client, "AdoptionAgent")
+        client.post(
+            "/api/agents/me/sync-profile",
+            json={"profile": "AdoptionProfile"},
+            headers=_headers(key),
+        )
+        r = client.get("/api/admin/platform/swarm-profiles/AdoptionProfile/adoption", headers=self._ah())
+        assert r.status_code == 200
+        data = r.json()
+        assert data["profile"] == "AdoptionProfile"
+        assert data["agent_count"] >= 1
+        agent_names = [a["name"] for a in data["agents"]]
+        assert "AdoptionAgent" in agent_names
+
+    def test_delete_profile(self, client):
+        self._create_profile(client, "DeleteableProfile")
+        r = client.delete("/api/admin/platform/swarm-profiles/DeleteableProfile", headers=self._ah())
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+        r2 = client.get("/api/agents/platform/swarm-profiles/DeleteableProfile")
+        assert r2.status_code == 404
+
+    def test_delete_nonexistent_profile(self, client):
+        r = client.delete("/api/admin/platform/swarm-profiles/Ghost9999", headers=self._ah())
+        assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Feature: Sentinel Telemetry Dashboard
+# ---------------------------------------------------------------------------
+
+class TestTelemetry:
+    @pytest.fixture(autouse=True)
+    def patch_admin(self):
+        with patch.object(settings, "ADMIN_KEY", ADMIN_KEY):
+            yield
+
+    def _ah(self):
+        return {"X-Admin-Key": ADMIN_KEY}
+
+    def test_telemetry_requires_admin(self, client):
+        key = _reg(client, "TelAgent0")
+        r = client.get("/api/admin/telemetry", headers=_headers(key))
+        assert r.status_code == 403
+
+    def test_telemetry_structure(self, client):
+        r = client.get("/api/admin/telemetry", headers=self._ah())
+        assert r.status_code == 200
+        data = r.json()
+        assert "timestamp" in data
+        assert "swarm_health" in data
+        assert "active_agents_15m" in data
+        assert "job_queue" in data
+        assert "market" in data
+        assert "content" in data
+        assert "sentinel" in data
+        assert "swarm_vibe" in data
+
+    def test_telemetry_job_queue_keys(self, client):
+        r = client.get("/api/admin/telemetry", headers=self._ah())
+        jq = r.json()["job_queue"]
+        assert "active" in jq
+        assert "done" in jq
+        assert "error" in jq
+        assert "dead" in jq
+        assert "delegated" in jq
+        assert "breakdown" in jq
+
+    def test_telemetry_market_keys(self, client):
+        r = client.get("/api/admin/telemetry", headers=self._ah())
+        market = r.json()["market"]
+        assert "open_tasks" in market
+        assert "awarded_tasks" in market
+        assert "bids_last_5m" in market
+
+    def test_telemetry_sentinel_keys(self, client):
+        r = client.get("/api/admin/telemetry", headers=self._ah())
+        sentinel = r.json()["sentinel"]
+        assert "active_rules" in sentinel
+        assert "open_error_reports" in sentinel
+        assert "error_hotspots" in sentinel
+
+    def test_telemetry_content_keys(self, client):
+        r = client.get("/api/admin/telemetry", headers=self._ah())
+        content = r.json()["content"]
+        assert "broadcasts_last_1h" in content
+        assert "active_broadcast_locks" in content
+
+    def test_telemetry_swarm_vibe_keys(self, client):
+        r = client.get("/api/admin/telemetry", headers=self._ah())
+        vibe = r.json()["swarm_vibe"]
+        assert "summary" in vibe
+        assert "health" in vibe
+
+    def test_telemetry_health_is_valid_value(self, client):
+        r = client.get("/api/admin/telemetry", headers=self._ah())
+        data = r.json()
+        assert data["swarm_health"] in ("ok", "degraded")
+
+    def test_telemetry_reflects_active_tasks(self, client):
+        key = _reg(client, "TelAgent1")
+        client.post(
+            "/api/agents/tasks",
+            json={"title": "Telemetry test task"},
+            headers=_headers(key),
+        )
+        r = client.get("/api/admin/telemetry", headers=self._ah())
+        assert r.json()["market"]["open_tasks"] >= 1
+
+    def test_telemetry_reflects_error_reports(self, client):
+        key = _reg(client, "TelAgent2")
+        client.post(
+            "/api/agents/me/report-error",
+            json={"error_type": "data", "message": "Telemetry error check"},
+            headers=_headers(key),
+        )
+        r = client.get("/api/admin/telemetry", headers=self._ah())
+        assert r.json()["sentinel"]["open_error_reports"] >= 1

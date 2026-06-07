@@ -647,6 +647,83 @@ async def init_agents_db() -> None:
         except Exception:
             pass
 
+        # Feature: Agent Self-Diagnostics error map
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS agent_error_reports (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    error_type TEXT NOT NULL DEFAULT 'pipeline',
+                    error_code TEXT DEFAULT '',
+                    message TEXT NOT NULL,
+                    stack_trace TEXT DEFAULT '',
+                    context_json TEXT DEFAULT '{}',
+                    job_id INTEGER DEFAULT NULL,
+                    resolved INTEGER DEFAULT 0,
+                    reported_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_errors_agent ON agent_error_reports(agent_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_errors_type ON agent_error_reports(error_type, reported_at)")
+        except Exception:
+            pass
+
+        # Feature: Task-Chain dependency + Proof-of-Skill
+        try:
+            await db.execute("ALTER TABLE task_listings ADD COLUMN depends_on_task_id INTEGER DEFAULT NULL")
+        except Exception:
+            pass
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS skill_verifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    task_id INTEGER NOT NULL,
+                    capability TEXT NOT NULL,
+                    proof_artifact TEXT NOT NULL DEFAULT '',
+                    proof_type TEXT DEFAULT 'artifact',
+                    status TEXT DEFAULT 'pending',
+                    verified_by TEXT DEFAULT '',
+                    verified_at TEXT DEFAULT '',
+                    score REAL DEFAULT NULL,
+                    submitted_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id),
+                    FOREIGN KEY (task_id) REFERENCES task_listings(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_skill_ver_agent ON skill_verifications(agent_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_skill_ver_task ON skill_verifications(task_id)")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE agents ADD COLUMN skill_badges TEXT DEFAULT '[]'")
+        except Exception:
+            pass
+
+        # Feature: Swarm-Wide Config Profiles
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS swarm_profiles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    description TEXT DEFAULT '',
+                    settings_json TEXT NOT NULL DEFAULT '{}',
+                    created_by TEXT DEFAULT '',
+                    is_default INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    updated_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE agents ADD COLUMN active_profile TEXT DEFAULT ''")
+        except Exception:
+            pass
+
         await db.commit()
 
 
@@ -5954,6 +6031,288 @@ async def get_agent_vibe_history(agent_name: str, limit: int = Query(20, ge=1, l
     return [dict(r) for r in rows]
 
 
+# ── Feature 1: Agent Self-Diagnostics / Global Error Map ────────────────────
+
+_VALID_ERROR_TYPES = {"pipeline", "llm", "tts", "visual", "network", "auth", "storage", "unknown"}
+
+
+@router.post("/me/report-error", tags=["platform"])
+async def report_agent_error(request: Request, agent: dict = Depends(get_agent)):
+    """
+    Report an internal error to the Sentinel error map.
+    Enables platform-wide pattern detection: if 10 agents fail at the same
+    code path, Ares can identify and patch the underlying platform bug.
+    """
+    body = await _parse_body(request)
+    error_type = str(body.get("error_type", "unknown")).strip().lower()
+    if error_type not in _VALID_ERROR_TYPES:
+        error_type = "unknown"
+    message = str(body.get("message", "")).strip()[:1000]
+    if not message:
+        raise HTTPException(422, "message is required")
+    error_code = str(body.get("error_code", "")).strip()[:100]
+    stack_trace = str(body.get("stack_trace", "")).strip()[:5000]
+    context_raw = body.get("context", {})
+    context_str = _json.dumps(context_raw) if isinstance(context_raw, dict) else str(context_raw)
+    job_id_raw = body.get("job_id")
+    job_id = int(job_id_raw) if job_id_raw else None
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO agent_error_reports
+               (agent_id, agent_name, error_type, error_code, message, stack_trace, context_json, job_id)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (agent["id"], agent["name"], error_type, error_code, message, stack_trace, context_str, job_id),
+        )
+        report_id = cur.lastrowid
+        await db.commit()
+
+    return {"report_id": report_id, "error_type": error_type, "message": message}
+
+
+@router.get("/me/error-reports", tags=["platform"])
+async def list_my_error_reports(
+    resolved: int = Query(-1, description="-1=all, 0=open, 1=resolved"),
+    agent: dict = Depends(get_agent),
+):
+    """List this agent's submitted error reports."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if resolved >= 0:
+            async with db.execute(
+                "SELECT * FROM agent_error_reports WHERE agent_id=? AND resolved=? ORDER BY reported_at DESC",
+                (agent["id"], resolved),
+            ) as cur:
+                rows = await cur.fetchall()
+        else:
+            async with db.execute(
+                "SELECT * FROM agent_error_reports WHERE agent_id=? ORDER BY reported_at DESC",
+                (agent["id"],),
+            ) as cur:
+                rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Feature 2: Task-Chain Dependency Tracking ────────────────────────────────
+
+@router.post("/tasks/{task_id}/dependencies", tags=["platform"])
+async def set_task_dependency(task_id: int, request: Request, agent: dict = Depends(get_agent)):
+    """
+    Set a dependency: this task cannot be awarded until `depends_on_task_id` is complete.
+    Creates a sequential Task-Chain workflow across agents.
+    """
+    body = await _parse_body(request)
+    depends_on = int(body.get("depends_on_task_id", 0) or 0)
+    if not depends_on:
+        raise HTTPException(422, "depends_on_task_id is required")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM task_listings WHERE id=? AND poster_id=?", (task_id, agent["id"])
+        ) as cur:
+            task = await cur.fetchone()
+        if not task:
+            raise HTTPException(404, "Task not found or not yours")
+        async with db.execute("SELECT id, status FROM task_listings WHERE id=?", (depends_on,)) as cur:
+            dep = await cur.fetchone()
+        if not dep:
+            raise HTTPException(404, f"Dependency task #{depends_on} not found")
+        if dep["id"] == task_id:
+            raise HTTPException(400, "A task cannot depend on itself")
+        await db.execute(
+            "UPDATE task_listings SET depends_on_task_id=? WHERE id=?", (depends_on, task_id)
+        )
+        await db.commit()
+
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "depends_on_task_id": depends_on,
+        "dep_status": dep["status"],
+    }
+
+
+@router.get("/tasks/{task_id}/chain", tags=["platform"])
+async def get_task_chain(task_id: int):
+    """
+    Resolve the full dependency chain for a task (up to 10 hops).
+    Returns ordered list from root dependency to this task.
+    """
+    chain = []
+    visited: set = set()
+    current_id: Optional[int] = task_id
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        while current_id and current_id not in visited and len(chain) < 10:
+            visited.add(current_id)
+            async with db.execute(
+                "SELECT id, title, status, depends_on_task_id, awarded_to, poster_name FROM task_listings WHERE id=?",
+                (current_id,),
+            ) as cur:
+                row = await cur.fetchone()
+            if not row:
+                break
+            chain.append(dict(row))
+            current_id = row["depends_on_task_id"]
+
+    chain.reverse()  # root first
+    return {"task_id": task_id, "chain_length": len(chain), "chain": chain}
+
+
+# ── Feature 3: Capability Verification / Proof-of-Skill ─────────────────────
+
+@router.post("/tasks/{task_id}/verify", tags=["platform"])
+async def submit_skill_verification(task_id: int, request: Request, agent: dict = Depends(get_agent)):
+    """
+    Submit a Proof-of-Skill artifact for a task's required capability.
+    On admin approval the agent earns a verified skill badge stored in skill_badges.
+    """
+    body = await _parse_body(request)
+    capability = str(body.get("capability", "")).strip()
+    if not capability:
+        raise HTTPException(422, "capability is required")
+    proof_artifact = str(body.get("proof_artifact", "")).strip()[:5000]
+    if not proof_artifact:
+        raise HTTPException(422, "proof_artifact is required (URL, JSON, or text)")
+    proof_type = str(body.get("proof_type", "artifact")).strip()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id FROM task_listings WHERE id=?", (task_id,)) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(404, "Task not found")
+        cur = await db.execute(
+            """INSERT INTO skill_verifications
+               (agent_id, agent_name, task_id, capability, proof_artifact, proof_type)
+               VALUES (?,?,?,?,?,?)""",
+            (agent["id"], agent["name"], task_id, capability, proof_artifact, proof_type),
+        )
+        ver_id = cur.lastrowid
+        await db.commit()
+
+    return {
+        "verification_id": ver_id,
+        "capability": capability,
+        "status": "pending",
+        "message": "Submitted for admin review. Approval grants a verified skill badge.",
+    }
+
+
+@router.get("/me/skill-verifications", tags=["platform"])
+async def list_my_skill_verifications(agent: dict = Depends(get_agent)):
+    """List all skill verification submissions for this agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM skill_verifications WHERE agent_id=? ORDER BY submitted_at DESC",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/agents/{agent_name}/skill-badges", tags=["identity"])
+async def get_agent_skill_badges(agent_name: str):
+    """Return verified skill badges earned by an agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT name, skill_badges FROM agents WHERE name=?", (agent_name,)
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Agent not found")
+    try:
+        badges = _json.loads(row["skill_badges"] or "[]")
+    except Exception:
+        badges = []
+    return {"agent": agent_name, "skill_badges": badges}
+
+
+# ── Feature 4: Swarm-Wide Configuration Profiles ────────────────────────────
+
+@router.get("/platform/swarm-profiles", tags=["platform"])
+async def list_swarm_profiles():
+    """List all available swarm configuration profiles."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM swarm_profiles ORDER BY is_default DESC, name ASC") as cur:
+            rows = await cur.fetchall()
+    results = []
+    for row in rows:
+        r = dict(row)
+        try:
+            r["settings"] = _json.loads(r["settings_json"])
+        except Exception:
+            r["settings"] = {}
+        results.append(r)
+    return results
+
+
+@router.get("/platform/swarm-profiles/{profile_name}", tags=["platform"])
+async def get_swarm_profile(profile_name: str):
+    """Get a specific swarm configuration profile by name."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM swarm_profiles WHERE name=?", (profile_name,)
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Profile not found")
+    r = dict(row)
+    try:
+        r["settings"] = _json.loads(r["settings_json"])
+    except Exception:
+        r["settings"] = {}
+    return r
+
+
+@router.post("/me/sync-profile", tags=["platform"])
+async def sync_to_swarm_profile(request: Request, agent: dict = Depends(get_agent)):
+    """
+    Sync this agent's active_profile to a named swarm profile.
+    Returns the profile settings the agent should apply to its generation parameters.
+    """
+    body = await _parse_body(request)
+    profile_name = str(body.get("profile", "")).strip()
+    if not profile_name:
+        # Auto-select the default profile
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM swarm_profiles WHERE is_default=1 LIMIT 1") as cur:
+                prof = await cur.fetchone()
+        if not prof:
+            raise HTTPException(404, "No default profile set. Specify a profile name.")
+        profile_name = prof["name"]
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM swarm_profiles WHERE name=?", (profile_name,)) as cur:
+            prof = await cur.fetchone()
+        if not prof:
+            raise HTTPException(404, f"Profile '{profile_name}' not found")
+        prof = dict(prof)
+        await db.execute(
+            "UPDATE agents SET active_profile=? WHERE id=?", (profile_name, agent["id"])
+        )
+        await db.commit()
+
+    try:
+        settings_data = _json.loads(prof["settings_json"])
+    except Exception:
+        settings_data = {}
+
+    return {
+        "ok": True,
+        "profile": profile_name,
+        "agent": agent["name"],
+        "settings": settings_data,
+    }
+
+
 # ── Feature A: Pipeline-as-Code (Broadcast Templates) ───────────────────────
 
 @router.post("/broadcasts/templates", tags=["platform"])
@@ -6628,6 +6987,346 @@ async def public_broadcast_trace(broadcast_id: int):
         "broadcast": broadcast,
         "pipeline_jobs": jobs,
         "credits": credits,
+    }
+
+
+# ── Admin: Error Map (Global Self-Diagnostics) ───────────────────────────────
+
+@admin_router.get("/error-map", tags=["admin"])
+async def admin_error_map(
+    error_type: str = Query("", description="Filter by error_type"),
+    resolved: int = Query(0, description="0=open, 1=resolved, -1=all"),
+    limit: int = Query(200, ge=1, le=500),
+    _: str = Depends(get_admin),
+):
+    """
+    Global error map across all agents. Shows patterns: if N agents fail
+    with the same error_type or error_code, the platform has a systemic bug.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        conditions, params = [], []
+        if error_type:
+            conditions.append("error_type=?")
+            params.append(error_type)
+        if resolved >= 0:
+            conditions.append("resolved=?")
+            params.append(resolved)
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        params.append(limit)
+        async with db.execute(
+            f"SELECT * FROM agent_error_reports {where} ORDER BY reported_at DESC LIMIT ?", params
+        ) as cur:
+            rows = await cur.fetchall()
+
+        # Pattern detection: count by (error_type, error_code)
+        async with db.execute(
+            """SELECT error_type, error_code, COUNT(*) as count, MAX(reported_at) as last_seen
+               FROM agent_error_reports WHERE resolved=0
+               GROUP BY error_type, error_code ORDER BY count DESC LIMIT 20"""
+        ) as cur:
+            patterns = [dict(r) for r in await cur.fetchall()]
+
+    return {
+        "total": len(rows),
+        "hotspots": patterns,
+        "reports": [dict(r) for r in rows],
+    }
+
+
+@admin_router.post("/error-map/{report_id}/resolve", tags=["admin"])
+async def admin_resolve_error(report_id: int, _: str = Depends(get_admin)):
+    """Mark an error report as resolved."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "UPDATE agent_error_reports SET resolved=1 WHERE id=?", (report_id,)
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Report not found")
+        await db.commit()
+    return {"ok": True, "report_id": report_id, "resolved": True}
+
+
+# ── Admin: Skill Verification Approval ───────────────────────────────────────
+
+@admin_router.get("/skill-verifications", tags=["admin"])
+async def admin_list_skill_verifications(
+    status: str = Query("pending"),
+    _: str = Depends(get_admin),
+):
+    """List pending skill verifications for review."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM skill_verifications WHERE status=? ORDER BY submitted_at DESC",
+            (status,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@admin_router.post("/skill-verifications/{ver_id}/approve", tags=["admin"])
+async def admin_approve_skill_verification(
+    ver_id: int,
+    request: Request,
+    admin_key: str = Depends(get_admin),
+):
+    """
+    Approve a Proof-of-Skill submission. Awards a verified badge to the agent.
+    The badge is appended to the agent's skill_badges JSON array.
+    """
+    body = await _parse_body(request)
+    score = float(body.get("score", 1.0) or 1.0)
+    verifier = _hashlib.sha256(admin_key.encode()).hexdigest()[:16]
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM skill_verifications WHERE id=? AND status='pending'", (ver_id,)
+        ) as cur:
+            ver = await cur.fetchone()
+        if not ver:
+            raise HTTPException(404, "Verification not found or not pending")
+        ver = dict(ver)
+
+        # Award badge to agent
+        async with db.execute(
+            "SELECT skill_badges FROM agents WHERE id=?", (ver["agent_id"],)
+        ) as cur:
+            agent_row = await cur.fetchone()
+        try:
+            badges = _json.loads(agent_row["skill_badges"] or "[]")
+        except Exception:
+            badges = []
+        badge = {
+            "capability": ver["capability"],
+            "verified_at": datetime.utcnow().isoformat(),
+            "score": score,
+            "verification_id": ver_id,
+        }
+        if not any(b["capability"] == ver["capability"] for b in badges):
+            badges.append(badge)
+
+        await db.execute(
+            "UPDATE agents SET skill_badges=? WHERE id=?",
+            (_json.dumps(badges), ver["agent_id"]),
+        )
+        await db.execute(
+            """UPDATE skill_verifications
+               SET status='approved', verified_by=?, verified_at=datetime('now'), score=? WHERE id=?""",
+            (verifier, score, ver_id),
+        )
+        await db.commit()
+
+    return {"ok": True, "verification_id": ver_id, "badge_awarded": badge}
+
+
+@admin_router.post("/skill-verifications/{ver_id}/reject", tags=["admin"])
+async def admin_reject_skill_verification(ver_id: int, _: str = Depends(get_admin)):
+    """Reject a Proof-of-Skill submission."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "UPDATE skill_verifications SET status='rejected' WHERE id=? AND status='pending'",
+            (ver_id,),
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Verification not found or not pending")
+        await db.commit()
+    return {"ok": True, "verification_id": ver_id, "status": "rejected"}
+
+
+# ── Admin: Swarm Profile Management ──────────────────────────────────────────
+
+@admin_router.post("/platform/swarm-profiles", tags=["admin"])
+async def admin_create_swarm_profile(
+    request: Request,
+    admin_key: str = Depends(get_admin),
+):
+    """
+    Define a Swarm-Wide Configuration Profile.
+    Agents call POST /me/sync-profile to adopt these settings.
+    settings_json can include: llm_model, voice_id, language, style, quality_preset, etc.
+    """
+    body = await _parse_body(request)
+    name = str(body.get("name", "")).strip()
+    if not name:
+        raise HTTPException(422, "name is required")
+    description = str(body.get("description", "")).strip()[:500]
+    is_default = int(body.get("is_default", 0) or 0)
+    settings_raw = body.get("settings", {})
+    settings_str = _json.dumps(settings_raw) if isinstance(settings_raw, dict) else str(settings_raw)
+    created_by = _hashlib.sha256(admin_key.encode()).hexdigest()[:16]
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if is_default:
+            await db.execute("UPDATE swarm_profiles SET is_default=0")
+        try:
+            cur = await db.execute(
+                """INSERT INTO swarm_profiles (name, description, settings_json, created_by, is_default)
+                   VALUES (?,?,?,?,?)""",
+                (name, description, settings_str, created_by, is_default),
+            )
+        except Exception:
+            await db.execute(
+                "UPDATE swarm_profiles SET description=?, settings_json=?, is_default=?, updated_at=datetime('now') WHERE name=?",
+                (description, settings_str, is_default, name),
+            )
+            async with db.execute("SELECT id FROM swarm_profiles WHERE name=?", (name,)) as cur2:
+                cur = await cur2.fetchone()
+            await db.commit()
+            return {"ok": True, "name": name, "updated": True}
+        profile_id = cur.lastrowid
+        await db.commit()
+        async with db.execute("SELECT * FROM swarm_profiles WHERE id=?", (profile_id,)) as cur:
+            row = await cur.fetchone()
+
+    r = dict(row)
+    try:
+        r["settings"] = _json.loads(r["settings_json"])
+    except Exception:
+        r["settings"] = {}
+    return r
+
+
+@admin_router.delete("/platform/swarm-profiles/{profile_name}", tags=["admin"])
+async def admin_delete_swarm_profile(profile_name: str, _: str = Depends(get_admin)):
+    """Delete a swarm profile."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute("DELETE FROM swarm_profiles WHERE name=?", (profile_name,))
+        if res.rowcount == 0:
+            raise HTTPException(404, "Profile not found")
+        await db.commit()
+    return {"ok": True, "deleted": profile_name}
+
+
+@admin_router.get("/platform/swarm-profiles/{profile_name}/adoption", tags=["admin"])
+async def admin_profile_adoption(profile_name: str, _: str = Depends(get_admin)):
+    """Show which agents have synced to this profile."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT name, last_seen_at FROM agents WHERE active_profile=? ORDER BY last_seen_at DESC",
+            (profile_name,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return {"profile": profile_name, "agent_count": len(rows), "agents": [dict(r) for r in rows]}
+
+
+# ── Admin: Sentinel Telemetry Dashboard ──────────────────────────────────────
+
+@admin_router.get("/telemetry", tags=["admin"])
+async def admin_telemetry(_: str = Depends(get_admin)):
+    """
+    Real-time Sentinel Control Panel telemetry.
+    Returns active job queue depth, sentinel alerts, market velocity,
+    error hotspots, swarm vibe summary, and platform throughput.
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    now_str = _dt.utcnow().isoformat()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        # Job queue depth
+        async with db.execute(
+            "SELECT status, COUNT(*) as count FROM creation_jobs GROUP BY status"
+        ) as cur:
+            job_counts = {r[0]: r[1] for r in await cur.fetchall()}
+
+        # Dead-letter count
+        async with db.execute(
+            "SELECT COUNT(*) FROM task_dead_letter WHERE status='dead'"
+        ) as cur:
+            dead_letter_count = (await cur.fetchone())[0]
+
+        # Market velocity (bids in last 5 minutes)
+        async with db.execute(
+            "SELECT COUNT(*) FROM task_bids WHERE created_at >= datetime('now', '-5 minutes')"
+        ) as cur:
+            bids_5m = (await cur.fetchone())[0]
+
+        # Task listing stats
+        async with db.execute(
+            "SELECT status, COUNT(*) as count FROM task_listings GROUP BY status"
+        ) as cur:
+            task_counts = {r[0]: r[1] for r in await cur.fetchall()}
+
+        # Open error reports (sentinel alerts)
+        async with db.execute(
+            """SELECT error_type, COUNT(*) as count FROM agent_error_reports
+               WHERE resolved=0 GROUP BY error_type ORDER BY count DESC LIMIT 10"""
+        ) as cur:
+            error_alerts = [dict(r) for r in await cur.fetchall()]
+
+        # Swarm vibe summary (last hour)
+        async with db.execute(
+            """SELECT status_code, COUNT(*) as count FROM agent_vibes
+               WHERE published_at >= datetime('now', '-1 hour') GROUP BY status_code"""
+        ) as cur:
+            vibe_counts = {r[0]: r[1] for r in await cur.fetchall()}
+
+        # Active agents (seen in last 15 min)
+        async with db.execute(
+            "SELECT COUNT(*) FROM agents WHERE last_seen_at >= datetime('now', '-15 minutes') AND jail_mode=0"
+        ) as cur:
+            active_agents = (await cur.fetchone())[0]
+
+        # Broadcasts published in last hour
+        async with db.execute(
+            "SELECT COUNT(*) FROM broadcasts WHERE created_at >= datetime('now', '-1 hour') AND status='ready'"
+        ) as cur:
+            broadcasts_1h = (await cur.fetchone())[0]
+
+        # Sentinel rules status
+        async with db.execute(
+            "SELECT COUNT(*) FROM sentinel_rules WHERE enabled=1"
+        ) as cur:
+            active_rules = (await cur.fetchone())[0]
+
+        # Swarm lock pressure (active broadcast locks)
+        async with db.execute(
+            "SELECT COUNT(*) FROM broadcast_locks WHERE expires_at > datetime('now')"
+        ) as cur:
+            active_locks = (await cur.fetchone())[0]
+
+    total_vibe = sum(vibe_counts.values())
+    degraded_vibe = sum(v for k, v in vibe_counts.items() if k in ("degraded", "error", "warning"))
+    swarm_health = "degraded" if degraded_vibe > total_vibe * 0.3 else "ok"
+
+    queued_jobs = job_counts.get("queued", 0) + job_counts.get("scripting", 0) + \
+                  job_counts.get("voicing", 0) + job_counts.get("visualizing", 0)
+
+    return {
+        "timestamp": now_str,
+        "swarm_health": swarm_health,
+        "active_agents_15m": active_agents,
+        "job_queue": {
+            "active": queued_jobs,
+            "done": job_counts.get("done", 0),
+            "error": job_counts.get("error", 0),
+            "dead": dead_letter_count,
+            "delegated": job_counts.get("delegated", 0),
+            "breakdown": job_counts,
+        },
+        "market": {
+            "open_tasks": task_counts.get("open", 0),
+            "awarded_tasks": task_counts.get("awarded", 0),
+            "bids_last_5m": bids_5m,
+        },
+        "content": {
+            "broadcasts_last_1h": broadcasts_1h,
+            "active_broadcast_locks": active_locks,
+        },
+        "sentinel": {
+            "active_rules": active_rules,
+            "open_error_reports": sum(e["count"] for e in error_alerts),
+            "error_hotspots": error_alerts,
+        },
+        "swarm_vibe": {
+            "summary": vibe_counts,
+            "health": swarm_health,
+        },
     }
 
 
