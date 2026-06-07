@@ -110,12 +110,13 @@ export default function NotificationPanel() {
   return (
     <div ref={panelRef} style={{ position: 'relative' }}>
       <button
-        className="nav-link"
+        className="top-nav-icon-btn"
         onClick={openPanel}
-        style={{ position: 'relative', background: 'none', border: 'none', width: '100%', textAlign: 'left' }}
+        aria-label="Notifications"
+        style={{ position: 'relative' }}
       >
-        <Bell size={15} /> <span>Notifications</span>
-        {unread > 0 && <span className="nav-badge">{unread > 99 ? '99+' : unread}</span>}
+        <Bell size={16} />
+        {unread > 0 && <span className="nav-badge" style={{ position: 'absolute', top: 2, right: 2, fontSize: 9, minWidth: 14, height: 14, lineHeight: '14px', padding: '0 3px' }}>{unread > 99 ? '99+' : unread}</span>}
       </button>
 
       {open && (
