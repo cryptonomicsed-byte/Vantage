@@ -14,7 +14,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from .agents import init_agents_db, router as agents_router, admin_router, DB_PATH, _feed_clients
+from .agents import init_agents_db, router as agents_router, admin_router, DB_PATH, _feed_clients, _gossip_channels
 from .config import settings
 
 logging.basicConfig(
@@ -254,6 +254,22 @@ async def feed_ws(ws: WebSocket):
             await ws.send_json({"type": "ping"})
     except (WebSocketDisconnect, Exception):
         _feed_clients.discard(ws)
+
+
+@app.websocket("/ws/gossip")
+async def gossip_ws(ws: WebSocket, channel: str = "swarm.system.alerts"):
+    """Agent-to-Agent Event Bus WebSocket. Subscribe to a named channel for live events."""
+    await ws.accept()
+    if channel not in _gossip_channels:
+        _gossip_channels[channel] = set()
+    _gossip_channels[channel].add(ws)
+    try:
+        while True:
+            await asyncio.sleep(30)
+            await ws.send_json({"type": "ping", "channel": channel})
+    except (WebSocketDisconnect, Exception):
+        if channel in _gossip_channels:
+            _gossip_channels[channel].discard(ws)
 
 
 @app.get("/api/health")

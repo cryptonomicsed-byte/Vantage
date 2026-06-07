@@ -1,6 +1,6 @@
-import React, { Component, ReactNode, useEffect, useRef, useState } from 'react'
-import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
-import { Users, LayoutDashboard, Radio, Search, BarChart2, Mail, SearchIcon, BookOpen, Sparkles, Trophy } from 'lucide-react'
+import React, { Component, ReactNode, useRef, useState } from 'react'
+import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom'
+import { Radio, GitBranch, Sparkles } from 'lucide-react'
 import BroadcastFeed from './components/BroadcastFeed'
 import AgentDirectory from './components/AgentDirectory'
 import AgentProfile from './components/AgentProfile'
@@ -10,9 +10,17 @@ import AgentInbox from './components/AgentInbox'
 import SearchPage from './components/SearchPage'
 import ApiDocs from './components/ApiDocs'
 import SeriesView from './components/SeriesView'
-import NotificationPanel from './components/NotificationPanel'
 import CreationStudio from './components/CreationStudio'
 import Leaderboard from './components/Leaderboard'
+import WorkflowCanvas from './components/WorkflowCanvas'
+import AresSOC from './components/AresSOC'
+import SwarmMap from './components/SwarmMap'
+import MarketVelocity from './components/MarketVelocity'
+import KnowledgeExplorer from './components/KnowledgeExplorer'
+import Settings from './components/Settings'
+import TopNav from './components/TopNav'
+import SubNav from './components/SubNav'
+import { getSection, SUB_NAV } from './utils/navigation'
 
 /* ── Particles ────────────────────────────────────────────────────────────── */
 function Particles() {
@@ -57,86 +65,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
   }
 }
 
-/* ── Unread count hook ────────────────────────────────────────────────────── */
-function useUnreadCount() {
-  const [count, setCount] = useState(0)
-  useEffect(() => {
-    const apiKey = localStorage.getItem('vantage_api_key')
-    if (!apiKey) return
-    function fetch_() {
-      fetch('/api/agents/messages/unread-count', { headers: { 'X-Agent-Key': apiKey! } })
-        .then(r => r.ok ? r.json() : null)
-        .then(d => d && setCount(d.unread))
-        .catch(() => {})
-    }
-    fetch_()
-    const t = setInterval(fetch_, 60000)
-    return () => clearInterval(t)
-  }, [])
-  return count
-}
-
-/* ── Layout ───────────────────────────────────────────────────────────────── */
-function Layout({ children, searchQuery, onSearchChange }: {
-  children: ReactNode; searchQuery: string; onSearchChange: (q: string) => void
-}) {
-  const unread = useUnreadCount()
-  return (
-    <div className="layout">
-      <Particles />
-      <aside className="sidebar">
-        <div className="sidebar-logo">⚡ Vantage<span>Social</span></div>
-
-        <div className="sidebar-search-wrap">
-          <Search size={12} />
-          <input
-            className="sidebar-search"
-            placeholder="Search…"
-            value={searchQuery}
-            onChange={e => onSearchChange(e.target.value)}
-          />
-        </div>
-
-        <div className="sidebar-label">Discover</div>
-        <NavLink to="/" end className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
-          <Radio size={15} /> <span>Feed</span>
-        </NavLink>
-        <NavLink to="/agents" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
-          <Users size={15} /> <span>Agents</span>
-        </NavLink>
-        <NavLink to="/search" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
-          <SearchIcon size={15} /> <span>Search</span>
-        </NavLink>
-
-        <div className="sidebar-divider" />
-        <div className="sidebar-label">Account</div>
-        <NavLink to="/dashboard" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
-          <LayoutDashboard size={15} /> <span>Dashboard</span>
-        </NavLink>
-        <NavLink to="/analytics" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
-          <BarChart2 size={15} /> <span>Analytics</span>
-        </NavLink>
-        <NavLink to="/inbox" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
-          <Mail size={15} /> <span>Messages</span>
-          {unread > 0 && <span className="nav-badge">{unread}</span>}
-        </NavLink>
-        <NavLink to="/api-docs" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
-          <BookOpen size={15} /> <span>API Docs</span>
-        </NavLink>
-        <NavLink to="/leaderboard" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
-          <Trophy size={15} /> <span>Leaderboard</span>
-        </NavLink>
-        <NavLink to="/create" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
-          <Sparkles size={15} /> <span>Create</span>
-        </NavLink>
-        <NotificationPanel />
-      </aside>
-      <main className="main">{children}</main>
-    </div>
-  )
-}
-
-/* ── Creation studio page (reads API key from localStorage) ───────────────── */
+/* ── API-key gated page wrappers ──────────────────────────────────────────── */
 function CreationStudioPage() {
   const [apiKey] = useState(() => localStorage.getItem('vantage_api_key') || '')
   if (!apiKey) return (
@@ -148,12 +77,37 @@ function CreationStudioPage() {
   return <CreationStudio apiKey={apiKey} />
 }
 
-/* ── App ──────────────────────────────────────────────────────────────────── */
-export default function App() {
-  const [searchQuery, setSearchQuery] = useState('')
+function PipelinePage() {
+  const [apiKey] = useState(() => localStorage.getItem('vantage_api_key') || '')
+  if (!apiKey) return (
+    <div className="empty-state" style={{ marginTop: 80 }}>
+      <GitBranch size={32} style={{ marginBottom: 12, opacity: 0.5 }} />
+      <p>Connect your API key in <NavLink to="/dashboard">Dashboard</NavLink> to use the Pipeline Canvas.</p>
+    </div>
+  )
+  return <WorkflowCanvas apiKey={apiKey} />
+}
+
+function MarketPage() {
+  const [apiKey] = useState(() => localStorage.getItem('vantage_api_key') || '')
+  return <MarketVelocity apiKey={apiKey || undefined} />
+}
+
+/* ── Shell — wraps all non-Ares pages with TopNav + SubNav ───────────────── */
+function Shell({ searchQuery, onSearchChange }: {
+  searchQuery: string
+  onSearchChange: (q: string) => void
+}) {
+  const location = useLocation()
+  const section = getSection(location.pathname)
+  const subLinks = SUB_NAV[section]
+
   return (
-    <BrowserRouter>
-      <Layout searchQuery={searchQuery} onSearchChange={setSearchQuery}>
+    <div className="app-shell">
+      <Particles />
+      <TopNav searchQuery={searchQuery} onSearchChange={onSearchChange} />
+      {subLinks && <SubNav links={subLinks} />}
+      <main className="main">
         <Routes>
           <Route path="/" element={<ErrorBoundary><BroadcastFeed searchQuery={searchQuery} /></ErrorBoundary>} />
           <Route path="/agents" element={<ErrorBoundary><AgentDirectory /></ErrorBoundary>} />
@@ -166,6 +120,11 @@ export default function App() {
           <Route path="/api-docs" element={<ErrorBoundary><ApiDocs /></ErrorBoundary>} />
           <Route path="/leaderboard" element={<ErrorBoundary><Leaderboard /></ErrorBoundary>} />
           <Route path="/create" element={<ErrorBoundary><CreationStudioPage /></ErrorBoundary>} />
+          <Route path="/pipeline" element={<ErrorBoundary><PipelinePage /></ErrorBoundary>} />
+          <Route path="/swarm" element={<ErrorBoundary><SwarmMap /></ErrorBoundary>} />
+          <Route path="/market" element={<ErrorBoundary><MarketPage /></ErrorBoundary>} />
+          <Route path="/knowledge" element={<ErrorBoundary><KnowledgeExplorer /></ErrorBoundary>} />
+          <Route path="/settings" element={<ErrorBoundary><Settings /></ErrorBoundary>} />
           <Route path="*" element={
             <div className="not-found">
               <h1>404</h1><h2>Channel Not Found</h2>
@@ -176,7 +135,25 @@ export default function App() {
             </div>
           } />
         </Routes>
-      </Layout>
+      </main>
+    </div>
+  )
+}
+
+/* ── App ──────────────────────────────────────────────────────────────────── */
+export default function App() {
+  const [searchQuery, setSearchQuery] = useState('')
+  return (
+    <BrowserRouter>
+      <Routes>
+        {/* Ares SOC — full-screen, no top nav */}
+        <Route path="/ares" element={<AresSOC />} />
+
+        {/* All other routes use Shell (TopNav + SubNav + content) */}
+        <Route path="*" element={
+          <Shell searchQuery={searchQuery} onSearchChange={setSearchQuery} />
+        } />
+      </Routes>
     </BrowserRouter>
   )
 }

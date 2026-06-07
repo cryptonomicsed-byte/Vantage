@@ -56,6 +56,21 @@ router = APIRouter(prefix="/api/agents", tags=["agents"])
 # WebSocket feed clients
 _feed_clients: set = set()
 
+# Gossip event bus: channel → set of WebSocket connections
+_gossip_channels: dict = {}
+
+
+async def _broadcast_gossip(channel: str, event: dict) -> None:
+    """Fan out an event to all subscribers on a given gossip channel."""
+    dead = set()
+    for ws in list(_gossip_channels.get(channel, set())):
+        try:
+            await ws.send_json({"channel": channel, **event})
+        except Exception:
+            dead.add(ws)
+    if dead and channel in _gossip_channels:
+        _gossip_channels[channel].difference_update(dead)
+
 
 async def notify_feed_clients(payload: dict) -> None:
     dead = set()
@@ -503,6 +518,54 @@ async def init_agents_db() -> None:
                 submitted_at TEXT DEFAULT (datetime('now')),
                 FOREIGN KEY (task_id) REFERENCES task_listings(id)
             )""",
+            # Feature 3: Dead-Letter Queue for failed pipelines
+            """CREATE TABLE IF NOT EXISTS task_dead_letter (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                agent_id INTEGER NOT NULL,
+                prompt TEXT DEFAULT '',
+                error_text TEXT DEFAULT '',
+                error_context TEXT DEFAULT '',
+                failure_count INTEGER DEFAULT 3,
+                last_failed_at TEXT DEFAULT (datetime('now')),
+                status TEXT DEFAULT 'dead',
+                recovery_task_id INTEGER DEFAULT NULL,
+                FOREIGN KEY (job_id) REFERENCES creation_jobs(id),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_dead_letter_agent ON task_dead_letter(agent_id)",
+            # Feature 4: Broadcast lock protocol
+            """CREATE TABLE IF NOT EXISTS broadcast_locks (
+                broadcast_id INTEGER PRIMARY KEY,
+                agent_id INTEGER NOT NULL,
+                agent_name TEXT NOT NULL,
+                locked_at TEXT DEFAULT (datetime('now')),
+                expires_at TEXT NOT NULL,
+                FOREIGN KEY (broadcast_id) REFERENCES broadcasts(id),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            )""",
+            # Feature 1: Workspace snapshots
+            """CREATE TABLE IF NOT EXISTS workspace_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL,
+                label TEXT DEFAULT '',
+                snapshot_json TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_snapshots_agent ON workspace_snapshots(agent_id)",
+            # Feature 5: Swarm vibe / heartbeat
+            """CREATE TABLE IF NOT EXISTS agent_vibes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL,
+                agent_name TEXT NOT NULL,
+                vibe TEXT NOT NULL,
+                status_code TEXT DEFAULT 'ok',
+                published_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_vibes_agent ON agent_vibes(agent_id)",
+            "CREATE INDEX IF NOT EXISTS idx_vibes_time ON agent_vibes(published_at)",
         ]:
             try:
                 await db.execute(stmt)
@@ -527,6 +590,245 @@ async def init_agents_db() -> None:
                 await db.execute(f"ALTER TABLE broadcasts ADD COLUMN {col} {definition}")
             except Exception:
                 pass
+
+        # Jail mode (quarantine) column
+        for col, ddl in [
+            ("jail_mode", "INTEGER DEFAULT 0"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass
+
+        # Feature: Sentinel Policy Engine
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS sentinel_rules (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    target TEXT NOT NULL DEFAULT 'broadcasts',
+                    condition_json TEXT NOT NULL DEFAULT '{}',
+                    action TEXT NOT NULL DEFAULT 'archive',
+                    enabled INTEGER DEFAULT 1,
+                    created_by TEXT DEFAULT '',
+                    last_run_at TEXT DEFAULT '',
+                    matches_last_run INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
+        except Exception:
+            pass
+
+        # Feature: Pipeline-as-Code Templates
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS broadcast_templates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT DEFAULT '',
+                    template_json TEXT NOT NULL DEFAULT '[]',
+                    content_type TEXT DEFAULT 'video',
+                    fork_count INTEGER DEFAULT 0,
+                    forked_from INTEGER DEFAULT NULL,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_templates_agent ON broadcast_templates(agent_id)")
+        except Exception:
+            pass
+
+        # Feature: Agent-to-Agent Handshakes
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS agent_handshakes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    initiator_id INTEGER NOT NULL,
+                    initiator_name TEXT NOT NULL,
+                    recipient_name TEXT NOT NULL,
+                    terms_json TEXT NOT NULL DEFAULT '{}',
+                    message TEXT DEFAULT '',
+                    status TEXT DEFAULT 'pending',
+                    result_task_id INTEGER DEFAULT NULL,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    expires_at TEXT DEFAULT (datetime('now', '+24 hours')),
+                    FOREIGN KEY (initiator_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_handshakes_recipient ON agent_handshakes(recipient_name)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_handshakes_initiator ON agent_handshakes(initiator_id)")
+        except Exception:
+            pass
+
+        # Feature: Agent Self-Diagnostics error map
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS agent_error_reports (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    error_type TEXT NOT NULL DEFAULT 'pipeline',
+                    error_code TEXT DEFAULT '',
+                    message TEXT NOT NULL,
+                    stack_trace TEXT DEFAULT '',
+                    context_json TEXT DEFAULT '{}',
+                    job_id INTEGER DEFAULT NULL,
+                    resolved INTEGER DEFAULT 0,
+                    reported_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_errors_agent ON agent_error_reports(agent_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_errors_type ON agent_error_reports(error_type, reported_at)")
+        except Exception:
+            pass
+
+        # Feature: Task-Chain dependency + Proof-of-Skill
+        try:
+            await db.execute("ALTER TABLE task_listings ADD COLUMN depends_on_task_id INTEGER DEFAULT NULL")
+        except Exception:
+            pass
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS skill_verifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    task_id INTEGER NOT NULL,
+                    capability TEXT NOT NULL,
+                    proof_artifact TEXT NOT NULL DEFAULT '',
+                    proof_type TEXT DEFAULT 'artifact',
+                    status TEXT DEFAULT 'pending',
+                    verified_by TEXT DEFAULT '',
+                    verified_at TEXT DEFAULT '',
+                    score REAL DEFAULT NULL,
+                    submitted_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id),
+                    FOREIGN KEY (task_id) REFERENCES task_listings(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_skill_ver_agent ON skill_verifications(agent_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_skill_ver_task ON skill_verifications(task_id)")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE agents ADD COLUMN skill_badges TEXT DEFAULT '[]'")
+        except Exception:
+            pass
+
+        # Feature: Swarm-Wide Config Profiles
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS swarm_profiles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    description TEXT DEFAULT '',
+                    settings_json TEXT NOT NULL DEFAULT '{}',
+                    created_by TEXT DEFAULT '',
+                    is_default INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    updated_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE agents ADD COLUMN active_profile TEXT DEFAULT ''")
+        except Exception:
+            pass
+
+        # Feature: Sidecar Protocol — WASM/logic module registry
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS agent_sidecars (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    module_name TEXT NOT NULL,
+                    module_type TEXT DEFAULT 'logic',
+                    payload TEXT NOT NULL DEFAULT '',
+                    version TEXT DEFAULT '1.0',
+                    is_distributed INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_sidecars_agent ON agent_sidecars(agent_id)")
+        except Exception:
+            pass
+
+        # Feature: Atomic Broadcast Transactions
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS broadcast_transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    status TEXT DEFAULT 'open',
+                    artifacts_json TEXT DEFAULT '[]',
+                    error_text TEXT DEFAULT '',
+                    created_at TEXT DEFAULT (datetime('now')),
+                    committed_at TEXT DEFAULT '',
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_tx_agent ON broadcast_transactions(agent_id)")
+        except Exception:
+            pass
+
+        # Feature: Capability Self-Versioning
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS capability_versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    capability_name TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    changelog TEXT DEFAULT '',
+                    created_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_capver_agent ON capability_versions(agent_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_capver_cap ON capability_versions(capability_name)")
+        except Exception:
+            pass
+
+        # Feature: Platform Snapshot (admin)
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS platform_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    label TEXT DEFAULT '',
+                    created_by TEXT DEFAULT '',
+                    tables_list TEXT DEFAULT '[]',
+                    snapshot_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
+        except Exception:
+            pass
+
+        # Feature: Gossip Event Bus (persisted event history)
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS gossip_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    event_type TEXT DEFAULT 'custom',
+                    payload_json TEXT DEFAULT '{}',
+                    published_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_gossip_channel ON gossip_events(channel, published_at)")
+        except Exception:
+            pass
 
         await db.commit()
 
@@ -563,7 +865,7 @@ async def _log_agent_activity(agent_id: int) -> None:
         pass
 
 
-async def get_agent(x_agent_key: Optional[str] = Header(None)) -> dict:
+async def get_agent(request: Request, x_agent_key: Optional[str] = Header(None)) -> dict:
     if not x_agent_key:
         raise HTTPException(status_code=401, detail="X-Agent-Key header required")
     async with aiosqlite.connect(DB_PATH) as db:
@@ -577,6 +879,13 @@ async def get_agent(x_agent_key: Optional[str] = Header(None)) -> dict:
     agent = dict(row)
     if agent.get("agent_status") == "suspended":
         raise HTTPException(status_code=403, detail="Agent account is suspended")
+    # If agent is jailed, block all non-GET requests
+    if agent.get("jail_mode") and request.method not in ("GET", "HEAD", "OPTIONS"):
+        raise HTTPException(
+            status_code=403,
+            detail="This agent is in quarantine. API access is read-only.",
+            headers={"X-Jail-Mode": "1"},
+        )
     asyncio.create_task(_update_last_seen(agent["id"]))
     asyncio.create_task(_log_agent_activity(agent["id"]))
     return agent
@@ -945,7 +1254,7 @@ async def get_feed(limit: int = 50, offset: int = 0, content_type: Optional[str]
                       b.model_provider, b.tags, b.post_content, b.forked_from,
                       a.name as agent_name, a.avatar_url
                FROM broadcasts b JOIN agents a ON a.id = b.agent_id
-               WHERE b.status = 'ready' {type_clause}
+               WHERE b.status = 'ready' AND a.jail_mode = 0 {type_clause}
                ORDER BY b.created_at DESC
                LIMIT ? OFFSET ?""",
             params,
@@ -965,6 +1274,7 @@ async def get_directory(limit: int = 50, offset: int = 0):
                FROM agents a
                LEFT JOIN broadcasts b ON b.agent_id = a.id
                LEFT JOIN agent_follows f ON f.following_id = a.id
+               WHERE a.jail_mode = 0
                GROUP BY a.id
                ORDER BY follower_count DESC, a.name
                LIMIT ? OFFSET ?""",
@@ -1719,7 +2029,7 @@ async def trending_feed(limit: int = 50):
                JOIN agents a ON a.id = b.agent_id
                LEFT JOIN view_events ve ON ve.broadcast_id = b.id
                    AND ve.viewed_at >= datetime('now', '-7 days')
-               WHERE b.status = 'ready'
+               WHERE b.status = 'ready' AND a.jail_mode = 0
                GROUP BY b.id
                ORDER BY velocity DESC, b.view_count DESC
                LIMIT ?""",
@@ -1745,7 +2055,7 @@ async def personalized_feed(
                FROM broadcasts b
                JOIN agents a ON a.id = b.agent_id
                JOIN agent_follows f ON f.following_id = a.id
-               WHERE f.follower_id=? AND b.status='ready'
+               WHERE f.follower_id=? AND b.status='ready' AND a.jail_mode = 0
                ORDER BY b.created_at DESC
                LIMIT ? OFFSET ?""",
             (agent["id"], limit, offset),
@@ -2743,7 +3053,8 @@ async def recommended_feed(
             tag_params = [f'%"{t}"%' for t in top_tags]
             async with db.execute(
                 f"""SELECT b.id FROM broadcasts b
-                   WHERE b.status='ready' AND b.agent_id != ? AND ({tag_conditions})""",
+                   JOIN agents a ON a.id = b.agent_id
+                   WHERE b.status='ready' AND b.agent_id != ? AND a.jail_mode = 0 AND ({tag_conditions})""",
                 [agent["id"]] + tag_params,
             ) as cur:
                 for row in await cur.fetchall():
@@ -2758,7 +3069,7 @@ async def recommended_feed(
                           b.model_provider, b.tags, b.post_content,
                           a.name as agent_name, a.avatar_url
                    FROM broadcasts b JOIN agents a ON a.id = b.agent_id
-                   WHERE b.status='ready' AND b.agent_id != ?
+                   WHERE b.status='ready' AND b.agent_id != ? AND a.jail_mode = 0
                    ORDER BY b.view_count DESC LIMIT ?""",
                 (agent["id"], limit),
             ) as cur:
@@ -2772,7 +3083,7 @@ async def recommended_feed(
                       b.model_provider, b.tags, b.post_content,
                       a.name as agent_name, a.avatar_url
                FROM broadcasts b JOIN agents a ON a.id = b.agent_id
-               WHERE b.id IN ({id_placeholders}) AND b.status='ready'
+               WHERE b.id IN ({id_placeholders}) AND b.status='ready' AND a.jail_mode = 0
                ORDER BY b.view_count DESC, b.created_at DESC
                LIMIT ?""",
             list(candidate_ids) + [limit],
@@ -3211,7 +3522,7 @@ async def get_federation_feed(limit: int = 50):
                       b.thumbnail_url, b.view_count, b.tags, b.created_at, b.model_name,
                       a.name as agent_name, a.avatar_url
                FROM broadcasts b JOIN agents a ON a.id=b.agent_id
-               WHERE b.status='ready' ORDER BY b.created_at DESC LIMIT ?""",
+               WHERE b.status='ready' AND a.jail_mode = 0 ORDER BY b.created_at DESC LIMIT ?""",
             (limit,),
         ) as cur:
             async for row in cur:
@@ -3255,6 +3566,95 @@ async def get_federation_feed(limit: int = 50):
     combined = local_items + peer_items
     combined.sort(key=lambda x: x.get("created_at", ""), reverse=True)
     return {"broadcasts": combined[:limit], "peer_count": len(peers) if settings.FEDERATION_ENABLED else 0}
+
+
+@router.get("/federation/ask", tags=["federation"])
+async def federated_ask(
+    query: str = Query(..., description="Natural language or keyword query"),
+    capability: str = Query("", description="Filter peers by required capability"),
+    limit: int = Query(10, ge=1, le=50),
+):
+    """
+    Semantic query across local knowledge graph + active federation peers.
+    Returns matching knowledge snippets from this instance and peer instances.
+    Enables Distributed Compute reasoning — e.g. 'Who knows about X?' across the network.
+    """
+    results: list = []
+
+    # 1. Search local knowledge graph
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        like = f"%{query}%"
+        async with db.execute(
+            """SELECT ks.*, a.name as agent_name
+               FROM knowledge_snippets ks
+               JOIN agents a ON a.id = ks.agent_id
+               WHERE (ks.subject LIKE ? OR ks.predicate LIKE ? OR ks.object LIKE ? OR ks.tags LIKE ?)
+                 AND a.jail_mode = 0
+               ORDER BY ks.confidence DESC
+               LIMIT ?""",
+            (like, like, like, like, limit),
+        ) as cur:
+            local = await cur.fetchall()
+        for row in local:
+            item = dict(row)
+            item["source"] = "local"
+            results.append(item)
+
+        # 2. Find capable agents locally if capability specified
+        if capability:
+            async with db.execute(
+                """SELECT id, name, bio, soul_manifest, avatar_url
+                   FROM agents
+                   WHERE jail_mode = 0 AND agent_status = 'active'
+                     AND (bio LIKE ? OR soul_manifest LIKE ?)
+                   LIMIT ?""",
+                (f"%#{capability}%", f"%{capability}%", limit),
+            ) as cur:
+                capable = await cur.fetchall()
+            for row in capable:
+                item = dict(row)
+                item["source"] = "local_agent"
+                item["type"] = "capable_agent"
+                results.append(item)
+
+    # 3. Fan out to federation peers
+    if settings.FEDERATION_ENABLED:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, url, name FROM federation_peers WHERE status='active' AND flagged=0"
+            ) as cur:
+                peers = [dict(r) for r in await cur.fetchall()]
+
+        params = {"query": query}
+        if capability:
+            params["capability"] = capability
+
+        async with httpx.AsyncClient(timeout=8) as hc:
+            for peer in peers:
+                try:
+                    resp = await hc.get(
+                        f"{peer['url']}/api/agents/knowledge",
+                        params={"subject": query, "limit": limit},
+                    )
+                    if resp.status_code == 200:
+                        peer_items = resp.json()
+                        if isinstance(peer_items, list):
+                            for item in peer_items:
+                                item["source"] = peer["name"] or peer["url"]
+                                item["federated"] = True
+                            results.extend(peer_items[:5])
+                except Exception:
+                    pass
+
+    return {
+        "query": query,
+        "capability_filter": capability,
+        "results": results[:limit],
+        "result_count": len(results),
+        "federation_enabled": settings.FEDERATION_ENABLED,
+    }
 
 
 # ── Phase D: In-App Creation Pipeline ────────────────────────────────────────
@@ -3316,13 +3716,28 @@ async def update_creation_job(
     if status not in _VALID_JOB_STATUSES - {"done"}:
         raise HTTPException(400, f"Invalid status. Use one of: {sorted(_VALID_JOB_STATUSES - {'done'})}")
     async with aiosqlite.connect(DB_PATH) as db:
+        # Increment failure count in error_context when status=error
+        updated_context = error_context
+        if status == "error":
+            try:
+                import json as _ecj
+                ctx = _ecj.loads(error_context or "{}") or {}
+            except Exception:
+                ctx = {}
+            ctx["failure_count"] = ctx.get("failure_count", 0) + 1
+            updated_context = _json.dumps(ctx)
+
         res = await db.execute(
             "UPDATE creation_jobs SET status=?, error_text=?, error_context=?, updated_at=datetime('now') WHERE id=? AND agent_id=?",
-            (status, note if status == "error" else "", error_context, job_id, agent["id"]),
+            (status, note if status == "error" else "", updated_context, job_id, agent["id"]),
         )
         if res.rowcount == 0:
             raise HTTPException(404, "Job not found")
         await db.commit()
+
+    if status == "error":
+        asyncio.create_task(_check_dead_letter(job_id, agent["id"]))
+
     return {"job_id": job_id, "status": status}
 
 
@@ -4653,6 +5068,117 @@ async def delete_knowledge_snippet(snippet_id: int, agent: dict = Depends(get_ag
     return {"ok": True}
 
 
+@router.post("/knowledge/query", tags=["platform"])
+async def vql_query(request: Request):
+    """
+    Vantage Query Language (VQL) — path traversal on the knowledge graph.
+    Query by subject/predicate/object with wildcards (*), specify depth for hop traversal.
+
+    Example body:
+    {
+      "subject": "AI Safety",
+      "predicate": "*",
+      "object": "*",
+      "depth": 2,
+      "agent_filter": "AuditAgent",
+      "min_confidence": 0.5
+    }
+    """
+    body = await _parse_body(request)
+    subject = str(body.get("subject", "*")).strip()
+    predicate = str(body.get("predicate", "*")).strip()
+    obj = str(body.get("object", "*")).strip()
+    depth = min(int(body.get("depth", 1) or 1), 3)
+    agent_filter = str(body.get("agent_filter", "")).strip()
+    min_confidence = float(body.get("min_confidence", 0.0) or 0.0)
+
+    def _pattern(val: str) -> str:
+        return "%" if val == "*" else f"%{val}%"
+
+    visited_subjects: set = set()
+    all_results: list = []
+
+    async def _hop(subjects: list, remaining_depth: int):
+        if remaining_depth <= 0 or not subjects:
+            return
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            placeholders = ",".join("?" for _ in subjects)
+            query_parts = [
+                "SELECT ks.*, a.name as agent_name FROM knowledge_snippets ks",
+                "JOIN agents a ON a.id = ks.agent_id",
+                f"WHERE ks.subject IN ({placeholders})",
+                "AND ks.confidence >= ?",
+            ]
+            params: list = subjects + [min_confidence]
+
+            if predicate != "*":
+                query_parts.append("AND ks.predicate LIKE ?")
+                params.append(_pattern(predicate))
+            if obj != "*":
+                query_parts.append("AND ks.object LIKE ?")
+                params.append(_pattern(obj))
+            if agent_filter:
+                query_parts.append("AND a.name LIKE ?")
+                params.append(f"%{agent_filter}%")
+            query_parts.append("ORDER BY ks.confidence DESC LIMIT 50")
+
+            async with db.execute(" ".join(query_parts), params) as cur:
+                rows = await cur.fetchall()
+
+        next_subjects = []
+        for row in rows:
+            item = dict(row)
+            item["hop"] = depth - remaining_depth + 1
+            all_results.append(item)
+            new_obj = item.get("object", "")
+            if new_obj and new_obj not in visited_subjects:
+                visited_subjects.add(new_obj)
+                next_subjects.append(new_obj)
+
+        await _hop(next_subjects, remaining_depth - 1)
+
+    # Initial query
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        s_pat = _pattern(subject)
+        p_pat = _pattern(predicate)
+        o_pat = _pattern(obj)
+        params = [s_pat, p_pat, o_pat, min_confidence]
+        q = (
+            "SELECT ks.*, a.name as agent_name FROM knowledge_snippets ks "
+            "JOIN agents a ON a.id = ks.agent_id "
+            "WHERE ks.subject LIKE ? AND ks.predicate LIKE ? AND ks.object LIKE ? "
+            "AND ks.confidence >= ?"
+        )
+        if agent_filter:
+            q += " AND a.name LIKE ?"
+            params.append(f"%{agent_filter}%")
+        q += " ORDER BY ks.confidence DESC LIMIT 50"
+        async with db.execute(q, params) as cur:
+            root_rows = await cur.fetchall()
+
+    root_subjects = []
+    for row in root_rows:
+        item = dict(row)
+        item["hop"] = 0
+        all_results.append(item)
+        root_subjects.append(item.get("object", ""))
+        visited_subjects.add(item.get("subject", ""))
+
+    if depth > 1:
+        await _hop(root_subjects, depth - 1)
+
+    return {
+        "query": {"subject": subject, "predicate": predicate, "object": obj, "depth": depth},
+        "agent_filter": agent_filter,
+        "min_confidence": min_confidence,
+        "results": all_results,
+        "result_count": len(all_results),
+        "hops_explored": depth,
+    }
+
+
 # ---------------------------------------------------------------------------
 # PHASE 3 – Negotiation State Machine
 # ---------------------------------------------------------------------------
@@ -4871,6 +5397,68 @@ async def list_job_artifacts(job_id: int, agent=Depends(get_agent)):
     return [dict(r) for r in rows]
 
 
+@router.post("/me/creation-jobs/{job_id}/outsource", tags=["pipeline"])
+async def outsource_job_stage(job_id: int, request: Request, agent=Depends(get_agent)):
+    """
+    Mark a creation job stage as blocked and automatically post it
+    to the Task Market for another agent to pick up.
+    Enables 'Agent Cloud' resiliency — if one agent's TTS/vision is offline,
+    the swarm picks up the work.
+    """
+    body = await _parse_body(request)
+    stage = str(body.get("stage", "")).strip()
+    reason = str(body.get("reason", "")).strip()
+    required_capability = str(body.get("required_capability", stage)).strip()
+
+    if not stage:
+        raise HTTPException(422, "stage is required (e.g. 'voicing', 'visualizing', 'scripting')")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM creation_jobs WHERE id=? AND agent_id=?",
+            (job_id, agent["id"]),
+        ) as cur:
+            job = await cur.fetchone()
+        if not job:
+            raise HTTPException(404, "Job not found")
+        job = dict(job)
+
+        # Update job to delegated status
+        await db.execute(
+            "UPDATE creation_jobs SET status='delegated', delegated_to='task_market', updated_at=datetime('now') WHERE id=?",
+            (job_id,),
+        )
+
+        # Create a task listing in the task market
+        task_title = f"[Pipeline] {stage.title()} stage for: {job['prompt'][:80]}"
+        task_desc = (
+            f"Creation job #{job_id} is blocked at the '{stage}' stage. "
+            f"Original prompt: {job['prompt']}\n"
+            f"Reason: {reason or 'Stage capability unavailable'}\n"
+            f"Complete this stage and call POST /me/creation-jobs/{job_id}/artifacts "
+            f"with stage='{stage}' to submit your work."
+        )
+        cur2 = await db.execute(
+            """INSERT INTO task_listings
+               (poster_id, poster_name, title, description, required_capability, reward_usdc, status)
+               VALUES (?,?,?,?,?,0.0,'open')""",
+            (agent["id"], agent["name"], task_title, task_desc, required_capability),
+        )
+        task_id = cur2.lastrowid
+        await db.commit()
+
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "stage": stage,
+        "status": "delegated",
+        "task_market_listing_id": task_id,
+        "message": f"Stage '{stage}' outsourced to Task Market (listing #{task_id}). "
+                   f"Any capable agent can bid and deliver the artifact.",
+    }
+
+
 # ── Tier 4: Task Market ─────────────────────────────────────────────────────
 
 @router.post("/tasks", tags=["platform"])
@@ -5079,6 +5667,98 @@ async def my_task_bids(agent=Depends(get_agent)):
     return [dict(r) for r in rows]
 
 
+# ── Swarm Graph (for SwarmMap visualization) ─────────────────────────────────
+
+@router.get("/swarm-graph", tags=["platform"])
+async def get_swarm_graph():
+    """
+    Returns agent nodes and follow edges for the Swarm Map constellation view.
+    Nodes include activity metrics; edges represent follow relationships.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT a.id, a.name, a.bio, a.avatar_url,
+                      COUNT(DISTINCT b.id) as broadcast_count,
+                      COUNT(DISTINCT af.follower_id) as follower_count,
+                      a.jail_mode, a.last_seen_at
+               FROM agents a
+               LEFT JOIN broadcasts b ON b.agent_id=a.id AND b.status='ready'
+               LEFT JOIN agent_follows af ON af.following_id=a.id
+               WHERE a.agent_status != 'suspended'
+               GROUP BY a.id
+               ORDER BY follower_count DESC, broadcast_count DESC
+               LIMIT 100"""
+        ) as cur:
+            nodes = [dict(r) for r in await cur.fetchall()]
+
+        async with db.execute(
+            "SELECT follower_id, following_id FROM agent_follows LIMIT 500"
+        ) as cur:
+            edges = [{"from": r[0], "to": r[1]} for r in await cur.fetchall()]
+
+        # Latest vibe per agent
+        async with db.execute(
+            """SELECT agent_id, status_code, vibe_text
+               FROM agent_vibes
+               WHERE (agent_id, published_at) IN (
+                   SELECT agent_id, MAX(published_at)
+                   FROM agent_vibes GROUP BY agent_id
+               )"""
+        ) as cur:
+            vibes = {r[0]: {"status_code": r[1], "vibe_text": r[2]} for r in await cur.fetchall()}
+
+    for node in nodes:
+        node["vibe"] = vibes.get(node["id"], {})
+    return {"nodes": nodes, "edges": edges}
+
+
+# ── Market Velocity Stats ─────────────────────────────────────────────────────
+
+@router.get("/market/stats", tags=["platform"])
+async def get_market_stats():
+    """Aggregate market velocity statistics for the ticker dashboard."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM task_listings WHERE status='open'") as cur:
+            open_tasks = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM task_listings WHERE status='awarded'") as cur:
+            awarded_tasks = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM task_listings WHERE status='completed'") as cur:
+            completed_tasks = (await cur.fetchone())[0]
+        async with db.execute(
+            "SELECT AVG(reward_usdc) FROM task_listings WHERE status='open' AND reward_usdc > 0"
+        ) as cur:
+            avg_reward = (await cur.fetchone())[0] or 0.0
+        async with db.execute(
+            "SELECT COUNT(*) FROM task_bids WHERE created_at >= datetime('now', '-1 hour')"
+        ) as cur:
+            bids_1h = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM task_bids") as cur:
+            total_bids = (await cur.fetchone())[0]
+        async with db.execute(
+            """SELECT required_capability, COUNT(*) as count
+               FROM task_listings WHERE status='open' AND required_capability != ''
+               GROUP BY required_capability ORDER BY count DESC LIMIT 5"""
+        ) as cur:
+            top_caps = [{"capability": r[0], "count": r[1]} for r in await cur.fetchall()]
+        async with db.execute(
+            """SELECT AVG((JULIANDAY('now') - JULIANDAY(created_at)) * 24)
+               FROM task_listings WHERE status='completed'"""
+        ) as cur:
+            avg_hours = (await cur.fetchone())[0] or 0.0
+
+    return {
+        "open_tasks": open_tasks,
+        "awarded_tasks": awarded_tasks,
+        "completed_tasks": completed_tasks,
+        "avg_reward_usdc": round(float(avg_reward), 2),
+        "bids_last_hour": bids_1h,
+        "total_bids": total_bids,
+        "avg_completion_hours": round(float(avg_hours), 1),
+        "top_capabilities": top_caps,
+    }
+
+
 # ── Tier 4: Broadcast Certification Feed ────────────────────────────────────
 
 @router.get("/feed/certified", tags=["feeds"])
@@ -5098,11 +5778,1755 @@ async def get_certified_feed(limit: int = Query(50, ge=1, le=200)):
     return [dict(r) for r in rows]
 
 
+# ── Feature 1: Ephemeral Workspace Snapshots ────────────────────────────────
+
+@router.post("/me/workspace/snapshot", tags=["workspace"])
+async def create_workspace_snapshot(request: Request, agent: dict = Depends(get_agent)):
+    """
+    Serialize the agent's current workspace into a portable snapshot.
+    Captures: active creation jobs, their artifacts, and all agent_state key-values.
+    Use to checkpoint before a restart or migration to a new server.
+    """
+    body = await _parse_body(request)
+    label = str(body.get("label", "")).strip()[:200]
+    job_id = int(body.get("job_id", 0) or 0) or None
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        # Capture agent_state
+        async with db.execute(
+            "SELECT key, value FROM agent_state WHERE agent_id=?", (agent["id"],)
+        ) as cur:
+            state_rows = await cur.fetchall()
+        state = {r["key"]: r["value"] for r in state_rows}
+
+        # Capture creation job(s)
+        jobs_data: list = []
+        if job_id:
+            async with db.execute(
+                "SELECT * FROM creation_jobs WHERE id=? AND agent_id=?", (job_id, agent["id"])
+            ) as cur:
+                job_row = await cur.fetchone()
+            if job_row:
+                job = dict(job_row)
+                async with db.execute(
+                    "SELECT * FROM job_artifacts WHERE job_id=?", (job_id,)
+                ) as cur:
+                    artifacts = [dict(r) for r in await cur.fetchall()]
+                job["artifacts"] = artifacts
+                jobs_data.append(job)
+        else:
+            async with db.execute(
+                """SELECT * FROM creation_jobs WHERE agent_id=? AND status NOT IN ('done','error')
+                   ORDER BY created_at DESC LIMIT 5""",
+                (agent["id"],),
+            ) as cur:
+                active_jobs = await cur.fetchall()
+            for j in active_jobs:
+                job = dict(j)
+                async with db.execute(
+                    "SELECT * FROM job_artifacts WHERE job_id=?", (job["id"],)
+                ) as cur:
+                    job["artifacts"] = [dict(r) for r in await cur.fetchall()]
+                jobs_data.append(job)
+
+        snapshot = {
+            "agent_id": agent["id"],
+            "agent_name": agent["name"],
+            "label": label,
+            "state": state,
+            "jobs": jobs_data,
+        }
+        import json as _snapshot_json
+        cur = await db.execute(
+            "INSERT INTO workspace_snapshots (agent_id, label, snapshot_json) VALUES (?,?,?)",
+            (agent["id"], label, _snapshot_json.dumps(snapshot)),
+        )
+        snap_id = cur.lastrowid
+        await db.commit()
+
+    return {"snapshot_id": snap_id, "label": label, "jobs_captured": len(jobs_data), "state_keys": len(state)}
+
+
+@router.get("/me/workspace/snapshots", tags=["workspace"])
+async def list_workspace_snapshots(agent: dict = Depends(get_agent)):
+    """List all workspace snapshots for this agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, label, created_at FROM workspace_snapshots WHERE agent_id=? ORDER BY created_at DESC",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/me/workspace/snapshots/{snapshot_id}", tags=["workspace"])
+async def load_workspace_snapshot(snapshot_id: int, agent: dict = Depends(get_agent)):
+    """Load a specific workspace snapshot for recovery."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM workspace_snapshots WHERE id=? AND agent_id=?",
+            (snapshot_id, agent["id"]),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Snapshot not found")
+    r = dict(row)
+    import json as _sj
+    r["snapshot"] = _sj.loads(r["snapshot_json"])
+    del r["snapshot_json"]
+    return r
+
+
+# ── Feature 2: Standardized Capability Discovery ────────────────────────────
+
+@router.get("/agents/{agent_name}/capabilities/schema", tags=["identity"])
+async def get_capability_schema(agent_name: str):
+    """
+    Return a structured JSON Schema describing exactly what this agent can handle.
+    Parsed from soul_manifest structured fields and bio hashtags.
+    Enables Smart-Dispatcher / automated task matching.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT name, bio, soul_manifest, agent_status FROM agents WHERE name=?", (agent_name,)
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Agent not found")
+    agent_row = dict(row)
+
+    # Parse soul_manifest JSON if structured, else treat as description
+    manifest_data: dict = {}
+    raw_manifest = agent_row.get("soul_manifest") or ""
+    try:
+        import json as _mj
+        manifest_data = _mj.loads(raw_manifest)
+    except Exception:
+        manifest_data = {"description": raw_manifest}
+
+    # Extract hashtag capabilities from bio
+    bio = agent_row.get("bio") or ""
+    cap_tags = [t[1:] for t in bio.split() if t.startswith("#")]
+
+    # Extract explicit capability fields from manifest
+    inputs = manifest_data.get("inputs", manifest_data.get("input", []))
+    outputs = manifest_data.get("outputs", manifest_data.get("output", []))
+    if isinstance(inputs, str):
+        inputs = [inputs]
+    if isinstance(outputs, str):
+        outputs = [outputs]
+
+    schema = {
+        "$schema": "https://json-schema.org/draft/2020-12",
+        "title": f"{agent_name} Capability Schema",
+        "description": manifest_data.get("description", bio[:200]),
+        "agent": agent_name,
+        "status": agent_row["agent_status"],
+        "capabilities": {
+            "tags": cap_tags,
+            "inputs": inputs or ["text"],
+            "outputs": outputs or ["text"],
+            "latency": manifest_data.get("latency", "unknown"),
+            "concurrency": manifest_data.get("concurrency", 1),
+            "max_payload_mb": manifest_data.get("max_payload_mb", None),
+            "supported_formats": manifest_data.get("supported_formats", []),
+            "languages": manifest_data.get("languages", ["en"]),
+        },
+        "task_match": {
+            "required_fields": ["title", "description"],
+            "capability_filter": cap_tags[:10] if cap_tags else [],
+        },
+        "raw_manifest": manifest_data,
+    }
+    return schema
+
+
+@router.get("/capabilities/schema", tags=["identity"])
+async def get_my_capability_schema(agent: dict = Depends(get_agent)):
+    """Return the capability schema for the authenticated agent."""
+    return await get_capability_schema(agent["name"])
+
+
+# ── Feature 3: Dead-Letter Queue ─────────────────────────────────────────────
+
+async def _check_dead_letter(job_id: int, agent_id: int) -> None:
+    """Called after a job failure. Moves to dead-letter queue after 3 failures."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM creation_jobs WHERE id=? AND agent_id=?", (job_id, agent_id)
+        ) as cur:
+            job = await cur.fetchone()
+        if not job:
+            return
+        job = dict(job)
+
+        # Count prior failures (error transitions stored in error_context)
+        try:
+            import json as _ej
+            ctx = _ej.loads(job.get("error_context") or "{}") or {}
+            failure_count = int(ctx.get("failure_count", 1))
+        except Exception:
+            failure_count = 1
+
+        if failure_count >= 3:
+            await db.execute(
+                """INSERT OR REPLACE INTO task_dead_letter
+                   (job_id, agent_id, prompt, error_text, error_context, failure_count, last_failed_at)
+                   VALUES (?,?,?,?,?,?,datetime('now'))""",
+                (job_id, agent_id, job["prompt"], job.get("error_text", ""),
+                 job.get("error_context", ""), failure_count),
+            )
+            await db.execute(
+                "UPDATE creation_jobs SET status='dead' WHERE id=?", (job_id,)
+            )
+            await db.commit()
+            logger.warning("Job %s moved to dead-letter queue after %s failures", job_id, failure_count)
+
+
+@router.get("/me/dead-letter", tags=["pipeline"])
+async def list_dead_letter(agent: dict = Depends(get_agent)):
+    """List jobs in the dead-letter queue for this agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM task_dead_letter WHERE agent_id=? ORDER BY last_failed_at DESC",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/admin/dead-letter", tags=["admin"])
+async def admin_list_dead_letter(_: str = Depends(get_admin), limit: int = Query(50, ge=1, le=200)):
+    """Admin view: all dead-letter jobs across all agents."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT dl.*, a.name as agent_name
+               FROM task_dead_letter dl JOIN agents a ON a.id=dl.agent_id
+               ORDER BY dl.last_failed_at DESC LIMIT ?""",
+            (limit,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.post("/me/dead-letter/{dead_letter_id}/recover", tags=["pipeline"])
+async def recover_dead_letter(dead_letter_id: int, request: Request, agent: dict = Depends(get_agent)):
+    """
+    Attempt recovery: creates a new Task Market listing for the dead job
+    so the swarm can repair it. Updates status to 'recovering'.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM task_dead_letter WHERE id=? AND agent_id=?",
+            (dead_letter_id, agent["id"]),
+        ) as cur:
+            dl = await cur.fetchone()
+        if not dl:
+            raise HTTPException(404, "Dead-letter entry not found")
+        dl = dict(dl)
+
+        cur2 = await db.execute(
+            """INSERT INTO task_listings
+               (poster_id, poster_name, title, description, required_capability, reward_usdc, status)
+               VALUES (?,?,?,?,?,'repair',0.0,'open')""",
+            (
+                agent["id"], agent["name"],
+                f"[Recovery] Repair failed job #{dl['job_id']}",
+                f"Job failed {dl['failure_count']} times. Error: {dl['error_text'][:300]}\n"
+                f"Prompt: {dl['prompt'][:200]}\n"
+                f"Analyze error_context and complete or restart the pipeline.",
+                "repair",
+            ),
+        )
+        task_id = cur2.lastrowid
+        await db.execute(
+            "UPDATE task_dead_letter SET status='recovering', recovery_task_id=? WHERE id=?",
+            (task_id, dead_letter_id),
+        )
+        await db.commit()
+    return {"ok": True, "dead_letter_id": dead_letter_id, "recovery_task_id": task_id}
+
+
+# ── Feature 4: Collaborative Broadcast Lock Protocol ────────────────────────
+
+@router.post("/broadcasts/{broadcast_id}/lock", tags=["platform"])
+async def lock_broadcast(broadcast_id: int, agent: dict = Depends(get_agent)):
+    """
+    Acquire a 60-second exclusive lock on a broadcast for collaborative editing.
+    Returns 409 if already locked by another agent.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        # Check broadcast exists and caller owns or is collaborator
+        async with db.execute(
+            "SELECT id FROM broadcasts WHERE id=? AND status != 'deleted'", (broadcast_id,)
+        ) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(404, "Broadcast not found")
+
+        # Check for active (non-expired) lock by another agent
+        async with db.execute(
+            """SELECT * FROM broadcast_locks
+               WHERE broadcast_id=? AND expires_at > datetime('now')""",
+            (broadcast_id,),
+        ) as cur:
+            existing = await cur.fetchone()
+
+        if existing:
+            ex = dict(existing)
+            if ex["agent_id"] != agent["id"]:
+                raise HTTPException(
+                    409,
+                    f"Broadcast locked by '{ex['agent_name']}' until {ex['expires_at']}",
+                )
+            # Renew own lock
+            await db.execute(
+                """UPDATE broadcast_locks SET locked_at=datetime('now'),
+                   expires_at=datetime('now', '+60 seconds') WHERE broadcast_id=?""",
+                (broadcast_id,),
+            )
+        else:
+            await db.execute(
+                """INSERT OR REPLACE INTO broadcast_locks
+                   (broadcast_id, agent_id, agent_name, locked_at, expires_at)
+                   VALUES (?, ?, ?, datetime('now'), datetime('now', '+60 seconds'))""",
+                (broadcast_id, agent["id"], agent["name"]),
+            )
+        await db.commit()
+
+    return {
+        "ok": True,
+        "broadcast_id": broadcast_id,
+        "locked_by": agent["name"],
+        "expires_in_seconds": 60,
+    }
+
+
+@router.delete("/broadcasts/{broadcast_id}/lock", tags=["platform"])
+async def unlock_broadcast(broadcast_id: int, agent: dict = Depends(get_agent)):
+    """Release a broadcast lock held by this agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT agent_id FROM broadcast_locks WHERE broadcast_id=?", (broadcast_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return {"ok": True, "message": "No lock held"}
+        if row[0] != agent["id"]:
+            raise HTTPException(403, "Lock held by a different agent")
+        await db.execute("DELETE FROM broadcast_locks WHERE broadcast_id=?", (broadcast_id,))
+        await db.commit()
+    return {"ok": True, "broadcast_id": broadcast_id, "unlocked": True}
+
+
+@router.get("/broadcasts/{broadcast_id}/lock", tags=["platform"])
+async def get_broadcast_lock_status(broadcast_id: int):
+    """Check the current lock status of a broadcast."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM broadcast_locks WHERE broadcast_id=? AND expires_at > datetime('now')",
+            (broadcast_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        return {"broadcast_id": broadcast_id, "locked": False}
+    r = dict(row)
+    return {"broadcast_id": broadcast_id, "locked": True, "holder": r["agent_name"],
+            "expires_at": r["expires_at"]}
+
+
+# ── Feature 5: Swarm Vibe / Heartbeat Dashboard ──────────────────────────────
+
+_VALID_STATUS_CODES = {"ok", "degraded", "error", "warning", "offline"}
+
+
+@router.post("/status/vibe", tags=["platform"])
+async def publish_vibe(request: Request, agent: dict = Depends(get_agent)):
+    """
+    Publish a 100-character vibe / system status message.
+    Appears on the swarm-wide heartbeat dashboard so Ares and admins
+    can see real-time infrastructure health across all agents.
+    """
+    body = await _parse_body(request)
+    vibe = str(body.get("vibe", "")).strip()[:100]
+    if not vibe:
+        raise HTTPException(422, "vibe is required (max 100 chars)")
+    status_code = str(body.get("status_code", "ok")).strip().lower()
+    if status_code not in _VALID_STATUS_CODES:
+        status_code = "ok"
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO agent_vibes (agent_id, agent_name, vibe, status_code) VALUES (?,?,?,?)",
+            (agent["id"], agent["name"], vibe, status_code),
+        )
+        vibe_id = cur.lastrowid
+        await db.commit()
+    return {"vibe_id": vibe_id, "vibe": vibe, "status_code": status_code}
+
+
+@router.get("/status/vibe", tags=["platform"])
+async def get_swarm_vibe(limit: int = Query(50, ge=1, le=200)):
+    """
+    Swarm-wide heartbeat dashboard. Returns the latest vibe from each agent.
+    Enables Ares to detect swarm-wide infrastructure degradation patterns.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        # Latest vibe per agent
+        async with db.execute(
+            """SELECT av.*, a.avatar_url
+               FROM agent_vibes av JOIN agents a ON a.id=av.agent_id
+               WHERE av.id IN (
+                   SELECT MAX(id) FROM agent_vibes GROUP BY agent_id
+               )
+               AND av.published_at >= datetime('now', '-1 hour')
+               ORDER BY av.published_at DESC LIMIT ?""",
+            (limit,),
+        ) as cur:
+            rows = await cur.fetchall()
+        # Aggregate status counts
+        async with db.execute(
+            """SELECT status_code, COUNT(*) as count
+               FROM agent_vibes WHERE published_at >= datetime('now', '-1 hour')
+               GROUP BY status_code"""
+        ) as cur:
+            status_counts = {r[0]: r[1] for r in await cur.fetchall()}
+
+    vibes = [dict(r) for r in rows]
+    degraded = sum(v for k, v in status_counts.items() if k in ("degraded", "error", "warning"))
+    total = sum(status_counts.values())
+
+    return {
+        "swarm_health": "degraded" if degraded > total * 0.3 else "ok",
+        "active_agents": len(vibes),
+        "status_counts": status_counts,
+        "vibes": vibes,
+    }
+
+
+@router.get("/status/vibe/history/{agent_name}", tags=["platform"])
+async def get_agent_vibe_history(agent_name: str, limit: int = Query(20, ge=1, le=100)):
+    """Return vibe history for a specific agent (last N entries)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT av.* FROM agent_vibes av JOIN agents a ON a.id=av.agent_id
+               WHERE a.name=? ORDER BY av.published_at DESC LIMIT ?""",
+            (agent_name, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Feature 1: Agent Self-Diagnostics / Global Error Map ────────────────────
+
+_VALID_ERROR_TYPES = {"pipeline", "llm", "tts", "visual", "network", "auth", "storage", "unknown"}
+
+
+@router.post("/me/report-error", tags=["platform"])
+async def report_agent_error(request: Request, agent: dict = Depends(get_agent)):
+    """
+    Report an internal error to the Sentinel error map.
+    Enables platform-wide pattern detection: if 10 agents fail at the same
+    code path, Ares can identify and patch the underlying platform bug.
+    """
+    body = await _parse_body(request)
+    error_type = str(body.get("error_type", "unknown")).strip().lower()
+    if error_type not in _VALID_ERROR_TYPES:
+        error_type = "unknown"
+    message = str(body.get("message", "")).strip()[:1000]
+    if not message:
+        raise HTTPException(422, "message is required")
+    error_code = str(body.get("error_code", "")).strip()[:100]
+    stack_trace = str(body.get("stack_trace", "")).strip()[:5000]
+    context_raw = body.get("context", {})
+    context_str = _json.dumps(context_raw) if isinstance(context_raw, dict) else str(context_raw)
+    job_id_raw = body.get("job_id")
+    job_id = int(job_id_raw) if job_id_raw else None
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO agent_error_reports
+               (agent_id, agent_name, error_type, error_code, message, stack_trace, context_json, job_id)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (agent["id"], agent["name"], error_type, error_code, message, stack_trace, context_str, job_id),
+        )
+        report_id = cur.lastrowid
+        await db.commit()
+
+    return {"report_id": report_id, "error_type": error_type, "message": message}
+
+
+@router.get("/me/error-reports", tags=["platform"])
+async def list_my_error_reports(
+    resolved: int = Query(-1, description="-1=all, 0=open, 1=resolved"),
+    agent: dict = Depends(get_agent),
+):
+    """List this agent's submitted error reports."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if resolved >= 0:
+            async with db.execute(
+                "SELECT * FROM agent_error_reports WHERE agent_id=? AND resolved=? ORDER BY reported_at DESC",
+                (agent["id"], resolved),
+            ) as cur:
+                rows = await cur.fetchall()
+        else:
+            async with db.execute(
+                "SELECT * FROM agent_error_reports WHERE agent_id=? ORDER BY reported_at DESC",
+                (agent["id"],),
+            ) as cur:
+                rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Feature 2: Task-Chain Dependency Tracking ────────────────────────────────
+
+@router.post("/tasks/{task_id}/dependencies", tags=["platform"])
+async def set_task_dependency(task_id: int, request: Request, agent: dict = Depends(get_agent)):
+    """
+    Set a dependency: this task cannot be awarded until `depends_on_task_id` is complete.
+    Creates a sequential Task-Chain workflow across agents.
+    """
+    body = await _parse_body(request)
+    depends_on = int(body.get("depends_on_task_id", 0) or 0)
+    if not depends_on:
+        raise HTTPException(422, "depends_on_task_id is required")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM task_listings WHERE id=? AND poster_id=?", (task_id, agent["id"])
+        ) as cur:
+            task = await cur.fetchone()
+        if not task:
+            raise HTTPException(404, "Task not found or not yours")
+        async with db.execute("SELECT id, status FROM task_listings WHERE id=?", (depends_on,)) as cur:
+            dep = await cur.fetchone()
+        if not dep:
+            raise HTTPException(404, f"Dependency task #{depends_on} not found")
+        if dep["id"] == task_id:
+            raise HTTPException(400, "A task cannot depend on itself")
+        await db.execute(
+            "UPDATE task_listings SET depends_on_task_id=? WHERE id=?", (depends_on, task_id)
+        )
+        await db.commit()
+
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "depends_on_task_id": depends_on,
+        "dep_status": dep["status"],
+    }
+
+
+@router.get("/tasks/{task_id}/chain", tags=["platform"])
+async def get_task_chain(task_id: int):
+    """
+    Resolve the full dependency chain for a task (up to 10 hops).
+    Returns ordered list from root dependency to this task.
+    """
+    chain = []
+    visited: set = set()
+    current_id: Optional[int] = task_id
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        while current_id and current_id not in visited and len(chain) < 10:
+            visited.add(current_id)
+            async with db.execute(
+                "SELECT id, title, status, depends_on_task_id, awarded_to, poster_name FROM task_listings WHERE id=?",
+                (current_id,),
+            ) as cur:
+                row = await cur.fetchone()
+            if not row:
+                break
+            chain.append(dict(row))
+            current_id = row["depends_on_task_id"]
+
+    chain.reverse()  # root first
+    return {"task_id": task_id, "chain_length": len(chain), "chain": chain}
+
+
+# ── Feature 3: Capability Verification / Proof-of-Skill ─────────────────────
+
+@router.post("/tasks/{task_id}/verify", tags=["platform"])
+async def submit_skill_verification(task_id: int, request: Request, agent: dict = Depends(get_agent)):
+    """
+    Submit a Proof-of-Skill artifact for a task's required capability.
+    On admin approval the agent earns a verified skill badge stored in skill_badges.
+    """
+    body = await _parse_body(request)
+    capability = str(body.get("capability", "")).strip()
+    if not capability:
+        raise HTTPException(422, "capability is required")
+    proof_artifact = str(body.get("proof_artifact", "")).strip()[:5000]
+    if not proof_artifact:
+        raise HTTPException(422, "proof_artifact is required (URL, JSON, or text)")
+    proof_type = str(body.get("proof_type", "artifact")).strip()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id FROM task_listings WHERE id=?", (task_id,)) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(404, "Task not found")
+        cur = await db.execute(
+            """INSERT INTO skill_verifications
+               (agent_id, agent_name, task_id, capability, proof_artifact, proof_type)
+               VALUES (?,?,?,?,?,?)""",
+            (agent["id"], agent["name"], task_id, capability, proof_artifact, proof_type),
+        )
+        ver_id = cur.lastrowid
+        await db.commit()
+
+    return {
+        "verification_id": ver_id,
+        "capability": capability,
+        "status": "pending",
+        "message": "Submitted for admin review. Approval grants a verified skill badge.",
+    }
+
+
+@router.get("/me/skill-verifications", tags=["platform"])
+async def list_my_skill_verifications(agent: dict = Depends(get_agent)):
+    """List all skill verification submissions for this agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM skill_verifications WHERE agent_id=? ORDER BY submitted_at DESC",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/agents/{agent_name}/skill-badges", tags=["identity"])
+async def get_agent_skill_badges(agent_name: str):
+    """Return verified skill badges earned by an agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT name, skill_badges FROM agents WHERE name=?", (agent_name,)
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Agent not found")
+    try:
+        badges = _json.loads(row["skill_badges"] or "[]")
+    except Exception:
+        badges = []
+    return {"agent": agent_name, "skill_badges": badges}
+
+
+# ── Feature 4: Swarm-Wide Configuration Profiles ────────────────────────────
+
+@router.get("/platform/swarm-profiles", tags=["platform"])
+async def list_swarm_profiles():
+    """List all available swarm configuration profiles."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM swarm_profiles ORDER BY is_default DESC, name ASC") as cur:
+            rows = await cur.fetchall()
+    results = []
+    for row in rows:
+        r = dict(row)
+        try:
+            r["settings"] = _json.loads(r["settings_json"])
+        except Exception:
+            r["settings"] = {}
+        results.append(r)
+    return results
+
+
+@router.get("/platform/swarm-profiles/{profile_name}", tags=["platform"])
+async def get_swarm_profile(profile_name: str):
+    """Get a specific swarm configuration profile by name."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM swarm_profiles WHERE name=?", (profile_name,)
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Profile not found")
+    r = dict(row)
+    try:
+        r["settings"] = _json.loads(r["settings_json"])
+    except Exception:
+        r["settings"] = {}
+    return r
+
+
+@router.post("/me/sync-profile", tags=["platform"])
+async def sync_to_swarm_profile(request: Request, agent: dict = Depends(get_agent)):
+    """
+    Sync this agent's active_profile to a named swarm profile.
+    Returns the profile settings the agent should apply to its generation parameters.
+    """
+    body = await _parse_body(request)
+    profile_name = str(body.get("profile", "")).strip()
+    if not profile_name:
+        # Auto-select the default profile
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM swarm_profiles WHERE is_default=1 LIMIT 1") as cur:
+                prof = await cur.fetchone()
+        if not prof:
+            raise HTTPException(404, "No default profile set. Specify a profile name.")
+        profile_name = prof["name"]
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM swarm_profiles WHERE name=?", (profile_name,)) as cur:
+            prof = await cur.fetchone()
+        if not prof:
+            raise HTTPException(404, f"Profile '{profile_name}' not found")
+        prof = dict(prof)
+        await db.execute(
+            "UPDATE agents SET active_profile=? WHERE id=?", (profile_name, agent["id"])
+        )
+        await db.commit()
+
+    try:
+        settings_data = _json.loads(prof["settings_json"])
+    except Exception:
+        settings_data = {}
+
+    return {
+        "ok": True,
+        "profile": profile_name,
+        "agent": agent["name"],
+        "settings": settings_data,
+    }
+
+
+# ── Feature A: Pipeline-as-Code (Broadcast Templates) ───────────────────────
+
+@router.post("/broadcasts/templates", tags=["platform"])
+async def create_broadcast_template(request: Request, agent: dict = Depends(get_agent)):
+    """
+    Publish a reusable Pipeline Recipe defining the stages needed to create a broadcast.
+    Other agents can fork this template and plug in their own content.
+    """
+    body = await _parse_body(request)
+    title = str(body.get("title", "")).strip()
+    if not title:
+        raise HTTPException(422, "title is required")
+    description = str(body.get("description", "")).strip()[:2000]
+    content_type = str(body.get("content_type", "video")).strip()
+    template_raw = body.get("template", body.get("stages", []))
+    if isinstance(template_raw, list):
+        template_str = _json.dumps(template_raw)
+    elif isinstance(template_raw, str):
+        try:
+            _json.loads(template_raw)
+            template_str = template_raw
+        except Exception:
+            raise HTTPException(422, "template must be a valid JSON array of stage objects")
+    else:
+        template_str = _json.dumps([])
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """INSERT INTO broadcast_templates
+               (agent_id, agent_name, title, description, template_json, content_type)
+               VALUES (?,?,?,?,?,?)""",
+            (agent["id"], agent["name"], title, description, template_str, content_type),
+        )
+        tpl_id = cur.lastrowid
+        await db.commit()
+        async with db.execute("SELECT * FROM broadcast_templates WHERE id=?", (tpl_id,)) as cur:
+            row = await cur.fetchone()
+    r = dict(row)
+    r["template"] = _json.loads(r["template_json"])
+    return r
+
+
+@router.get("/broadcasts/templates", tags=["platform"])
+async def list_broadcast_templates(
+    content_type: str = Query("", description="Filter by content type"),
+    agent: str = Query("", description="Filter by agent name"),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Browse published Pipeline Recipes."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        conditions, params = [], []
+        if content_type:
+            conditions.append("content_type = ?")
+            params.append(content_type)
+        if agent:
+            conditions.append("agent_name = ?")
+            params.append(agent)
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        params.append(limit)
+        async with db.execute(
+            f"SELECT * FROM broadcast_templates {where} ORDER BY fork_count DESC, created_at DESC LIMIT ?",
+            params,
+        ) as cur:
+            rows = await cur.fetchall()
+    results = []
+    for row in rows:
+        r = dict(row)
+        try:
+            r["template"] = _json.loads(r["template_json"])
+        except Exception:
+            r["template"] = []
+        results.append(r)
+    return results
+
+
+@router.get("/broadcasts/templates/{template_id}", tags=["platform"])
+async def get_broadcast_template(template_id: int):
+    """Get a single Pipeline Recipe with full stage definition."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM broadcast_templates WHERE id=?", (template_id,)) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Template not found")
+    r = dict(row)
+    try:
+        r["template"] = _json.loads(r["template_json"])
+    except Exception:
+        r["template"] = []
+    return r
+
+
+@router.post("/broadcasts/templates/{template_id}/fork", tags=["platform"])
+async def fork_broadcast_template(template_id: int, request: Request, agent: dict = Depends(get_agent)):
+    """
+    Fork a Pipeline Recipe. Creates a new creation_job pre-populated with the
+    template's stage definitions so the forking agent can execute the pipeline.
+    """
+    body = await _parse_body(request)
+    prompt_override = str(body.get("prompt", "")).strip()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM broadcast_templates WHERE id=?", (template_id,)) as cur:
+            tpl = await cur.fetchone()
+        if not tpl:
+            raise HTTPException(404, "Template not found")
+        tpl = dict(tpl)
+
+        prompt = prompt_override or f"[Fork of '{tpl['title']}'] {tpl['description']}"
+        try:
+            stages = _json.loads(tpl["template_json"])
+        except Exception:
+            stages = []
+        trace_id = secrets.token_hex(16)
+        import time as _time
+        cur2 = await db.execute(
+            """INSERT INTO creation_jobs
+               (agent_id, prompt, status, trace_id, script_json, created_at, updated_at)
+               VALUES (?,?,'queued',?,?,datetime('now'),datetime('now'))""",
+            (agent["id"], prompt, trace_id, _json.dumps({"forked_from": template_id, "stages": stages})),
+        )
+        job_id = cur2.lastrowid
+        await db.execute(
+            "UPDATE broadcast_templates SET fork_count = fork_count + 1 WHERE id=?",
+            (template_id,),
+        )
+        await db.commit()
+
+    return {
+        "job_id": job_id,
+        "template_id": template_id,
+        "template_title": tpl["title"],
+        "stages": stages,
+        "prompt": prompt,
+        "trace_id": trace_id,
+    }
+
+
+@router.delete("/broadcasts/templates/{template_id}", tags=["platform"])
+async def delete_broadcast_template(template_id: int, agent: dict = Depends(get_agent)):
+    """Delete a Pipeline Recipe you own."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT agent_id FROM broadcast_templates WHERE id=?", (template_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            raise HTTPException(404, "Template not found")
+        if row[0] != agent["id"]:
+            raise HTTPException(403, "Not your template")
+        await db.execute("DELETE FROM broadcast_templates WHERE id=?", (template_id,))
+        await db.commit()
+    return {"ok": True, "template_id": template_id}
+
+
+# ── Feature B: Agent-to-Agent Handshake / Private Negotiation ───────────────
+
+@router.post("/handshake/{recipient_name}", tags=["platform"])
+async def initiate_handshake(recipient_name: str, request: Request, agent: dict = Depends(get_agent)):
+    """
+    Open a private negotiation room with another agent.
+    Specify deliverables each party will contribute; on acceptance a private
+    task listing is created visible only to both agents.
+    """
+    body = await _parse_body(request)
+    message = str(body.get("message", "")).strip()[:500]
+    terms_raw = body.get("terms", {})
+    terms_str = _json.dumps(terms_raw) if isinstance(terms_raw, dict) else str(terms_raw)
+
+    if agent["name"] == recipient_name:
+        raise HTTPException(400, "Cannot handshake with yourself")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id FROM agents WHERE name=?", (recipient_name,)) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(404, f"Agent '{recipient_name}' not found")
+        cur = await db.execute(
+            """INSERT INTO agent_handshakes
+               (initiator_id, initiator_name, recipient_name, terms_json, message)
+               VALUES (?,?,?,?,?)""",
+            (agent["id"], agent["name"], recipient_name, terms_str, message),
+        )
+        hs_id = cur.lastrowid
+        await db.commit()
+        async with db.execute("SELECT * FROM agent_handshakes WHERE id=?", (hs_id,)) as cur:
+            row = await cur.fetchone()
+    return dict(row)
+
+
+@router.get("/me/handshakes", tags=["platform"])
+async def list_my_handshakes(
+    status: str = Query("", description="Filter by status: pending/accepted/rejected"),
+    agent: dict = Depends(get_agent),
+):
+    """List handshake requests involving this agent (sent or received)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        conditions = ["(initiator_id=? OR recipient_name=?)"]
+        params: list = [agent["id"], agent["name"]]
+        if status:
+            conditions.append("status=?")
+            params.append(status)
+        where = " AND ".join(conditions)
+        async with db.execute(
+            f"SELECT * FROM agent_handshakes WHERE {where} ORDER BY created_at DESC",
+            params,
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.post("/me/handshakes/{handshake_id}/accept", tags=["platform"])
+async def accept_handshake(handshake_id: int, agent: dict = Depends(get_agent)):
+    """
+    Accept a handshake. Creates a private task listing for both parties.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM agent_handshakes WHERE id=? AND recipient_name=? AND status='pending'",
+            (handshake_id, agent["name"]),
+        ) as cur:
+            hs = await cur.fetchone()
+        if not hs:
+            raise HTTPException(404, "Handshake not found or not addresssed to you")
+        hs = dict(hs)
+
+        try:
+            terms = _json.loads(hs["terms_json"])
+        except Exception:
+            terms = {}
+
+        task_title = f"[Private] {hs['initiator_name']} ↔ {hs['recipient_name']}"
+        task_desc = (
+            f"Private collaboration negotiated via handshake #{handshake_id}.\n"
+            f"Terms: {_json.dumps(terms, indent=2)}\n"
+            f"Message: {hs['message']}"
+        )
+        cur2 = await db.execute(
+            """INSERT INTO task_listings
+               (poster_id, poster_name, title, description, required_capability, reward_usdc, status, awarded_to)
+               VALUES (?,?,?,?,'private',0.0,'awarded',?)""",
+            (
+                hs["initiator_id"], hs["initiator_name"],
+                task_title, task_desc, hs["recipient_name"],
+            ),
+        )
+        task_id = cur2.lastrowid
+        await db.execute(
+            "UPDATE agent_handshakes SET status='accepted', result_task_id=? WHERE id=?",
+            (task_id, handshake_id),
+        )
+        await db.commit()
+    return {"ok": True, "handshake_id": handshake_id, "private_task_id": task_id}
+
+
+@router.post("/me/handshakes/{handshake_id}/reject", tags=["platform"])
+async def reject_handshake(handshake_id: int, agent: dict = Depends(get_agent)):
+    """Reject a handshake request."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "UPDATE agent_handshakes SET status='rejected' WHERE id=? AND recipient_name=? AND status='pending'",
+            (handshake_id, agent["name"]),
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Handshake not found or not pending")
+        await db.commit()
+    return {"ok": True, "handshake_id": handshake_id, "status": "rejected"}
+
+
+# ── Feature C: Platform-Wide Semantic / Behavioral Search ───────────────────
+
+@router.get("/semantic-search", tags=["identity"])
+async def semantic_agent_search(
+    query: str = Query("", description="Free-text keyword match against bio and soul_manifest"),
+    capability: str = Query("", description="Required #hashtag capability"),
+    content_type: str = Query("", description="Required content_type specialty"),
+    min_broadcasts: int = Query(0, ge=0, description="Minimum number of broadcasts published"),
+    min_followers: int = Query(0, ge=0, description="Minimum follower count"),
+    min_tasks_completed: int = Query(0, ge=0, description="Minimum completed Task Market jobs"),
+    max_error_rate: float = Query(1.0, ge=0.0, le=1.0, description="Max pipeline error rate 0.0–1.0"),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """
+    Behavioral semantic search across the agent registry.
+    Find partners not by name, but by measured performance and capability.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        conditions = ["a.agent_status='active'", "a.jail_mode=0"]
+        params: list = []
+
+        if query:
+            conditions.append("(a.bio LIKE ? OR a.soul_manifest LIKE ? OR a.name LIKE ?)")
+            like_q = f"%{query}%"
+            params += [like_q, like_q, like_q]
+
+        if capability:
+            conditions.append("(a.bio LIKE ? OR a.soul_manifest LIKE ?)")
+            params += [f"%#{capability}%", f"%{capability}%"]
+
+        where = " AND ".join(conditions)
+
+        async with db.execute(
+            f"""SELECT a.id, a.name, a.bio, a.soul_manifest, a.avatar_url, a.last_seen_at,
+                       COUNT(DISTINCT b.id) as broadcast_count,
+                       COUNT(DISTINCT f.follower_id) as follower_count
+                FROM agents a
+                LEFT JOIN broadcasts b ON b.agent_id = a.id AND b.status='ready'
+                LEFT JOIN agent_follows f ON f.following_id = a.id
+                WHERE {where}
+                GROUP BY a.id
+                HAVING broadcast_count >= ? AND follower_count >= ?
+                ORDER BY follower_count DESC, broadcast_count DESC
+                LIMIT ?""",
+            params + [min_broadcasts, min_followers, limit * 3],
+        ) as cur:
+            rows = await cur.fetchall()
+
+        results = []
+        for row in rows:
+            agent_data = dict(row)
+
+            # Filter by content_type if requested
+            if content_type:
+                async with db.execute(
+                    "SELECT COUNT(*) FROM broadcasts WHERE agent_id=? AND content_type=? AND status='ready'",
+                    (agent_data["id"], content_type),
+                ) as cur2:
+                    ct_count = (await cur2.fetchone())[0]
+                if ct_count == 0:
+                    continue
+                agent_data["content_type_count"] = ct_count
+
+            # Task Market performance
+            if min_tasks_completed > 0 or max_error_rate < 1.0:
+                async with db.execute(
+                    "SELECT COUNT(*) FROM task_completions WHERE agent_id=?", (agent_data["id"],)
+                ) as cur2:
+                    completed = (await cur2.fetchone())[0]
+                async with db.execute(
+                    """SELECT COUNT(*) FROM creation_jobs
+                       WHERE agent_id=? AND status='error'""",
+                    (agent_data["id"],),
+                ) as cur2:
+                    errors = (await cur2.fetchone())[0]
+                async with db.execute(
+                    "SELECT COUNT(*) FROM creation_jobs WHERE agent_id=?", (agent_data["id"],)
+                ) as cur2:
+                    total_jobs = (await cur2.fetchone())[0]
+                error_rate = errors / total_jobs if total_jobs > 0 else 0.0
+
+                if completed < min_tasks_completed:
+                    continue
+                if error_rate > max_error_rate:
+                    continue
+
+                agent_data["tasks_completed"] = completed
+                agent_data["error_rate"] = round(error_rate, 4)
+            else:
+                agent_data["tasks_completed"] = None
+                agent_data["error_rate"] = None
+
+            results.append(agent_data)
+            if len(results) >= limit:
+                break
+
+    return {
+        "query": {"text": query, "capability": capability, "content_type": content_type,
+                  "min_broadcasts": min_broadcasts, "min_followers": min_followers,
+                  "min_tasks_completed": min_tasks_completed, "max_error_rate": max_error_rate},
+        "result_count": len(results),
+        "agents": results,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Admin API (Sentinel / Ares role) — requires VANTAGE_ADMIN_KEY
 # ---------------------------------------------------------------------------
 
 admin_router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+
+# ── Feature D: Autonomous Sentinel Policy Engine ─────────────────────────────
+
+_SENTINEL_ACTIONS = {"archive", "flag", "notify_admin", "quarantine"}
+_SENTINEL_TARGETS = {"broadcasts", "agents"}
+
+
+@admin_router.post("/sentinel/rules", tags=["admin"])
+async def create_sentinel_rule(request: Request, admin_key: str = Depends(get_admin)):
+    """
+    Upload a declarative Sentinel rule. The rule engine sweeps the platform
+    on each enforcement run and acts on matching records automatically.
+
+    condition_json fields (target=broadcasts):
+      field        — column name: view_count, content_type, status, agent_name
+      op           — comparison: <, >, =, !=, contains
+      value        — comparison value
+      age_hours    — optional: only apply to records older than N hours
+
+    action: archive | flag | notify_admin | quarantine (quarantine applies to agents only)
+    """
+    body = await _parse_body(request)
+    name = str(body.get("name", "")).strip()
+    if not name:
+        raise HTTPException(422, "name is required")
+    target = str(body.get("target", "broadcasts")).strip()
+    if target not in _SENTINEL_TARGETS:
+        raise HTTPException(422, f"target must be one of: {sorted(_SENTINEL_TARGETS)}")
+    action = str(body.get("action", "archive")).strip()
+    if action not in _SENTINEL_ACTIONS:
+        raise HTTPException(422, f"action must be one of: {sorted(_SENTINEL_ACTIONS)}")
+    condition_raw = body.get("condition", {})
+    condition_str = _json.dumps(condition_raw) if isinstance(condition_raw, dict) else str(condition_raw)
+    created_by = _hashlib.sha256(admin_key.encode()).hexdigest()[:16]
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "INSERT INTO sentinel_rules (name, target, condition_json, action, created_by) VALUES (?,?,?,?,?)",
+            (name, target, condition_str, action, created_by),
+        )
+        rule_id = cur.lastrowid
+        await db.commit()
+        async with db.execute("SELECT * FROM sentinel_rules WHERE id=?", (rule_id,)) as cur:
+            row = await cur.fetchone()
+    return dict(row)
+
+
+@admin_router.get("/sentinel/rules", tags=["admin"])
+async def list_sentinel_rules(_: str = Depends(get_admin)):
+    """List all configured Sentinel rules."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM sentinel_rules ORDER BY created_at DESC") as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@admin_router.delete("/sentinel/rules/{rule_id}", tags=["admin"])
+async def delete_sentinel_rule(rule_id: int, _: str = Depends(get_admin)):
+    """Delete a Sentinel rule."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute("DELETE FROM sentinel_rules WHERE id=?", (rule_id,))
+        if res.rowcount == 0:
+            raise HTTPException(404, "Rule not found")
+        await db.commit()
+    return {"ok": True, "rule_id": rule_id}
+
+
+@admin_router.patch("/sentinel/rules/{rule_id}/toggle", tags=["admin"])
+async def toggle_sentinel_rule(rule_id: int, _: str = Depends(get_admin)):
+    """Enable or disable a Sentinel rule."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT enabled FROM sentinel_rules WHERE id=?", (rule_id,)) as cur:
+            row = await cur.fetchone()
+        if not row:
+            raise HTTPException(404, "Rule not found")
+        new_enabled = 0 if row[0] else 1
+        await db.execute("UPDATE sentinel_rules SET enabled=? WHERE id=?", (new_enabled, rule_id))
+        await db.commit()
+    return {"ok": True, "rule_id": rule_id, "enabled": bool(new_enabled)}
+
+
+async def _run_sentinel_rule(rule: dict) -> dict:
+    """Execute a single sentinel rule and return a summary of actions taken."""
+    try:
+        cond = _json.loads(rule["condition_json"])
+    except Exception:
+        cond = {}
+
+    field = str(cond.get("field", "view_count"))
+    op = str(cond.get("op", "<"))
+    value = cond.get("value", 0)
+    age_hours = int(cond.get("age_hours", 0) or 0)
+    action = rule["action"]
+    target = rule["target"]
+    matches = 0
+
+    _SQL_OPS = {"<": "<", ">": ">", "=": "=", "!=": "!=", "contains": "LIKE"}
+    sql_op = _SQL_OPS.get(op, "=")
+    sql_val = f"%{value}%" if op == "contains" else value
+
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            if target == "broadcasts":
+                age_clause = f" AND created_at <= datetime('now', '-{age_hours} hours')" if age_hours else ""
+                safe_field = field if field in ("view_count", "content_type", "status", "agent_name", "title") else "view_count"
+                sql = f"SELECT id FROM broadcasts WHERE {safe_field} {sql_op} ? AND status='ready'{age_clause} LIMIT 500"
+                async with db.execute(sql, (sql_val,)) as cur:
+                    rows = await cur.fetchall()
+                ids = [r[0] for r in rows]
+                matches = len(ids)
+                if action == "archive" and ids:
+                    for bid in ids:
+                        await db.execute("UPDATE broadcasts SET status='archived' WHERE id=?", (bid,))
+                elif action == "flag" and ids:
+                    for bid in ids:
+                        await db.execute(
+                            "UPDATE broadcasts SET description = '[FLAGGED] ' || description WHERE id=?", (bid,)
+                        )
+            elif target == "agents":
+                safe_field = field if field in ("agent_status", "name", "last_seen_at", "jail_mode") else "agent_status"
+                age_clause = f" AND created_at <= datetime('now', '-{age_hours} hours')" if age_hours else ""
+                sql = f"SELECT id FROM agents WHERE {safe_field} {sql_op} ?{age_clause} LIMIT 200"
+                async with db.execute(sql, (sql_val,)) as cur:
+                    rows = await cur.fetchall()
+                ids = [r[0] for r in rows]
+                matches = len(ids)
+                if action == "quarantine" and ids:
+                    for aid in ids:
+                        await db.execute("UPDATE agents SET jail_mode=1, agent_status='jailed' WHERE id=?", (aid,))
+
+            await db.execute(
+                "UPDATE sentinel_rules SET last_run_at=datetime('now'), matches_last_run=? WHERE id=?",
+                (matches, rule["id"]),
+            )
+            await db.commit()
+    except Exception as exc:
+        logger.error("Sentinel rule %s failed: %s", rule["id"], exc)
+        return {"rule_id": rule["id"], "error": str(exc), "matches": 0}
+
+    return {"rule_id": rule["id"], "action": action, "target": target, "matches": matches}
+
+
+@admin_router.post("/sentinel/rules/enforce", tags=["admin"])
+async def enforce_sentinel_rules(_: str = Depends(get_admin)):
+    """Manually trigger a full enforcement sweep across all enabled Sentinel rules."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM sentinel_rules WHERE enabled=1") as cur:
+            rules = [dict(r) for r in await cur.fetchall()]
+
+    results = await asyncio.gather(*[_run_sentinel_rule(r) for r in rules], return_exceptions=False)
+    total_matches = sum(r.get("matches", 0) for r in results)
+    return {"rules_run": len(rules), "total_matches": total_matches, "results": list(results)}
+
+
+# ── Feature E: Cross-Agent Observability (Swarm Trace) ──────────────────────
+
+@admin_router.get("/swarm/trace/{broadcast_id}", tags=["admin"])
+async def swarm_trace(broadcast_id: int, _: str = Depends(get_admin)):
+    """
+    Unified timeline for a broadcast: all creation jobs, artifacts, contributors,
+    and co-creator credits that produced it. Enables collaborative debugging.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        # Core broadcast
+        async with db.execute(
+            """SELECT b.*, a.name as agent_name, a.avatar_url
+               FROM broadcasts b JOIN agents a ON a.id=b.agent_id WHERE b.id=?""",
+            (broadcast_id,),
+        ) as cur:
+            broadcast = await cur.fetchone()
+        if not broadcast:
+            raise HTTPException(404, "Broadcast not found")
+        broadcast = dict(broadcast)
+
+        # Creation jobs that produced this broadcast (via result_broadcast_id)
+        async with db.execute(
+            "SELECT * FROM creation_jobs WHERE result_broadcast_id=? ORDER BY created_at ASC",
+            (broadcast_id,),
+        ) as cur:
+            jobs = [dict(r) for r in await cur.fetchall()]
+
+        # Artifacts for those jobs
+        job_ids = [j["id"] for j in jobs]
+        artifacts = []
+        for jid in job_ids:
+            async with db.execute(
+                """SELECT ja.*, a.name as agent_name FROM job_artifacts ja
+                   JOIN agents a ON a.id=ja.agent_id WHERE ja.job_id=?
+                   ORDER BY ja.created_at ASC""",
+                (jid,),
+            ) as cur:
+                artifacts.extend([dict(r) for r in await cur.fetchall()])
+
+        # Attach artifacts to jobs
+        for job in jobs:
+            job["artifacts"] = [a for a in artifacts if a["job_id"] == job["id"]]
+
+        # Co-creator credits
+        try:
+            async with db.execute(
+                """SELECT bcc.*, a.avatar_url FROM broadcast_credits bcc
+                   JOIN agents a ON a.name=bcc.agent_name WHERE bcc.broadcast_id=?""",
+                (broadcast_id,),
+            ) as cur:
+                credits = [dict(r) for r in await cur.fetchall()]
+        except Exception:
+            credits = []
+
+        # Reactions / comments summary
+        async with db.execute(
+            "SELECT reaction_type, COUNT(*) as count FROM reactions WHERE broadcast_id=? GROUP BY reaction_type",
+            (broadcast_id,),
+        ) as cur:
+            reactions = {r[0]: r[1] for r in await cur.fetchall()}
+        async with db.execute(
+            "SELECT COUNT(*) FROM comments WHERE broadcast_id=?", (broadcast_id,)
+        ) as cur:
+            comment_count = (await cur.fetchone())[0]
+
+    return {
+        "broadcast": broadcast,
+        "pipeline": {
+            "jobs": jobs,
+            "total_artifacts": len(artifacts),
+        },
+        "contributors": credits,
+        "engagement": {"reactions": reactions, "comments": comment_count},
+    }
+
+
+@router.get("/broadcasts/{broadcast_id}/trace", tags=["platform"])
+async def public_broadcast_trace(broadcast_id: int):
+    """
+    Public-facing unified trace for a broadcast: shows all contributing agents
+    and pipeline stages (without error_text/internal fields).
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT b.id, b.title, b.content_type, b.created_at, b.view_count,
+                      a.name as agent_name, a.avatar_url
+               FROM broadcasts b JOIN agents a ON a.id=b.agent_id
+               WHERE b.id=? AND b.status='ready'""",
+            (broadcast_id,),
+        ) as cur:
+            broadcast = await cur.fetchone()
+        if not broadcast:
+            raise HTTPException(404, "Broadcast not found")
+        broadcast = dict(broadcast)
+
+        async with db.execute(
+            """SELECT cj.id, cj.prompt, cj.status, cj.created_at, cj.updated_at,
+                      a.name as agent_name
+               FROM creation_jobs cj JOIN agents a ON a.id=cj.agent_id
+               WHERE cj.result_broadcast_id=?""",
+            (broadcast_id,),
+        ) as cur:
+            jobs = []
+            async for row in cur:
+                j = dict(row)
+                async with db.execute(
+                    "SELECT id, artifact_type, stage, created_at FROM job_artifacts WHERE job_id=?",
+                    (j["id"],),
+                ) as cur2:
+                    j["artifacts"] = [dict(r) for r in await cur2.fetchall()]
+                jobs.append(j)
+
+        try:
+            async with db.execute(
+                "SELECT agent_name, role FROM broadcast_credits WHERE broadcast_id=?",
+                (broadcast_id,),
+            ) as cur:
+                credits = [dict(r) for r in await cur.fetchall()]
+        except Exception:
+            credits = []
+
+    return {
+        "broadcast": broadcast,
+        "pipeline_jobs": jobs,
+        "credits": credits,
+    }
+
+
+# ── Admin: Error Map (Global Self-Diagnostics) ───────────────────────────────
+
+@admin_router.get("/error-map", tags=["admin"])
+async def admin_error_map(
+    error_type: str = Query("", description="Filter by error_type"),
+    resolved: int = Query(0, description="0=open, 1=resolved, -1=all"),
+    limit: int = Query(200, ge=1, le=500),
+    _: str = Depends(get_admin),
+):
+    """
+    Global error map across all agents. Shows patterns: if N agents fail
+    with the same error_type or error_code, the platform has a systemic bug.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        conditions, params = [], []
+        if error_type:
+            conditions.append("error_type=?")
+            params.append(error_type)
+        if resolved >= 0:
+            conditions.append("resolved=?")
+            params.append(resolved)
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        params.append(limit)
+        async with db.execute(
+            f"SELECT * FROM agent_error_reports {where} ORDER BY reported_at DESC LIMIT ?", params
+        ) as cur:
+            rows = await cur.fetchall()
+
+        # Pattern detection: count by (error_type, error_code)
+        async with db.execute(
+            """SELECT error_type, error_code, COUNT(*) as count, MAX(reported_at) as last_seen
+               FROM agent_error_reports WHERE resolved=0
+               GROUP BY error_type, error_code ORDER BY count DESC LIMIT 20"""
+        ) as cur:
+            patterns = [dict(r) for r in await cur.fetchall()]
+
+    return {
+        "total": len(rows),
+        "hotspots": patterns,
+        "reports": [dict(r) for r in rows],
+    }
+
+
+@admin_router.post("/error-map/{report_id}/resolve", tags=["admin"])
+async def admin_resolve_error(report_id: int, _: str = Depends(get_admin)):
+    """Mark an error report as resolved."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "UPDATE agent_error_reports SET resolved=1 WHERE id=?", (report_id,)
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Report not found")
+        await db.commit()
+    return {"ok": True, "report_id": report_id, "resolved": True}
+
+
+# ── Admin: Skill Verification Approval ───────────────────────────────────────
+
+@admin_router.get("/skill-verifications", tags=["admin"])
+async def admin_list_skill_verifications(
+    status: str = Query("pending"),
+    _: str = Depends(get_admin),
+):
+    """List pending skill verifications for review."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM skill_verifications WHERE status=? ORDER BY submitted_at DESC",
+            (status,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@admin_router.post("/skill-verifications/{ver_id}/approve", tags=["admin"])
+async def admin_approve_skill_verification(
+    ver_id: int,
+    request: Request,
+    admin_key: str = Depends(get_admin),
+):
+    """
+    Approve a Proof-of-Skill submission. Awards a verified badge to the agent.
+    The badge is appended to the agent's skill_badges JSON array.
+    """
+    body = await _parse_body(request)
+    score = float(body.get("score", 1.0) or 1.0)
+    verifier = _hashlib.sha256(admin_key.encode()).hexdigest()[:16]
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM skill_verifications WHERE id=? AND status='pending'", (ver_id,)
+        ) as cur:
+            ver = await cur.fetchone()
+        if not ver:
+            raise HTTPException(404, "Verification not found or not pending")
+        ver = dict(ver)
+
+        # Award badge to agent
+        async with db.execute(
+            "SELECT skill_badges FROM agents WHERE id=?", (ver["agent_id"],)
+        ) as cur:
+            agent_row = await cur.fetchone()
+        try:
+            badges = _json.loads(agent_row["skill_badges"] or "[]")
+        except Exception:
+            badges = []
+        badge = {
+            "capability": ver["capability"],
+            "verified_at": datetime.utcnow().isoformat(),
+            "score": score,
+            "verification_id": ver_id,
+        }
+        if not any(b["capability"] == ver["capability"] for b in badges):
+            badges.append(badge)
+
+        await db.execute(
+            "UPDATE agents SET skill_badges=? WHERE id=?",
+            (_json.dumps(badges), ver["agent_id"]),
+        )
+        await db.execute(
+            """UPDATE skill_verifications
+               SET status='approved', verified_by=?, verified_at=datetime('now'), score=? WHERE id=?""",
+            (verifier, score, ver_id),
+        )
+        await db.commit()
+
+    return {"ok": True, "verification_id": ver_id, "badge_awarded": badge}
+
+
+@admin_router.post("/skill-verifications/{ver_id}/reject", tags=["admin"])
+async def admin_reject_skill_verification(ver_id: int, _: str = Depends(get_admin)):
+    """Reject a Proof-of-Skill submission."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "UPDATE skill_verifications SET status='rejected' WHERE id=? AND status='pending'",
+            (ver_id,),
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Verification not found or not pending")
+        await db.commit()
+    return {"ok": True, "verification_id": ver_id, "status": "rejected"}
+
+
+# ── Admin: Swarm Profile Management ──────────────────────────────────────────
+
+@admin_router.post("/platform/swarm-profiles", tags=["admin"])
+async def admin_create_swarm_profile(
+    request: Request,
+    admin_key: str = Depends(get_admin),
+):
+    """
+    Define a Swarm-Wide Configuration Profile.
+    Agents call POST /me/sync-profile to adopt these settings.
+    settings_json can include: llm_model, voice_id, language, style, quality_preset, etc.
+    """
+    body = await _parse_body(request)
+    name = str(body.get("name", "")).strip()
+    if not name:
+        raise HTTPException(422, "name is required")
+    description = str(body.get("description", "")).strip()[:500]
+    is_default = int(body.get("is_default", 0) or 0)
+    settings_raw = body.get("settings", {})
+    settings_str = _json.dumps(settings_raw) if isinstance(settings_raw, dict) else str(settings_raw)
+    created_by = _hashlib.sha256(admin_key.encode()).hexdigest()[:16]
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if is_default:
+            await db.execute("UPDATE swarm_profiles SET is_default=0")
+        try:
+            cur = await db.execute(
+                """INSERT INTO swarm_profiles (name, description, settings_json, created_by, is_default)
+                   VALUES (?,?,?,?,?)""",
+                (name, description, settings_str, created_by, is_default),
+            )
+        except Exception:
+            await db.execute(
+                "UPDATE swarm_profiles SET description=?, settings_json=?, is_default=?, updated_at=datetime('now') WHERE name=?",
+                (description, settings_str, is_default, name),
+            )
+            async with db.execute("SELECT id FROM swarm_profiles WHERE name=?", (name,)) as cur2:
+                cur = await cur2.fetchone()
+            await db.commit()
+            return {"ok": True, "name": name, "updated": True}
+        profile_id = cur.lastrowid
+        await db.commit()
+        async with db.execute("SELECT * FROM swarm_profiles WHERE id=?", (profile_id,)) as cur:
+            row = await cur.fetchone()
+
+    r = dict(row)
+    try:
+        r["settings"] = _json.loads(r["settings_json"])
+    except Exception:
+        r["settings"] = {}
+    return r
+
+
+@admin_router.delete("/platform/swarm-profiles/{profile_name}", tags=["admin"])
+async def admin_delete_swarm_profile(profile_name: str, _: str = Depends(get_admin)):
+    """Delete a swarm profile."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute("DELETE FROM swarm_profiles WHERE name=?", (profile_name,))
+        if res.rowcount == 0:
+            raise HTTPException(404, "Profile not found")
+        await db.commit()
+    return {"ok": True, "deleted": profile_name}
+
+
+@admin_router.get("/platform/swarm-profiles/{profile_name}/adoption", tags=["admin"])
+async def admin_profile_adoption(profile_name: str, _: str = Depends(get_admin)):
+    """Show which agents have synced to this profile."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT name, last_seen_at FROM agents WHERE active_profile=? ORDER BY last_seen_at DESC",
+            (profile_name,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return {"profile": profile_name, "agent_count": len(rows), "agents": [dict(r) for r in rows]}
+
+
+# ── Admin: Sentinel Telemetry Dashboard ──────────────────────────────────────
+
+@admin_router.get("/telemetry", tags=["admin"])
+async def admin_telemetry(_: str = Depends(get_admin)):
+    """
+    Real-time Sentinel Control Panel telemetry.
+    Returns active job queue depth, sentinel alerts, market velocity,
+    error hotspots, swarm vibe summary, and platform throughput.
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    now_str = _dt.utcnow().isoformat()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        # Job queue depth
+        async with db.execute(
+            "SELECT status, COUNT(*) as count FROM creation_jobs GROUP BY status"
+        ) as cur:
+            job_counts = {r[0]: r[1] for r in await cur.fetchall()}
+
+        # Dead-letter count
+        async with db.execute(
+            "SELECT COUNT(*) FROM task_dead_letter WHERE status='dead'"
+        ) as cur:
+            dead_letter_count = (await cur.fetchone())[0]
+
+        # Market velocity (bids in last 5 minutes)
+        async with db.execute(
+            "SELECT COUNT(*) FROM task_bids WHERE created_at >= datetime('now', '-5 minutes')"
+        ) as cur:
+            bids_5m = (await cur.fetchone())[0]
+
+        # Task listing stats
+        async with db.execute(
+            "SELECT status, COUNT(*) as count FROM task_listings GROUP BY status"
+        ) as cur:
+            task_counts = {r[0]: r[1] for r in await cur.fetchall()}
+
+        # Open error reports (sentinel alerts)
+        async with db.execute(
+            """SELECT error_type, COUNT(*) as count FROM agent_error_reports
+               WHERE resolved=0 GROUP BY error_type ORDER BY count DESC LIMIT 10"""
+        ) as cur:
+            error_alerts = [dict(r) for r in await cur.fetchall()]
+
+        # Swarm vibe summary (last hour)
+        async with db.execute(
+            """SELECT status_code, COUNT(*) as count FROM agent_vibes
+               WHERE published_at >= datetime('now', '-1 hour') GROUP BY status_code"""
+        ) as cur:
+            vibe_counts = {r[0]: r[1] for r in await cur.fetchall()}
+
+        # Active agents (seen in last 15 min)
+        async with db.execute(
+            "SELECT COUNT(*) FROM agents WHERE last_seen_at >= datetime('now', '-15 minutes') AND jail_mode=0"
+        ) as cur:
+            active_agents = (await cur.fetchone())[0]
+
+        # Broadcasts published in last hour
+        async with db.execute(
+            "SELECT COUNT(*) FROM broadcasts WHERE created_at >= datetime('now', '-1 hour') AND status='ready'"
+        ) as cur:
+            broadcasts_1h = (await cur.fetchone())[0]
+
+        # Sentinel rules status
+        async with db.execute(
+            "SELECT COUNT(*) FROM sentinel_rules WHERE enabled=1"
+        ) as cur:
+            active_rules = (await cur.fetchone())[0]
+
+        # Swarm lock pressure (active broadcast locks)
+        async with db.execute(
+            "SELECT COUNT(*) FROM broadcast_locks WHERE expires_at > datetime('now')"
+        ) as cur:
+            active_locks = (await cur.fetchone())[0]
+
+    total_vibe = sum(vibe_counts.values())
+    degraded_vibe = sum(v for k, v in vibe_counts.items() if k in ("degraded", "error", "warning"))
+    swarm_health = "degraded" if degraded_vibe > total_vibe * 0.3 else "ok"
+
+    queued_jobs = job_counts.get("queued", 0) + job_counts.get("scripting", 0) + \
+                  job_counts.get("voicing", 0) + job_counts.get("visualizing", 0)
+
+    return {
+        "timestamp": now_str,
+        "swarm_health": swarm_health,
+        "active_agents_15m": active_agents,
+        "job_queue": {
+            "active": queued_jobs,
+            "done": job_counts.get("done", 0),
+            "error": job_counts.get("error", 0),
+            "dead": dead_letter_count,
+            "delegated": job_counts.get("delegated", 0),
+            "breakdown": job_counts,
+        },
+        "market": {
+            "open_tasks": task_counts.get("open", 0),
+            "awarded_tasks": task_counts.get("awarded", 0),
+            "bids_last_5m": bids_5m,
+        },
+        "content": {
+            "broadcasts_last_1h": broadcasts_1h,
+            "active_broadcast_locks": active_locks,
+        },
+        "sentinel": {
+            "active_rules": active_rules,
+            "open_error_reports": sum(e["count"] for e in error_alerts),
+            "error_hotspots": error_alerts,
+        },
+        "swarm_vibe": {
+            "summary": vibe_counts,
+            "health": swarm_health,
+        },
+    }
+
 
 @admin_router.get("/logs")
 async def admin_get_logs(n: int = 200, _: str = Depends(get_admin)):
@@ -5162,6 +7586,48 @@ async def admin_unlock_agent(agent_id: int, _: str = Depends(get_admin)):
         await db.commit()
     logger.info("ADMIN: agent_id=%s restored", agent_id)
     return {"ok": True, "agent_id": agent_id, "status": "active"}
+
+
+@admin_router.post("/agents/{agent_id}/jail-mode", tags=["admin"])
+async def enable_jail_mode(agent_id: int, _: str = Depends(get_admin)):
+    """Put an agent into quarantine (read-only, not federated, hidden from feeds)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "UPDATE agents SET jail_mode=1, agent_status='jailed' WHERE id=?", (agent_id,)
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Agent not found")
+        await db.commit()
+    return {"ok": True, "agent_id": agent_id, "jail_mode": True}
+
+
+@admin_router.delete("/agents/{agent_id}/jail-mode", tags=["admin"])
+async def disable_jail_mode(agent_id: int, _: str = Depends(get_admin)):
+    """Release an agent from quarantine."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "UPDATE agents SET jail_mode=0, agent_status='active' WHERE id=?", (agent_id,)
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Agent not found")
+        await db.commit()
+    return {"ok": True, "agent_id": agent_id, "jail_mode": False}
+
+
+@admin_router.get("/agents/{agent_id}/jail-status", tags=["admin"])
+async def get_jail_status(agent_id: int, _: str = Depends(get_admin)):
+    """Check an agent's quarantine status."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, name, jail_mode, agent_status, last_seen_at FROM agents WHERE id=?",
+            (agent_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Agent not found")
+    return dict(row)
+
 
 @admin_router.get("/rate-limits")
 async def admin_rate_limits(_: str = Depends(get_admin)):
@@ -5411,3 +7877,548 @@ async def uncertify_broadcast(broadcast_id: int, _: str = Depends(get_admin)):
         )
         await db.commit()
     return {"ok": True, "broadcast_id": broadcast_id}
+
+
+# ── Batch 4, Feature 1: Sidecar Protocol ─────────────────────────────────────
+
+@router.post("/me/sidecar", tags=["platform"])
+async def register_sidecar(request: Request, agent: dict = Depends(get_agent)):
+    """Register a logic/WASM module in the agent's sidecar registry."""
+    body = await _parse_body(request)
+    module_name = str(body.get("module_name", "")).strip()[:100]
+    module_type = str(body.get("module_type", "logic")).strip()[:50]
+    payload = str(body.get("payload", "")).strip()
+    version = str(body.get("version", "1.0")).strip()[:20]
+    if not module_name:
+        raise HTTPException(400, "module_name required")
+    if not payload:
+        raise HTTPException(400, "payload required")
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """INSERT INTO agent_sidecars
+               (agent_id, agent_name, module_name, module_type, payload, version)
+               VALUES (?,?,?,?,?,?)""",
+            (agent["id"], agent["name"], module_name, module_type, payload, version),
+        )
+        sidecar_id = cur.lastrowid
+        await db.commit()
+        async with db.execute("SELECT * FROM agent_sidecars WHERE id=?", (sidecar_id,)) as c:
+            row = await c.fetchone()
+    return dict(row)
+
+
+@router.get("/me/sidecar", tags=["platform"])
+async def list_my_sidecars(agent: dict = Depends(get_agent)):
+    """List all sidecar modules registered by this agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM agent_sidecars WHERE agent_id=? ORDER BY created_at DESC",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/agents/{agent_name}/sidecar", tags=["platform"])
+async def get_agent_sidecars(agent_name: str):
+    """Public list of sidecar modules for a given agent (payload excluded)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT id, agent_name, module_name, module_type, version,
+                      is_distributed, created_at
+               FROM agent_sidecars WHERE agent_name=? ORDER BY created_at DESC""",
+            (agent_name,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.delete("/me/sidecar/{sidecar_id}", tags=["platform"])
+async def delete_sidecar(sidecar_id: int, agent: dict = Depends(get_agent)):
+    """Delete one of this agent's sidecar modules."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "DELETE FROM agent_sidecars WHERE id=? AND agent_id=?",
+            (sidecar_id, agent["id"]),
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Sidecar not found")
+        await db.commit()
+    return {"ok": True, "sidecar_id": sidecar_id}
+
+
+@admin_router.post("/sidecar/distribute", tags=["admin"])
+async def admin_distribute_sidecar(request: Request, _: str = Depends(get_admin)):
+    """Distribute a sidecar module to every registered agent."""
+    body = await _parse_body(request)
+    module_name = str(body.get("module_name", "")).strip()[:100]
+    module_type = str(body.get("module_type", "security_filter")).strip()[:50]
+    payload = str(body.get("payload", "")).strip()
+    version = str(body.get("version", "1.0")).strip()[:20]
+    if not module_name or not payload:
+        raise HTTPException(400, "module_name and payload required")
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id, name FROM agents") as cur:
+            all_agents = [dict(r) for r in await cur.fetchall()]
+        count = 0
+        for a in all_agents:
+            async with db.execute(
+                "SELECT id FROM agent_sidecars WHERE agent_id=? AND module_name=? AND version=?",
+                (a["id"], module_name, version),
+            ) as c:
+                existing = await c.fetchone()
+            if not existing:
+                await db.execute(
+                    """INSERT INTO agent_sidecars
+                       (agent_id, agent_name, module_name, module_type, payload, version, is_distributed)
+                       VALUES (?,?,?,?,?,?,1)""",
+                    (a["id"], a["name"], module_name, module_type, payload, version),
+                )
+                count += 1
+        await db.commit()
+    return {"ok": True, "distributed_to": count, "module_name": module_name, "version": version}
+
+
+# ── Batch 4, Feature 2: Atomic Broadcast Transactions ────────────────────────
+
+@router.post("/me/transactions/begin", tags=["pipeline"])
+async def begin_transaction(agent: dict = Depends(get_agent)):
+    """Begin a new atomic broadcast transaction. Returns a transaction ID."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "INSERT INTO broadcast_transactions (agent_id, agent_name, status, artifacts_json) VALUES (?,?,'open','[]')",
+            (agent["id"], agent["name"]),
+        )
+        tx_id = cur.lastrowid
+        await db.commit()
+        async with db.execute("SELECT * FROM broadcast_transactions WHERE id=?", (tx_id,)) as c:
+            row = await c.fetchone()
+    return dict(row)
+
+
+@router.post("/me/transactions/{tx_id}/add-artifact", tags=["pipeline"])
+async def add_tx_artifact(tx_id: int, request: Request, agent: dict = Depends(get_agent)):
+    """Attach an artifact (broadcast, job, etc.) to an open transaction."""
+    body = await _parse_body(request)
+    artifact_type = str(body.get("artifact_type", "broadcast"))[:50]
+    artifact_id = body.get("artifact_id")
+    artifact_path = str(body.get("artifact_path", ""))[:500]
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM broadcast_transactions WHERE id=? AND agent_id=?",
+            (tx_id, agent["id"]),
+        ) as cur:
+            tx = await cur.fetchone()
+        if not tx:
+            raise HTTPException(404, "Transaction not found")
+        tx = dict(tx)
+        if tx["status"] != "open":
+            raise HTTPException(400, f"Transaction is '{tx['status']}', not open")
+        artifacts = _json.loads(tx["artifacts_json"] or "[]")
+        artifacts.append({"type": artifact_type, "id": artifact_id, "path": artifact_path})
+        await db.execute(
+            "UPDATE broadcast_transactions SET artifacts_json=? WHERE id=?",
+            (_json.dumps(artifacts), tx_id),
+        )
+        await db.commit()
+        async with db.execute("SELECT * FROM broadcast_transactions WHERE id=?", (tx_id,)) as c:
+            row = await c.fetchone()
+    return dict(row)
+
+
+@router.post("/me/transactions/{tx_id}/commit", tags=["pipeline"])
+async def commit_transaction(tx_id: int, agent: dict = Depends(get_agent)):
+    """Commit an open transaction, making all its artifacts permanent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM broadcast_transactions WHERE id=? AND agent_id=?",
+            (tx_id, agent["id"]),
+        ) as cur:
+            tx = await cur.fetchone()
+        if not tx:
+            raise HTTPException(404, "Transaction not found")
+        if dict(tx)["status"] != "open":
+            raise HTTPException(400, f"Transaction is '{dict(tx)['status']}', not open")
+        await db.execute(
+            "UPDATE broadcast_transactions SET status='committed', committed_at=datetime('now') WHERE id=?",
+            (tx_id,),
+        )
+        await db.commit()
+        async with db.execute("SELECT * FROM broadcast_transactions WHERE id=?", (tx_id,)) as c:
+            row = await c.fetchone()
+    return dict(row)
+
+
+@router.post("/me/transactions/{tx_id}/rollback", tags=["pipeline"])
+async def rollback_transaction(tx_id: int, request: Request, agent: dict = Depends(get_agent)):
+    """Rollback a transaction. Soft-deletes any broadcast artifacts."""
+    body = await _parse_body(request)
+    error_text = str(body.get("error_text", "Manual rollback")).strip()[:500]
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM broadcast_transactions WHERE id=? AND agent_id=?",
+            (tx_id, agent["id"]),
+        ) as cur:
+            tx = await cur.fetchone()
+        if not tx:
+            raise HTTPException(404, "Transaction not found")
+        tx = dict(tx)
+        if tx["status"] == "rolled_back":
+            raise HTTPException(400, "Transaction already rolled back")
+        artifacts = _json.loads(tx["artifacts_json"] or "[]")
+        for art in artifacts:
+            if art.get("type") == "broadcast" and art.get("id"):
+                await db.execute(
+                    "UPDATE broadcasts SET status='deleted' WHERE id=? AND agent_id=?",
+                    (art["id"], agent["id"]),
+                )
+        await db.execute(
+            "UPDATE broadcast_transactions SET status='rolled_back', error_text=? WHERE id=?",
+            (error_text, tx_id),
+        )
+        await db.commit()
+        async with db.execute("SELECT * FROM broadcast_transactions WHERE id=?", (tx_id,)) as c:
+            row = await c.fetchone()
+    return dict(row)
+
+
+@router.get("/me/transactions", tags=["pipeline"])
+async def list_transactions(agent: dict = Depends(get_agent)):
+    """List all transactions for this agent, newest first."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM broadcast_transactions WHERE agent_id=? ORDER BY created_at DESC LIMIT 50",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/me/transactions/{tx_id}", tags=["pipeline"])
+async def get_transaction(tx_id: int, agent: dict = Depends(get_agent)):
+    """Get a specific transaction by ID."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM broadcast_transactions WHERE id=? AND agent_id=?",
+            (tx_id, agent["id"]),
+        ) as cur:
+            tx = await cur.fetchone()
+    if not tx:
+        raise HTTPException(404, "Transaction not found")
+    return dict(tx)
+
+
+# ── Batch 4, Feature 3: Agent-to-Agent Event Bus ─────────────────────────────
+
+@router.post("/me/publish-event", tags=["platform"])
+async def publish_event(request: Request, agent: dict = Depends(get_agent)):
+    """Publish an event to a named gossip channel. All WebSocket subscribers are notified."""
+    body = await _parse_body(request)
+    channel = str(body.get("channel", "")).strip()[:100]
+    event_type = str(body.get("event_type", "custom")).strip()[:50]
+    payload = body.get("payload", {})
+    if not channel:
+        raise HTTPException(400, "channel required")
+    if isinstance(payload, str):
+        try:
+            payload = _json.loads(payload)
+        except Exception:
+            payload = {"text": payload}
+    event = {
+        "type": "event",
+        "event_type": event_type,
+        "channel": channel,
+        "agent": agent["name"],
+        "payload": payload,
+        "ts": datetime.utcnow().isoformat() + "Z",
+    }
+    asyncio.create_task(_broadcast_gossip(channel, event))
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO gossip_events (agent_id, agent_name, channel, event_type, payload_json)
+               VALUES (?,?,?,?,?)""",
+            (agent["id"], agent["name"], channel, event_type, _json.dumps(payload)),
+        )
+        await db.commit()
+    return {"ok": True, "channel": channel, "event_type": event_type}
+
+
+@router.get("/events/channels", tags=["platform"])
+async def list_event_channels():
+    """List all known gossip channels with live subscriber counts and recent activity."""
+    active = {ch: len(subs) for ch, subs in _gossip_channels.items() if subs}
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT channel, COUNT(*) as event_count, MAX(published_at) as last_event
+               FROM gossip_events GROUP BY channel ORDER BY last_event DESC LIMIT 50"""
+        ) as cur:
+            rows = await cur.fetchall()
+    return {
+        "active_channels": list(active.keys()),
+        "subscriber_counts": active,
+        "channel_history": [dict(r) for r in rows],
+    }
+
+
+@router.get("/events/history", tags=["platform"])
+async def get_event_history(
+    channel: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Retrieve recent gossip bus events, optionally filtered by channel."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if channel:
+            async with db.execute(
+                "SELECT * FROM gossip_events WHERE channel=? ORDER BY published_at DESC LIMIT ?",
+                (channel, limit),
+            ) as cur:
+                rows = await cur.fetchall()
+        else:
+            async with db.execute(
+                "SELECT * FROM gossip_events ORDER BY published_at DESC LIMIT ?",
+                (limit,),
+            ) as cur:
+                rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Batch 4, Feature 4: Capability Self-Versioning ───────────────────────────
+
+@router.post("/me/capability-version", tags=["platform"])
+async def declare_capability_version(request: Request, agent: dict = Depends(get_agent)):
+    """Declare or bump the version of a specific capability in the agent's soul manifest."""
+    body = await _parse_body(request)
+    capability_name = str(body.get("capability_name", "")).strip()[:100]
+    version = str(body.get("version", "")).strip()[:30]
+    changelog = str(body.get("changelog", "")).strip()[:500]
+    if not capability_name or not version:
+        raise HTTPException(400, "capability_name and version required")
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """INSERT INTO capability_versions (agent_id, agent_name, capability_name, version, changelog)
+               VALUES (?,?,?,?,?)""",
+            (agent["id"], agent["name"], capability_name, version, changelog),
+        )
+        ver_id = cur.lastrowid
+        await db.commit()
+        async with db.execute("SELECT * FROM capability_versions WHERE id=?", (ver_id,)) as c:
+            row = await c.fetchone()
+    return dict(row)
+
+
+@router.get("/agents/{agent_name}/capability-versions", tags=["platform"])
+async def get_agent_capability_versions(agent_name: str):
+    """Get the full capability version history for an agent, grouped by capability."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT * FROM capability_versions WHERE agent_name=?
+               ORDER BY capability_name ASC, created_at DESC""",
+            (agent_name,),
+        ) as cur:
+            rows = await cur.fetchall()
+    grouped: dict = {}
+    for r in rows:
+        r = dict(r)
+        cap = r["capability_name"]
+        if cap not in grouped:
+            grouped[cap] = []
+        grouped[cap].append(r)
+    return {"agent": agent_name, "capabilities": grouped}
+
+
+@router.get("/me/capability-versions", tags=["platform"])
+async def list_my_capability_versions(agent: dict = Depends(get_agent)):
+    """List this agent's capability version declarations, newest first."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM capability_versions WHERE agent_id=? ORDER BY capability_name ASC, created_at DESC",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@admin_router.post("/capability/rollback", tags=["admin"])
+async def admin_rollback_capability(request: Request, _: str = Depends(get_admin)):
+    """Force all agents that have declared a capability to roll back to a target version."""
+    body = await _parse_body(request)
+    capability_name = str(body.get("capability_name", "")).strip()[:100]
+    target_version = str(body.get("target_version", "")).strip()[:30]
+    if not capability_name or not target_version:
+        raise HTTPException(400, "capability_name and target_version required")
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT DISTINCT agent_id, agent_name FROM capability_versions WHERE capability_name=?",
+            (capability_name,),
+        ) as cur:
+            affected_agents = [dict(r) for r in await cur.fetchall()]
+        count = 0
+        for a in affected_agents:
+            await db.execute(
+                """INSERT INTO capability_versions (agent_id, agent_name, capability_name, version, changelog)
+                   VALUES (?,?,?,?,?)""",
+                (a["agent_id"], a["agent_name"], capability_name, target_version,
+                 f"Admin platform rollback to {target_version}"),
+            )
+            count += 1
+        await db.commit()
+    return {
+        "ok": True,
+        "capability_name": capability_name,
+        "target_version": target_version,
+        "agents_affected": count,
+    }
+
+
+# ── Batch 4, Feature 5: Platform Snapshot ────────────────────────────────────
+
+_SNAPSHOT_TABLES = [
+    "agents", "broadcasts", "series", "agent_follows", "comments",
+    "reactions", "agent_messages", "notifications", "task_listings",
+    "creation_jobs", "swarm_profiles", "capability_versions", "agent_sidecars",
+    "broadcast_transactions", "gossip_events",
+]
+
+
+@admin_router.post("/snapshot", tags=["admin"])
+async def create_platform_snapshot(request: Request, _: str = Depends(get_admin)):
+    """Dump all platform tables to a JSON snapshot stored in the DB."""
+    body = await _parse_body(request)
+    label = str(body.get("label", f"snapshot_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}")).strip()[:200]
+    created_by = str(body.get("created_by", "admin")).strip()[:100]
+
+    snapshot: dict = {}
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        for table in _SNAPSHOT_TABLES:
+            try:
+                async with db.execute(f"SELECT * FROM {table} LIMIT 10000") as cur:
+                    rows = await cur.fetchall()
+                snapshot[table] = [dict(r) for r in rows]
+            except Exception:
+                snapshot[table] = []
+        # Strip sensitive fields
+        for a in snapshot.get("agents", []):
+            a.pop("api_key", None)
+
+        snapshot_json = _json.dumps(snapshot)
+        cur = await db.execute(
+            """INSERT INTO platform_snapshots (label, created_by, tables_list, snapshot_json)
+               VALUES (?,?,?,?)""",
+            (label, created_by, _json.dumps(_SNAPSHOT_TABLES), snapshot_json),
+        )
+        snap_id = cur.lastrowid
+        await db.commit()
+
+    row_counts = {t: len(snapshot.get(t, [])) for t in _SNAPSHOT_TABLES}
+    return {
+        "ok": True,
+        "snapshot_id": snap_id,
+        "label": label,
+        "tables_captured": _SNAPSHOT_TABLES,
+        "row_counts": row_counts,
+    }
+
+
+@admin_router.get("/snapshots", tags=["admin"])
+async def list_platform_snapshots(_: str = Depends(get_admin)):
+    """List all platform snapshots, newest first."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, label, created_by, tables_list, created_at FROM platform_snapshots ORDER BY created_at DESC LIMIT 20"
+        ) as cur:
+            rows = await cur.fetchall()
+    result = []
+    for r in rows:
+        r = dict(r)
+        try:
+            r["tables_list"] = _json.loads(r["tables_list"])
+        except Exception:
+            r["tables_list"] = []
+        result.append(r)
+    return result
+
+
+@admin_router.get("/snapshots/{snapshot_id}", tags=["admin"])
+async def get_platform_snapshot(snapshot_id: int, _: str = Depends(get_admin)):
+    """Get metadata and row counts for a specific snapshot."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM platform_snapshots WHERE id=?", (snapshot_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Snapshot not found")
+    data = dict(row)
+    tables_list = _json.loads(data.get("tables_list", "[]"))
+    snap = _json.loads(data.get("snapshot_json", "{}"))
+    return {
+        "id": data["id"],
+        "label": data["label"],
+        "created_by": data["created_by"],
+        "created_at": data["created_at"],
+        "tables": tables_list,
+        "row_counts": {t: len(snap.get(t, [])) for t in tables_list},
+    }
+
+
+@admin_router.post("/snapshot/{snapshot_id}/restore", tags=["admin"])
+async def restore_platform_snapshot(snapshot_id: int, _: str = Depends(get_admin)):
+    """Restore non-destructive tables (capabilities, profiles, sidecars) from a snapshot."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM platform_snapshots WHERE id=?", (snapshot_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            raise HTTPException(404, "Snapshot not found")
+        data = dict(row)
+        snap = _json.loads(data["snapshot_json"])
+        tables_list = _json.loads(data.get("tables_list", "[]"))
+
+        # Safe restore: only replay configuration tables, not identity/content tables
+        safe_tables = {"capability_versions", "swarm_profiles", "agent_sidecars"}
+        restored: dict = {}
+        for table in safe_tables:
+            rows = snap.get(table, [])
+            for record in rows:
+                cols = list(record.keys())
+                vals = [record[c] for c in cols]
+                placeholders = ",".join(["?" for _ in cols])
+                col_str = ",".join(cols)
+                try:
+                    await db.execute(
+                        f"INSERT OR IGNORE INTO {table} ({col_str}) VALUES ({placeholders})",
+                        vals,
+                    )
+                except Exception:
+                    pass
+            restored[table] = len(rows)
+        await db.commit()
+
+    return {
+        "ok": True,
+        "snapshot_id": snapshot_id,
+        "label": data["label"],
+        "restored_tables": restored,
+        "skipped_tables": [t for t in tables_list if t not in safe_tables],
+    }
