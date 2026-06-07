@@ -1161,3 +1161,313 @@ class TestSealRoutes:
         bid = _text_post(client, key)
         r = client.post(f"/api/agents/broadcasts/{bid}/seal", data={"policy": "private"})
         assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Hermes Feature: Jail Mode
+# ---------------------------------------------------------------------------
+
+JAIL_ADMIN_KEY = "test-jail-admin-key"
+
+
+class TestJailMode:
+    @pytest.fixture(autouse=True)
+    def patch_admin_key(self):
+        with patch.object(settings, "ADMIN_KEY", JAIL_ADMIN_KEY):
+            yield
+
+    def _admin_headers(self):
+        return {"X-Admin-Key": JAIL_ADMIN_KEY}
+
+    def _get_agent_id(self, client, name):
+        r = client.get(f"/api/agents/profile/{name}")
+        assert r.status_code == 200
+        return r.json()["id"]
+
+    def test_enable_jail_mode(self, client):
+        key = _reg(client, "JailAgent1")
+        agent_id = self._get_agent_id(client, "JailAgent1")
+        r = client.post(f"/api/admin/agents/{agent_id}/jail-mode", headers=self._admin_headers())
+        assert r.status_code == 200
+        assert r.json()["jail_mode"] is True
+
+    def test_jail_status_reflects_mode(self, client):
+        key = _reg(client, "JailAgent2")
+        agent_id = self._get_agent_id(client, "JailAgent2")
+        client.post(f"/api/admin/agents/{agent_id}/jail-mode", headers=self._admin_headers())
+        r = client.get(f"/api/admin/agents/{agent_id}/jail-status", headers=self._admin_headers())
+        assert r.status_code == 200
+        assert r.json()["jail_mode"] == 1
+
+    def test_jailed_agent_cannot_post(self, client):
+        key = _reg(client, "JailAgent3")
+        agent_id = self._get_agent_id(client, "JailAgent3")
+        client.post(f"/api/admin/agents/{agent_id}/jail-mode", headers=self._admin_headers())
+        # Posting should be blocked
+        r = client.post(
+            "/api/agents/posts/text",
+            json={"title": "Jailbreak", "content": "testing"},
+            headers=_headers(key),
+        )
+        assert r.status_code == 403
+        assert "quarantine" in r.json()["detail"].lower()
+
+    def test_disable_jail_mode(self, client):
+        key = _reg(client, "JailAgent4")
+        agent_id = self._get_agent_id(client, "JailAgent4")
+        client.post(f"/api/admin/agents/{agent_id}/jail-mode", headers=self._admin_headers())
+        r = client.delete(f"/api/admin/agents/{agent_id}/jail-mode", headers=self._admin_headers())
+        assert r.status_code == 200
+        assert r.json()["jail_mode"] is False
+
+    def test_released_agent_can_post(self, client):
+        key = _reg(client, "JailAgent5")
+        agent_id = self._get_agent_id(client, "JailAgent5")
+        client.post(f"/api/admin/agents/{agent_id}/jail-mode", headers=self._admin_headers())
+        client.delete(f"/api/admin/agents/{agent_id}/jail-mode", headers=self._admin_headers())
+        r = client.post(
+            "/api/agents/posts/text",
+            json={"title": "Free again", "content": "hello"},
+            headers=_headers(key),
+        )
+        assert r.status_code == 200
+
+    def test_jailed_agent_hidden_from_feed(self, client):
+        key = _reg(client, "JailFeedAgent")
+        bid = _text_post(client, key, title="Visible before jail")
+        agent_id = self._get_agent_id(client, "JailFeedAgent")
+        # Before jail: should appear
+        r = client.get("/api/agents/feed")
+        ids = [b["id"] for b in r.json()]
+        assert bid in ids
+        # After jail: should be hidden
+        client.post(f"/api/admin/agents/{agent_id}/jail-mode", headers=self._admin_headers())
+        r2 = client.get("/api/agents/feed")
+        ids2 = [b["id"] for b in r2.json()]
+        assert bid not in ids2
+
+
+# ---------------------------------------------------------------------------
+# Hermes Feature: Pipeline Resiliency (Outsource)
+# ---------------------------------------------------------------------------
+
+class TestPipelineOutsource:
+    def test_outsource_creates_task_listing(self, client):
+        key = _reg(client, "OutsourceAgent1")
+        # Create a creation job
+        r = client.post(
+            "/api/agents/create",
+            json={"prompt": "Create a tutorial on neural nets"},
+            headers=_headers(key),
+        )
+        assert r.status_code == 200
+        job_id = r.json()["job_id"]
+        # Outsource the voicing stage
+        r2 = client.post(
+            f"/api/agents/me/creation-jobs/{job_id}/outsource",
+            json={"stage": "voicing", "reason": "TTS model offline"},
+            headers=_headers(key),
+        )
+        assert r2.status_code == 200
+        data = r2.json()
+        assert data["status"] == "delegated"
+        assert "task_market_listing_id" in data
+        assert data["stage"] == "voicing"
+
+    def test_outsourced_job_appears_in_task_market(self, client):
+        key = _reg(client, "OutsourceAgent2")
+        r = client.post(
+            "/api/agents/create",
+            json={"prompt": "Make a music video"},
+            headers=_headers(key),
+        )
+        job_id = r.json()["job_id"]
+        r2 = client.post(
+            f"/api/agents/me/creation-jobs/{job_id}/outsource",
+            json={"stage": "visualizing", "required_capability": "video_generation"},
+            headers=_headers(key),
+        )
+        task_id = r2.json()["task_market_listing_id"]
+        r3 = client.get(f"/api/agents/tasks/{task_id}")
+        assert r3.status_code == 200
+        assert "visualizing" in r3.json()["title"].lower() or "Pipeline" in r3.json()["title"]
+
+    def test_outsource_missing_stage_returns_422(self, client):
+        key = _reg(client, "OutsourceAgent3")
+        r = client.post(
+            "/api/agents/create",
+            json={"prompt": "A quick test"},
+            headers=_headers(key),
+        )
+        job_id = r.json()["job_id"]
+        r2 = client.post(
+            f"/api/agents/me/creation-jobs/{job_id}/outsource",
+            json={},
+            headers=_headers(key),
+        )
+        assert r2.status_code == 422
+
+    def test_outsource_wrong_job_returns_404(self, client):
+        key = _reg(client, "OutsourceAgent4")
+        r = client.post(
+            f"/api/agents/me/creation-jobs/99999/outsource",
+            json={"stage": "scripting"},
+            headers=_headers(key),
+        )
+        assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Hermes Feature: Federated Reasoning
+# ---------------------------------------------------------------------------
+
+class TestFederatedReasoning:
+    def test_federation_ask_returns_structure(self, client):
+        r = client.get("/api/agents/federation/ask", params={"query": "neural networks"})
+        assert r.status_code == 200
+        data = r.json()
+        assert "query" in data
+        assert "results" in data
+        assert "result_count" in data
+        assert data["query"] == "neural networks"
+
+    def test_federation_ask_finds_local_knowledge(self, client):
+        key = _reg(client, "FedAskAgent1")
+        # Publish a knowledge snippet
+        client.post(
+            "/api/agents/knowledge",
+            json={"subject": "FedAskTopic", "predicate": "is_about", "object": "quantum"},
+            headers=_headers(key),
+        )
+        r = client.get("/api/agents/federation/ask", params={"query": "FedAskTopic"})
+        assert r.status_code == 200
+        subjects = [item.get("subject", "") for item in r.json()["results"]
+                    if item.get("source") == "local"]
+        assert any("FedAskTopic" in s for s in subjects)
+
+    def test_federation_ask_with_capability_filter(self, client):
+        key = _reg(client, "FedAskAgent2", bio="Finance expert #trading #quant")
+        r = client.get(
+            "/api/agents/federation/ask",
+            params={"query": "market analysis", "capability": "trading"},
+        )
+        assert r.status_code == 200
+        sources = [item.get("source") for item in r.json()["results"]]
+        assert "local_agent" in sources
+
+    def test_federation_ask_requires_query(self, client):
+        r = client.get("/api/agents/federation/ask")
+        assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Hermes Feature: VQL (Vantage Query Language)
+# ---------------------------------------------------------------------------
+
+class TestVQL:
+    def test_vql_basic_wildcard(self, client):
+        key = _reg(client, "VQLAgent1")
+        client.post(
+            "/api/agents/knowledge",
+            json={"subject": "VQLSubject", "predicate": "knows", "object": "VQLObject", "confidence": 0.9},
+            headers=_headers(key),
+        )
+        r = client.post("/api/agents/knowledge/query", json={"subject": "VQLSubject"})
+        assert r.status_code == 200
+        data = r.json()
+        assert "results" in data
+        assert "result_count" in data
+        assert any(row["subject"] == "VQLSubject" for row in data["results"])
+
+    def test_vql_predicate_filter(self, client):
+        key = _reg(client, "VQLAgent2")
+        client.post(
+            "/api/agents/knowledge",
+            json={"subject": "TopicA", "predicate": "rel_to", "object": "TopicB"},
+            headers=_headers(key),
+        )
+        client.post(
+            "/api/agents/knowledge",
+            json={"subject": "TopicA", "predicate": "unrelated", "object": "TopicC"},
+            headers=_headers(key),
+        )
+        r = client.post("/api/agents/knowledge/query", json={"subject": "TopicA", "predicate": "rel_to"})
+        assert r.status_code == 200
+        preds = [row["predicate"] for row in r.json()["results"]]
+        assert all(p == "rel_to" for p in preds)
+
+    def test_vql_min_confidence_filter(self, client):
+        key = _reg(client, "VQLAgent3")
+        client.post(
+            "/api/agents/knowledge",
+            json={"subject": "ConfSubject", "predicate": "knows", "object": "High", "confidence": 0.9},
+            headers=_headers(key),
+        )
+        client.post(
+            "/api/agents/knowledge",
+            json={"subject": "ConfSubject", "predicate": "knows", "object": "Low", "confidence": 0.1},
+            headers=_headers(key),
+        )
+        r = client.post(
+            "/api/agents/knowledge/query",
+            json={"subject": "ConfSubject", "min_confidence": 0.5},
+        )
+        assert r.status_code == 200
+        objects = [row["object"] for row in r.json()["results"]]
+        assert "High" in objects
+        assert "Low" not in objects
+
+    def test_vql_depth_traversal(self, client):
+        key = _reg(client, "VQLAgent4")
+        # A → B → C chain
+        client.post(
+            "/api/agents/knowledge",
+            json={"subject": "NodeA", "predicate": "links_to", "object": "NodeB", "confidence": 1.0},
+            headers=_headers(key),
+        )
+        client.post(
+            "/api/agents/knowledge",
+            json={"subject": "NodeB", "predicate": "links_to", "object": "NodeC", "confidence": 1.0},
+            headers=_headers(key),
+        )
+        r = client.post(
+            "/api/agents/knowledge/query",
+            json={"subject": "NodeA", "depth": 2},
+        )
+        assert r.status_code == 200
+        subjects = {row["subject"] for row in r.json()["results"]}
+        assert "NodeA" in subjects
+        assert "NodeB" in subjects  # hop 2
+
+    def test_vql_all_wildcard(self, client):
+        key = _reg(client, "VQLAgent5")
+        client.post(
+            "/api/agents/knowledge",
+            json={"subject": "AnySubject", "predicate": "any_pred", "object": "AnyObj"},
+            headers=_headers(key),
+        )
+        r = client.post("/api/agents/knowledge/query", json={"subject": "*", "predicate": "*", "object": "*"})
+        assert r.status_code == 200
+        assert r.json()["result_count"] >= 1
+
+    def test_vql_agent_filter(self, client):
+        key1 = _reg(client, "VQLAgentFilter1")
+        key2 = _reg(client, "VQLAgentFilter2")
+        client.post(
+            "/api/agents/knowledge",
+            json={"subject": "FilterSubject", "predicate": "knows", "object": "FromAgent1"},
+            headers=_headers(key1),
+        )
+        client.post(
+            "/api/agents/knowledge",
+            json={"subject": "FilterSubject", "predicate": "knows", "object": "FromAgent2"},
+            headers=_headers(key2),
+        )
+        r = client.post(
+            "/api/agents/knowledge/query",
+            json={"subject": "FilterSubject", "agent_filter": "VQLAgentFilter1"},
+        )
+        assert r.status_code == 200
+        objects = [row["object"] for row in r.json()["results"]]
+        assert "FromAgent1" in objects
+        assert "FromAgent2" not in objects
