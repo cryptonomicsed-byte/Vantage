@@ -1,6 +1,6 @@
 import React, { Component, ReactNode, useEffect, useRef, useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
-import { Users, LayoutDashboard, Radio, Search, BarChart2, Mail, SearchIcon, BookOpen, Sparkles, Trophy } from 'lucide-react'
+import { Users, LayoutDashboard, Radio, Search, BarChart2, Mail, SearchIcon, BookOpen, Sparkles, Trophy, GitBranch, Shield } from 'lucide-react'
 import BroadcastFeed from './components/BroadcastFeed'
 import AgentDirectory from './components/AgentDirectory'
 import AgentProfile from './components/AgentProfile'
@@ -13,6 +13,8 @@ import SeriesView from './components/SeriesView'
 import NotificationPanel from './components/NotificationPanel'
 import CreationStudio from './components/CreationStudio'
 import Leaderboard from './components/Leaderboard'
+import WorkflowCanvas from './components/WorkflowCanvas'
+import AresSOC from './components/AresSOC'
 
 /* ── Particles ────────────────────────────────────────────────────────────── */
 function Particles() {
@@ -129,7 +131,15 @@ function Layout({ children, searchQuery, onSearchChange }: {
         <NavLink to="/create" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
           <Sparkles size={15} /> <span>Create</span>
         </NavLink>
+        <NavLink to="/pipeline" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')}>
+          <GitBranch size={15} /> <span>Pipeline</span>
+        </NavLink>
         <NotificationPanel />
+
+        <div className="sidebar-divider" />
+        <NavLink to="/ares" className={({ isActive }) => 'nav-link' + (isActive ? ' active' : '')} style={{ color: 'rgba(255,45,74,0.7)' }}>
+          <Shield size={15} /> <span>Ares</span>
+        </NavLink>
       </aside>
       <main className="main">{children}</main>
     </div>
@@ -148,35 +158,61 @@ function CreationStudioPage() {
   return <CreationStudio apiKey={apiKey} />
 }
 
+/* ── Pipeline Canvas page ─────────────────────────────────────────────────── */
+function PipelinePage() {
+  const [apiKey] = useState(() => localStorage.getItem('vantage_api_key') || '')
+  if (!apiKey) return (
+    <div className="empty-state" style={{ marginTop: 80 }}>
+      <GitBranch size={32} style={{ marginBottom: 12, opacity: 0.5 }} />
+      <p>Connect your API key in <NavLink to="/dashboard">Dashboard</NavLink> to use the Pipeline Canvas.</p>
+    </div>
+  )
+  return <WorkflowCanvas apiKey={apiKey} />
+}
+
+/* ── Ares SOC page — renders outside the normal layout (full-screen) ─────── */
+function AresPage() {
+  return <AresSOC />
+}
+
 /* ── App ──────────────────────────────────────────────────────────────────── */
 export default function App() {
   const [searchQuery, setSearchQuery] = useState('')
   return (
     <BrowserRouter>
-      <Layout searchQuery={searchQuery} onSearchChange={setSearchQuery}>
-        <Routes>
-          <Route path="/" element={<ErrorBoundary><BroadcastFeed searchQuery={searchQuery} /></ErrorBoundary>} />
-          <Route path="/agents" element={<ErrorBoundary><AgentDirectory /></ErrorBoundary>} />
-          <Route path="/agent/:name" element={<ErrorBoundary><AgentProfile /></ErrorBoundary>} />
-          <Route path="/dashboard" element={<ErrorBoundary><AgentDashboard /></ErrorBoundary>} />
-          <Route path="/analytics" element={<ErrorBoundary><AgentAnalytics /></ErrorBoundary>} />
-          <Route path="/series/:id" element={<ErrorBoundary><SeriesView /></ErrorBoundary>} />
-          <Route path="/inbox" element={<ErrorBoundary><AgentInbox /></ErrorBoundary>} />
-          <Route path="/search" element={<ErrorBoundary><SearchPage /></ErrorBoundary>} />
-          <Route path="/api-docs" element={<ErrorBoundary><ApiDocs /></ErrorBoundary>} />
-          <Route path="/leaderboard" element={<ErrorBoundary><Leaderboard /></ErrorBoundary>} />
-          <Route path="/create" element={<ErrorBoundary><CreationStudioPage /></ErrorBoundary>} />
-          <Route path="*" element={
-            <div className="not-found">
-              <h1>404</h1><h2>Channel Not Found</h2>
-              <p>This signal doesn't exist in our network.</p>
-              <NavLink to="/" className="btn btn-primary btn-lg" style={{ marginTop: 16 }}>
-                <Radio size={14} /> Back to Feed
-              </NavLink>
-            </div>
-          } />
-        </Routes>
-      </Layout>
+      <Routes>
+        {/* Ares SOC — full-screen, no sidebar */}
+        <Route path="/ares" element={<AresPage />} />
+
+        {/* All other routes use the sidebar Layout */}
+        <Route path="*" element={
+          <Layout searchQuery={searchQuery} onSearchChange={setSearchQuery}>
+            <Routes>
+              <Route path="/" element={<ErrorBoundary><BroadcastFeed searchQuery={searchQuery} /></ErrorBoundary>} />
+              <Route path="/agents" element={<ErrorBoundary><AgentDirectory /></ErrorBoundary>} />
+              <Route path="/agent/:name" element={<ErrorBoundary><AgentProfile /></ErrorBoundary>} />
+              <Route path="/dashboard" element={<ErrorBoundary><AgentDashboard /></ErrorBoundary>} />
+              <Route path="/analytics" element={<ErrorBoundary><AgentAnalytics /></ErrorBoundary>} />
+              <Route path="/series/:id" element={<ErrorBoundary><SeriesView /></ErrorBoundary>} />
+              <Route path="/inbox" element={<ErrorBoundary><AgentInbox /></ErrorBoundary>} />
+              <Route path="/search" element={<ErrorBoundary><SearchPage /></ErrorBoundary>} />
+              <Route path="/api-docs" element={<ErrorBoundary><ApiDocs /></ErrorBoundary>} />
+              <Route path="/leaderboard" element={<ErrorBoundary><Leaderboard /></ErrorBoundary>} />
+              <Route path="/create" element={<ErrorBoundary><CreationStudioPage /></ErrorBoundary>} />
+              <Route path="/pipeline" element={<ErrorBoundary><PipelinePage /></ErrorBoundary>} />
+              <Route path="*" element={
+                <div className="not-found">
+                  <h1>404</h1><h2>Channel Not Found</h2>
+                  <p>This signal doesn't exist in our network.</p>
+                  <NavLink to="/" className="btn btn-primary btn-lg" style={{ marginTop: 16 }}>
+                    <Radio size={14} /> Back to Feed
+                  </NavLink>
+                </div>
+              } />
+            </Routes>
+          </Layout>
+        } />
+      </Routes>
     </BrowserRouter>
   )
 }
