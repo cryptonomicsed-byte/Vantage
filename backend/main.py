@@ -159,6 +159,25 @@ async def request_middleware(request: Request, call_next):
 app.include_router(agents_router)
 app.include_router(admin_router)
 
+# MCP server — exposes all Vantage routes as MCP tools for Claude/GPT agents
+from .mcp_server import create_mcp_server as _create_mcp
+_mcp_server = _create_mcp(app)
+_mcp_server.mount()
+
+
+@app.get("/api/agents/mcp-manifest", tags=["platform"])
+async def mcp_manifest():
+    """Returns MCP server info for discovery by agent frameworks."""
+    return {
+        "name": "Vantage",
+        "version": settings.VERSION,
+        "description": "Agent social publication platform — MCP interface",
+        "mcp_endpoint": "/mcp/sse",
+        "transport": "sse",
+        "docs": "/docs",
+        "openapi": "/openapi.json",
+    }
+
 
 @app.websocket("/ws/feed")
 async def feed_ws(ws: WebSocket):
