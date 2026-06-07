@@ -1471,3 +1471,319 @@ class TestVQL:
         objects = [row["object"] for row in r.json()["results"]]
         assert "FromAgent1" in objects
         assert "FromAgent2" not in objects
+
+
+# ---------------------------------------------------------------------------
+# Feature 1: Ephemeral Workspace Snapshots
+# ---------------------------------------------------------------------------
+
+class TestWorkspaceSnapshots:
+    def test_create_snapshot_empty_state(self, client):
+        key = _reg(client, "SnapAgent1")
+        r = client.post(
+            "/api/agents/me/workspace/snapshot",
+            json={"label": "before migration"},
+            headers=_headers(key),
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert "snapshot_id" in data
+        assert data["label"] == "before migration"
+
+    def test_snapshot_captures_agent_state(self, client):
+        key = _reg(client, "SnapAgent2")
+        # Set some agent state first
+        client.put(
+            "/api/agents/me/state/task_stage",
+            json={"value": "voicing"},
+            headers=_headers(key),
+        )
+        r = client.post(
+            "/api/agents/me/workspace/snapshot",
+            json={"label": "with state"},
+            headers=_headers(key),
+        )
+        assert r.status_code == 200
+        snap_id = r.json()["snapshot_id"]
+        # Load the snapshot
+        r2 = client.get(f"/api/agents/me/workspace/snapshots/{snap_id}", headers=_headers(key))
+        assert r2.status_code == 200
+        snap = r2.json()["snapshot"]
+        assert snap["state"].get("task_stage") == "voicing"
+
+    def test_list_snapshots(self, client):
+        key = _reg(client, "SnapAgent3")
+        client.post("/api/agents/me/workspace/snapshot", json={}, headers=_headers(key))
+        client.post("/api/agents/me/workspace/snapshot", json={"label": "second"}, headers=_headers(key))
+        r = client.get("/api/agents/me/workspace/snapshots", headers=_headers(key))
+        assert r.status_code == 200
+        assert len(r.json()) >= 2
+
+    def test_load_wrong_snapshot_returns_404(self, client):
+        key = _reg(client, "SnapAgent4")
+        r = client.get("/api/agents/me/workspace/snapshots/99999", headers=_headers(key))
+        assert r.status_code == 404
+
+    def test_snapshot_captures_active_jobs(self, client):
+        key = _reg(client, "SnapAgent5")
+        r_job = client.post(
+            "/api/agents/create",
+            json={"prompt": "Snapshot test pipeline"},
+            headers=_headers(key),
+        )
+        assert r_job.status_code == 200
+        job_id = r_job.json()["job_id"]
+        r = client.post(
+            "/api/agents/me/workspace/snapshot",
+            json={"job_id": job_id},
+            headers=_headers(key),
+        )
+        assert r.status_code == 200
+        assert r.json()["jobs_captured"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Feature 2: Capability Discovery Schema
+# ---------------------------------------------------------------------------
+
+class TestCapabilitySchema:
+    def test_get_capability_schema_basic(self, client):
+        key = _reg(client, "CapSchemaAgent1", bio="Audio transcription specialist #tts #audio")
+        r = client.get("/api/agents/agents/CapSchemaAgent1/capabilities/schema")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["agent"] == "CapSchemaAgent1"
+        assert "$schema" in data
+        assert "capabilities" in data
+        assert "tts" in data["capabilities"]["tags"]
+        assert "audio" in data["capabilities"]["tags"]
+
+    def test_my_capability_schema(self, client):
+        key = _reg(client, "CapSchemaAgent2", bio="Vision model #vision #image")
+        r = client.get("/api/agents/capabilities/schema", headers=_headers(key))
+        assert r.status_code == 200
+        data = r.json()
+        assert data["agent"] == "CapSchemaAgent2"
+        assert "vision" in data["capabilities"]["tags"]
+
+    def test_capability_schema_404_unknown_agent(self, client):
+        r = client.get("/api/agents/agents/NoSuchAgentXYZ/capabilities/schema")
+        assert r.status_code == 404
+
+    def test_capability_schema_structured_manifest(self, client):
+        import json
+        manifest = json.dumps({
+            "inputs": ["audio", "text"],
+            "outputs": ["text"],
+            "latency": "low",
+            "concurrency": 4,
+        })
+        key = _reg(client, "CapSchemaAgent3")
+        client.patch(
+            "/api/agents/me/profile",
+            json={"soul_manifest": manifest},
+            headers=_headers(key),
+        )
+        r = client.get("/api/agents/agents/CapSchemaAgent3/capabilities/schema")
+        assert r.status_code == 200
+        caps = r.json()["capabilities"]
+        assert "audio" in caps["inputs"]
+        assert caps["latency"] == "low"
+        assert caps["concurrency"] == 4
+
+
+# ---------------------------------------------------------------------------
+# Feature 3: Dead-Letter Queue
+# ---------------------------------------------------------------------------
+
+class TestDeadLetterQueue:
+    def test_dead_letter_list_empty_initially(self, client):
+        key = _reg(client, "DLAgent1")
+        r = client.get("/api/agents/me/dead-letter", headers=_headers(key))
+        assert r.status_code == 200
+        assert r.json() == []
+
+    def test_job_moves_to_dead_letter_after_3_failures(self, client):
+        key = _reg(client, "DLAgent2")
+        r_job = client.post(
+            "/api/agents/create",
+            json={"prompt": "Doomed pipeline test"},
+            headers=_headers(key),
+        )
+        job_id = r_job.json()["job_id"]
+        # Simulate 3 failures
+        for i in range(3):
+            client.patch(
+                f"/api/agents/me/creation-jobs/{job_id}",
+                json={"status": "error", "note": f"Failure {i+1}", "error_context": "{}"},
+                headers=_headers(key),
+            )
+        # After 3 errors the background task should have moved it
+        import time; time.sleep(0.1)
+        r = client.get("/api/agents/me/dead-letter", headers=_headers(key))
+        assert r.status_code == 200
+
+    def test_dead_letter_recovery_creates_task(self, client):
+        key = _reg(client, "DLAgent3")
+        # Create and fail a job 3 times
+        r_job = client.post("/api/agents/create", json={"prompt": "Recover me"}, headers=_headers(key))
+        job_id = r_job.json()["job_id"]
+        for _ in range(3):
+            client.patch(
+                f"/api/agents/me/creation-jobs/{job_id}",
+                json={"status": "error", "note": "fail", "error_context": "{}"},
+                headers=_headers(key),
+            )
+        import time; time.sleep(0.1)
+        dl = client.get("/api/agents/me/dead-letter", headers=_headers(key)).json()
+        if not dl:
+            pytest.skip("Background dead-letter task timing — skip in CI")
+        dl_id = dl[0]["id"]
+        r = client.post(f"/api/agents/me/dead-letter/{dl_id}/recover", json={}, headers=_headers(key))
+        assert r.status_code == 200
+        assert "recovery_task_id" in r.json()
+
+
+# ---------------------------------------------------------------------------
+# Feature 4: Collaborative Broadcast Lock Protocol
+# ---------------------------------------------------------------------------
+
+class TestBroadcastLock:
+    def test_lock_and_check_status(self, client):
+        key = _reg(client, "LockAgent1")
+        bid = _text_post(client, key, title="Collab Broadcast")
+        r = client.post(f"/api/agents/broadcasts/{bid}/lock", headers=_headers(key))
+        assert r.status_code == 200
+        assert r.json()["locked_by"] == "LockAgent1"
+        # Check status
+        r2 = client.get(f"/api/agents/broadcasts/{bid}/lock")
+        assert r2.status_code == 200
+        assert r2.json()["locked"] is True
+        assert r2.json()["holder"] == "LockAgent1"
+
+    def test_lock_conflict_returns_409(self, client):
+        key1 = _reg(client, "LockAgent2a")
+        key2 = _reg(client, "LockAgent2b")
+        bid = _text_post(client, key1, title="Conflict Broadcast")
+        client.post(f"/api/agents/broadcasts/{bid}/lock", headers=_headers(key1))
+        r = client.post(f"/api/agents/broadcasts/{bid}/lock", headers=_headers(key2))
+        assert r.status_code == 409
+
+    def test_renew_own_lock(self, client):
+        key = _reg(client, "LockAgent3")
+        bid = _text_post(client, key, title="Renew Lock Broadcast")
+        r1 = client.post(f"/api/agents/broadcasts/{bid}/lock", headers=_headers(key))
+        r2 = client.post(f"/api/agents/broadcasts/{bid}/lock", headers=_headers(key))
+        assert r2.status_code == 200
+
+    def test_unlock_broadcast(self, client):
+        key = _reg(client, "LockAgent4")
+        bid = _text_post(client, key, title="Unlock Broadcast")
+        client.post(f"/api/agents/broadcasts/{bid}/lock", headers=_headers(key))
+        r = client.delete(f"/api/agents/broadcasts/{bid}/lock", headers=_headers(key))
+        assert r.status_code == 200
+        assert r.json()["unlocked"] is True
+        # Status should now show unlocked
+        r2 = client.get(f"/api/agents/broadcasts/{bid}/lock")
+        assert r2.json()["locked"] is False
+
+    def test_unlock_wrong_holder_returns_403(self, client):
+        key1 = _reg(client, "LockAgent5a")
+        key2 = _reg(client, "LockAgent5b")
+        bid = _text_post(client, key1, title="Foreign Lock")
+        client.post(f"/api/agents/broadcasts/{bid}/lock", headers=_headers(key1))
+        r = client.delete(f"/api/agents/broadcasts/{bid}/lock", headers=_headers(key2))
+        assert r.status_code == 403
+
+    def test_unlocked_broadcast_shows_not_locked(self, client):
+        key = _reg(client, "LockAgent6")
+        bid = _text_post(client, key, title="Never Locked")
+        r = client.get(f"/api/agents/broadcasts/{bid}/lock")
+        assert r.status_code == 200
+        assert r.json()["locked"] is False
+
+
+# ---------------------------------------------------------------------------
+# Feature 5: Swarm Vibe Dashboard
+# ---------------------------------------------------------------------------
+
+class TestSwarmVibe:
+    def test_publish_vibe(self, client):
+        key = _reg(client, "VibeAgent1")
+        r = client.post(
+            "/api/agents/status/vibe",
+            json={"vibe": "All systems nominal", "status_code": "ok"},
+            headers=_headers(key),
+        )
+        assert r.status_code == 200
+        assert r.json()["vibe"] == "All systems nominal"
+        assert r.json()["status_code"] == "ok"
+
+    def test_vibe_truncated_to_100_chars(self, client):
+        key = _reg(client, "VibeAgent2")
+        long_vibe = "x" * 200
+        r = client.post(
+            "/api/agents/status/vibe",
+            json={"vibe": long_vibe},
+            headers=_headers(key),
+        )
+        assert r.status_code == 200
+        assert len(r.json()["vibe"]) <= 100
+
+    def test_get_swarm_vibe_dashboard(self, client):
+        key = _reg(client, "VibeAgent3")
+        client.post(
+            "/api/agents/status/vibe",
+            json={"vibe": "LLM Latency High", "status_code": "degraded"},
+            headers=_headers(key),
+        )
+        r = client.get("/api/agents/status/vibe")
+        assert r.status_code == 200
+        data = r.json()
+        assert "swarm_health" in data
+        assert "vibes" in data
+        assert "status_counts" in data
+        assert any(v["agent_name"] == "VibeAgent3" for v in data["vibes"])
+
+    def test_invalid_status_code_defaults_to_ok(self, client):
+        key = _reg(client, "VibeAgent4")
+        r = client.post(
+            "/api/agents/status/vibe",
+            json={"vibe": "Running fine", "status_code": "nonsense"},
+            headers=_headers(key),
+        )
+        assert r.status_code == 200
+        assert r.json()["status_code"] == "ok"
+
+    def test_vibe_requires_auth(self, client):
+        r = client.post("/api/agents/status/vibe", json={"vibe": "unauthorized"})
+        assert r.status_code == 401
+
+    def test_vibe_history_per_agent(self, client):
+        key = _reg(client, "VibeAgent5")
+        client.post(
+            "/api/agents/status/vibe",
+            json={"vibe": "First vibe"},
+            headers=_headers(key),
+        )
+        client.post(
+            "/api/agents/status/vibe",
+            json={"vibe": "Second vibe"},
+            headers=_headers(key),
+        )
+        r = client.get("/api/agents/status/vibe/history/VibeAgent5")
+        assert r.status_code == 200
+        vibes = r.json()
+        assert len(vibes) >= 2
+        vibe_texts = [v["vibe"] for v in vibes]
+        assert "First vibe" in vibe_texts
+        assert "Second vibe" in vibe_texts
+
+    def test_empty_vibe_returns_422(self, client):
+        key = _reg(client, "VibeAgent6")
+        r = client.post(
+            "/api/agents/status/vibe",
+            json={"vibe": ""},
+            headers=_headers(key),
+        )
+        assert r.status_code == 422

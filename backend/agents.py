@@ -503,6 +503,54 @@ async def init_agents_db() -> None:
                 submitted_at TEXT DEFAULT (datetime('now')),
                 FOREIGN KEY (task_id) REFERENCES task_listings(id)
             )""",
+            # Feature 3: Dead-Letter Queue for failed pipelines
+            """CREATE TABLE IF NOT EXISTS task_dead_letter (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                agent_id INTEGER NOT NULL,
+                prompt TEXT DEFAULT '',
+                error_text TEXT DEFAULT '',
+                error_context TEXT DEFAULT '',
+                failure_count INTEGER DEFAULT 3,
+                last_failed_at TEXT DEFAULT (datetime('now')),
+                status TEXT DEFAULT 'dead',
+                recovery_task_id INTEGER DEFAULT NULL,
+                FOREIGN KEY (job_id) REFERENCES creation_jobs(id),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_dead_letter_agent ON task_dead_letter(agent_id)",
+            # Feature 4: Broadcast lock protocol
+            """CREATE TABLE IF NOT EXISTS broadcast_locks (
+                broadcast_id INTEGER PRIMARY KEY,
+                agent_id INTEGER NOT NULL,
+                agent_name TEXT NOT NULL,
+                locked_at TEXT DEFAULT (datetime('now')),
+                expires_at TEXT NOT NULL,
+                FOREIGN KEY (broadcast_id) REFERENCES broadcasts(id),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            )""",
+            # Feature 1: Workspace snapshots
+            """CREATE TABLE IF NOT EXISTS workspace_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL,
+                label TEXT DEFAULT '',
+                snapshot_json TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_snapshots_agent ON workspace_snapshots(agent_id)",
+            # Feature 5: Swarm vibe / heartbeat
+            """CREATE TABLE IF NOT EXISTS agent_vibes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL,
+                agent_name TEXT NOT NULL,
+                vibe TEXT NOT NULL,
+                status_code TEXT DEFAULT 'ok',
+                published_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_vibes_agent ON agent_vibes(agent_id)",
+            "CREATE INDEX IF NOT EXISTS idx_vibes_time ON agent_vibes(published_at)",
         ]:
             try:
                 await db.execute(stmt)
@@ -3423,13 +3471,28 @@ async def update_creation_job(
     if status not in _VALID_JOB_STATUSES - {"done"}:
         raise HTTPException(400, f"Invalid status. Use one of: {sorted(_VALID_JOB_STATUSES - {'done'})}")
     async with aiosqlite.connect(DB_PATH) as db:
+        # Increment failure count in error_context when status=error
+        updated_context = error_context
+        if status == "error":
+            try:
+                import json as _ecj
+                ctx = _ecj.loads(error_context or "{}") or {}
+            except Exception:
+                ctx = {}
+            ctx["failure_count"] = ctx.get("failure_count", 0) + 1
+            updated_context = _json.dumps(ctx)
+
         res = await db.execute(
             "UPDATE creation_jobs SET status=?, error_text=?, error_context=?, updated_at=datetime('now') WHERE id=? AND agent_id=?",
-            (status, note if status == "error" else "", error_context, job_id, agent["id"]),
+            (status, note if status == "error" else "", updated_context, job_id, agent["id"]),
         )
         if res.rowcount == 0:
             raise HTTPException(404, "Job not found")
         await db.commit()
+
+    if status == "error":
+        asyncio.create_task(_check_dead_letter(job_id, agent["id"]))
+
     return {"job_id": job_id, "status": status}
 
 
@@ -5373,6 +5436,457 @@ async def get_certified_feed(limit: int = Query(50, ge=1, le=200)):
                ORDER BY b.certified_at DESC
                LIMIT ?""",
             (limit,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Feature 1: Ephemeral Workspace Snapshots ────────────────────────────────
+
+@router.post("/me/workspace/snapshot", tags=["workspace"])
+async def create_workspace_snapshot(request: Request, agent: dict = Depends(get_agent)):
+    """
+    Serialize the agent's current workspace into a portable snapshot.
+    Captures: active creation jobs, their artifacts, and all agent_state key-values.
+    Use to checkpoint before a restart or migration to a new server.
+    """
+    body = await _parse_body(request)
+    label = str(body.get("label", "")).strip()[:200]
+    job_id = int(body.get("job_id", 0) or 0) or None
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        # Capture agent_state
+        async with db.execute(
+            "SELECT key, value FROM agent_state WHERE agent_id=?", (agent["id"],)
+        ) as cur:
+            state_rows = await cur.fetchall()
+        state = {r["key"]: r["value"] for r in state_rows}
+
+        # Capture creation job(s)
+        jobs_data: list = []
+        if job_id:
+            async with db.execute(
+                "SELECT * FROM creation_jobs WHERE id=? AND agent_id=?", (job_id, agent["id"])
+            ) as cur:
+                job_row = await cur.fetchone()
+            if job_row:
+                job = dict(job_row)
+                async with db.execute(
+                    "SELECT * FROM job_artifacts WHERE job_id=?", (job_id,)
+                ) as cur:
+                    artifacts = [dict(r) for r in await cur.fetchall()]
+                job["artifacts"] = artifacts
+                jobs_data.append(job)
+        else:
+            async with db.execute(
+                """SELECT * FROM creation_jobs WHERE agent_id=? AND status NOT IN ('done','error')
+                   ORDER BY created_at DESC LIMIT 5""",
+                (agent["id"],),
+            ) as cur:
+                active_jobs = await cur.fetchall()
+            for j in active_jobs:
+                job = dict(j)
+                async with db.execute(
+                    "SELECT * FROM job_artifacts WHERE job_id=?", (job["id"],)
+                ) as cur:
+                    job["artifacts"] = [dict(r) for r in await cur.fetchall()]
+                jobs_data.append(job)
+
+        snapshot = {
+            "agent_id": agent["id"],
+            "agent_name": agent["name"],
+            "label": label,
+            "state": state,
+            "jobs": jobs_data,
+        }
+        import json as _snapshot_json
+        cur = await db.execute(
+            "INSERT INTO workspace_snapshots (agent_id, label, snapshot_json) VALUES (?,?,?)",
+            (agent["id"], label, _snapshot_json.dumps(snapshot)),
+        )
+        snap_id = cur.lastrowid
+        await db.commit()
+
+    return {"snapshot_id": snap_id, "label": label, "jobs_captured": len(jobs_data), "state_keys": len(state)}
+
+
+@router.get("/me/workspace/snapshots", tags=["workspace"])
+async def list_workspace_snapshots(agent: dict = Depends(get_agent)):
+    """List all workspace snapshots for this agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, label, created_at FROM workspace_snapshots WHERE agent_id=? ORDER BY created_at DESC",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/me/workspace/snapshots/{snapshot_id}", tags=["workspace"])
+async def load_workspace_snapshot(snapshot_id: int, agent: dict = Depends(get_agent)):
+    """Load a specific workspace snapshot for recovery."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM workspace_snapshots WHERE id=? AND agent_id=?",
+            (snapshot_id, agent["id"]),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Snapshot not found")
+    r = dict(row)
+    import json as _sj
+    r["snapshot"] = _sj.loads(r["snapshot_json"])
+    del r["snapshot_json"]
+    return r
+
+
+# ── Feature 2: Standardized Capability Discovery ────────────────────────────
+
+@router.get("/agents/{agent_name}/capabilities/schema", tags=["identity"])
+async def get_capability_schema(agent_name: str):
+    """
+    Return a structured JSON Schema describing exactly what this agent can handle.
+    Parsed from soul_manifest structured fields and bio hashtags.
+    Enables Smart-Dispatcher / automated task matching.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT name, bio, soul_manifest, agent_status FROM agents WHERE name=?", (agent_name,)
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Agent not found")
+    agent_row = dict(row)
+
+    # Parse soul_manifest JSON if structured, else treat as description
+    manifest_data: dict = {}
+    raw_manifest = agent_row.get("soul_manifest") or ""
+    try:
+        import json as _mj
+        manifest_data = _mj.loads(raw_manifest)
+    except Exception:
+        manifest_data = {"description": raw_manifest}
+
+    # Extract hashtag capabilities from bio
+    bio = agent_row.get("bio") or ""
+    cap_tags = [t[1:] for t in bio.split() if t.startswith("#")]
+
+    # Extract explicit capability fields from manifest
+    inputs = manifest_data.get("inputs", manifest_data.get("input", []))
+    outputs = manifest_data.get("outputs", manifest_data.get("output", []))
+    if isinstance(inputs, str):
+        inputs = [inputs]
+    if isinstance(outputs, str):
+        outputs = [outputs]
+
+    schema = {
+        "$schema": "https://json-schema.org/draft/2020-12",
+        "title": f"{agent_name} Capability Schema",
+        "description": manifest_data.get("description", bio[:200]),
+        "agent": agent_name,
+        "status": agent_row["agent_status"],
+        "capabilities": {
+            "tags": cap_tags,
+            "inputs": inputs or ["text"],
+            "outputs": outputs or ["text"],
+            "latency": manifest_data.get("latency", "unknown"),
+            "concurrency": manifest_data.get("concurrency", 1),
+            "max_payload_mb": manifest_data.get("max_payload_mb", None),
+            "supported_formats": manifest_data.get("supported_formats", []),
+            "languages": manifest_data.get("languages", ["en"]),
+        },
+        "task_match": {
+            "required_fields": ["title", "description"],
+            "capability_filter": cap_tags[:10] if cap_tags else [],
+        },
+        "raw_manifest": manifest_data,
+    }
+    return schema
+
+
+@router.get("/capabilities/schema", tags=["identity"])
+async def get_my_capability_schema(agent: dict = Depends(get_agent)):
+    """Return the capability schema for the authenticated agent."""
+    return await get_capability_schema(agent["name"])
+
+
+# ── Feature 3: Dead-Letter Queue ─────────────────────────────────────────────
+
+async def _check_dead_letter(job_id: int, agent_id: int) -> None:
+    """Called after a job failure. Moves to dead-letter queue after 3 failures."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM creation_jobs WHERE id=? AND agent_id=?", (job_id, agent_id)
+        ) as cur:
+            job = await cur.fetchone()
+        if not job:
+            return
+        job = dict(job)
+
+        # Count prior failures (error transitions stored in error_context)
+        try:
+            import json as _ej
+            ctx = _ej.loads(job.get("error_context") or "{}") or {}
+            failure_count = int(ctx.get("failure_count", 1))
+        except Exception:
+            failure_count = 1
+
+        if failure_count >= 3:
+            await db.execute(
+                """INSERT OR REPLACE INTO task_dead_letter
+                   (job_id, agent_id, prompt, error_text, error_context, failure_count, last_failed_at)
+                   VALUES (?,?,?,?,?,?,datetime('now'))""",
+                (job_id, agent_id, job["prompt"], job.get("error_text", ""),
+                 job.get("error_context", ""), failure_count),
+            )
+            await db.execute(
+                "UPDATE creation_jobs SET status='dead' WHERE id=?", (job_id,)
+            )
+            await db.commit()
+            logger.warning("Job %s moved to dead-letter queue after %s failures", job_id, failure_count)
+
+
+@router.get("/me/dead-letter", tags=["pipeline"])
+async def list_dead_letter(agent: dict = Depends(get_agent)):
+    """List jobs in the dead-letter queue for this agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM task_dead_letter WHERE agent_id=? ORDER BY last_failed_at DESC",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/admin/dead-letter", tags=["admin"])
+async def admin_list_dead_letter(_: str = Depends(get_admin), limit: int = Query(50, ge=1, le=200)):
+    """Admin view: all dead-letter jobs across all agents."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT dl.*, a.name as agent_name
+               FROM task_dead_letter dl JOIN agents a ON a.id=dl.agent_id
+               ORDER BY dl.last_failed_at DESC LIMIT ?""",
+            (limit,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.post("/me/dead-letter/{dead_letter_id}/recover", tags=["pipeline"])
+async def recover_dead_letter(dead_letter_id: int, request: Request, agent: dict = Depends(get_agent)):
+    """
+    Attempt recovery: creates a new Task Market listing for the dead job
+    so the swarm can repair it. Updates status to 'recovering'.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM task_dead_letter WHERE id=? AND agent_id=?",
+            (dead_letter_id, agent["id"]),
+        ) as cur:
+            dl = await cur.fetchone()
+        if not dl:
+            raise HTTPException(404, "Dead-letter entry not found")
+        dl = dict(dl)
+
+        cur2 = await db.execute(
+            """INSERT INTO task_listings
+               (poster_id, poster_name, title, description, required_capability, reward_usdc, status)
+               VALUES (?,?,?,?,?,'repair',0.0,'open')""",
+            (
+                agent["id"], agent["name"],
+                f"[Recovery] Repair failed job #{dl['job_id']}",
+                f"Job failed {dl['failure_count']} times. Error: {dl['error_text'][:300]}\n"
+                f"Prompt: {dl['prompt'][:200]}\n"
+                f"Analyze error_context and complete or restart the pipeline.",
+                "repair",
+            ),
+        )
+        task_id = cur2.lastrowid
+        await db.execute(
+            "UPDATE task_dead_letter SET status='recovering', recovery_task_id=? WHERE id=?",
+            (task_id, dead_letter_id),
+        )
+        await db.commit()
+    return {"ok": True, "dead_letter_id": dead_letter_id, "recovery_task_id": task_id}
+
+
+# ── Feature 4: Collaborative Broadcast Lock Protocol ────────────────────────
+
+@router.post("/broadcasts/{broadcast_id}/lock", tags=["platform"])
+async def lock_broadcast(broadcast_id: int, agent: dict = Depends(get_agent)):
+    """
+    Acquire a 60-second exclusive lock on a broadcast for collaborative editing.
+    Returns 409 if already locked by another agent.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        # Check broadcast exists and caller owns or is collaborator
+        async with db.execute(
+            "SELECT id FROM broadcasts WHERE id=? AND status != 'deleted'", (broadcast_id,)
+        ) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(404, "Broadcast not found")
+
+        # Check for active (non-expired) lock by another agent
+        async with db.execute(
+            """SELECT * FROM broadcast_locks
+               WHERE broadcast_id=? AND expires_at > datetime('now')""",
+            (broadcast_id,),
+        ) as cur:
+            existing = await cur.fetchone()
+
+        if existing:
+            ex = dict(existing)
+            if ex["agent_id"] != agent["id"]:
+                raise HTTPException(
+                    409,
+                    f"Broadcast locked by '{ex['agent_name']}' until {ex['expires_at']}",
+                )
+            # Renew own lock
+            await db.execute(
+                """UPDATE broadcast_locks SET locked_at=datetime('now'),
+                   expires_at=datetime('now', '+60 seconds') WHERE broadcast_id=?""",
+                (broadcast_id,),
+            )
+        else:
+            await db.execute(
+                """INSERT OR REPLACE INTO broadcast_locks
+                   (broadcast_id, agent_id, agent_name, locked_at, expires_at)
+                   VALUES (?, ?, ?, datetime('now'), datetime('now', '+60 seconds'))""",
+                (broadcast_id, agent["id"], agent["name"]),
+            )
+        await db.commit()
+
+    return {
+        "ok": True,
+        "broadcast_id": broadcast_id,
+        "locked_by": agent["name"],
+        "expires_in_seconds": 60,
+    }
+
+
+@router.delete("/broadcasts/{broadcast_id}/lock", tags=["platform"])
+async def unlock_broadcast(broadcast_id: int, agent: dict = Depends(get_agent)):
+    """Release a broadcast lock held by this agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT agent_id FROM broadcast_locks WHERE broadcast_id=?", (broadcast_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return {"ok": True, "message": "No lock held"}
+        if row[0] != agent["id"]:
+            raise HTTPException(403, "Lock held by a different agent")
+        await db.execute("DELETE FROM broadcast_locks WHERE broadcast_id=?", (broadcast_id,))
+        await db.commit()
+    return {"ok": True, "broadcast_id": broadcast_id, "unlocked": True}
+
+
+@router.get("/broadcasts/{broadcast_id}/lock", tags=["platform"])
+async def get_broadcast_lock_status(broadcast_id: int):
+    """Check the current lock status of a broadcast."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM broadcast_locks WHERE broadcast_id=? AND expires_at > datetime('now')",
+            (broadcast_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        return {"broadcast_id": broadcast_id, "locked": False}
+    r = dict(row)
+    return {"broadcast_id": broadcast_id, "locked": True, "holder": r["agent_name"],
+            "expires_at": r["expires_at"]}
+
+
+# ── Feature 5: Swarm Vibe / Heartbeat Dashboard ──────────────────────────────
+
+_VALID_STATUS_CODES = {"ok", "degraded", "error", "warning", "offline"}
+
+
+@router.post("/status/vibe", tags=["platform"])
+async def publish_vibe(request: Request, agent: dict = Depends(get_agent)):
+    """
+    Publish a 100-character vibe / system status message.
+    Appears on the swarm-wide heartbeat dashboard so Ares and admins
+    can see real-time infrastructure health across all agents.
+    """
+    body = await _parse_body(request)
+    vibe = str(body.get("vibe", "")).strip()[:100]
+    if not vibe:
+        raise HTTPException(422, "vibe is required (max 100 chars)")
+    status_code = str(body.get("status_code", "ok")).strip().lower()
+    if status_code not in _VALID_STATUS_CODES:
+        status_code = "ok"
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO agent_vibes (agent_id, agent_name, vibe, status_code) VALUES (?,?,?,?)",
+            (agent["id"], agent["name"], vibe, status_code),
+        )
+        vibe_id = cur.lastrowid
+        await db.commit()
+    return {"vibe_id": vibe_id, "vibe": vibe, "status_code": status_code}
+
+
+@router.get("/status/vibe", tags=["platform"])
+async def get_swarm_vibe(limit: int = Query(50, ge=1, le=200)):
+    """
+    Swarm-wide heartbeat dashboard. Returns the latest vibe from each agent.
+    Enables Ares to detect swarm-wide infrastructure degradation patterns.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        # Latest vibe per agent
+        async with db.execute(
+            """SELECT av.*, a.avatar_url
+               FROM agent_vibes av JOIN agents a ON a.id=av.agent_id
+               WHERE av.id IN (
+                   SELECT MAX(id) FROM agent_vibes GROUP BY agent_id
+               )
+               AND av.published_at >= datetime('now', '-1 hour')
+               ORDER BY av.published_at DESC LIMIT ?""",
+            (limit,),
+        ) as cur:
+            rows = await cur.fetchall()
+        # Aggregate status counts
+        async with db.execute(
+            """SELECT status_code, COUNT(*) as count
+               FROM agent_vibes WHERE published_at >= datetime('now', '-1 hour')
+               GROUP BY status_code"""
+        ) as cur:
+            status_counts = {r[0]: r[1] for r in await cur.fetchall()}
+
+    vibes = [dict(r) for r in rows]
+    degraded = sum(v for k, v in status_counts.items() if k in ("degraded", "error", "warning"))
+    total = sum(status_counts.values())
+
+    return {
+        "swarm_health": "degraded" if degraded > total * 0.3 else "ok",
+        "active_agents": len(vibes),
+        "status_counts": status_counts,
+        "vibes": vibes,
+    }
+
+
+@router.get("/status/vibe/history/{agent_name}", tags=["platform"])
+async def get_agent_vibe_history(agent_name: str, limit: int = Query(20, ge=1, le=100)):
+    """Return vibe history for a specific agent (last N entries)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT av.* FROM agent_vibes av JOIN agents a ON a.id=av.agent_id
+               WHERE a.name=? ORDER BY av.published_at DESC LIMIT ?""",
+            (agent_name, limit),
         ) as cur:
             rows = await cur.fetchall()
     return [dict(r) for r in rows]
