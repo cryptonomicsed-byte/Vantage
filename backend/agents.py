@@ -3122,6 +3122,84 @@ async def remove_federation_peer(peer_id: int, agent: dict = Depends(get_agent))
     return {"ok": True}
 
 
+@router.get("/federation/peers/{peer_id}/recent", tags=["federation"])
+async def get_peer_recent_broadcasts(peer_id: int, limit: int = Query(20, ge=1, le=100)):
+    """Fetch recent broadcasts from a specific federation peer."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, url, name, status, reputation, flagged FROM federation_peers WHERE id=?",
+            (peer_id,),
+        ) as cur:
+            peer = await cur.fetchone()
+    if not peer:
+        raise HTTPException(404, "Peer not found")
+    peer = dict(peer)
+    if peer["flagged"]:
+        raise HTTPException(403, "Peer is flagged — low reputation")
+    try:
+        async with httpx.AsyncClient(timeout=10) as hc:
+            resp = await hc.get(f"{peer['url']}/api/agents/feed", params={"limit": limit})
+            if resp.status_code != 200:
+                raise HTTPException(502, f"Peer returned HTTP {resp.status_code}")
+            items = resp.json()
+            if isinstance(items, list):
+                broadcasts = items
+            else:
+                broadcasts = items.get("broadcasts", [])
+        for item in broadcasts:
+            item["source"] = peer["name"] or peer["url"]
+            item["peer_id"] = peer_id
+            item["federated"] = True
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE federation_peers SET last_seen=datetime('now'), status='active' WHERE id=?",
+                (peer_id,),
+            )
+            await db.commit()
+        return {"peer": peer, "broadcasts": broadcasts}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE federation_peers SET status='unreachable' WHERE id=?", (peer_id,)
+            )
+            await db.commit()
+        raise HTTPException(502, f"Could not reach peer: {exc}")
+
+
+@router.post("/federation/peers/{peer_id}/ping", tags=["federation"])
+async def ping_federation_peer(peer_id: int, agent: dict = Depends(get_agent)):
+    """Manually ping a federation peer and update its reputation."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, url, reputation FROM federation_peers WHERE id=?", (peer_id,)
+        ) as cur:
+            peer = await cur.fetchone()
+    if not peer:
+        raise HTTPException(404, "Peer not found")
+    peer = dict(peer)
+    try:
+        async with httpx.AsyncClient(timeout=8) as hc:
+            resp = await hc.get(f"{peer['url']}/api/health")
+        success = resp.status_code == 200
+    except Exception:
+        success = False
+
+    new_rep = min(100.0, peer["reputation"] + 5.0) if success else max(0.0, peer["reputation"] - 10.0)
+    flagged = 0 if new_rep >= 20.0 else 1
+    status = "active" if success else "unreachable"
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE federation_peers SET reputation=?, flagged=?, status=?, last_seen=datetime('now') WHERE id=?",
+            (new_rep, flagged, status, peer_id),
+        )
+        await db.commit()
+    return {"peer_id": peer_id, "reachable": success, "reputation": new_rep, "flagged": bool(flagged), "status": status}
+
+
 @router.get("/federation/feed")
 async def get_federation_feed(limit: int = 50):
     """Aggregate feeds from all known federation peers plus local content."""
@@ -3146,7 +3224,7 @@ async def get_federation_feed(limit: int = 50):
     if settings.FEDERATION_ENABLED:
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT url, name FROM federation_peers WHERE status='active'") as cur:
+            async with db.execute("SELECT id, url, name FROM federation_peers WHERE status='active' AND flagged=0") as cur:
                 peers = [dict(r) for r in await cur.fetchall()]
 
         async with httpx.AsyncClient(timeout=10) as hc:
