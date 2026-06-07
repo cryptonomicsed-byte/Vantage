@@ -795,3 +795,369 @@ class TestPlatform:
         r = client.get("/api/agents/leaderboard")
         assert r.status_code == 200
         assert isinstance(r.json(), list)
+
+
+# ---------------------------------------------------------------------------
+# Capability Matchmaking
+# ---------------------------------------------------------------------------
+
+class TestCapabilityMatchmaking:
+    def test_find_capable_by_bio_tag(self, client):
+        key = _reg(client, "CapAgent1")
+        # Update bio with capability tag
+        fd = {"bio": "I am a finance analysis agent #finance #analysis"}
+        client.patch("/api/agents/me/profile", data=fd, headers=_headers(key))
+        r = client.get("/api/agents/find-capable?capability=finance")
+        assert r.status_code == 200
+        names = [a["name"] for a in r.json()]
+        assert "CapAgent1" in names
+
+    def test_find_capable_no_match(self, client):
+        r = client.get("/api/agents/find-capable?capability=unicornxyz99")
+        assert r.status_code == 200
+        assert r.json() == []
+
+    def test_find_capable_requires_capability_param(self, client):
+        r = client.get("/api/agents/find-capable")
+        assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Artifact Staging
+# ---------------------------------------------------------------------------
+
+class TestArtifactStaging:
+    def test_upload_and_list_artifacts(self, client):
+        key = _reg(client, "ArtifactAgent1")
+        # Create a creation job first
+        r = client.post(
+            "/api/agents/create",
+            json={"prompt": "Make a video about AI"},
+            headers=_headers(key),
+        )
+        assert r.status_code == 200
+        job_id = r.json()["job_id"]
+
+        # Upload an artifact
+        r2 = client.post(
+            f"/api/agents/me/creation-jobs/{job_id}/artifacts",
+            json={"artifact_type": "script", "stage": "scripting", "content": "# AI Script\n\nIntro..."},
+            headers=_headers(key),
+        )
+        assert r2.status_code == 200
+        assert r2.json()["stage"] == "scripting"
+
+        # List artifacts
+        r3 = client.get(f"/api/agents/me/creation-jobs/{job_id}/artifacts", headers=_headers(key))
+        assert r3.status_code == 200
+        arts = r3.json()
+        assert len(arts) == 1
+        assert arts[0]["artifact_type"] == "script"
+
+    def test_artifact_requires_auth(self, client):
+        r = client.post(
+            "/api/agents/me/creation-jobs/999/artifacts",
+            json={"artifact_type": "script", "stage": "scripting"},
+        )
+        assert r.status_code == 401
+
+    def test_artifact_wrong_job(self, client):
+        key_a = _reg(client, "ArtifactAgentA")
+        key_b = _reg(client, "ArtifactAgentB")
+        r = client.post(
+            "/api/agents/create",
+            json={"prompt": "Test"},
+            headers=_headers(key_a),
+        )
+        job_id = r.json()["job_id"]
+        # Agent B cannot upload to Agent A's job
+        r2 = client.post(
+            f"/api/agents/me/creation-jobs/{job_id}/artifacts",
+            json={"artifact_type": "audio", "stage": "voicing"},
+            headers=_headers(key_b),
+        )
+        assert r2.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Task Market
+# ---------------------------------------------------------------------------
+
+class TestTaskMarket:
+    def test_create_and_list_tasks(self, client):
+        key = _reg(client, "TaskPoster1")
+        r = client.post(
+            "/api/agents/tasks",
+            json={"title": "Write a market analysis", "description": "Daily BTC analysis", "required_capability": "finance", "reward_usdc": 5.0},
+            headers=_headers(key),
+        )
+        assert r.status_code == 200
+        task = r.json()
+        assert task["title"] == "Write a market analysis"
+        assert task["status"] == "open"
+        task_id = task["id"]
+
+        # List tasks
+        r2 = client.get("/api/agents/tasks")
+        assert r2.status_code == 200
+        ids = [t["id"] for t in r2.json()]
+        assert task_id in ids
+
+    def test_get_task_detail(self, client):
+        key = _reg(client, "TaskPoster2")
+        r = client.post(
+            "/api/agents/tasks",
+            json={"title": "Detail test task"},
+            headers=_headers(key),
+        )
+        task_id = r.json()["id"]
+        r2 = client.get(f"/api/agents/tasks/{task_id}")
+        assert r2.status_code == 200
+        assert "bids" in r2.json()
+
+    def test_task_not_found(self, client):
+        r = client.get("/api/agents/tasks/999999")
+        assert r.status_code == 404
+
+    def test_bid_on_task(self, client):
+        key_poster = _reg(client, "TaskBidPoster")
+        key_bidder = _reg(client, "TaskBidder1")
+        r = client.post(
+            "/api/agents/tasks",
+            json={"title": "Task for bidding"},
+            headers=_headers(key_poster),
+        )
+        task_id = r.json()["id"]
+        r2 = client.post(
+            f"/api/agents/tasks/{task_id}/bid",
+            json={"approach": "I'll use my finance skills", "estimated_hours": 2.0},
+            headers=_headers(key_bidder),
+        )
+        assert r2.status_code == 200
+        assert r2.json()["task_id"] == task_id
+
+    def test_cannot_bid_on_own_task(self, client):
+        key = _reg(client, "SelfBidAgent")
+        r = client.post("/api/agents/tasks", json={"title": "My own task"}, headers=_headers(key))
+        task_id = r.json()["id"]
+        r2 = client.post(f"/api/agents/tasks/{task_id}/bid", json={"approach": "me"}, headers=_headers(key))
+        assert r2.status_code == 400
+
+    def test_full_task_lifecycle(self, client):
+        key_poster = _reg(client, "LifecyclePoster")
+        key_worker = _reg(client, "LifecycleWorker")
+
+        # Create task
+        r = client.post(
+            "/api/agents/tasks",
+            json={"title": "Full lifecycle task", "reward_usdc": 10.0},
+            headers=_headers(key_poster),
+        )
+        task_id = r.json()["id"]
+
+        # Worker bids
+        client.post(
+            f"/api/agents/tasks/{task_id}/bid",
+            json={"approach": "I'll do it well"},
+            headers=_headers(key_worker),
+        )
+
+        # Poster awards to worker
+        r_award = client.post(
+            f"/api/agents/tasks/{task_id}/award/LifecycleWorker",
+            headers=_headers(key_poster),
+        )
+        assert r_award.status_code == 200
+
+        # Worker completes
+        r_complete = client.post(
+            f"/api/agents/tasks/{task_id}/complete",
+            json={"result_description": "Done! Here's the result."},
+            headers=_headers(key_worker),
+        )
+        assert r_complete.status_code == 200
+
+        # Poster approves
+        r_approve = client.post(
+            f"/api/agents/tasks/{task_id}/approve",
+            headers=_headers(key_poster),
+        )
+        assert r_approve.status_code == 200
+        assert r_approve.json()["status"] == "completed"
+
+    def test_my_tasks(self, client):
+        key = _reg(client, "MyTasksAgent")
+        client.post("/api/agents/tasks", json={"title": "My task 1"}, headers=_headers(key))
+        client.post("/api/agents/tasks", json={"title": "My task 2"}, headers=_headers(key))
+        r = client.get("/api/agents/me/tasks", headers=_headers(key))
+        assert r.status_code == 200
+        assert len(r.json()) >= 2
+
+    def test_my_bids(self, client):
+        key_poster = _reg(client, "BidsPoster")
+        key_bidder = _reg(client, "BidsBidder")
+        r = client.post("/api/agents/tasks", json={"title": "Bid tracker task"}, headers=_headers(key_poster))
+        task_id = r.json()["id"]
+        client.post(f"/api/agents/tasks/{task_id}/bid", json={"approach": "bid"}, headers=_headers(key_bidder))
+        r2 = client.get("/api/agents/me/task-bids", headers=_headers(key_bidder))
+        assert r2.status_code == 200
+        assert len(r2.json()) >= 1
+
+    def test_filter_tasks_by_capability(self, client):
+        key = _reg(client, "CapFilterPoster")
+        client.post(
+            "/api/agents/tasks",
+            json={"title": "Vision task", "required_capability": "vision"},
+            headers=_headers(key),
+        )
+        r = client.get("/api/agents/tasks?capability=vision")
+        assert r.status_code == 200
+        for t in r.json():
+            assert "vision" in t["required_capability"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Broadcast Certification
+# ---------------------------------------------------------------------------
+
+CERT_ADMIN_KEY = "test-admin-cert-key"
+
+
+class TestBroadcastCertification:
+    @pytest.fixture(autouse=True)
+    def patch_admin_key(self):
+        with patch.object(settings, "ADMIN_KEY", CERT_ADMIN_KEY):
+            yield
+
+    def _admin_headers(self):
+        return {"X-Admin-Key": CERT_ADMIN_KEY}
+
+    def test_certify_broadcast(self, client):
+        key = _reg(client, "CertAgent1")
+        bid = _text_post(client, key, title="To Certify")
+        r = client.post(f"/api/admin/broadcasts/{bid}/certify", headers=self._admin_headers())
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+    def test_certified_feed_empty_by_default(self, client):
+        r = client.get("/api/agents/feed/certified")
+        assert r.status_code == 200
+        assert isinstance(r.json(), list)
+
+    def test_certified_feed_shows_certified(self, client):
+        key = _reg(client, "CertFeedAgent")
+        bid = _text_post(client, key, title="Certified Content")
+        client.post(f"/api/admin/broadcasts/{bid}/certify", headers=self._admin_headers())
+        r = client.get("/api/agents/feed/certified")
+        assert r.status_code == 200
+        ids = [b["id"] for b in r.json()]
+        assert bid in ids
+
+    def test_uncertify_broadcast(self, client):
+        key = _reg(client, "UncertAgent")
+        bid = _text_post(client, key, title="To Uncertify")
+        client.post(f"/api/admin/broadcasts/{bid}/certify", headers=self._admin_headers())
+        r = client.delete(f"/api/admin/broadcasts/{bid}/certify", headers=self._admin_headers())
+        assert r.status_code == 200
+        # Should no longer be in certified feed
+        r2 = client.get("/api/agents/feed/certified")
+        ids = [b["id"] for b in r2.json()]
+        assert bid not in ids
+
+    def test_certify_requires_admin(self, client):
+        key = _reg(client, "CertNoAuthAgent")
+        bid = _text_post(client, key)
+        # No admin key header — should be rejected
+        r = client.post(f"/api/admin/broadcasts/{bid}/certify")
+        assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Federation
+# ---------------------------------------------------------------------------
+
+class TestFederation:
+    def test_get_peers_empty(self, client):
+        r = client.get("/api/agents/federation/peers")
+        assert r.status_code == 200
+        data = r.json()
+        assert "peers" in data
+        assert isinstance(data["peers"], list)
+
+    def test_add_peer_requires_auth(self, client):
+        r = client.post("/api/agents/federation/peers", json={"url": "http://example.com"})
+        assert r.status_code == 401
+
+    def test_add_and_remove_peer(self, client):
+        key = _reg(client, "FedAgent1")
+        r = client.post(
+            "/api/agents/federation/peers",
+            json={"url": "http://peer1.example.com", "name": "Peer1"},
+            headers=_headers(key),
+        )
+        # Returns ok:False if FEDERATION_ENABLED=False (default in tests), ok:True if enabled
+        assert r.status_code == 200
+
+    def test_federation_feed(self, client):
+        r = client.get("/api/agents/federation/feed")
+        assert r.status_code == 200
+        data = r.json()
+        assert "broadcasts" in data
+        assert isinstance(data["broadcasts"], list)
+
+
+# ---------------------------------------------------------------------------
+# MCP
+# ---------------------------------------------------------------------------
+
+class TestMCPManifest:
+    def test_mcp_manifest_returns_info(self, client):
+        r = client.get("/api/agents/mcp-manifest")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["name"] == "Vantage"
+        assert "mcp_endpoint" in data
+        assert data["mcp_endpoint"] == "/mcp/sse"
+
+    def test_mcp_manifest_has_docs_link(self, client):
+        r = client.get("/api/agents/mcp-manifest")
+        assert "docs" in r.json()
+
+
+# ---------------------------------------------------------------------------
+# Seal Routes
+# ---------------------------------------------------------------------------
+
+class TestSealRoutes:
+    def test_seal_status_on_unsealed_broadcast(self, client):
+        key = _reg(client, "SealStatusAgent")
+        bid = _text_post(client, key)
+        r = client.get(f"/api/agents/broadcasts/{bid}/seal-status")
+        assert r.status_code == 200
+
+    def test_seal_broadcast(self, client):
+        key = _reg(client, "SealAgent1")
+        bid = _text_post(client, key)
+        r = client.post(
+            f"/api/agents/broadcasts/{bid}/seal",
+            data={"policy": "followers-only"},
+            headers=_headers(key),
+        )
+        assert r.status_code == 200
+
+    def test_unseal_broadcast(self, client):
+        key = _reg(client, "UnsealAgent1")
+        bid = _text_post(client, key)
+        client.post(
+            f"/api/agents/broadcasts/{bid}/seal",
+            data={"policy": "private"},
+            headers=_headers(key),
+        )
+        r = client.delete(f"/api/agents/broadcasts/{bid}/seal", headers=_headers(key))
+        assert r.status_code == 200
+
+    def test_seal_requires_auth(self, client):
+        key = _reg(client, "SealNoAuthAgent")
+        bid = _text_post(client, key)
+        r = client.post(f"/api/agents/broadcasts/{bid}/seal", data={"policy": "private"})
+        assert r.status_code == 401
