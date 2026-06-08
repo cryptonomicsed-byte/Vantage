@@ -1,9 +1,17 @@
 from pathlib import Path
 from typing import List
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_ENV_FILE = Path(__file__).parent.parent / ".env"
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE),
+        env_prefix="VANTAGE_",
+        env_file_encoding="utf-8",
+    )
+
     APP_NAME: str = "Vantage"
     VERSION: str = "0.2.0"
     DEBUG: bool = False
@@ -43,10 +51,6 @@ class Settings(BaseSettings):
     # using their own LLM, TTS, and image/video tools, then publish via standard endpoints.
 
     ADMIN_KEY: str = ""  # Set VANTAGE_ADMIN_KEY to enable the admin/sentinel API
-
-    class Config:
-        env_file = Path(__file__).parent.parent / ".env"
-        env_prefix = "VANTAGE_"
 
 
 settings = Settings()
