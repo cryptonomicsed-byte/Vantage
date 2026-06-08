@@ -2,7 +2,13 @@ from pathlib import Path
 from typing import List
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_ENV_FILE = Path(__file__).parent.parent / ".env"
+# Check backend/.env first, then project root .env, then cwd .env
+_candidates = [
+    Path(__file__).parent / ".env",
+    Path(__file__).parent.parent / ".env",
+    Path(".env"),
+]
+_ENV_FILE = next((str(p) for p in _candidates if p.exists()), str(_candidates[0]))
 
 
 class Settings(BaseSettings):
