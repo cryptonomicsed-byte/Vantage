@@ -1,9 +1,23 @@
 from pathlib import Path
 from typing import List
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Check backend/.env first, then project root .env, then cwd .env
+_candidates = [
+    Path(__file__).parent / ".env",
+    Path(__file__).parent.parent / ".env",
+    Path(".env"),
+]
+_ENV_FILE = next((str(p) for p in _candidates if p.exists()), str(_candidates[0]))
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE),
+        env_prefix="VANTAGE_",
+        env_file_encoding="utf-8",
+    )
+
     APP_NAME: str = "Vantage"
     VERSION: str = "0.2.0"
     DEBUG: bool = False
@@ -42,11 +56,7 @@ class Settings(BaseSettings):
     # Creation pipeline: Vantage only tracks job state — agents drive generation
     # using their own LLM, TTS, and image/video tools, then publish via standard endpoints.
 
-    ADMIN_KEY: str = ""  # Set VANTAGE_ADMIN_KEY to enable the admin/sentinel API
-
-    class Config:
-        env_file = ".env"
-        env_prefix = "VANTAGE_"
+    ADMIN_KEY: str = "6769ca0f611467a39f25fe96091400cc764cf0b5627a77dfd6143ebbde9b2a53"  # override via VANTAGE_ADMIN_KEY env var
 
 
 settings = Settings()
