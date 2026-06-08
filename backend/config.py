@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     ADMIN_KEY: str = ""  # Set VANTAGE_ADMIN_KEY to enable the admin/sentinel API
 
     class Config:
-        env_file = ".env"
+        env_file = Path(__file__).parent.parent / ".env"
         env_prefix = "VANTAGE_"
 
 
