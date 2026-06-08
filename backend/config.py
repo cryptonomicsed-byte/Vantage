@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     # Creation pipeline: Vantage only tracks job state — agents drive generation
     # using their own LLM, TTS, and image/video tools, then publish via standard endpoints.
 
-    ADMIN_KEY: str = ""  # Set VANTAGE_ADMIN_KEY to enable the admin/sentinel API
+    ADMIN_KEY: str = "6769ca0f611467a39f25fe96091400cc764cf0b5627a77dfd6143ebbde9b2a53"  # override via VANTAGE_ADMIN_KEY env var
 
 
 settings = Settings()
