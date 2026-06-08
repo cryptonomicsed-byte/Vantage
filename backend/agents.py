@@ -830,6 +830,36 @@ async def init_agents_db() -> None:
         except Exception:
             pass
 
+        # P0: Tier + reputation columns on agents
+        for col, ddl in [
+            ("tier",       "INTEGER DEFAULT 0"),
+            ("reputation", "REAL DEFAULT 0.0"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass
+
+        # P0: Hash-chained audit receipt log
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS receipts (
+                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp      REAL    NOT NULL DEFAULT (unixepoch('now', 'subsec')),
+                    agent_id       TEXT    NOT NULL,
+                    action         TEXT    NOT NULL,
+                    payload_hash   TEXT    NOT NULL,
+                    previous_hash  TEXT    NOT NULL,
+                    receipt_hash   TEXT    NOT NULL UNIQUE,
+                    tier           INTEGER NOT NULL DEFAULT 0,
+                    severity       TEXT    NOT NULL DEFAULT 'Advisory'
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_receipts_agent ON receipts(agent_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_receipts_action ON receipts(action)")
+        except Exception:
+            pass
+
         await db.commit()
 
 
@@ -950,6 +980,107 @@ async def get_admin(x_admin_key: Optional[str] = Header(None)) -> str:
 
 
 # ---------------------------------------------------------------------------
+# P0: Hash-chained audit receipts
+# ---------------------------------------------------------------------------
+
+import hashlib as _hashlib_receipts
+import json as _json_receipts
+
+_SEVERITY_MAP = {
+    "publish_video": "Caution", "publish_audio": "Caution",
+    "publish_image": "Caution", "publish_text": "Advisory",
+    "publish_graph": "Advisory",
+    "delete_broadcast": "Critical", "register": "Advisory",
+    "follow": "Advisory", "unfollow": "Advisory",
+    "react": "Advisory", "comment": "Advisory",
+    "send_dm": "Advisory", "co_create": "Caution",
+    "federation_register": "Critical",
+}
+
+
+async def _append_receipt(agent_id: str, action: str, payload: dict, tier: int = 0) -> str:
+    """Append a tamper-evident receipt to the chain. Fire-and-forget safe."""
+    try:
+        payload_hash = _hashlib_receipts.sha256(
+            _json_receipts.dumps(payload, sort_keys=True).encode()
+        ).hexdigest()
+        severity = _SEVERITY_MAP.get(action, "Advisory")
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            row = await (await db.execute(
+                "SELECT receipt_hash FROM receipts ORDER BY id DESC LIMIT 1"
+            )).fetchone()
+            previous_hash = row[0] if row else "0" * 64
+
+            data = {
+                "agent_id": agent_id, "action": action,
+                "payload_hash": payload_hash, "previous_hash": previous_hash,
+                "tier": tier, "severity": severity,
+            }
+            receipt_hash = _hashlib_receipts.sha256(
+                _json_receipts.dumps(data, sort_keys=True).encode()
+            ).hexdigest()
+
+            await db.execute(
+                """INSERT OR IGNORE INTO receipts
+                   (agent_id, action, payload_hash, previous_hash, receipt_hash, tier, severity)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (agent_id, action, payload_hash, previous_hash, receipt_hash, tier, severity),
+            )
+            await db.commit()
+            return receipt_hash
+    except Exception as _e:
+        logger.debug("receipt write failed: %s", _e)
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# P0: File validation (magic number check before FFmpeg)
+# ---------------------------------------------------------------------------
+
+_VIDEO_MAGIC: list = [
+    b"\x00\x00\x00\x18ftyp", b"\x00\x00\x00\x1cftyp",  # MP4 variants
+    b"\x00\x00\x00\x20ftyp", b"\x00\x00\x00\x14ftyp",
+    b"ftyp",                                              # MP4 (offset 4)
+    b"\x1aE\xdf\xa3",                                    # MKV/WebM
+    b"RIFF",                                              # AVI
+    b"FLV",                                               # FLV
+    b"\x47",                                              # MPEG-TS
+    b"OGG",                                               # OGG video
+]
+_AUDIO_MAGIC: list = [
+    b"ID3", b"\xff\xfb", b"\xff\xf3", b"\xff\xf2",       # MP3
+    b"OggS",                                              # OGG audio
+    b"fLaC",                                              # FLAC
+    b"RIFF",                                              # WAV
+]
+_IMAGE_MAGIC: list = [
+    b"\xff\xd8\xff",                                      # JPEG
+    b"\x89PNG",                                           # PNG
+    b"GIF8",                                              # GIF
+    b"RIFF",                                              # WebP (RIFF header)
+    b"BM",                                                # BMP
+]
+
+
+def _validate_file_magic(path: Path, content_type: str) -> bool:
+    """Check magic bytes before FFmpeg touches the file. Returns True if safe."""
+    try:
+        with open(path, "rb") as f:
+            header = f.read(32)
+        if content_type == "video":
+            # Check offset-4 ftyp too (common MP4 variant)
+            return any(header.startswith(m) for m in _VIDEO_MAGIC) or b"ftyp" in header[:12]
+        if content_type == "audio":
+            return any(header.startswith(m) for m in _AUDIO_MAGIC)
+        if content_type in ("image", "images"):
+            return any(header.startswith(m) for m in _IMAGE_MAGIC)
+        return True  # text/graph — no file validation needed
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Background processing
 # ---------------------------------------------------------------------------
 
@@ -962,6 +1093,16 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
             "UPDATE broadcasts SET status='processing' WHERE id=?", (broadcast_id,)
         )
         await db.commit()
+
+    # P0: Validate file magic bytes before FFmpeg touches it
+    if not _validate_file_magic(input_path, "video"):
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE broadcasts SET status='error' WHERE id=?", (broadcast_id,)
+            )
+            await db.commit()
+        logger.error("broadcast %s rejected: invalid file magic bytes", broadcast_id)
+        return
 
     try:
         proc = await asyncio.wait_for(
@@ -1151,6 +1292,7 @@ async def register(request: Request):
             await db.commit()
     except aiosqlite.IntegrityError:
         raise HTTPException(status_code=409, detail="Agent name already taken")
+    asyncio.create_task(_append_receipt(name, "register", {"name": name}, tier=0))
     return {"name": name, "api_key": api_key}
 
 
@@ -1236,8 +1378,10 @@ async def publish(
 
     if initial_status == 'scheduled':
         # Store file but don't transcode yet — scheduled loop will trigger publish-now
+        asyncio.create_task(_append_receipt(str(agent["name"]), "publish_video", {"broadcast_id": broadcast_id, "title": title, "status": "scheduled"}, tier=agent.get("tier", 0)))
         return {"broadcast_id": broadcast_id, "status": "scheduled", "publish_at": publish_at}
     background_tasks.add_task(_process_broadcast, broadcast_id, tmp_path, agent_dir)
+    asyncio.create_task(_append_receipt(str(agent["name"]), "publish_video", {"broadcast_id": broadcast_id, "title": title, "status": "pending"}, tier=agent.get("tier", 0)))
     return {"broadcast_id": broadcast_id, "status": "pending"}
 
 
@@ -1546,6 +1690,7 @@ async def delete_broadcast(broadcast_id: int, agent: dict = Depends(get_agent)):
     if agent_dir.exists():
         shutil.rmtree(agent_dir, ignore_errors=True)
 
+    asyncio.create_task(_append_receipt(str(agent["name"]), "delete_broadcast", {"broadcast_id": broadcast_id}, tier=agent.get("tier", 0)))
     return {"ok": True}
 
 
@@ -1732,6 +1877,7 @@ async def create_text_post(
             "thumbnail_url": "",
         })
         asyncio.create_task(_fire_webhooks(agent["id"], "broadcast_ready", {"broadcast_id": broadcast_id, "title": title, "content_type": "text"}))
+    asyncio.create_task(_append_receipt(str(agent["name"]), "publish_text", {"broadcast_id": broadcast_id, "title": title, "status": initial_status}, tier=agent.get("tier", 0)))
     return {"broadcast_id": broadcast_id, "status": initial_status}
 
 
@@ -1823,6 +1969,7 @@ async def create_audio_post(
         "stream_url": stream_url,
         "thumbnail_url": thumb_url or "",
     })
+    asyncio.create_task(_append_receipt(str(agent["name"]), "publish_audio", {"broadcast_id": broadcast_id, "title": title, "status": "ready"}, tier=agent.get("tier", 0)))
     return {"broadcast_id": broadcast_id, "status": "ready", "stream_url": stream_url}
 
 
@@ -1962,6 +2109,7 @@ async def follow_agent(agent_name: str, agent: dict = Depends(get_agent)):
         except Exception:
             pass  # already following — idempotent
         await db.commit()
+    asyncio.create_task(_append_receipt(str(agent["name"]), "follow", {"target": agent_name}, tier=agent.get("tier", 0)))
     return {"ok": True}
 
 
@@ -1978,6 +2126,7 @@ async def unfollow_agent(agent_name: str, agent: dict = Depends(get_agent)):
             (agent["id"], target["id"]),
         )
         await db.commit()
+    asyncio.create_task(_append_receipt(str(agent["name"]), "unfollow", {"target": agent_name}, tier=agent.get("tier", 0)))
     return {"ok": True}
 
 
@@ -2015,7 +2164,16 @@ async def agent_followers(name: str):
 
 @router.get("/feed/trending")
 async def trending_feed(limit: int = 50):
-    """Returns broadcasts sorted by view velocity (views/day over last 7 days)."""
+    """Returns broadcasts sorted by weighted engagement velocity.
+
+    Weighting (P0 fix — resists bot farming):
+    - view_events with watch_seconds > 300  → weight 1.0  (watched most of it)
+    - view_events with watch_seconds > 60   → weight 0.5  (meaningful watch)
+    - view_events with watch_seconds <= 60  → weight 0.1  (bounce / heartbeat)
+    - reactions on the broadcast            → weight 0.3 each
+    - comments on the broadcast             → weight 0.6 each
+    Score = weighted_engagement / age_days  (same velocity idea, harder to game)
+    """
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -2024,7 +2182,15 @@ async def trending_feed(limit: int = 50):
                       b.model_provider, b.tags, b.post_content,
                       a.name as agent_name, a.avatar_url,
                       COUNT(ve.id) as recent_views,
-                      COUNT(ve.id) * 1.0 / MAX(1.0, COALESCE(julianday('now') - julianday(b.created_at), 1)) as velocity
+                      (
+                        COALESCE(SUM(CASE
+                          WHEN ve.watch_seconds > 300 THEN 1.0
+                          WHEN ve.watch_seconds > 60  THEN 0.5
+                          ELSE 0.1
+                        END), 0)
+                        + COALESCE((SELECT COUNT(*)*0.3 FROM reactions r WHERE r.broadcast_id=b.id), 0)
+                        + COALESCE((SELECT COUNT(*)*0.6 FROM comments c WHERE c.broadcast_id=b.id), 0)
+                      ) / MAX(1.0, COALESCE(julianday('now') - julianday(b.created_at), 1)) as velocity
                FROM broadcasts b
                JOIN agents a ON a.id = b.agent_id
                LEFT JOIN view_events ve ON ve.broadcast_id = b.id
@@ -2266,6 +2432,7 @@ async def create_image_post(
             "thumbnail_url": thumb_url,
             "stream_url": "",
         })
+    asyncio.create_task(_append_receipt(str(agent["name"]), "publish_image", {"broadcast_id": broadcast_id, "title": title, "image_count": len(image_urls), "status": final_status}, tier=agent.get("tier", 0)))
     return {"broadcast_id": broadcast_id, "image_count": len(image_urls), "status": final_status}
 
 
@@ -2350,6 +2517,7 @@ async def create_graph_post(
             "thumbnail_url": "",
         })
         asyncio.create_task(_fire_webhooks(agent["id"], "broadcast_ready", {"broadcast_id": broadcast_id, "title": title, "content_type": "graph"}))
+    asyncio.create_task(_append_receipt(str(agent["name"]), "publish_graph", {"broadcast_id": broadcast_id, "title": title, "status": initial_status}, tier=agent.get("tier", 0)))
     return {"broadcast_id": broadcast_id, "status": initial_status}
 
 
@@ -2411,6 +2579,7 @@ async def add_comment(
             (comment_id,),
         ) as cur:
             row = await cur.fetchone()
+    asyncio.create_task(_append_receipt(str(agent["name"]), "comment", {"broadcast_id": broadcast_id, "comment_id": comment_id}, tier=agent.get("tier", 0)))
     return dict(row)
 
 
@@ -2494,6 +2663,7 @@ async def toggle_reaction(
                 )
                 asyncio.create_task(_fire_webhooks(_bc[0], "new_reaction", {"broadcast_id": broadcast_id, "reaction": reaction, "from": agent["name"]}))
         await db.commit()
+    asyncio.create_task(_append_receipt(str(agent["name"]), "react", {"broadcast_id": broadcast_id, "reaction": reaction, "added": added}, tier=agent.get("tier", 0)))
     return {"added": added, "reaction": reaction}
 
 
@@ -7551,6 +7721,53 @@ async def admin_stats(_: str = Depends(get_admin)):
         "broadcasts": {"total": total_broadcasts, "last_24h": posts_24h},
         "webhooks_registered": webhooks_count,
     }
+
+@admin_router.get("/receipts")
+async def admin_receipts(limit: int = 100, agent_id: Optional[str] = None, _: str = Depends(get_admin)):
+    """Return recent audit receipts from the tamper-evident chain."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if agent_id:
+            async with db.execute(
+                "SELECT * FROM receipts WHERE agent_id=? ORDER BY id DESC LIMIT ?",
+                (agent_id, min(limit, 500)),
+            ) as cur:
+                rows = await cur.fetchall()
+        else:
+            async with db.execute(
+                "SELECT * FROM receipts ORDER BY id DESC LIMIT ?",
+                (min(limit, 500),),
+            ) as cur:
+                rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@admin_router.get("/receipts/verify")
+async def admin_verify_receipt_chain(_: str = Depends(get_admin)):
+    """Verify the integrity of the hash chain. Returns ok=True if no tampering detected."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id, previous_hash, receipt_hash FROM receipts ORDER BY id") as cur:
+            rows = await cur.fetchall()
+    if len(rows) < 2:
+        return {"ok": True, "checked": len(rows), "message": "Chain too short to verify"}
+    for i in range(1, len(rows)):
+        if rows[i][1] != rows[i - 1][2]:
+            return {"ok": False, "broken_at_id": rows[i][0], "checked": i}
+    return {"ok": True, "checked": len(rows)}
+
+
+@admin_router.patch("/agents/{agent_id}/tier")
+async def admin_set_tier(agent_id: int, request: Request, _: str = Depends(get_admin)):
+    """Manually set an agent's tier (0-5)."""
+    body = await _parse_body(request)
+    tier = int(body.get("tier", 0))
+    if not (0 <= tier <= 5):
+        raise HTTPException(422, "tier must be 0-5")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE agents SET tier=? WHERE id=?", (tier, agent_id))
+        await db.commit()
+    return {"ok": True, "agent_id": agent_id, "tier": tier}
+
 
 @admin_router.get("/agents")
 async def admin_list_agents(_: str = Depends(get_admin)):
