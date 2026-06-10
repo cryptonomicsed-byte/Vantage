@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { NavLink, Link, useLocation } from 'react-router-dom'
-import { Home, Compass, Zap, User, MessageSquare, Search, Settings, Shield } from 'lucide-react'
-import NotificationPanel from './NotificationPanel'
+import { Home, Compass, Zap, User, MessageSquare, Network, TrendingUp, BookOpen } from 'lucide-react'
 import { getSection } from '../utils/navigation'
 
 function useUnreadDMs(): number {
@@ -22,19 +21,33 @@ function useUnreadDMs(): number {
   return count
 }
 
-interface SidebarProps { onSearchToggle: () => void }
+const SECONDARY_PATHS = ['/swarm', '/market', '/knowledge']
 
-export default function Sidebar({ onSearchToggle }: SidebarProps) {
+export default function Sidebar() {
   const location = useLocation()
   const section = getSection(location.pathname)
   const unreadDMs = useUnreadDMs()
 
-  const NAV = [
-    { to: '/',          icon: Home,          label: 'Feed',    sec: 'feed'    },
-    { to: '/agents',    icon: Compass,        label: 'Explore', sec: 'explore' },
-    { to: '/create',    icon: Zap,            label: 'Create',  sec: 'create'  },
-    { to: '/dashboard', icon: User,           label: 'Me',      sec: 'me'      },
-    { to: '/inbox',     icon: MessageSquare,  label: 'Inbox',   sec: 'me', badge: unreadDMs },
+  function active(to: string): boolean {
+    if (to === '/') return location.pathname === '/'
+    if (to === '/inbox') return location.pathname === '/inbox'
+    if (to === '/dashboard') return section === 'me' && location.pathname !== '/inbox'
+    if (to === '/agents') return section === 'explore' && !SECONDARY_PATHS.includes(location.pathname)
+    return location.pathname === to
+  }
+
+  const PRIMARY = [
+    { to: '/',          icon: Home,          label: 'Feed',    badge: 0         },
+    { to: '/agents',    icon: Compass,       label: 'Explore', badge: 0         },
+    { to: '/create',    icon: Zap,           label: 'Create',  badge: 0         },
+    { to: '/dashboard', icon: User,          label: 'Me',      badge: 0         },
+    { to: '/inbox',     icon: MessageSquare, label: 'Inbox',   badge: unreadDMs },
+  ]
+
+  const SECONDARY = [
+    { to: '/swarm',     icon: Network,    label: 'Swarm'     },
+    { to: '/market',    icon: TrendingUp, label: 'Market'    },
+    { to: '/knowledge', icon: BookOpen,   label: 'Knowledge' },
   ]
 
   return (
@@ -42,44 +55,32 @@ export default function Sidebar({ onSearchToggle }: SidebarProps) {
       <Link to="/" className="sidebar-logo" title="Vantage">⚡</Link>
 
       <nav className="sidebar-nav">
-        {NAV.map(({ to, icon: Icon, label, sec, badge }) => (
+        {PRIMARY.map(({ to, icon: Icon, label, badge }) => (
           <NavLink
             key={to}
             to={to}
             end={to === '/'}
-            className={() => `sidebar-item${section === sec ? ' active' : ''}`}
+            className={() => `sidebar-item${active(to) ? ' active' : ''}`}
           >
-            <Icon size={20} />
-            {badge != null && badge > 0 && (
-              <span className="sidebar-badge">{badge > 99 ? '99+' : badge}</span>
-            )}
+            <Icon size={18} />
+            {badge > 0 && <span className="sidebar-badge">{badge > 99 ? '99+' : badge}</span>}
             <span className="sidebar-label">{label}</span>
           </NavLink>
         ))}
 
         <div className="sidebar-divider" />
 
-        <button className="sidebar-item" onClick={onSearchToggle} title="Search">
-          <Search size={20} />
-          <span className="sidebar-label">Search</span>
-        </button>
-
-        <NotificationPanel sidebarMode />
+        {SECONDARY.map(({ to, icon: Icon, label }) => (
+          <NavLink
+            key={to}
+            to={to}
+            className={() => `sidebar-item${active(to) ? ' active' : ''}`}
+          >
+            <Icon size={16} />
+            <span className="sidebar-label">{label}</span>
+          </NavLink>
+        ))}
       </nav>
-
-      <div className="sidebar-bottom">
-        <NavLink
-          to="/settings"
-          className={() => `sidebar-item${section === 'settings' ? ' active' : ''}`}
-        >
-          <Settings size={18} />
-          <span className="sidebar-label">Settings</span>
-        </NavLink>
-        <Link to="/ares" className="sidebar-item ares-item">
-          <Shield size={18} />
-          <span className="sidebar-label">Ares SOC</span>
-        </Link>
-      </div>
     </aside>
   )
 }

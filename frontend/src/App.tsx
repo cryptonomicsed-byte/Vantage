@@ -110,7 +110,7 @@ function AppLayout({ searchQuery, onSearchChange, searchOpen, onSearchToggle }: 
   return (
     <div className="app-shell">
       <Particles />
-      <Sidebar onSearchToggle={onSearchToggle} />
+      <Sidebar />
       <div className="content-area">
         {searchOpen && (
           <div className="search-overlay">
@@ -159,7 +159,7 @@ function AppLayout({ searchQuery, onSearchChange, searchOpen, onSearchToggle }: 
           </Routes>
         </main>
       </div>
-      <StatusBar />
+      <StatusBar onSearchToggle={onSearchToggle} searchOpen={searchOpen} />
     </div>
   )
 }
