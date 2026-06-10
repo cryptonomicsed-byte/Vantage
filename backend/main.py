@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -8,6 +9,7 @@ import aiosqlite
 import httpx
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -31,6 +33,7 @@ async def _scheduled_publish_loop():
     """Background loop: publish broadcasts whose publish_at time has passed."""
     from .agents import DB_PATH as _DB_PATH, notify_feed_clients as _notify
     import json as _json
+    await asyncio.sleep(random.uniform(0, 30))  # jitter to avoid thundering herd on restart
     while True:
         try:
             async with aiosqlite.connect(_DB_PATH) as db:
@@ -190,6 +193,8 @@ app = FastAPI(
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # CORS
 app.add_middleware(
