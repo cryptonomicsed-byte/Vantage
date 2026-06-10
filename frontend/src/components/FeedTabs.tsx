@@ -8,32 +8,56 @@ interface Props {
   hasApiKey?: boolean
 }
 
-const TABS: { id: FeedTabId; label: string; icon: string; requiresKey?: boolean }[] = [
-  { id: 'all',         label: 'All',       icon: '📡' },
-  { id: 'video',       label: 'Video',     icon: '🎬' },
-  { id: 'text',        label: 'Text',      icon: '📝' },
-  { id: 'audio',       label: 'Audio',     icon: '🎵' },
-  { id: 'image',       label: 'Gallery',   icon: '🖼️' },
-  { id: 'graph',       label: 'Graph',     icon: '🕸️' },
-  { id: 'debate',      label: 'Debates',   icon: '⚔️' },
-  { id: 'following',   label: 'Following', icon: '⭐', requiresKey: true },
-  { id: 'trending',    label: 'Trending',  icon: '🔥' },
-  { id: 'recommended', label: 'For You',   icon: '✨', requiresKey: true },
-  { id: 'federated',   label: 'Federation', icon: '🌐' },
+const SOURCES: { id: FeedTabId; label: string; requiresKey?: boolean }[] = [
+  { id: 'all',         label: 'All'       },
+  { id: 'trending',    label: 'Trending'  },
+  { id: 'following',   label: 'Following', requiresKey: true },
+  { id: 'recommended', label: 'For You',   requiresKey: true },
+  { id: 'federated',   label: 'Network'   },
 ]
 
+const TYPES: { id: FeedTabId; icon: string; label: string }[] = [
+  { id: 'video',  icon: '🎬', label: 'Video'   },
+  { id: 'text',   icon: '📝', label: 'Text'    },
+  { id: 'audio',  icon: '🎵', label: 'Audio'   },
+  { id: 'image',  icon: '🖼️', label: 'Gallery' },
+  { id: 'graph',  icon: '🕸️', label: 'Graph'   },
+  { id: 'debate', icon: '⚔️', label: 'Debates' },
+]
+
+const TYPE_IDS = new Set(TYPES.map(t => t.id))
+
 export default function FeedTabs({ active, onChange, hasApiKey = false }: Props) {
+  const activeIsType = TYPE_IDS.has(active)
+
   return (
     <div className="feed-tabs">
-      {TABS.filter(t => !t.requiresKey || hasApiKey).map(t => (
-        <button
-          key={t.id}
-          className={`feed-tab${active === t.id ? ' active' : ''}`}
-          onClick={() => onChange(t.id)}
-        >
-          {t.icon} {t.label}
-        </button>
-      ))}
+      {/* ── Source tabs (left) ── */}
+      <div className="ft-sources">
+        {SOURCES.filter(s => !s.requiresKey || hasApiKey).map(s => (
+          <button
+            key={s.id}
+            className={`ft-src-btn${active === s.id || (s.id === 'all' && activeIsType) ? ' active' : ''}`}
+            onClick={() => onChange(s.id)}
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Type filter icons (right) ── */}
+      <div className="ft-types">
+        {TYPES.map(t => (
+          <button
+            key={t.id}
+            className={`ft-type-btn${active === t.id ? ' active' : ''}`}
+            onClick={() => onChange(t.id)}
+            title={t.label}
+          >
+            {t.icon}
+          </button>
+        ))}
+      </div>
     </div>
   )
 }

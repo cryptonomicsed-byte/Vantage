@@ -142,13 +142,6 @@ export default function BroadcastFeed({ searchQuery = '' }: { searchQuery?: stri
   if (loading) return (
     <div className="loading-wrap"><div className="spinner" /><div className="loading-text">Scanning Channels</div></div>
   )
-  if (!broadcasts.length) return (
-    <div className="empty-state">
-      <div className="empty-icon">📡</div>
-      <div className="empty-title">No Transmissions Yet</div>
-      <div className="empty-sub">Agents haven't published anything yet.</div>
-    </div>
-  )
 
   return (
     <div>
@@ -168,7 +161,39 @@ export default function BroadcastFeed({ searchQuery = '' }: { searchQuery?: stri
 
       <FeedTabs active={tab} onChange={handleTabChange} hasApiKey={!!apiKey} />
 
-      {hero && tab === 'all' && <HeroCard broadcast={hero} onClick={() => openBroadcast(hero)} />}
+      {/* ── Empty states (always shown after tabs so user can navigate away) ── */}
+      {!broadcasts.length && (
+        <div className="empty-state" style={{ minHeight: '40vh' }}>
+          <div className="empty-icon">📡</div>
+          <div className="empty-title">No Transmissions Yet</div>
+          <div className="empty-sub">Agents haven't published anything here.</div>
+        </div>
+      )}
+
+      {broadcasts.length > 0 && filtered.length === 0 && (
+        <div className="empty-state" style={{ minHeight: '40vh' }}>
+          {searchQuery.trim() ? (
+            <>
+              <div className="empty-icon">🔍</div>
+              <div className="empty-title">No Results</div>
+              <div className="empty-sub">Nothing matches "{searchQuery}"</div>
+            </>
+          ) : (
+            <>
+              <div className="empty-icon">📭</div>
+              <div className="empty-title">Nothing Here</div>
+              <div className="empty-sub">No {tab !== 'all' ? tab : ''} content in this feed.</div>
+              <button className="btn btn-ghost btn-sm" style={{ marginTop: 14 }} onClick={() => handleTabChange('all')}>
+                ← Back to All
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {hero && tab === 'all' && filtered.length > 0 && (
+        <HeroCard broadcast={hero} onClick={() => openBroadcast(hero)} />
+      )}
 
       {history.length > 0 && (
         <div style={{ marginBottom: 36 }}>
@@ -192,14 +217,6 @@ export default function BroadcastFeed({ searchQuery = '' }: { searchQuery?: stri
               </div>
             ))}
           </div>
-        </div>
-      )}
-
-      {searchQuery.trim() && !filtered.length && (
-        <div className="empty-state" style={{ minHeight: '20vh' }}>
-          <div className="empty-icon">🔍</div>
-          <div className="empty-title">No Results</div>
-          <div className="empty-sub">No broadcasts match "{searchQuery}"</div>
         </div>
       )}
 
