@@ -27,11 +27,22 @@ export default function VideoModal({ broadcast, onClose }: { broadcast: Broadcas
     el.classList.add('vjs-big-play-centered')
     videoRef.current.appendChild(el)
 
+    const url = broadcast.stream_url
+    const isHLS = url.includes('.m3u8')
+    const sources = isHLS
+      ? [{ src: url, type: 'application/x-mpegURL' }]
+      : [
+          { src: url, type: 'video/mp4' },
+          { src: url, type: 'video/webm' },
+          { src: url, type: 'video/ogg' },
+        ]
+
     playerRef.current = videojs(el, {
       controls: true,
       autoplay: true,
       fluid: true,
-      sources: [{ src: broadcast.stream_url, type: 'application/x-mpegURL' }],
+      html5: { vhs: { overrideNative: true }, nativeVideoTracks: false },
+      sources,
     })
 
     playerRef.current.on('play', () => {

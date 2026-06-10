@@ -153,37 +153,59 @@ async def _append_receipt(agent_id: str, action: str, payload: dict, tier: int =
 
 # File magic byte validation
 _VIDEO_MAGIC: list = [
+    # MP4 / MOV / M4V — ftyp box at various sizes (4-byte big-endian size + "ftyp")
+    b"\x00\x00\x00\x08ftyp", b"\x00\x00\x00\x0cftyp",
+    b"\x00\x00\x00\x10ftyp", b"\x00\x00\x00\x14ftyp",
     b"\x00\x00\x00\x18ftyp", b"\x00\x00\x00\x1cftyp",
-    b"\x00\x00\x00\x20ftyp", b"\x00\x00\x00\x14ftyp",
-    b"ftyp",
-    b"\x1aE\xdf\xa3",   # MKV/WebM
-    b"RIFF",             # AVI
-    b"FLV",
-    b"\x47",             # MPEG-TS
-    b"OGG",
+    b"\x00\x00\x00\x20ftyp", b"\x00\x00\x00\x24ftyp",
+    b"ftyp",                   # ftyp without size prefix (some encoders)
+    b"\x1aE\xdf\xa3",          # MKV / WebM (EBML magic)
+    b"RIFF",                   # AVI (RIFF....AVI )
+    b"FLV\x01",                # FLV
+    b"\x47\x40",               # MPEG-TS (sync 0x47 + first PID bits)
+    b"\x00\x00\x01\xb3",       # MPEG-1/2 video ES
+    b"\x00\x00\x01\xba",       # MPEG program stream
+    b"OGG",                    # OGG video
+    b"\x30\x26\xb2\x75",       # ASF / WMV
 ]
 _AUDIO_MAGIC: list = [
-    b"ID3", b"\xff\xfb", b"\xff\xf3", b"\xff\xf2",   # MP3
-    b"OggS",
-    b"fLaC",
-    b"RIFF",
+    b"ID3",                    # MP3 with ID3 tag
+    b"\xff\xfb", b"\xff\xf3", b"\xff\xf2",   # MP3 MPEG sync (various layers)
+    b"\xff\xf9", b"\xff\xf1",  # AAC ADTS sync
+    b"OggS",                   # OGG audio
+    b"fLaC",                   # FLAC
+    b"RIFF",                   # WAV / AIFF-over-RIFF
+    b"FORM",                   # AIFF
+    b"\x00\x00\x00\x20ftypM4A",  # M4A (AAC in MP4 container)
+    b"\x00\x00\x00\x1cftypM4A",
+    # M4A / AAC in MP4 — caught by ftyp-in-header check below
 ]
 _IMAGE_MAGIC: list = [
     b"\xff\xd8\xff",    # JPEG
     b"\x89PNG",
     b"GIF8",
-    b"RIFF",            # WebP
+    b"RIFF",            # WebP (RIFF....WEBP)
     b"BM",              # BMP
+    b"\x00\x00\x01\x00",  # ICO
 ]
 
 
 def _validate_file_magic(path: Path, content_type: str) -> bool:
     try:
         with open(path, "rb") as f:
-            header = f.read(32)
+            header = f.read(64)
         if content_type == "video":
-            return any(header.startswith(m) for m in _VIDEO_MAGIC) or b"ftyp" in header[:12]
+            # ftyp box can appear anywhere in the first ~36 bytes (size varies)
+            if b"ftyp" in header[:36]:
+                return True
+            # EBML/WebM: first 4 bytes are always \x1aE\xdf\xa3
+            if header[:4] == b"\x1a\x45\xdf\xa3":
+                return True
+            return any(header.startswith(m) for m in _VIDEO_MAGIC)
         if content_type == "audio":
+            # M4A: ftyp box in header is valid
+            if b"ftyp" in header[:36]:
+                return True
             return any(header.startswith(m) for m in _AUDIO_MAGIC)
         if content_type in ("image", "images"):
             return any(header.startswith(m) for m in _IMAGE_MAGIC)
