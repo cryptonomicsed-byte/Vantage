@@ -128,6 +128,7 @@ function AppLayout({ searchQuery, onSearchChange, searchOpen, onSearchToggle }: 
             </button>
           </div>
         )}
+        <div id="feed-topbar-slot" />
         {subLinks && <SubNav links={subLinks} />}
         <main className="main">
           <Routes>

@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
 import { Eye, Play, X, Layers, ChevronDown, ArrowUpDown } from 'lucide-react'
 import VideoModal from './VideoModal'
@@ -279,9 +280,14 @@ export default function BroadcastFeed({ searchQuery = '' }: { searchQuery?: stri
 
   const hero = filtered.find(b => b.content_type === 'video' || !b.content_type) || filtered[0] || null
 
+  const topbarSlot = document.getElementById('feed-topbar-slot')
+
   return (
     <div className="feed-page">
-      <FeedTopBar tab={tab} sort={sort} hasApiKey={!!apiKey} onTab={handleTabChange} onSort={setSort} />
+      {topbarSlot && createPortal(
+        <FeedTopBar tab={tab} sort={sort} hasApiKey={!!apiKey} onTab={handleTabChange} onSort={setSort} />,
+        topbarSlot
+      )}
 
       {toast && <div className="feed-toast">{toast}</div>}
 
