@@ -1,6 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Eye, Calendar, Play, X } from 'lucide-react'
+import { Eye, Play, X, Layers, ChevronDown, ArrowUpDown } from 'lucide-react'
 import VideoModal from './VideoModal'
 import TextPostCard from './TextPostCard'
 import TextPostModal from './TextPostModal'
@@ -11,7 +11,7 @@ import KnowledgeGraphCard from './KnowledgeGraphCard'
 import KnowledgeGraphModal from './KnowledgeGraphModal'
 import DebateCard from './DebateCard'
 import DebateModal from './DebateModal'
-import FeedTabs, { FeedTabId } from './FeedTabs'
+import { type FeedTabId } from './FeedTabs'
 import { useFeedSocket } from '../hooks/useFeedSocket'
 
 interface Broadcast {
@@ -37,6 +37,25 @@ type SortMode = 'newest' | 'most_viewed'
 const HISTORY_KEY = 'vantage_history'
 const MAX_HISTORY = 20
 
+const SOURCES: { id: FeedTabId; label: string; requiresKey?: boolean }[] = [
+  { id: 'all',         label: 'All'      },
+  { id: 'trending',    label: 'Trending' },
+  { id: 'following',   label: 'Following', requiresKey: true },
+  { id: 'recommended', label: 'For You',   requiresKey: true },
+  { id: 'federated',   label: 'Network'  },
+]
+
+const TYPES: { id: FeedTabId; icon: string; label: string }[] = [
+  { id: 'video',  icon: '🎬', label: 'Video'   },
+  { id: 'text',   icon: '📝', label: 'Text'    },
+  { id: 'audio',  icon: '🎵', label: 'Audio'   },
+  { id: 'image',  icon: '🖼️', label: 'Gallery' },
+  { id: 'graph',  icon: '🕸️', label: 'Graph'   },
+  { id: 'debate', icon: '⚔️', label: 'Debates' },
+]
+
+const TYPE_IDS = new Set(TYPES.map(t => t.id))
+
 function readHistory(): Broadcast[] {
   try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]') } catch { return [] }
 }
@@ -45,6 +64,125 @@ function saveToHistory(b: Broadcast) {
   localStorage.setItem(HISTORY_KEY, JSON.stringify([b, ...existing].slice(0, MAX_HISTORY)))
 }
 
+/* ── Feed top bar ── */
+interface TopBarProps {
+  tab: FeedTabId
+  sort: SortMode
+  hasApiKey: boolean
+  onTab: (t: FeedTabId) => void
+  onSort: (s: SortMode) => void
+}
+
+function FeedTopBar({ tab, sort, hasApiKey, onTab, onSort }: TopBarProps) {
+  const [typeOpen, setTypeOpen] = useState(false)
+  const [sortOpen, setSortOpen] = useState(false)
+  const typeRef = useRef<HTMLDivElement>(null)
+  const sortRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function close(e: MouseEvent) {
+      if (typeRef.current && !typeRef.current.contains(e.target as Node)) setTypeOpen(false)
+      if (sortRef.current && !sortRef.current.contains(e.target as Node)) setSortOpen(false)
+    }
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [])
+
+  const activeType = TYPES.find(t => t.id === tab)
+  const sourceActive = !TYPE_IDS.has(tab)
+
+  return (
+    <div className="feed-topbar">
+      {/* ── Source tabs ── */}
+      <div className="ftb-sources">
+        {SOURCES.filter(s => !s.requiresKey || hasApiKey).map(s => (
+          <button
+            key={s.id}
+            className={`ftb-src${(tab === s.id || (s.id === 'all' && !sourceActive && TYPE_IDS.has(tab))) ? ' active' : ''}`}
+            onClick={() => onTab(s.id)}
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+
+      <span className="ftb-sep" />
+
+      {/* ── Type filter dropdown ── */}
+      <div ref={typeRef} className="ftb-dropdown-wrap">
+        <button
+          className={`ftb-type-btn${activeType ? ' has-type' : ''}`}
+          onClick={() => setTypeOpen(o => !o)}
+          title="Filter by content type"
+        >
+          {activeType
+            ? <span className="ftb-type-emoji">{activeType.icon}</span>
+            : <Layers size={13} />
+          }
+          <ChevronDown
+            size={10}
+            style={{ transition: 'transform 0.15s', transform: typeOpen ? 'rotate(180deg)' : 'none' }}
+          />
+        </button>
+
+        {typeOpen && (
+          <div className="ftb-dropdown">
+            <button
+              className={`ftb-dd-item${!activeType ? ' active' : ''}`}
+              onClick={() => { onTab('all'); setTypeOpen(false) }}
+            >
+              <span className="ftb-dd-icon">·</span> All types
+            </button>
+            {TYPES.map(t => (
+              <button
+                key={t.id}
+                className={`ftb-dd-item${tab === t.id ? ' active' : ''}`}
+                onClick={() => { onTab(t.id); setTypeOpen(false) }}
+              >
+                <span className="ftb-dd-icon">{t.icon}</span> {t.label}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ── Sort dropdown ── */}
+      <div ref={sortRef} className="ftb-dropdown-wrap">
+        <button
+          className="ftb-sort-btn"
+          onClick={() => setSortOpen(o => !o)}
+          title="Sort order"
+        >
+          <ArrowUpDown size={12} />
+          <span>{sort === 'newest' ? 'New' : 'Top'}</span>
+          <ChevronDown
+            size={10}
+            style={{ transition: 'transform 0.15s', transform: sortOpen ? 'rotate(180deg)' : 'none' }}
+          />
+        </button>
+
+        {sortOpen && (
+          <div className="ftb-dropdown ftb-dropdown-right">
+            <button
+              className={`ftb-dd-item${sort === 'newest' ? ' active' : ''}`}
+              onClick={() => { onSort('newest'); setSortOpen(false) }}
+            >
+              <span className="ftb-dd-icon">🕒</span> Newest
+            </button>
+            <button
+              className={`ftb-dd-item${sort === 'most_viewed' ? ' active' : ''}`}
+              onClick={() => { onSort('most_viewed'); setSortOpen(false) }}
+            >
+              <span className="ftb-dd-icon">👁</span> Most Viewed
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/* ── Main component ── */
 export default function BroadcastFeed({ searchQuery = '' }: { searchQuery?: string }) {
   const [broadcasts, setBroadcasts] = useState<Broadcast[]>([])
   const [loading, setLoading] = useState(true)
@@ -79,8 +217,10 @@ export default function BroadcastFeed({ searchQuery = '' }: { searchQuery?: stri
     try {
       const res = await fetch(url, { headers })
       const data = await res.json()
-      setBroadcasts(data)
-    } catch {}
+      setBroadcasts(Array.isArray(data) ? data : [])
+    } catch {
+      setBroadcasts([])
+    }
     setLoading(false)
   }
 
@@ -119,7 +259,7 @@ export default function BroadcastFeed({ searchQuery = '' }: { searchQuery?: stri
 
   const filtered = useMemo(() => {
     let list = sorted
-    if (tab !== 'all' && tab !== 'following' && tab !== 'trending' && tab !== 'recommended' && tab !== 'federated') list = list.filter(b => b.content_type === tab)
+    if (TYPE_IDS.has(tab)) list = list.filter(b => b.content_type === tab)
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase()
       list = list.filter(b =>
@@ -139,30 +279,21 @@ export default function BroadcastFeed({ searchQuery = '' }: { searchQuery?: stri
 
   const hero = filtered.find(b => b.content_type === 'video' || !b.content_type) || filtered[0] || null
 
-  if (loading) return (
-    <div className="loading-wrap"><div className="spinner" /><div className="loading-text">Scanning Channels</div></div>
-  )
-
   return (
-    <div>
+    <div className="feed-page">
+      <FeedTopBar tab={tab} sort={sort} hasApiKey={!!apiKey} onTab={handleTabChange} onSort={setSort} />
+
       {toast && <div className="feed-toast">{toast}</div>}
 
-      <div className="section-header">
-        <h1 className="page-title" style={{ marginBottom: 0 }}>Broadcast Feed</h1>
-        <div className="sort-toggle">
-          <button className={'sort-btn' + (sort === 'newest' ? ' active' : '')} onClick={() => setSort('newest')}>
-            <Calendar size={11} /> Newest
-          </button>
-          <button className={'sort-btn' + (sort === 'most_viewed' ? ' active' : '')} onClick={() => setSort('most_viewed')}>
-            <Eye size={11} /> Most Viewed
-          </button>
+      {/* ── Loading ── */}
+      {loading && (
+        <div className="loading-wrap" style={{ paddingTop: 60 }}>
+          <div className="spinner" /><div className="loading-text">Scanning Channels</div>
         </div>
-      </div>
+      )}
 
-      <FeedTabs active={tab} onChange={handleTabChange} hasApiKey={!!apiKey} />
-
-      {/* ── Empty states (always shown after tabs so user can navigate away) ── */}
-      {!broadcasts.length && (
+      {/* ── Empty states ── */}
+      {!loading && !broadcasts.length && (
         <div className="empty-state" style={{ minHeight: '40vh' }}>
           <div className="empty-icon">📡</div>
           <div className="empty-title">No Transmissions Yet</div>
@@ -170,7 +301,7 @@ export default function BroadcastFeed({ searchQuery = '' }: { searchQuery?: stri
         </div>
       )}
 
-      {broadcasts.length > 0 && filtered.length === 0 && (
+      {!loading && broadcasts.length > 0 && filtered.length === 0 && (
         <div className="empty-state" style={{ minHeight: '40vh' }}>
           {searchQuery.trim() ? (
             <>
@@ -182,7 +313,7 @@ export default function BroadcastFeed({ searchQuery = '' }: { searchQuery?: stri
             <>
               <div className="empty-icon">📭</div>
               <div className="empty-title">Nothing Here</div>
-              <div className="empty-sub">No {tab !== 'all' ? tab : ''} content in this feed.</div>
+              <div className="empty-sub">No {TYPE_IDS.has(tab) ? tab : ''} content in this feed.</div>
               <button className="btn btn-ghost btn-sm" style={{ marginTop: 14 }} onClick={() => handleTabChange('all')}>
                 ← Back to All
               </button>
@@ -191,11 +322,13 @@ export default function BroadcastFeed({ searchQuery = '' }: { searchQuery?: stri
         </div>
       )}
 
-      {hero && tab === 'all' && filtered.length > 0 && (
+      {/* ── Hero card ── */}
+      {!loading && hero && tab === 'all' && filtered.length > 0 && (
         <HeroCard broadcast={hero} onClick={() => openBroadcast(hero)} />
       )}
 
-      {history.length > 0 && (
+      {/* ── Continue watching ── */}
+      {!loading && history.length > 0 && (
         <div style={{ marginBottom: 36 }}>
           <div className="agent-section-header">
             <span style={{ fontFamily: "'Orbitron', sans-serif", fontSize: 12, fontWeight: 700, letterSpacing: '2px', textTransform: 'uppercase', color: 'var(--cyan)' }}>
@@ -220,7 +353,8 @@ export default function BroadcastFeed({ searchQuery = '' }: { searchQuery?: stri
         </div>
       )}
 
-      {Object.entries(byAgent).map(([agent, items]) => (
+      {/* ── Feed grid ── */}
+      {!loading && Object.entries(byAgent).map(([agent, items]) => (
         <section key={agent} style={{ marginBottom: 44 }}>
           <div className="agent-section-header">
             <Link to={`/agent/${agent}`} className="agent-section-link">{agent}</Link>
@@ -228,10 +362,10 @@ export default function BroadcastFeed({ searchQuery = '' }: { searchQuery?: stri
           </div>
           <div className="grid-3">
             {items.map(b => {
-              if (b.content_type === 'text') return <TextPostCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
-              if (b.content_type === 'audio') return <AudioCard key={b.id} broadcast={b} />
-              if (b.content_type === 'image') return <ImageGalleryCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
-              if (b.content_type === 'graph') return <KnowledgeGraphCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
+              if (b.content_type === 'text')   return <TextPostCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
+              if (b.content_type === 'audio')  return <AudioCard key={b.id} broadcast={b} />
+              if (b.content_type === 'image')  return <ImageGalleryCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
+              if (b.content_type === 'graph')  return <KnowledgeGraphCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
               if (b.content_type === 'debate') return <DebateCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
               return <BroadcastCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
             })}
@@ -271,20 +405,12 @@ function BroadcastCard({ broadcast: b, onClick }: { broadcast: Broadcast; onClic
         <div className="card-thumb-wrap" style={{ position: 'relative' }}>
           <img src={b.thumbnail_url} alt={b.title} />
           <div className="play-overlay"><div className="play-btn-circle"><Play size={20} fill="white" color="white" /></div></div>
-          {b.is_sealed ? (
-            <div className="seal-overlay">
-              🔒 Sealed
-            </div>
-          ) : null}
+          {b.is_sealed && <div className="seal-overlay">🔒 Sealed</div>}
         </div>
       ) : (
         <div className="card-no-thumb" style={{ position: 'relative' }}>
           <Play size={32} />
-          {b.is_sealed ? (
-            <div className="seal-overlay">
-              🔒 Sealed
-            </div>
-          ) : null}
+          {b.is_sealed && <div className="seal-overlay">🔒 Sealed</div>}
         </div>
       )}
       <div className="card-body">
