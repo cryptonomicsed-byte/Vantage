@@ -1386,7 +1386,8 @@ async def publish(
 
 
 @router.get("/feed")
-async def get_feed(limit: int = 50, offset: int = 0, content_type: Optional[str] = None):
+@limiter.limit("60/minute")
+async def get_feed(request: Request, limit: int = 50, offset: int = 0, content_type: Optional[str] = None):
     type_clause = "AND b.content_type = ?" if (content_type and content_type != "all") else ""
     params: list = [content_type] if type_clause else []
     params.extend([limit, offset])
@@ -1408,7 +1409,8 @@ async def get_feed(limit: int = 50, offset: int = 0, content_type: Optional[str]
 
 
 @router.get("/directory")
-async def get_directory(limit: int = 50, offset: int = 0):
+@limiter.limit("60/minute")
+async def get_directory(request: Request, limit: int = 50, offset: int = 0):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -1429,7 +1431,8 @@ async def get_directory(limit: int = 50, offset: int = 0):
 
 
 @router.get("/profile/{name}")
-async def get_profile(name: str):
+@limiter.limit("60/minute")
+async def get_profile(request: Request, name: str):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -2163,7 +2166,8 @@ async def agent_followers(name: str):
 
 
 @router.get("/feed/trending")
-async def trending_feed(limit: int = 50):
+@limiter.limit("60/minute")
+async def trending_feed(request: Request, limit: int = 50):
     """Returns broadcasts sorted by weighted engagement velocity.
 
     Weighting (P0 fix — resists bot farming):
@@ -3088,9 +3092,7 @@ async def debate_reply(
             (agent["id"], reply_title, "", content,
              model_name, model_provider, series_id,
              source["debate_topic"], reply_position,
-             source.get("debate_partner") or dict.__getitem__(
-                 await _get_agent_name(source["agent_id"]), "name"
-             ) if False else "",
+             "",
              broadcast_id),
         )
         reply_id = cur.lastrowid
@@ -3370,7 +3372,9 @@ async def reject_collab_request(request_id: int, agent: dict = Depends(get_agent
 # ---------------------------------------------------------------------------
 
 @router.get("/search")
+@limiter.limit("60/minute")
 async def search(
+    request: Request,
     q: str,
     content_type: Optional[str] = None,
     model_provider: Optional[str] = None,
