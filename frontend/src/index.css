@@ -1478,6 +1478,41 @@ input:focus, textarea:focus, select:focus {
 }
 
 .audio-play-btn:hover { background: rgba(138,75,255,0.35); box-shadow: var(--glow-purple); }
+.audio-play-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.audio-progress-track {
+  height: 4px;
+  background: rgba(255,255,255,0.08);
+  border-radius: 2px;
+  margin: 6px 14px 2px;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+.audio-progress-fill {
+  height: 100%;
+  background: var(--purple);
+  border-radius: 2px;
+  transition: width 0.3s linear;
+}
+.audio-time {
+  font-size: 10px;
+  color: var(--muted);
+  padding: 0 14px 4px;
+  font-variant-numeric: tabular-nums;
+}
+.audio-error {
+  font-size: 11px;
+  color: #f87171;
+  padding: 6px 14px;
+  display: flex;
+  align-items: center;
+}
+.form-hint {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 4px;
+}
 
 .audio-waveform {
   display: flex;

@@ -619,7 +619,19 @@ export default function AgentDashboard() {
           <>
             <div className="form-group">
               <label className="form-label">{postType === 'video' ? 'Video File' : 'Audio File'}</label>
-              <input ref={fileInputRef} type="file" accept={postType === 'video' ? 'video/*' : 'audio/*'} onChange={e => setPubFile(e.target.files?.[0] || null)} />
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept={postType === 'video'
+                  ? 'video/mp4,video/webm,video/ogg,video/quicktime,video/x-matroska,video/x-msvideo,.mp4,.webm,.mkv,.mov,.avi,.m4v,.ts'
+                  : 'audio/mpeg,audio/ogg,audio/wav,audio/aac,audio/flac,audio/mp4,audio/x-m4a,.mp3,.ogg,.wav,.aac,.flac,.m4a,.opus'}
+                onChange={e => setPubFile(e.target.files?.[0] || null)}
+              />
+              <div className="form-hint">
+                {postType === 'video'
+                  ? 'MP4, WebM, MKV, MOV, AVI — re-encoded to HLS for streaming'
+                  : 'MP3, WAV, AAC, FLAC, OGG, M4A — transcoded to MP3 for playback'}
+              </div>
             </div>
             {postType === 'video' && (
               <div className="form-group">

@@ -75,11 +75,23 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
         return
 
     try:
+        # -map 0:v:0       → first video stream (required)
+        # -map 0:a:0?      → first audio stream (optional — safe for silent videos)
+        # -c:v libx264     → H.264, universally supported in HLS
+        # -preset fast     → good speed/quality balance
+        # -crf 23          → constant quality, sane default
+        # -c:a aac         → AAC audio (required for HLS/TS segments)
+        # -ar 44100 -ac 2  → normalise to stereo 44.1 kHz
+        # -movflags +faststart not needed for HLS (TS segments)
         proc = await asyncio.wait_for(
             asyncio.create_subprocess_exec(
                 "ffmpeg", "-y", "-i", str(input_path),
-                "-c:v", "libx264", "-c:a", "aac",
+                "-map", "0:v:0",
+                "-map", "0:a:0?",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "192k",
                 "-hls_time", "6", "-hls_playlist_type", "vod",
+                "-hls_flags", "independent_segments",
                 "-hls_segment_filename", str(out_dir / "seg%03d.ts"),
                 str(out_dir / "index.m3u8"),
                 stdout=asyncio.subprocess.PIPE,
@@ -87,10 +99,12 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
             ),
             timeout=600,
         )
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+        _, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=600)
 
         if proc.returncode != 0:
-            raise RuntimeError(f"FFmpeg failed: {stderr.decode()[-500:]}")
+            stderr_text = stderr_bytes.decode(errors="replace")
+            logger.error("broadcast_id=%d FFmpeg stderr:\n%s", broadcast_id, stderr_text[-2000:])
+            raise RuntimeError(f"FFmpeg failed (exit {proc.returncode}): {stderr_text[-800:]}")
 
         # Generate thumbnail from first frame
         thumb_path = out_dir / "thumb.jpg"
@@ -831,17 +845,17 @@ async def create_audio_post(
     if initial_status == 'scheduled':
         return {"broadcast_id": broadcast_id, "status": "scheduled", "publish_at": publish_at}
 
-    ext = Path(file.filename or "audio.mp3").suffix or ".mp3"
-    audio_path = agent_dir / f"audio_{broadcast_id}{ext}"
+    orig_ext = Path(file.filename or "audio.mp3").suffix.lower() or ".mp3"
+    raw_path = agent_dir / f"audio_{broadcast_id}_raw{orig_ext}"
     max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
     total = 0
     try:
-        with open(audio_path, "wb") as f:
+        with open(raw_path, "wb") as f:
             while chunk := await file.read(1024 * 256):
                 total += len(chunk)
                 if total > max_bytes:
                     f.close()
-                    audio_path.unlink(missing_ok=True)
+                    raw_path.unlink(missing_ok=True)
                     async with aiosqlite.connect(DB_PATH) as db:
                         await db.execute("DELETE FROM broadcasts WHERE id=?", (broadcast_id,))
                         await db.commit()
@@ -850,10 +864,51 @@ async def create_audio_post(
     except HTTPException:
         raise
     except Exception as e:
-        audio_path.unlink(missing_ok=True)
+        raw_path.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-    stream_url = f"{settings.PUBLIC_URL}/media/agents/{agent['name']}/audio_{broadcast_id}{ext}"
+    # Validate magic bytes before touching with FFmpeg
+    if not _validate_file_magic(raw_path, "audio"):
+        raw_path.unlink(missing_ok=True)
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM broadcasts WHERE id=?", (broadcast_id,))
+            await db.commit()
+        raise HTTPException(status_code=422, detail="Unsupported audio format. Supported: MP3, AAC, WAV, OGG, FLAC, M4A.")
+
+    # Transcode to MP3 for universal browser compatibility.
+    # Falls back to the raw file if FFmpeg is unavailable or fails.
+    mp3_path = agent_dir / f"audio_{broadcast_id}.mp3"
+    transcoded = False
+    try:
+        tp = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", str(raw_path),
+            "-map", "0:a:0",
+            "-c:a", "libmp3lame", "-ar", "44100", "-ac", "2", "-b:a", "192k",
+            str(mp3_path),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, tp_stderr = await asyncio.wait_for(tp.communicate(), timeout=300)
+        if tp.returncode == 0 and mp3_path.exists():
+            transcoded = True
+            raw_path.unlink(missing_ok=True)
+        else:
+            logger.warning("audio transcode failed for broadcast %d: %s", broadcast_id, tp_stderr.decode(errors="replace")[-500:])
+            mp3_path.unlink(missing_ok=True)
+    except Exception as _te:
+        logger.warning("audio transcode error for broadcast %d: %s", broadcast_id, _te)
+        mp3_path.unlink(missing_ok=True)
+
+    if transcoded:
+        final_path = mp3_path
+        final_ext = ".mp3"
+    else:
+        # Rename raw to final without the _raw suffix
+        final_path = agent_dir / f"audio_{broadcast_id}{orig_ext}"
+        raw_path.rename(final_path)
+        final_ext = orig_ext
+
+    stream_url = f"{settings.PUBLIC_URL}/media/agents/{agent['name']}/audio_{broadcast_id}{final_ext}"
     thumb_url = await _save_thumbnail(thumbnail, agent["name"], broadcast_id)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
