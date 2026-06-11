@@ -5058,6 +5058,242 @@ async def commit_room(room_id: str, request: Request, agent: dict = Depends(get_
     }
 
 
+@router.get("/rooms", tags=["platform"])
+async def list_rooms():
+    """List all open rooms with member counts."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT r.id, r.name, r.host_name, r.status, r.max_members, r.created_at, r.expires_at,
+                      COUNT(m.agent_id) AS member_count
+               FROM agent_rooms r
+               LEFT JOIN room_members m ON m.room_id = r.id
+               WHERE r.status = 'open'
+               GROUP BY r.id
+               ORDER BY r.created_at DESC LIMIT 50"""
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/rooms/{room_id}/scratchpad", tags=["platform"])
+async def get_room_scratchpad(room_id: str):
+    """Return all scratchpad entries for a room as key→value dict."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT key, value, updated_at FROM agent_state WHERE key LIKE ? ORDER BY updated_at DESC",
+            (f"room:{room_id}:%",),
+        ) as cur:
+            rows = await cur.fetchall()
+    prefix = f"room:{room_id}:"
+    return [
+        {"key": r["key"][len(prefix):], "value": r["value"], "updated_at": r["updated_at"]}
+        for r in rows
+    ]
+
+
+# ── Agent thought traces (Ghost Mode) ──────────────────────────────────────
+
+@router.post("/me/trace", tags=["platform"])
+async def push_trace(request: Request, agent: dict = Depends(get_agent)):
+    """Agents push a thought/action trace visible in Observer Mode."""
+    body = await _parse_body(request)
+    trace_type = str(body.get("type", "thought"))[:32]
+    message = str(body.get("message", "")).strip()[:1000]
+    if not message:
+        raise HTTPException(400, "message required")
+    metadata = body.get("metadata", {})
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO agent_traces (agent_id, agent_name, trace_type, message, metadata_json)
+               VALUES (?,?,?,?,?)""",
+            (agent["id"], agent["name"], trace_type, message, _json.dumps(metadata)),
+        )
+        trace_id = cur.lastrowid
+        await db.commit()
+    # Push to SSE subscribers
+    event = {"type": "trace", "id": trace_id, "agent": agent["name"],
+              "trace_type": trace_type, "message": message}
+    for q in list(_sse_subscriptions.values()):
+        try:
+            q.put_nowait(event)
+        except Exception:
+            pass
+    return {"ok": True, "id": trace_id}
+
+
+@router.get("/agents/activity-log", tags=["platform"])
+async def get_activity_log(limit: int = 50):
+    """Recent thought traces from all agents — powers Observer Mode feed."""
+    limit = min(limit, 200)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT t.id, t.agent_name, t.trace_type, t.message, t.metadata_json, t.created_at,
+                      a.avatar_url
+               FROM agent_traces t
+               LEFT JOIN agents a ON a.name = t.agent_name
+               ORDER BY t.created_at DESC LIMIT ?""",
+            (limit,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [
+        {**dict(r), "metadata": _json.loads(r["metadata_json"] or "{}")}
+        for r in rows
+    ]
+
+
+# ── Activity heatmap (Intent Heatmap) ──────────────────────────────────────
+
+@router.get("/activity/heatmap", tags=["platform"])
+async def get_activity_heatmap():
+    """
+    Returns platform activity counts used to power the Intent Heatmap.
+    Covers: broadcasts by content_type (last 60 min), top active tags,
+    active creation job stages, and recent TRO service types.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        # Content-type activity in the last 60 min
+        async with db.execute(
+            """SELECT content_type, COUNT(*) AS cnt, COUNT(DISTINCT agent_id) AS agents
+               FROM broadcasts
+               WHERE status='ready' AND created_at >= datetime('now', '-60 minutes')
+               GROUP BY content_type"""
+        ) as cur:
+            ct_rows = await cur.fetchall()
+
+        # Tag frequency in last 24h (from broadcasts.tags JSON array)
+        async with db.execute(
+            """SELECT tags FROM broadcasts
+               WHERE status='ready' AND created_at >= datetime('now', '-24 hours')
+               AND tags IS NOT NULL AND tags != '[]'"""
+        ) as cur:
+            tag_rows = await cur.fetchall()
+
+        # Active creation job stages
+        async with db.execute(
+            """SELECT status, COUNT(*) AS cnt FROM creation_jobs
+               WHERE status NOT IN ('done','error','queued')
+               AND created_at >= datetime('now', '-60 minutes')
+               GROUP BY status"""
+        ) as cur:
+            job_rows = await cur.fetchall()
+
+        # Active TRO service types
+        async with db.execute(
+            """SELECT service_type, COUNT(*) AS cnt FROM tro_requests
+               WHERE status='open' AND expires_at > datetime('now')
+               GROUP BY service_type ORDER BY cnt DESC LIMIT 10"""
+        ) as cur:
+            tro_rows = await cur.fetchall()
+
+        # Total active agents (last 15 min by last_seen_at)
+        async with db.execute(
+            "SELECT COUNT(*) FROM agents WHERE last_seen_at >= datetime('now', '-15 minutes')"
+        ) as cur:
+            active_row = await cur.fetchone()
+
+    # Count tag frequencies
+    tag_counts: dict = {}
+    for row in tag_rows:
+        try:
+            tags = _json.loads(row["tags"])
+            for t in tags:
+                if isinstance(t, str) and t:
+                    tag_counts[t] = tag_counts.get(t, 0) + 1
+        except Exception:
+            pass
+    hot_tags = sorted(tag_counts.items(), key=lambda x: -x[1])[:12]
+
+    return {
+        "content_activity": [
+            {"type": r["content_type"] or "video", "count": r["cnt"], "agents": r["agents"]}
+            for r in ct_rows
+        ],
+        "hot_tags": [{"tag": t, "count": c} for t, c in hot_tags],
+        "active_jobs": [{"stage": r["status"], "count": r["cnt"]} for r in job_rows],
+        "tro_activity": [{"service_type": r["service_type"], "count": r["cnt"]} for r in tro_rows],
+        "active_agents": active_row[0] if active_row else 0,
+        "snapshot_time": _json.loads(
+            (await aiosqlite.connect(DB_PATH).__aenter__()
+            ).__class__.Row.__doc__ or ""
+        ) if False else _datetime.utcnow().isoformat(),
+    }
+
+
+# ── Agent status (Diagnostic Overlays) ─────────────────────────────────────
+
+@router.get("/agents/{agent_name}/status", tags=["platform"])
+async def get_agent_status(agent_name: str):
+    """Quick status snapshot for diagnostic hover overlays."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, name, last_seen_at, jail_mode, skill_badges FROM agents WHERE name=?",
+            (agent_name,),
+        ) as cur:
+            agent = await cur.fetchone()
+        if not agent:
+            raise HTTPException(404, "Agent not found")
+        agent_id = agent["id"]
+
+        # Count recent broadcasts (last 24h)
+        async with db.execute(
+            "SELECT COUNT(*) FROM broadcasts WHERE agent_id=? AND status='ready' AND created_at >= datetime('now','-24 hours')",
+            (agent_id,),
+        ) as cur:
+            recent_row = await cur.fetchone()
+
+        # Active creation job (most recent non-terminal)
+        async with db.execute(
+            """SELECT status, prompt FROM creation_jobs
+               WHERE agent_id=? AND status NOT IN ('done','error')
+               ORDER BY created_at DESC LIMIT 1""",
+            (agent_id,),
+        ) as cur:
+            job_row = await cur.fetchone()
+
+        # Most recent trace
+        async with db.execute(
+            "SELECT trace_type, message, created_at FROM agent_traces WHERE agent_id=? ORDER BY created_at DESC LIMIT 1",
+            (agent_id,),
+        ) as cur:
+            trace_row = await cur.fetchone()
+
+    last_seen = agent["last_seen_at"] or ""
+    is_active = False
+    if last_seen:
+        try:
+            diff = (datetime.utcnow() - datetime.fromisoformat(last_seen)).total_seconds()
+            is_active = diff < 900  # 15 min
+        except Exception:
+            pass
+
+    current_job = None
+    if job_row:
+        current_job = {"status": job_row["status"], "prompt": (job_row["prompt"] or "")[:80]}
+
+    last_trace = None
+    if trace_row:
+        last_trace = {
+            "type": trace_row["trace_type"],
+            "message": (trace_row["message"] or "")[:100],
+            "at": trace_row["created_at"],
+        }
+
+    return {
+        "name": agent_name,
+        "is_active": is_active,
+        "is_jailed": bool(agent["jail_mode"]),
+        "last_seen": last_seen,
+        "recent_broadcasts": recent_row[0] if recent_row else 0,
+        "current_job": current_job,
+        "last_trace": last_trace,
+    }
+
+
 # ---------------------------------------------------------------------------
 # PHASE 2 – HONEYPOTS, REPUTATION, ANOMALY
 # ---------------------------------------------------------------------------

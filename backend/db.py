@@ -817,4 +817,23 @@ async def init_agents_db() -> None:
         except Exception:
             pass
 
+        # Ghost Mode: agent thought traces
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS agent_traces (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    trace_type TEXT DEFAULT 'thought',
+                    message TEXT NOT NULL,
+                    metadata_json TEXT DEFAULT '{}',
+                    created_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_traces_agent ON agent_traces(agent_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_traces_time ON agent_traces(created_at)")
+        except Exception:
+            pass
+
         await db.commit()

@@ -51,6 +51,20 @@ interface SwarmTask {
   created_at: string
 }
 
+// ─── Task flow particles ──────────────────────────────────────────────────────
+
+interface TaskParticle {
+  id: number
+  fromId: number
+  toId: number
+  progress: number   // 0 → 1
+  label: string
+  color: string
+  speed: number
+}
+
+let _nextParticleId = 1
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const K_REPULSION = 8000
@@ -150,7 +164,8 @@ function drawFrame(
   idxMap: Map<number, number>,
   w: number,
   h: number,
-  hoveredId: number | null
+  hoveredId: number | null,
+  particles: TaskParticle[]
 ) {
   ctx.clearRect(0, 0, w, h)
 
@@ -166,7 +181,6 @@ function drawFrame(
     const a = simNodes[ai]
     const b = simNodes[bi]
 
-    // Mutual follow = thicker
     const mutual =
       adjMap.get(from)?.has(to) && adjMap.get(to)?.has(from)
 
@@ -178,6 +192,49 @@ function drawFrame(
     ctx.lineWidth = mutual ? 1.5 : 0.8
     ctx.globalAlpha = 0.25
     ctx.stroke()
+    ctx.restore()
+  })
+
+  // Task-flow particles
+  particles.forEach(p => {
+    const ai = idxMap.get(p.fromId)
+    const bi = idxMap.get(p.toId)
+    if (ai === undefined || bi === undefined) return
+    const a = simNodes[ai]
+    const b = simNodes[bi]
+    const px = a.x + (b.x - a.x) * p.progress
+    const py = a.y + (b.y - a.y) * p.progress
+
+    // Trail
+    ctx.save()
+    const gradient = ctx.createLinearGradient(a.x, a.y, px, py)
+    gradient.addColorStop(0, 'transparent')
+    gradient.addColorStop(1, p.color + '66')
+    ctx.beginPath()
+    ctx.moveTo(a.x, a.y)
+    ctx.lineTo(px, py)
+    ctx.strokeStyle = gradient
+    ctx.lineWidth = 1
+    ctx.stroke()
+    ctx.restore()
+
+    // Particle dot
+    ctx.save()
+    ctx.beginPath()
+    ctx.arc(px, py, 4, 0, Math.PI * 2)
+    ctx.fillStyle = p.color
+    ctx.shadowBlur = 10
+    ctx.shadowColor = p.color
+    ctx.fill()
+    ctx.restore()
+
+    // Label
+    ctx.save()
+    ctx.font = '9px monospace'
+    ctx.fillStyle = p.color
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'bottom'
+    ctx.fillText(p.label, px, py - 5)
     ctx.restore()
   })
 
@@ -261,6 +318,7 @@ export default function SwarmMap() {
   const [swarmTasks, setSwarmTasks] = useState<SwarmTask[]>([])
   const [taskPanelOpen, setTaskPanelOpen] = useState(true)
   const wsRef = useRef<WebSocket | null>(null)
+  const particlesRef = useRef<TaskParticle[]>([])
 
   // ── Fetch & init ──────────────────────────────────────────────────────────
 
@@ -317,6 +375,29 @@ export default function SwarmMap() {
 
   useEffect(() => {
     loadData()
+    // Seed TRO particles after a short delay for nodes to settle
+    setTimeout(() => {
+      fetch('/api/agents/tro?status=open&limit=10')
+        .then(r => r.ok ? r.json() : [])
+        .then((tros: { service_type: string }[]) => {
+          const nodes = simNodesRef.current
+          if (nodes.length < 2) return
+          const newParticles: TaskParticle[] = tros.slice(0, 8).map(tro => {
+            const from = nodes[Math.floor(Math.random() * nodes.length)]
+            const to = nodes[Math.floor(Math.random() * nodes.length)]
+            return {
+              id: _nextParticleId++,
+              fromId: from.id, toId: to.id,
+              progress: Math.random() * 0.5,
+              label: tro.service_type.slice(0, 10),
+              color: '#ffaa00',
+              speed: 0.003 + Math.random() * 0.003,
+            }
+          })
+          particlesRef.current = newParticles
+        })
+        .catch(() => {})
+    }, 2500)
     // Load open swarm tasks
     fetch('/api/agents/swarm/tasks?limit=20')
       .then(r => r.ok ? r.json() : [])
@@ -333,6 +414,20 @@ export default function SwarmMap() {
             required_capability: msg.required_capability, reward_usdc: msg.reward_usdc,
             bid_count: 0, status: 'open', created_at: new Date().toISOString(),
           }, ...prev].slice(0, 30))
+          // Spawn a task particle across a random edge if nodes exist
+          const nodes = simNodesRef.current
+          if (nodes.length >= 2) {
+            const from = nodes[Math.floor(Math.random() * nodes.length)]
+            const to = nodes[Math.floor(Math.random() * nodes.length)]
+            if (from.id !== to.id) {
+              particlesRef.current = [...particlesRef.current, {
+                id: _nextParticleId++,
+                fromId: from.id, toId: to.id,
+                progress: 0, label: (msg.required_capability || 'task').slice(0, 12),
+                color: '#00f5ff', speed: 0.004 + Math.random() * 0.003,
+              }].slice(-20)
+            }
+          }
         }
       } catch { /* ignore parse errors */ }
     }
@@ -392,6 +487,10 @@ export default function SwarmMap() {
           w / 2,
           h / 2
         )
+        // Advance and prune task particles
+        particlesRef.current = particlesRef.current
+          .map(p => ({ ...p, progress: p.progress + p.speed }))
+          .filter(p => p.progress < 1)
         drawFrame(
           ctx,
           simNodes,
@@ -400,7 +499,8 @@ export default function SwarmMap() {
           idxMapRef.current,
           w,
           h,
-          hoveredIdRef.current
+          hoveredIdRef.current,
+          particlesRef.current
         )
       } else if (loading) {
         // Loading state

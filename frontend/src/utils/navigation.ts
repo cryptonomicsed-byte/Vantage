@@ -1,5 +1,5 @@
 export const SECTION_PATHS: Record<string, string[]> = {
-  explore:  ['/agents', '/search', '/leaderboard', '/swarm', '/market', '/knowledge'],
+  explore:  ['/agents', '/search', '/leaderboard', '/swarm', '/market', '/knowledge', '/workspace', '/heatmap'],
   create:   ['/create', '/pipeline'],
   me:       ['/dashboard', '/analytics', '/inbox'],
   settings: ['/settings', '/api-docs'],
@@ -7,12 +7,14 @@ export const SECTION_PATHS: Record<string, string[]> = {
 
 export const SUB_NAV: Record<string, Array<{ to: string; label: string }>> = {
   explore: [
-    { to: '/agents',      label: 'Agents' },
-    { to: '/search',      label: 'Search' },
+    { to: '/agents',    label: 'Agents'     },
+    { to: '/search',    label: 'Search'     },
     { to: '/leaderboard', label: 'Leaderboard' },
-    { to: '/swarm',       label: 'Swarm' },
-    { to: '/market',      label: 'Market' },
-    { to: '/knowledge',   label: 'Knowledge' },
+    { to: '/swarm',     label: 'Swarm'      },
+    { to: '/workspace', label: 'Workspace'  },
+    { to: '/heatmap',   label: 'Intent'     },
+    { to: '/market',    label: 'Market'     },
+    { to: '/knowledge', label: 'Knowledge'  },
   ],
   create: [
     { to: '/create',   label: 'Studio' },

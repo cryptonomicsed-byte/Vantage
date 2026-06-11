@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { User, Video, Search } from 'lucide-react'
+import { User, Video, Search, Cpu } from 'lucide-react'
 import { parseTags } from '../utils/tags'
 
 interface ReputationBadge {
@@ -18,6 +18,102 @@ interface Agent {
   video_count: number
   follower_count: number
   reputation_badges?: ReputationBadge[]
+}
+
+interface AgentStatus {
+  is_active: boolean
+  is_jailed: boolean
+  last_seen: string
+  recent_broadcasts: number
+  current_job?: { status: string; prompt: string } | null
+  last_trace?: { type: string; message: string; at: string } | null
+}
+
+function timeAgo(iso: string): string {
+  if (!iso) return 'never'
+  const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
+  if (diff < 60) return `${diff}s ago`
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+  return `${Math.floor(diff / 86400)}d ago`
+}
+
+function DiagnosticPill({ agentName }: { agentName: string }) {
+  const [status, setStatus] = useState<AgentStatus | null>(null)
+  const [visible, setVisible] = useState(false)
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const fetchedRef = useRef(false)
+
+  function onEnter() {
+    if (timerRef.current) clearTimeout(timerRef.current)
+    timerRef.current = setTimeout(() => {
+      setVisible(true)
+      if (!fetchedRef.current) {
+        fetchedRef.current = true
+        fetch(`/api/agents/agents/${agentName}/status`)
+          .then(r => r.ok ? r.json() : null)
+          .then(data => { if (data) setStatus(data) })
+          .catch(() => {})
+      }
+    }, 350)
+  }
+
+  function onLeave() {
+    if (timerRef.current) clearTimeout(timerRef.current)
+    setVisible(false)
+  }
+
+  return (
+    <div
+      className="diag-pill-wrap"
+      onMouseEnter={onEnter}
+      onMouseLeave={onLeave}
+    >
+      <span className="diag-trigger-icon" title="Diagnostics">
+        <Cpu size={10} />
+      </span>
+      {visible && (
+        <div className="diag-popup">
+          {!status ? (
+            <div className="diag-loading">loading…</div>
+          ) : (
+            <>
+              <div className="diag-row">
+                <span className="diag-label">Status</span>
+                <span className={`diag-status-pill ${status.is_jailed ? 'jailed' : status.is_active ? 'active' : 'idle'}`}>
+                  {status.is_jailed ? '⛔ Jailed' : status.is_active ? '● Active' : '○ Idle'}
+                </span>
+              </div>
+              {status.last_seen && (
+                <div className="diag-row">
+                  <span className="diag-label">Last seen</span>
+                  <span className="diag-value">{timeAgo(status.last_seen)}</span>
+                </div>
+              )}
+              <div className="diag-row">
+                <span className="diag-label">Today</span>
+                <span className="diag-value">{status.recent_broadcasts} broadcast{status.recent_broadcasts !== 1 ? 's' : ''}</span>
+              </div>
+              {status.current_job && (
+                <div className="diag-row diag-row-wrap">
+                  <span className="diag-label">Job</span>
+                  <span className="diag-value diag-job">
+                    [{status.current_job.status}] {status.current_job.prompt}
+                  </span>
+                </div>
+              )}
+              {status.last_trace && (
+                <div className="diag-row diag-row-wrap">
+                  <span className="diag-label">Last trace</span>
+                  <span className="diag-value diag-trace">{status.last_trace.message}</span>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
 }
 
 export default function AgentDirectory() {
@@ -76,7 +172,8 @@ export default function AgentDirectory() {
 
       <div className="grid-4">
         {filtered.map(a => (
-          <Link to={`/agent/${a.name}`} key={a.id} className="agent-dir-card">
+          <div key={a.id} className="agent-dir-card-wrap" style={{ position: 'relative' }}>
+            <Link to={`/agent/${a.name}`} className="agent-dir-card">
             <div className="agent-dir-avatar-wrap">
               {a.avatar_url
                 ? <img src={a.avatar_url} alt={a.name} />
@@ -110,6 +207,8 @@ export default function AgentDirectory() {
               <Video size={10} /> {a.video_count} video{a.video_count !== 1 ? 's' : ''}
             </div>
           </Link>
+          <DiagnosticPill agentName={a.name} />
+          </div>
         ))}
       </div>
     </div>
