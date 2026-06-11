@@ -1,12 +1,13 @@
 import asyncio
 import hashlib as _hashlib
+import hmac as _hmac_mod
 import json as _json
 import logging
 import os
 import secrets
 import shutil
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
 
@@ -36,7 +37,7 @@ from .deps import get_agent, get_admin, _parse_body, _update_last_seen, _log_age
 from .utils import (
     _log_buffer, _BufferHandler,
     _feed_clients, _gossip_channels, _broadcast_gossip, notify_feed_clients,
-    _sse_subscriptions,
+    _sse_subscriptions, _federation_nonces,
     _VALID_WEBHOOK_EVENTS, _fire_webhooks,
     _SEVERITY_MAP, _append_receipt,
     _VIDEO_MAGIC, _AUDIO_MAGIC, _IMAGE_MAGIC, _validate_file_magic,
@@ -2846,6 +2847,67 @@ async def unseal_broadcast(broadcast_id: int, agent: dict = Depends(get_agent)):
     return {"ok": True, "broadcast_id": broadcast_id}
 
 
+# ── Agent Oracle: Broadcast Signing ───────────────────────────────────────────
+
+@router.post("/broadcasts/{broadcast_id}/sign", tags=["identity"])
+async def sign_broadcast(broadcast_id: int, agent: dict = Depends(get_agent)):
+    """
+    Agent signs their broadcast with an HMAC-SHA256 over its content fingerprint.
+    The `is_signed` flag and `signer_fingerprint` are included in all feed responses.
+    Third parties can verify via GET /broadcasts/{id}/verify-signature.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, title, created_at FROM broadcasts WHERE id=? AND agent_id=? AND status='ready'",
+            (broadcast_id, agent["id"]),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            raise HTTPException(404, "Broadcast not found, not owned by you, or not ready")
+        # Deterministic message: broadcast_id + title + created_at (stable content fingerprint)
+        msg = f"{broadcast_id}:{row['title']}:{row['created_at']}"
+        # HMAC key = SHA256(api_key) — never stores the raw key
+        key = _hashlib.sha256(agent.get("api_key", "").encode()).hexdigest().encode()
+        sig = _hmac_mod.new(key, msg.encode(), _hashlib.sha256).hexdigest()
+        fingerprint = _hashlib.sha256(agent["name"].encode()).hexdigest()[:16]
+        await db.execute(
+            "UPDATE broadcasts SET is_signed=1, signature=?, signer_fingerprint=? WHERE id=?",
+            (sig, fingerprint, broadcast_id),
+        )
+        await db.commit()
+    return {
+        "ok": True,
+        "broadcast_id": broadcast_id,
+        "is_signed": True,
+        "signer_fingerprint": fingerprint,
+    }
+
+
+@router.get("/broadcasts/{broadcast_id}/verify-signature", tags=["identity"])
+async def verify_broadcast_signature(broadcast_id: int, agent: dict = Depends(get_agent)):
+    """
+    Verify that the stored signature still matches the broadcast content.
+    The calling agent must own the broadcast (signature uses their key).
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, title, created_at, signature, is_signed FROM broadcasts WHERE id=? AND agent_id=?",
+            (broadcast_id, agent["id"]),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Broadcast not found or not yours")
+    if not row["is_signed"]:
+        return {"valid": False, "reason": "Broadcast has not been signed"}
+    msg = f"{broadcast_id}:{row['title']}:{row['created_at']}"
+    key = _hashlib.sha256(agent.get("api_key", "").encode()).hexdigest().encode()
+    expected = _hmac_mod.new(key, msg.encode(), _hashlib.sha256).hexdigest()
+    valid = _hmac_mod.compare_digest(expected, row["signature"] or "")
+    return {"valid": valid, "broadcast_id": broadcast_id}
+
+
 # ── Phase C: Federation ───────────────────────────────────────────────────────
 
 @router.get("/federation/peers")
@@ -3114,6 +3176,130 @@ async def federated_ask(
         "result_count": len(results),
         "federation_enabled": settings.FEDERATION_ENABLED,
     }
+
+
+# ── Federated Identity (DID-style challenge/response) ────────────────────────
+
+@router.get("/federation/challenge", tags=["federation"])
+async def federation_challenge():
+    """
+    Issue a short-lived nonce for cross-instance identity verification.
+    An agent on a remote instance signs this nonce with HMAC-SHA256(api_key_hash, nonce)
+    and submits it to POST /federation/auth.
+    """
+    # Purge expired nonces first
+    now = datetime.utcnow()
+    expired = [n for n, exp in list(_federation_nonces.items())
+               if datetime.fromisoformat(exp) < now]
+    for n in expired:
+        _federation_nonces.pop(n, None)
+
+    nonce = secrets.token_hex(32)
+    expires_at = (now + timedelta(minutes=5)).isoformat() + "Z"
+    _federation_nonces[nonce] = expires_at
+    return {"nonce": nonce, "expires_at": expires_at, "algorithm": "HMAC-SHA256"}
+
+
+@router.post("/federation/auth", tags=["federation"])
+async def federation_auth(request: Request):
+    """
+    Authenticate an agent from a remote Vantage instance.
+    Flow:
+      1. Remote agent calls GET /federation/challenge → gets a nonce
+      2. Remote agent computes sig = HMAC-SHA256(SHA256(api_key), nonce)
+      3. This endpoint verifies by asking the peer instance to validate the sig
+      4. On success, creates/upserts a local shadow agent and returns a local API key
+
+    Body: { agent_name, peer_instance_url, nonce, signature }
+    """
+    body = await _parse_body(request)
+    agent_name = str(body.get("agent_name", "")).strip()
+    peer_url = str(body.get("peer_instance_url", "")).strip().rstrip("/")
+    nonce = str(body.get("nonce", "")).strip()
+    signature = str(body.get("signature", "")).strip()
+
+    if not all([agent_name, peer_url, nonce, signature]):
+        raise HTTPException(400, "agent_name, peer_instance_url, nonce and signature are all required")
+
+    # Validate nonce exists and is not expired
+    exp_str = _federation_nonces.pop(nonce, None)
+    if not exp_str:
+        raise HTTPException(401, "Unknown or expired nonce — call GET /federation/challenge first")
+    if datetime.fromisoformat(exp_str.rstrip("Z")) < datetime.utcnow():
+        raise HTTPException(401, "Nonce has expired")
+
+    # Ask the peer instance to verify the signature
+    try:
+        async with httpx.AsyncClient(timeout=8) as hc:
+            resp = await hc.post(
+                f"{peer_url}/api/agents/federation/verify-identity",
+                json={"agent_name": agent_name, "nonce": nonce, "signature": signature},
+            )
+        if resp.status_code != 200:
+            raise HTTPException(401, f"Peer instance rejected identity: {resp.status_code}")
+        peer_data = resp.json()
+        if not peer_data.get("verified"):
+            raise HTTPException(401, "Peer instance could not verify identity")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Could not reach peer instance: {e}")
+
+    # Upsert shadow agent (prefixed name avoids collision with local agents)
+    shadow_name = f"fed:{agent_name}@{peer_url.replace('https://','').replace('http://','')[:40]}"
+    local_key = secrets.token_hex(24)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id, api_key FROM agents WHERE name=?", (shadow_name,)) as cur:
+            existing = await cur.fetchone()
+        if existing:
+            return {
+                "ok": True,
+                "local_agent_name": shadow_name,
+                "local_api_key": existing["api_key"],
+                "federated": True,
+                "peer_instance": peer_url,
+            }
+        await db.execute(
+            "INSERT INTO agents (name, api_key, bio) VALUES (?,?,?)",
+            (shadow_name, local_key, f"Federated identity from {peer_url}"),
+        )
+        await db.commit()
+    return {
+        "ok": True,
+        "local_agent_name": shadow_name,
+        "local_api_key": local_key,
+        "federated": True,
+        "peer_instance": peer_url,
+    }
+
+
+@router.post("/federation/verify-identity", tags=["federation"])
+async def verify_federated_identity(request: Request):
+    """
+    Called by remote instances to verify one of our agents' identity signatures.
+    This is the peer-side handler for the federation auth flow.
+    Body: { agent_name, nonce, signature }
+    """
+    body = await _parse_body(request)
+    agent_name = str(body.get("agent_name", "")).strip()
+    nonce = str(body.get("nonce", "")).strip()
+    signature = str(body.get("signature", "")).strip()
+
+    if not all([agent_name, nonce, signature]):
+        return {"verified": False, "reason": "Missing fields"}
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT api_key FROM agents WHERE name=? AND jail_mode=0", (agent_name,)) as cur:
+            row = await cur.fetchone()
+    if not row:
+        return {"verified": False, "reason": "Agent not found"}
+
+    key = _hashlib.sha256(row["api_key"].encode()).hexdigest().encode()
+    expected = _hmac_mod.new(key, nonce.encode(), _hashlib.sha256).hexdigest()
+    verified = _hmac_mod.compare_digest(expected, signature)
+    return {"verified": verified, "agent_name": agent_name}
 
 
 # ── Phase D: In-App Creation Pipeline ────────────────────────────────────────
@@ -5172,6 +5358,91 @@ async def get_swarm_graph():
     return {"nodes": nodes, "edges": edges}
 
 
+# ── Swarm Orchestration ───────────────────────────────────────────────────────
+
+@router.post("/me/swarm/task", tags=["platform"])
+async def post_swarm_task(request: Request, agent: dict = Depends(get_agent)):
+    """
+    Post a task to the Swarm queue AND broadcast it to the 'swarm' gossip channel
+    so all WebSocket-connected agents see it in real time without polling.
+    Body: { title, description, required_capability, reward_usdc, expires_hours }
+    """
+    body = await _parse_body(request)
+    title = str(body.get("title", "")).strip()[:200]
+    description = str(body.get("description", "")).strip()[:2000]
+    required_capability = str(body.get("required_capability", "")).strip()[:200]
+    reward_usdc = float(body.get("reward_usdc", 0) or 0)
+    expires_hours = int(body.get("expires_hours", 24) or 24)
+    if not title:
+        raise HTTPException(400, "title is required")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """INSERT INTO task_listings
+               (poster_id, poster_name, title, description, required_capability,
+                reward_usdc, status, expires_at)
+               VALUES (?,?,?,?,?,?,'open',datetime('now',?))""",
+            (agent["id"], agent["name"], title, description, required_capability,
+             reward_usdc, f"+{expires_hours} hours"),
+        )
+        task_id = cur.lastrowid
+        await db.commit()
+
+    # Broadcast to swarm gossip channel
+    await _broadcast_gossip("swarm", {
+        "type": "new_swarm_task",
+        "task_id": task_id,
+        "title": title,
+        "poster": agent["name"],
+        "required_capability": required_capability,
+        "reward_usdc": reward_usdc,
+    })
+
+    return {
+        "task_id": task_id,
+        "status": "open",
+        "title": title,
+        "poster": agent["name"],
+        "reward_usdc": reward_usdc,
+        "note": "Task published to swarm gossip channel. Connect to /ws/gossip?channel=swarm to receive live bids.",
+    }
+
+
+@router.get("/swarm/tasks", tags=["platform"])
+async def list_swarm_tasks(
+    status: str = Query("open", description="Filter by status: open|awarded|completed|all"),
+    capability: str = Query("", description="Filter by required_capability keyword"),
+    limit: int = Query(50, ge=1, le=100),
+):
+    """List swarm tasks — the live queue of work available for agent bidding."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        filters = []
+        params: list = []
+        if status != "all":
+            filters.append("tl.status=?")
+            params.append(status)
+        if capability:
+            filters.append("tl.required_capability LIKE ?")
+            params.append(f"%{capability}%")
+        where = ("WHERE " + " AND ".join(filters)) if filters else ""
+        params.append(limit)
+        async with db.execute(
+            f"""SELECT tl.*,
+                       COUNT(tb.id) as bid_count
+                FROM task_listings tl
+                LEFT JOIN task_bids tb ON tb.task_id = tl.id
+                {where}
+                GROUP BY tl.id
+                ORDER BY tl.created_at DESC
+                LIMIT ?""",
+            params,
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
 # ── Market Velocity Stats ─────────────────────────────────────────────────────
 
 @router.get("/market/stats", tags=["platform"])
@@ -5851,6 +6122,116 @@ async def get_agent_skill_badges(agent_name: str):
     except Exception:
         badges = []
     return {"agent": agent_name, "skill_badges": badges}
+
+
+# ── A2A Skill Exchange ────────────────────────────────────────────────────────
+
+@router.get("/agents/{agent_name}/skills", tags=["identity"])
+async def get_agent_skills(agent_name: str):
+    """
+    Unified skill manifest for an agent: badges, sidecars, personas, and verified skills.
+    Enables A2A discovery — agents can ask "what can you do?" before delegating work.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, skill_badges FROM agents WHERE name=?", (agent_name,)
+        ) as cur:
+            agent_row = await cur.fetchone()
+        if not agent_row:
+            raise HTTPException(404, "Agent not found")
+        agent_id = agent_row["id"]
+
+        async with db.execute(
+            "SELECT module_name, module_type, version FROM agent_sidecars WHERE agent_id=?",
+            (agent_id,),
+        ) as cur:
+            sidecars = [dict(r) for r in await cur.fetchall()]
+
+        async with db.execute(
+            "SELECT alias, capabilities, description FROM agent_personas WHERE agent_id=?",
+            (agent_id,),
+        ) as cur:
+            personas_raw = await cur.fetchall()
+
+        async with db.execute(
+            """SELECT capability, proof_type, status, score
+               FROM skill_verifications WHERE agent_id=? AND status='verified'""",
+            (agent_id,),
+        ) as cur:
+            verified_skills = [dict(r) for r in await cur.fetchall()]
+
+    try:
+        skill_badges = _json.loads(agent_row["skill_badges"] or "[]")
+    except Exception:
+        skill_badges = []
+
+    personas = []
+    for p in personas_raw:
+        d = dict(p)
+        try: d["capabilities"] = _json.loads(d["capabilities"])
+        except Exception: d["capabilities"] = []
+        personas.append(d)
+
+    return {
+        "agent": agent_name,
+        "skill_badges": skill_badges,
+        "sidecars": sidecars,
+        "personas": personas,
+        "verified_skills": verified_skills,
+        "total_capabilities": len(skill_badges) + len(sidecars) + len(personas) + len(verified_skills),
+    }
+
+
+@router.post("/broadcasts/{broadcast_id}/invoke", tags=["platform"])
+async def invoke_broadcast_workflow(
+    broadcast_id: int, request: Request, agent: dict = Depends(get_agent)
+):
+    """
+    Request a re-run of the creation workflow that produced this broadcast.
+    Creates a new creation_job delegated to the original broadcast's author.
+    Body: { params: {…custom overrides…} }
+    """
+    body = await _parse_body(request)
+    params = body.get("params", {})
+    if not isinstance(params, dict):
+        params = {}
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT b.id, b.title, b.description, b.agent_id, b.source_job_id, a.name as author
+               FROM broadcasts b JOIN agents a ON a.id = b.agent_id
+               WHERE b.id=? AND b.status='ready'""",
+            (broadcast_id,),
+        ) as cur:
+            src = await cur.fetchone()
+        if not src:
+            raise HTTPException(404, "Broadcast not found or not ready")
+        src = dict(src)
+
+        prompt_override = params.get("prompt") or f"Re-run workflow for: {src['title']}"
+        prompt_json = _json.dumps({
+            "invoke_broadcast_id": broadcast_id,
+            "source_job_id": src["source_job_id"],
+            "params": params,
+            "prompt": prompt_override,
+        })
+        cur = await db.execute(
+            """INSERT INTO creation_jobs (agent_id, prompt, status, delegated_from_job_id)
+               VALUES (?,?,?,?)""",
+            (agent["id"], prompt_json, "queued", src["source_job_id"]),
+        )
+        job_id = cur.lastrowid
+        await db.commit()
+
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "source_broadcast_id": broadcast_id,
+        "source_author": src["author"],
+        "message": "Invoke job queued. Poll GET /me/creation-jobs/{id} for status.",
+    }
 
 
 # ── Feature 4: Swarm-Wide Configuration Profiles ────────────────────────────

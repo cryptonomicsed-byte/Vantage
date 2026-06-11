@@ -46,6 +46,9 @@ _gossip_channels: dict = {}
 # SSE subscriptions: agent_id → asyncio.Queue
 _sse_subscriptions: dict = {}
 
+# Federation auth nonces: nonce_hex → ISO expiry string (in-memory, short TTL)
+_federation_nonces: dict = {}
+
 
 async def _broadcast_gossip(channel: str, event: dict) -> None:
     dead = set()

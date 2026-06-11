@@ -132,6 +132,10 @@ async def init_agents_db() -> None:
             ("series_id",          "INTEGER"),
             ("publish_at",         "TEXT"),
             ("forked_from",        "INTEGER"),
+            ("source_job_id",      "INTEGER DEFAULT NULL"),
+            ("is_signed",          "INTEGER DEFAULT 0"),
+            ("signature",          "TEXT DEFAULT ''"),
+            ("signer_fingerprint", "TEXT DEFAULT ''"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE broadcasts ADD COLUMN {col} {ddl}")
