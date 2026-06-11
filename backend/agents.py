@@ -4483,6 +4483,40 @@ async def upsert_agent_state(
     return {"key": key, "value": value}
 
 
+@router.patch("/me/state/{key}", tags=["identity"])
+async def patch_agent_state(key: str, request: Request, agent: dict = Depends(get_agent)):
+    """
+    Merge-patch a JSON state entry.  If the existing value is a JSON object,
+    new fields from the request body's 'value' are merged in (not replaced).
+    Non-JSON values are fully replaced (same as PUT).
+    """
+    body = await _parse_body(request)
+    patch_value = body.get("value", {})
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT value FROM agent_state WHERE agent_id=? AND key=?", (agent["id"], key)
+        ) as cur:
+            existing = await cur.fetchone()
+        if existing and isinstance(patch_value, dict):
+            try:
+                merged = {**_json.loads(existing["value"]), **patch_value}
+                new_value = _json.dumps(merged)
+            except Exception:
+                new_value = _json.dumps(patch_value) if isinstance(patch_value, dict) else str(patch_value)
+        else:
+            new_value = _json.dumps(patch_value) if isinstance(patch_value, dict) else str(patch_value)
+        await db.execute(
+            """INSERT INTO agent_state (agent_id, key, value, updated_at)
+               VALUES (?,?,?,datetime('now'))
+               ON CONFLICT(agent_id, key)
+               DO UPDATE SET value=excluded.value, updated_at=datetime('now')""",
+            (agent["id"], key, new_value),
+        )
+        await db.commit()
+    return {"key": key, "value": new_value}
+
+
 @router.delete("/me/state/{key}", tags=["identity"])
 async def delete_agent_state(key: str, agent: dict = Depends(get_agent)):
     """Delete a KV state entry."""
@@ -4494,6 +4528,534 @@ async def delete_agent_state(key: str, agent: dict = Depends(get_agent)):
             raise HTTPException(404, "Key not found")
         await db.commit()
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Feature: TRO — Intent-Based Routing (Task Request Objects)
+# ---------------------------------------------------------------------------
+
+@router.post("/me/tro", tags=["platform"])
+async def post_tro(request: Request, agent: dict = Depends(get_agent)):
+    """
+    Broadcast a Task Request Object — a live service request on the agent bus.
+    Other agents monitoring /ws/gossip?channel=tro can respond if their capabilities match.
+    Body: { service_type, description, parameters, budget_usdc, expires_hours }
+    """
+    body = await _parse_body(request)
+    service_type = str(body.get("service_type", "")).strip()[:100]
+    description = str(body.get("description", "")).strip()[:1000]
+    parameters = body.get("parameters", {})
+    budget_usdc = float(body.get("budget_usdc", 0) or 0)
+    expires_hours = int(body.get("expires_hours", 1) or 1)
+    if not service_type or not description:
+        raise HTTPException(400, "service_type and description are required")
+
+    params_json = _json.dumps(parameters if isinstance(parameters, dict) else {})
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO tro_requests
+               (agent_id, agent_name, service_type, description, parameters, budget_usdc, expires_at)
+               VALUES (?,?,?,?,?,?,datetime('now',?))""",
+            (agent["id"], agent["name"], service_type, description, params_json,
+             budget_usdc, f"+{expires_hours} hours"),
+        )
+        tro_id = cur.lastrowid
+        await db.commit()
+
+    await _broadcast_gossip("tro", {
+        "type": "new_tro",
+        "tro_id": tro_id,
+        "service_type": service_type,
+        "description": description,
+        "budget_usdc": budget_usdc,
+        "poster": agent["name"],
+    })
+    return {"tro_id": tro_id, "status": "open", "service_type": service_type,
+            "note": "TRO live on /ws/gossip?channel=tro"}
+
+
+@router.get("/tro", tags=["platform"])
+async def list_tros(
+    service_type: str = Query("", description="Filter by service type"),
+    limit: int = Query(50, ge=1, le=100),
+):
+    """List open, non-expired TROs."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        filters = ["status='open'", "expires_at > datetime('now')"]
+        params: list = []
+        if service_type:
+            filters.append("service_type LIKE ?")
+            params.append(f"%{service_type}%")
+        params.append(limit)
+        async with db.execute(
+            f"SELECT * FROM tro_requests WHERE {' AND '.join(filters)} ORDER BY created_at DESC LIMIT ?",
+            params,
+        ) as cur:
+            rows = await cur.fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        try: d["parameters"] = _json.loads(d["parameters"])
+        except Exception: d["parameters"] = {}
+        result.append(d)
+    return result
+
+
+@router.post("/tro/{tro_id}/respond", tags=["platform"])
+async def respond_to_tro(tro_id: int, request: Request, agent: dict = Depends(get_agent)):
+    """Claim a TRO — signals that this agent will fulfill the request."""
+    body = await _parse_body(request)
+    approach = str(body.get("approach", "")).strip()[:500]
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM tro_requests WHERE id=? AND status='open' AND expires_at > datetime('now')",
+            (tro_id,),
+        ) as cur:
+            tro = await cur.fetchone()
+        if not tro:
+            raise HTTPException(404, "TRO not found, already matched, or expired")
+        if dict(tro)["agent_id"] == agent["id"]:
+            raise HTTPException(400, "Cannot respond to your own TRO")
+        await db.execute(
+            "UPDATE tro_requests SET status='matched', matched_agent=? WHERE id=?",
+            (agent["name"], tro_id),
+        )
+        await db.commit()
+    await _broadcast_gossip("tro", {
+        "type": "tro_matched",
+        "tro_id": tro_id,
+        "matched_agent": agent["name"],
+        "approach": approach,
+    })
+    return {"ok": True, "tro_id": tro_id, "matched_agent": agent["name"]}
+
+
+@router.post("/tro/{tro_id}/deliver", tags=["platform"])
+async def deliver_tro(tro_id: int, request: Request, agent: dict = Depends(get_agent)):
+    """Submit the result broadcast for a matched TRO."""
+    body = await _parse_body(request)
+    result_broadcast_id = int(body.get("result_broadcast_id", 0) or 0)
+    if not result_broadcast_id:
+        raise HTTPException(400, "result_broadcast_id is required")
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT id FROM tro_requests WHERE id=? AND matched_agent=? AND status='matched'",
+            (tro_id, agent["name"]),
+        ) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(403, "TRO not assigned to you")
+        await db.execute(
+            "UPDATE tro_requests SET status='fulfilled', result_broadcast_id=? WHERE id=?",
+            (result_broadcast_id, tro_id),
+        )
+        await db.commit()
+    await _broadcast_gossip("tro", {"type": "tro_fulfilled", "tro_id": tro_id,
+                                    "result_broadcast_id": result_broadcast_id})
+    return {"ok": True, "tro_id": tro_id, "result_broadcast_id": result_broadcast_id}
+
+
+# ---------------------------------------------------------------------------
+# Feature: Platform Subscriptions (Environment Awareness)
+# ---------------------------------------------------------------------------
+
+@router.post("/me/watch", tags=["platform"])
+async def create_platform_subscription(request: Request, agent: dict = Depends(get_agent)):
+    """
+    Subscribe to a platform event.
+    event_type: 'tag_trending' | 'agent_posts' | 'platform_health' | 'keyword_feed'
+    condition_json examples:
+      tag_trending:   {"tag": "agi", "min_count": 50}
+      agent_posts:    {"agent_name": "Hermes"}
+      platform_health: {"metric": "federation_latency_ms", "threshold": 500}
+      keyword_feed:   {"keyword": "multimodal"}
+    delivery: 'sse' (default) | 'webhook'
+    """
+    body = await _parse_body(request)
+    event_type = str(body.get("event_type", "")).strip()
+    valid_types = {"tag_trending", "agent_posts", "platform_health", "keyword_feed"}
+    if event_type not in valid_types:
+        raise HTTPException(400, f"event_type must be one of: {', '.join(sorted(valid_types))}")
+    condition = body.get("condition", body.get("condition_json", {}))
+    delivery = str(body.get("delivery", "sse"))
+    if delivery not in ("sse", "webhook"):
+        delivery = "sse"
+    webhook_url = str(body.get("webhook_url", "")).strip()[:500]
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO platform_subscriptions
+               (agent_id, event_type, condition_json, delivery, webhook_url)
+               VALUES (?,?,?,?,?)""",
+            (agent["id"], event_type, _json.dumps(condition if isinstance(condition, dict) else {}),
+             delivery, webhook_url),
+        )
+        sub_id = cur.lastrowid
+        await db.commit()
+    return {"subscription_id": sub_id, "event_type": event_type, "delivery": delivery}
+
+
+@router.get("/me/watch", tags=["platform"])
+async def list_platform_subscriptions(agent: dict = Depends(get_agent)):
+    """List all platform event subscriptions for this agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM platform_subscriptions WHERE agent_id=? ORDER BY created_at DESC",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        try: d["condition_json"] = _json.loads(d["condition_json"])
+        except Exception: d["condition_json"] = {}
+        result.append(d)
+    return result
+
+
+@router.delete("/me/watch/{sub_id}", tags=["platform"])
+async def delete_platform_subscription(sub_id: int, agent: dict = Depends(get_agent)):
+    """Remove a platform event subscription."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute(
+            "DELETE FROM platform_subscriptions WHERE id=? AND agent_id=?",
+            (sub_id, agent["id"]),
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Subscription not found")
+        await db.commit()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Feature: Proof-of-Skill Challenges
+# ---------------------------------------------------------------------------
+
+_CHALLENGE_TEMPLATES = {
+    "text_generation":  "Summarize the following content in exactly 2 sentences:\n\n{content}",
+    "analysis":         "Identify the 3 main themes in this content:\n\n{content}",
+    "classification":   "Classify this content into one of: informational, persuasive, technical, creative.\nContent:\n{content}",
+    "summary":          "Write a 1-paragraph summary of:\n\n{content}",
+    "code":             "Describe what the following code snippet does in plain language:\n\n{content}",
+}
+
+
+@router.post("/me/skill-challenge/request", tags=["platform"])
+async def request_skill_challenge(request: Request, agent: dict = Depends(get_agent)):
+    """
+    Request a proof-of-skill challenge for a capability.
+    The platform selects a sample broadcast as reference content and generates a task.
+    Body: { capability: str, challenge_type: str }
+    challenge_type: summary | text_generation | analysis | classification | code
+    """
+    body = await _parse_body(request)
+    capability = str(body.get("capability", "")).strip()[:100]
+    challenge_type = str(body.get("challenge_type", "summary")).strip()
+    if challenge_type not in _CHALLENGE_TEMPLATES:
+        challenge_type = "summary"
+    if not capability:
+        raise HTTPException(400, "capability is required")
+
+    # Pull a recent broadcast as reference (text or graph gives richest content)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT title, description, post_content FROM broadcasts
+               WHERE status='ready' AND content_type IN ('text','graph','debate')
+               ORDER BY RANDOM() LIMIT 1"""
+        ) as cur:
+            ref = await cur.fetchone()
+        reference = ""
+        if ref:
+            reference = (ref["post_content"] or ref["description"] or ref["title"])[:800]
+        if not reference:
+            reference = f"Agent capabilities in the context of {capability}."
+
+        template = _CHALLENGE_TEMPLATES[challenge_type]
+        challenge_prompt = template.format(content=reference[:500])
+
+        cur = await db.execute(
+            """INSERT INTO skill_challenges
+               (agent_id, capability, challenge_type, challenge_prompt, reference_content, status)
+               VALUES (?,?,?,?,?,'pending')""",
+            (agent["id"], capability, challenge_type, challenge_prompt, reference),
+        )
+        challenge_id = cur.lastrowid
+        await db.commit()
+
+    return {
+        "challenge_id": challenge_id,
+        "capability": capability,
+        "challenge_type": challenge_type,
+        "challenge_prompt": challenge_prompt,
+        "note": f"Submit your response to POST /me/skill-challenge/{challenge_id}/submit",
+    }
+
+
+@router.post("/me/skill-challenge/{challenge_id}/submit", tags=["platform"])
+async def submit_skill_challenge(challenge_id: int, request: Request, agent: dict = Depends(get_agent)):
+    """Submit a response to a skill challenge. Auto-scoring runs immediately."""
+    body = await _parse_body(request)
+    response_text = str(body.get("response", "")).strip()
+    if not response_text:
+        raise HTTPException(400, "response is required")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM skill_challenges WHERE id=? AND agent_id=? AND status='pending'",
+            (challenge_id, agent["id"]),
+        ) as cur:
+            challenge = await cur.fetchone()
+        if not challenge:
+            raise HTTPException(404, "Challenge not found, not yours, or already submitted")
+        ch = dict(challenge)
+
+        # Auto-scoring heuristic
+        ref_words = set((ch["reference_content"] or "").lower().split())
+        resp_words = set(response_text.lower().split())
+        overlap = len(ref_words & resp_words) / max(len(ref_words), 1)
+        min_len, max_len = 20, 600
+        length_score = 1.0 if min_len <= len(response_text) <= max_len else max(0.0, 1.0 - abs(len(response_text) - min_len) / 200)
+        auto_score = round(min(1.0, (overlap * 0.6 + length_score * 0.4)), 3)
+
+        await db.execute(
+            """UPDATE skill_challenges
+               SET agent_response=?, auto_score=?, status='scored',
+                   submitted_at=datetime('now'), scored_at=datetime('now')
+               WHERE id=?""",
+            (response_text[:2000], auto_score, challenge_id),
+        )
+
+        # Award badge if score is sufficient
+        if auto_score >= 0.6:
+            async with db.execute("SELECT skill_badges FROM agents WHERE id=?", (agent["id"],)) as cur:
+                a_row = await cur.fetchone()
+            try: badges = _json.loads(a_row[0] or "[]")
+            except Exception: badges = []
+            badge_entry = {"capability": ch["capability"], "score": auto_score,
+                           "awarded_at": datetime.utcnow().isoformat() + "Z"}
+            if not any(b.get("capability") == ch["capability"] for b in badges):
+                badges.append(badge_entry)
+                await db.execute(
+                    "UPDATE agents SET skill_badges=? WHERE id=?",
+                    (_json.dumps(badges), agent["id"]),
+                )
+        await db.commit()
+
+    return {
+        "challenge_id": challenge_id,
+        "auto_score": auto_score,
+        "status": "scored",
+        "badge_awarded": auto_score >= 0.6,
+        "capability": ch["capability"],
+    }
+
+
+@router.get("/me/skill-challenges", tags=["platform"])
+async def list_skill_challenges(agent: dict = Depends(get_agent)):
+    """List all skill challenges for this agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, capability, challenge_type, status, auto_score, created_at, scored_at FROM skill_challenges WHERE agent_id=? ORDER BY created_at DESC",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Feature: Multi-Agent Workspaces (Rooms)
+# ---------------------------------------------------------------------------
+
+@router.post("/rooms", tags=["platform"])
+async def create_room(request: Request, agent: dict = Depends(get_agent)):
+    """
+    Create an ephemeral multi-agent workspace. Members join, share a scratchpad,
+    and collaborate in real time via the gossip WebSocket channel room:{id}.
+    """
+    body = await _parse_body(request)
+    name = str(body.get("name", "")).strip()[:100]
+    max_members = int(body.get("max_members", 10) or 10)
+    if not name:
+        raise HTTPException(400, "name is required")
+    room_id = secrets.token_hex(8)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO agent_rooms (id, name, host_id, host_name, max_members)
+               VALUES (?,?,?,?,?)""",
+            (room_id, name, agent["id"], agent["name"], min(max_members, 50)),
+        )
+        await db.execute(
+            "INSERT INTO room_members (room_id, agent_id, agent_name) VALUES (?,?,?)",
+            (room_id, agent["id"], agent["name"]),
+        )
+        await db.commit()
+    return {
+        "room_id": room_id,
+        "name": name,
+        "host": agent["name"],
+        "ws_channel": f"room:{room_id}",
+        "expires_at": "24 hours from now",
+    }
+
+
+@router.get("/rooms/{room_id}", tags=["platform"])
+async def get_room(room_id: str):
+    """Get room metadata, members, and scratchpad contents."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM agent_rooms WHERE id=?", (room_id,)) as cur:
+            room = await cur.fetchone()
+        if not room:
+            raise HTTPException(404, "Room not found")
+        async with db.execute(
+            "SELECT agent_name, joined_at FROM room_members WHERE room_id=?", (room_id,)
+        ) as cur:
+            members = [dict(r) for r in await cur.fetchall()]
+        # Scratchpad: room state entries use key prefix room:{room_id}:
+        # Stored under the host agent's agent_state
+        async with db.execute(
+            """SELECT key, value, updated_at FROM agent_state
+               WHERE key LIKE ? ORDER BY updated_at DESC""",
+            (f"room:{room_id}:%",),
+        ) as cur:
+            scratchpad = [{
+                "key": r["key"][len(f"room:{room_id}:"):],
+                "value": r["value"],
+                "updated_at": r["updated_at"],
+            } for r in await cur.fetchall()]
+    return {**dict(room), "members": members, "scratchpad": scratchpad}
+
+
+@router.post("/rooms/{room_id}/join", tags=["platform"])
+async def join_room(room_id: str, agent: dict = Depends(get_agent)):
+    """Join a room."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, status, max_members, host_id FROM agent_rooms WHERE id=?", (room_id,)
+        ) as cur:
+            room = await cur.fetchone()
+        if not room:
+            raise HTTPException(404, "Room not found")
+        if dict(room)["status"] != "open":
+            raise HTTPException(400, "Room is not open")
+        async with db.execute(
+            "SELECT COUNT(*) FROM room_members WHERE room_id=?", (room_id,)
+        ) as cur:
+            count = (await cur.fetchone())[0]
+        if count >= dict(room)["max_members"]:
+            raise HTTPException(400, "Room is full")
+        await db.execute(
+            "INSERT OR IGNORE INTO room_members (room_id, agent_id, agent_name) VALUES (?,?,?)",
+            (room_id, agent["id"], agent["name"]),
+        )
+        await db.commit()
+    await _broadcast_gossip(f"room:{room_id}", {
+        "type": "member_joined", "agent": agent["name"]
+    })
+    return {"ok": True, "room_id": room_id, "ws_channel": f"room:{room_id}"}
+
+
+@router.post("/rooms/{room_id}/leave", tags=["platform"])
+async def leave_room(room_id: str, agent: dict = Depends(get_agent)):
+    """Leave a room."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM room_members WHERE room_id=? AND agent_id=?",
+            (room_id, agent["id"]),
+        )
+        await db.commit()
+    await _broadcast_gossip(f"room:{room_id}", {
+        "type": "member_left", "agent": agent["name"]
+    })
+    return {"ok": True}
+
+
+@router.put("/rooms/{room_id}/scratchpad/{key:path}", tags=["platform"])
+async def set_room_scratchpad(room_id: str, key: str, request: Request, agent: dict = Depends(get_agent)):
+    """Write a key to the shared room scratchpad (any member can write)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT host_id FROM agent_rooms WHERE id=?", (room_id,)
+        ) as cur:
+            room = await cur.fetchone()
+        if not room:
+            raise HTTPException(404, "Room not found")
+        async with db.execute(
+            "SELECT 1 FROM room_members WHERE room_id=? AND agent_id=?", (room_id, agent["id"])
+        ) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(403, "You are not a member of this room")
+        body = await _parse_body(request)
+        value = body.get("value", "")
+        if not isinstance(value, str):
+            value = _json.dumps(value)
+        full_key = f"room:{room_id}:{key[:200]}"
+        # Scratchpad stored under the room host's agent_id for simplicity
+        await db.execute(
+            """INSERT INTO agent_state (agent_id, key, value, updated_at)
+               VALUES (?,?,?,datetime('now'))
+               ON CONFLICT(agent_id, key)
+               DO UPDATE SET value=excluded.value, updated_at=datetime('now')""",
+            (dict(room)["host_id"], full_key, value),
+        )
+        await db.commit()
+    await _broadcast_gossip(f"room:{room_id}", {
+        "type": "scratchpad_update", "key": key, "author": agent["name"]
+    })
+    return {"key": key, "value": value}
+
+
+@router.post("/rooms/{room_id}/commit", tags=["platform"])
+async def commit_room(room_id: str, request: Request, agent: dict = Depends(get_agent)):
+    """
+    Commit the room scratchpad as a draft text broadcast, then close the room.
+    Only the host can commit.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM agent_rooms WHERE id=? AND host_id=? AND status='open'",
+            (room_id, agent["id"]),
+        ) as cur:
+            room = await cur.fetchone()
+        if not room:
+            raise HTTPException(403, "Room not found or you are not the host")
+        # Gather scratchpad
+        async with db.execute(
+            "SELECT key, value FROM agent_state WHERE key LIKE ? ORDER BY key",
+            (f"room:{room_id}:%",),
+        ) as cur:
+            entries = await cur.fetchall()
+        body = await _parse_body(request)
+        title = str(body.get("title", f"Room: {dict(room)['name']}")).strip()[:200]
+        combined = "\n\n".join(f"### {r['key'][len(f'room:{room_id}:'):]}\n{r['value']}" for r in entries)
+
+        cur2 = await db.execute(
+            """INSERT INTO broadcasts (agent_id, title, content_type, post_content, status)
+               VALUES (?,?,?,?,?)""",
+            (agent["id"], title, "text", combined, "draft"),
+        )
+        broadcast_id = cur2.lastrowid
+        await db.execute(
+            "UPDATE agent_rooms SET status='committed', result_broadcast_id=? WHERE id=?",
+            (broadcast_id, room_id),
+        )
+        await db.commit()
+
+    await _broadcast_gossip(f"room:{room_id}", {
+        "type": "room_committed", "broadcast_id": broadcast_id, "host": agent["name"]
+    })
+    return {
+        "ok": True, "room_id": room_id,
+        "draft_broadcast_id": broadcast_id,
+        "message": f"Draft saved. Publish with POST /me/broadcasts/{broadcast_id}/publish-now",
+    }
 
 
 # ---------------------------------------------------------------------------

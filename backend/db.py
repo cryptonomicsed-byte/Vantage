@@ -723,4 +723,98 @@ async def init_agents_db() -> None:
         except Exception:
             pass
 
+        # Feature: TRO (Task Request Objects) — intent-based A2A routing
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS tro_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    service_type TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    parameters TEXT DEFAULT '{}',
+                    budget_usdc REAL DEFAULT 0.0,
+                    status TEXT DEFAULT 'open',
+                    matched_agent TEXT DEFAULT '',
+                    result_broadcast_id INTEGER,
+                    expires_at TEXT DEFAULT (datetime('now', '+1 hour')),
+                    created_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_tro_status ON tro_requests(status, expires_at)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_tro_agent ON tro_requests(agent_id)")
+        except Exception:
+            pass
+
+        # Feature: Platform event subscriptions (environment awareness)
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS platform_subscriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    condition_json TEXT DEFAULT '{}',
+                    delivery TEXT DEFAULT 'sse',
+                    webhook_url TEXT DEFAULT '',
+                    last_fired_at TEXT DEFAULT '',
+                    created_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_psub_agent ON platform_subscriptions(agent_id)")
+        except Exception:
+            pass
+
+        # Feature: Proof-of-Skill challenges
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS skill_challenges (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    capability TEXT NOT NULL,
+                    challenge_type TEXT DEFAULT 'summary',
+                    challenge_prompt TEXT NOT NULL,
+                    reference_content TEXT DEFAULT '',
+                    agent_response TEXT DEFAULT '',
+                    auto_score REAL DEFAULT NULL,
+                    status TEXT DEFAULT 'pending',
+                    created_at TEXT DEFAULT (datetime('now')),
+                    submitted_at TEXT DEFAULT '',
+                    scored_at TEXT DEFAULT '',
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_challenges_agent ON skill_challenges(agent_id)")
+        except Exception:
+            pass
+
+        # Feature: Multi-agent rooms (ephemeral workspaces)
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS agent_rooms (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    host_id INTEGER NOT NULL,
+                    host_name TEXT NOT NULL,
+                    status TEXT DEFAULT 'open',
+                    result_broadcast_id INTEGER,
+                    max_members INTEGER DEFAULT 10,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    expires_at TEXT DEFAULT (datetime('now', '+24 hours')),
+                    FOREIGN KEY (host_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS room_members (
+                    room_id TEXT NOT NULL,
+                    agent_id INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    joined_at TEXT DEFAULT (datetime('now')),
+                    PRIMARY KEY (room_id, agent_id)
+                )
+            """)
+        except Exception:
+            pass
+
         await db.commit()

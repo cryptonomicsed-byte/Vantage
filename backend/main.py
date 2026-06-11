@@ -65,6 +65,124 @@ async def _scheduled_publish_loop():
         await asyncio.sleep(60)
 
 
+async def _platform_subscription_loop():
+    """Every 60s: evaluate platform_subscriptions and fire matching events."""
+    import json as _pjson
+    from .utils import _sse_subscriptions, _fire_webhooks
+    await asyncio.sleep(random.uniform(5, 20))
+    while True:
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT * FROM platform_subscriptions"
+                ) as cur:
+                    subs = [dict(r) for r in await cur.fetchall()]
+
+            for sub in subs:
+                try:
+                    cond = _pjson.loads(sub["condition_json"] or "{}")
+                    event_type = sub["event_type"]
+                    fire_event: dict | None = None
+
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        db.row_factory = aiosqlite.Row
+
+                        if event_type == "tag_trending":
+                            tag = cond.get("tag", "")
+                            min_count = int(cond.get("min_count", 50))
+                            if tag:
+                                async with db.execute(
+                                    """SELECT COUNT(*) FROM broadcasts
+                                       WHERE status='ready' AND tags LIKE ?
+                                         AND created_at > datetime('now', '-24 hours')""",
+                                    (f"%{tag}%",),
+                                ) as cur:
+                                    count = (await cur.fetchone())[0]
+                                if count >= min_count:
+                                    fire_event = {"type": "tag_trending", "tag": tag, "count": count}
+
+                        elif event_type == "agent_posts":
+                            watched = cond.get("agent_name", "")
+                            since = sub["last_fired_at"] or "1970-01-01"
+                            if watched:
+                                async with db.execute(
+                                    """SELECT COUNT(*) FROM broadcasts b
+                                       JOIN agents a ON a.id=b.agent_id
+                                       WHERE a.name=? AND b.status='ready' AND b.created_at > ?""",
+                                    (watched, since),
+                                ) as cur:
+                                    count = (await cur.fetchone())[0]
+                                if count > 0:
+                                    fire_event = {"type": "agent_posts", "agent_name": watched, "new_posts": count}
+
+                        elif event_type == "keyword_feed":
+                            kw = cond.get("keyword", "")
+                            since = sub["last_fired_at"] or "1970-01-01"
+                            if kw:
+                                async with db.execute(
+                                    """SELECT COUNT(*) FROM broadcasts
+                                       WHERE status='ready'
+                                         AND (title LIKE ? OR description LIKE ? OR post_content LIKE ?)
+                                         AND created_at > ?""",
+                                    (f"%{kw}%", f"%{kw}%", f"%{kw}%", since),
+                                ) as cur:
+                                    count = (await cur.fetchone())[0]
+                                if count > 0:
+                                    fire_event = {"type": "keyword_feed", "keyword": kw, "matches": count}
+
+                        elif event_type == "platform_health":
+                            metric = cond.get("metric", "federation_latency_ms")
+                            threshold = float(cond.get("threshold", 500))
+                            if metric == "federation_latency_ms":
+                                async with db.execute(
+                                    "SELECT url FROM federation_peers WHERE status='active' LIMIT 1"
+                                ) as cur:
+                                    peer = await cur.fetchone()
+                                if peer:
+                                    t0 = asyncio.get_event_loop().time()
+                                    try:
+                                        async with httpx.AsyncClient(timeout=5) as hc:
+                                            await hc.get(f"{peer['url']}/api/health")
+                                        latency_ms = (asyncio.get_event_loop().time() - t0) * 1000
+                                        if latency_ms > threshold:
+                                            fire_event = {
+                                                "type": "platform_health",
+                                                "metric": metric,
+                                                "value_ms": round(latency_ms, 1),
+                                                "threshold": threshold,
+                                            }
+                                    except Exception:
+                                        fire_event = {"type": "platform_health", "metric": metric,
+                                                      "error": "unreachable", "threshold": threshold}
+
+                    if fire_event:
+                        # Deliver via SSE or webhook
+                        agent_id = sub["agent_id"]
+                        if sub["delivery"] == "sse" and agent_id in _sse_subscriptions:
+                            try:
+                                _sse_subscriptions[agent_id].put_nowait(
+                                    {"source": "platform_watch", "subscription_id": sub["id"], **fire_event}
+                                )
+                            except Exception:
+                                pass
+                        elif sub["delivery"] == "webhook" and sub["webhook_url"]:
+                            await _fire_webhooks(agent_id, "platform_watch", fire_event)
+
+                        # Update last_fired_at
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            await db.execute(
+                                "UPDATE platform_subscriptions SET last_fired_at=datetime('now') WHERE id=?",
+                                (sub["id"],),
+                            )
+                            await db.commit()
+                except Exception as _sub_exc:
+                    logger.debug("subscription %s eval error: %s", sub["id"], _sub_exc)
+        except Exception as exc:
+            logger.warning("Platform subscription loop error: %s", exc)
+        await asyncio.sleep(60)
+
+
 async def _federation_gossip_loop():
     """Every 5 minutes: ping all known peers, discover new ones, adjust reputation."""
     from .agents import DB_PATH as _DB_PATH
@@ -147,17 +265,14 @@ async def lifespan(app: FastAPI):
 
     task = asyncio.create_task(_scheduled_publish_loop())
     gossip_task = asyncio.create_task(_federation_gossip_loop())
+    watch_task = asyncio.create_task(_platform_subscription_loop())
     yield
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-    gossip_task.cancel()
-    try:
-        await gossip_task
-    except asyncio.CancelledError:
-        pass
+    for t in (task, gossip_task, watch_task):
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(

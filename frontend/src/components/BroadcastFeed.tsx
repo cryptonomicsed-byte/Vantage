@@ -12,6 +12,8 @@ import KnowledgeGraphCard from './KnowledgeGraphCard'
 import KnowledgeGraphModal from './KnowledgeGraphModal'
 import DebateCard from './DebateCard'
 import DebateModal from './DebateModal'
+import TroCard from './TroCard'
+import TroModal from './TroModal'
 import { type FeedTabId } from './FeedTabs'
 import { useFeedSocket } from '../hooks/useFeedSocket'
 
@@ -53,6 +55,7 @@ const TYPES: { id: FeedTabId; icon: string; label: string }[] = [
   { id: 'image',  icon: '🖼️', label: 'Gallery' },
   { id: 'graph',  icon: '🕸️', label: 'Graph'   },
   { id: 'debate', icon: '⚔️', label: 'Debates' },
+  { id: 'tro',    icon: '⚡', label: 'Requests' },
 ]
 
 const TYPE_IDS = new Set(TYPES.map(t => t.id))
@@ -194,6 +197,7 @@ export default function BroadcastFeed({ searchQuery = '' }: { searchQuery?: stri
   const [selectedGallery, setSelectedGallery] = useState<Broadcast | null>(null)
   const [selectedGraph, setSelectedGraph] = useState<Broadcast | null>(null)
   const [selectedDebate, setSelectedDebate] = useState<Broadcast | null>(null)
+  const [selectedTro, setSelectedTro] = useState<Broadcast | null>(null)
   const [history, setHistory] = useState<Broadcast[]>([])
   const [toast, setToast] = useState('')
   const apiKey = localStorage.getItem('vantage_api_key') || ''
@@ -246,6 +250,7 @@ export default function BroadcastFeed({ searchQuery = '' }: { searchQuery?: stri
     else if (b.content_type === 'image') setSelectedGallery(b)
     else if (b.content_type === 'graph') setSelectedGraph(b)
     else if (b.content_type === 'debate') setSelectedDebate(b)
+    else if (b.content_type === 'tro') setSelectedTro(b)
     else if (b.content_type !== 'audio') setSelectedVideo(b)
     saveToHistory(b)
     setHistory(readHistory())
@@ -373,6 +378,7 @@ export default function BroadcastFeed({ searchQuery = '' }: { searchQuery?: stri
               if (b.content_type === 'image')  return <ImageGalleryCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
               if (b.content_type === 'graph')  return <KnowledgeGraphCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
               if (b.content_type === 'debate') return <DebateCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
+              if (b.content_type === 'tro')    return <TroCard key={b.id} tro={b as any} onClick={() => openBroadcast(b)} />
               return <BroadcastCard key={b.id} broadcast={b} onClick={() => openBroadcast(b)} />
             })}
           </div>
@@ -384,6 +390,7 @@ export default function BroadcastFeed({ searchQuery = '' }: { searchQuery?: stri
       {selectedGallery && <ImageGalleryModal broadcast={selectedGallery} onClose={() => setSelectedGallery(null)} />}
       {selectedGraph && <KnowledgeGraphModal broadcast={selectedGraph} onClose={() => setSelectedGraph(null)} />}
       {selectedDebate && <DebateModal broadcast={selectedDebate} onClose={() => setSelectedDebate(null)} />}
+      {selectedTro && <TroModal tro={selectedTro as any} onClose={() => setSelectedTro(null)} />}
     </div>
   )
 }
