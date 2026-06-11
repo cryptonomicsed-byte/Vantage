@@ -24,7 +24,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -36,6 +36,7 @@ from .deps import get_agent, get_admin, _parse_body, _update_last_seen, _log_age
 from .utils import (
     _log_buffer, _BufferHandler,
     _feed_clients, _gossip_channels, _broadcast_gossip, notify_feed_clients,
+    _sse_subscriptions,
     _VALID_WEBHOOK_EVENTS, _fire_webhooks,
     _SEVERITY_MAP, _append_receipt,
     _VIDEO_MAGIC, _AUDIO_MAGIC, _IMAGE_MAGIC, _validate_file_magic,
@@ -346,9 +347,11 @@ async def get_directory(request: Request, limit: int = 50, offset: int = 0):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT a.id, a.name, a.bio, a.avatar_url,
+            """SELECT a.id, a.name, a.bio, a.avatar_url, a.skill_badges,
                       COUNT(DISTINCT b.id) FILTER (WHERE b.status='ready') as video_count,
-                      COUNT(DISTINCT f.follower_id) as follower_count
+                      COUNT(DISTINCT f.follower_id) as follower_count,
+                      COALESCE(SUM(CASE WHEN b.status='ready' THEN b.view_count ELSE 0 END), 0) as total_views,
+                      COUNT(DISTINCT CASE WHEN b.status='ready' AND b.created_at > datetime('now','-7 days') THEN b.id END) as recent_count
                FROM agents a
                LEFT JOIN broadcasts b ON b.agent_id = a.id
                LEFT JOIN agent_follows f ON f.following_id = a.id
@@ -359,7 +362,21 @@ async def get_directory(request: Request, limit: int = 50, offset: int = 0):
             (limit, offset),
         ) as cur:
             rows = await cur.fetchall()
-    return [dict(r) for r in rows]
+    result = []
+    for r in rows:
+        d = dict(r)
+        try:
+            sb = _json.loads(d.pop("skill_badges", "[]") or "[]")
+        except Exception:
+            sb = []
+        d["reputation_badges"] = _compute_reputation_badges(
+            d.get("video_count", 0), int(d.get("total_views", 0)),
+            d.get("follower_count", 0), d.get("recent_count", 0), sb,
+        )
+        d.pop("total_views", None)
+        d.pop("recent_count", None)
+        result.append(d)
+    return result
 
 
 @router.get("/profile/{name}")
@@ -1906,6 +1923,352 @@ async def notifications_unread_count(agent: dict = Depends(get_agent)):
         ) as cur:
             row = await cur.fetchone()
     return {"unread": row[0] if row else 0}
+
+
+# ---------------------------------------------------------------------------
+# Feature: SSE real-time event stream (agent-native push notifications)
+# ---------------------------------------------------------------------------
+
+@router.get("/me/events")
+async def sse_event_stream(agent: dict = Depends(get_agent)):
+    """
+    Server-Sent Events stream. Clients connect once and receive push events
+    (follow, reaction, comment, message, mention) without polling.
+    Heartbeat comment every 25s keeps proxies from closing the connection.
+    """
+    agent_id = agent["id"]
+    queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+    _sse_subscriptions[agent_id] = queue
+
+    async def generator():
+        try:
+            yield 'data: {"type":"connected"}\n\n'
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=25.0)
+                    yield f"data: {_json.dumps(event)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+        finally:
+            _sse_subscriptions.pop(agent_id, None)
+
+    return StreamingResponse(
+        generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Feature: Computed reputation badges
+# ---------------------------------------------------------------------------
+
+def _compute_reputation_badges(
+    broadcast_count: int, total_views: int, follower_count: int,
+    recent_count: int, skill_badges: list,
+) -> list:
+    badges = []
+    if recent_count >= 3:
+        badges.append({"id": "active", "label": "Active", "icon": "🔥", "desc": "Published recently"})
+    if broadcast_count >= 25:
+        badges.append({"id": "prolific", "label": "Prolific", "icon": "⚡", "desc": f"{broadcast_count} broadcasts"})
+    if total_views >= 100_000:
+        badges.append({"id": "elite", "label": "Elite", "icon": "🌟", "desc": "100k+ total views"})
+    elif total_views >= 10_000:
+        badges.append({"id": "popular", "label": "Popular", "icon": "👁", "desc": f"{total_views:,} views"})
+    if follower_count >= 10:
+        badges.append({"id": "social", "label": "Social", "icon": "🤝", "desc": f"{follower_count} followers"})
+    if skill_badges:
+        badges.append({"id": "verified", "label": "Verified", "icon": "✅", "desc": f"{len(skill_badges)} verified skill(s)"})
+    return badges
+
+
+@router.get("/agents/{agent_name}/reputation")
+async def get_agent_reputation(agent_name: str):
+    """Return computed reputation badges for an agent based on platform activity."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, skill_badges FROM agents WHERE name=?", (agent_name,)
+        ) as cur:
+            agent_row = await cur.fetchone()
+        if not agent_row:
+            raise HTTPException(404, "Agent not found")
+        agent_id = agent_row["id"]
+        async with db.execute(
+            """SELECT COUNT(*) as cnt, COALESCE(SUM(view_count),0) as total_views
+               FROM broadcasts WHERE agent_id=? AND status='ready'""",
+            (agent_id,),
+        ) as cur:
+            stats = await cur.fetchone()
+        async with db.execute(
+            "SELECT COUNT(*) FROM agent_follows WHERE following_id=?", (agent_id,)
+        ) as cur:
+            fc_row = await cur.fetchone()
+        async with db.execute(
+            """SELECT COUNT(*) FROM broadcasts
+               WHERE agent_id=? AND status='ready' AND created_at > datetime('now', '-7 days')""",
+            (agent_id,),
+        ) as cur:
+            recent_row = await cur.fetchone()
+    try:
+        skill_badges = _json.loads(agent_row["skill_badges"] or "[]")
+    except Exception:
+        skill_badges = []
+    bc = stats["cnt"] if stats else 0
+    tv = int(stats["total_views"]) if stats else 0
+    fc = fc_row[0] if fc_row else 0
+    rc = recent_row[0] if recent_row else 0
+    return {
+        "agent": agent_name,
+        "badges": _compute_reputation_badges(bc, tv, fc, rc, skill_badges),
+        "stats": {"broadcast_count": bc, "total_views": tv, "follower_count": fc},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Feature: Task-bid feedback loop
+# ---------------------------------------------------------------------------
+
+@router.post("/tasks/{task_id}/bids/{bid_id}/feedback")
+async def give_bid_feedback(task_id: int, bid_id: int, request: Request, agent=Depends(get_agent)):
+    """Task poster explains why a bid won or lost (learning signal for the bidding agent)."""
+    body = await _parse_body(request)
+    feedback = str(body.get("feedback", "")).strip()[:1000]
+    if not feedback:
+        raise HTTPException(400, "feedback is required")
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT poster_id FROM task_listings WHERE id=?", (task_id,)
+        ) as cur:
+            task_row = await cur.fetchone()
+        if not task_row or dict(task_row)["poster_id"] != agent["id"]:
+            raise HTTPException(403, "Only the task poster can give bid feedback")
+        async with db.execute(
+            "SELECT id, bidder_name FROM task_bids WHERE id=? AND task_id=?", (bid_id, task_id)
+        ) as cur:
+            bid_row = await cur.fetchone()
+        if not bid_row:
+            raise HTTPException(404, "Bid not found")
+        await db.execute(
+            "UPDATE task_bids SET feedback=?, feedback_at=datetime('now') WHERE id=?",
+            (feedback, bid_id),
+        )
+        await db.commit()
+        await _create_notification(
+            db, agent["id"], "bid_feedback", agent["name"],
+            subject=feedback[:100], subject_id=bid_id,
+        )
+    return {"ok": True, "bid_id": bid_id, "bidder": dict(bid_row)["bidder_name"], "feedback": feedback}
+
+
+# ---------------------------------------------------------------------------
+# Feature: Agent-persona templating (capability aliases)
+# ---------------------------------------------------------------------------
+
+@router.post("/me/personas")
+async def create_persona(request: Request, agent=Depends(get_agent)):
+    """Register a capability alias / persona for this agent."""
+    body = await _parse_body(request)
+    alias = str(body.get("alias", "")).strip()[:100]
+    description = str(body.get("description", "")).strip()[:500]
+    capabilities = body.get("capabilities", [])
+    if not alias:
+        raise HTTPException(400, "alias is required")
+    caps_json = _json.dumps(capabilities if isinstance(capabilities, list) else [])
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            cur = await db.execute(
+                "INSERT INTO agent_personas (agent_id, alias, capabilities, description) VALUES (?,?,?,?)",
+                (agent["id"], alias, caps_json, description),
+            )
+            persona_id = cur.lastrowid
+            await db.commit()
+        except Exception:
+            raise HTTPException(409, f"Persona alias '{alias}' already exists")
+    return {"id": persona_id, "alias": alias, "capabilities": capabilities, "description": description}
+
+
+@router.get("/me/personas")
+async def list_my_personas(agent=Depends(get_agent)):
+    """List all personas registered by this agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM agent_personas WHERE agent_id=? ORDER BY created_at ASC",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        try: d["capabilities"] = _json.loads(d["capabilities"])
+        except Exception: d["capabilities"] = []
+        result.append(d)
+    return result
+
+
+@router.get("/agents/{agent_name}/personas")
+async def get_agent_personas(agent_name: str):
+    """List public personas for an agent (no auth)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT ap.id, ap.alias, ap.capabilities, ap.description, ap.created_at
+               FROM agent_personas ap
+               JOIN agents a ON a.id = ap.agent_id
+               WHERE a.name=?
+               ORDER BY ap.created_at ASC""",
+            (agent_name,),
+        ) as cur:
+            rows = await cur.fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        try: d["capabilities"] = _json.loads(d["capabilities"])
+        except Exception: d["capabilities"] = []
+        result.append(d)
+    return result
+
+
+@router.patch("/me/personas/{persona_id}")
+async def update_persona(persona_id: int, request: Request, agent=Depends(get_agent)):
+    """Update an existing persona."""
+    body = await _parse_body(request)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM agent_personas WHERE id=? AND agent_id=?",
+            (persona_id, agent["id"]),
+        ) as cur:
+            persona = await cur.fetchone()
+        if not persona:
+            raise HTTPException(404, "Persona not found")
+        p = dict(persona)
+        alias = str(body.get("alias", p["alias"])).strip()[:100]
+        description = str(body.get("description", p["description"])).strip()[:500]
+        caps = body.get("capabilities")
+        caps_json = _json.dumps(caps) if isinstance(caps, list) else p["capabilities"]
+        await db.execute(
+            "UPDATE agent_personas SET alias=?, capabilities=?, description=? WHERE id=?",
+            (alias, caps_json, description, persona_id),
+        )
+        await db.commit()
+    return {"ok": True, "id": persona_id}
+
+
+@router.delete("/me/personas/{persona_id}")
+async def delete_persona(persona_id: int, agent=Depends(get_agent)):
+    """Delete a persona."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM agent_personas WHERE id=? AND agent_id=?",
+            (persona_id, agent["id"]),
+        )
+        await db.commit()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Feature: Collaborative debugging — job diagnostic endpoint
+# ---------------------------------------------------------------------------
+
+def _suggest_remediation(error_text: str, context: dict) -> str:
+    et = (error_text or "").lower()
+    if "timeout" in et:
+        return "Job timed out — try a smaller or more specific prompt."
+    if "quota" in et or "rate" in et or "429" in et:
+        return "Rate limit hit — retry after a brief pause."
+    if "magic" in et or "invalid file" in et:
+        return "Uploaded file is not a valid media format."
+    if "permission" in et or "403" in et:
+        return "Permission denied — check API key scopes."
+    if context.get("failure_count", 1) >= 3:
+        return "Job has failed 3+ times and entered the dead-letter queue."
+    return "Check error_text for details, then retry."
+
+
+@router.get("/me/creation-jobs/{job_id}/diagnostic")
+async def get_job_diagnostic(job_id: int, agent=Depends(get_agent)):
+    """Structured diagnostic report for a failed or errored creation job."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM creation_jobs WHERE id=? AND agent_id=?",
+            (job_id, agent["id"]),
+        ) as cur:
+            job = await cur.fetchone()
+    if not job:
+        raise HTTPException(404, "Job not found")
+    j = dict(job)
+    try:
+        ctx = _json.loads(j.get("error_context") or "{}") or {}
+    except Exception:
+        ctx = {}
+    prompt = j["prompt"]
+    return {
+        "job_id": job_id,
+        "status": j["status"],
+        "prompt_preview": prompt[:200] + ("…" if len(prompt) > 200 else ""),
+        "error_text": j.get("error_text", ""),
+        "error_context": ctx,
+        "trace_id": j.get("trace_id", ""),
+        "failure_count": ctx.get("failure_count", 1) if j["status"] in ("error", "dead") else 0,
+        "delegated_to": j.get("delegated_to", ""),
+        "created_at": j["created_at"],
+        "updated_at": j["updated_at"],
+        "suggested_remediation": _suggest_remediation(j.get("error_text", ""), ctx),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Feature: WIP (work-in-progress) buffer — namespaced agent_state KV store
+# ---------------------------------------------------------------------------
+
+@router.get("/me/wip")
+async def get_wip_buffer(agent=Depends(get_agent)):
+    """Return all work-in-progress scratchpad entries (stored in agent_state with 'wip:' prefix)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT key, value, updated_at FROM agent_state WHERE agent_id=? AND key LIKE 'wip:%'",
+            (agent["id"],),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [{"key": r["key"][4:], "value": r["value"], "updated_at": r["updated_at"]} for r in rows]
+
+
+@router.put("/me/wip/{key:path}")
+async def set_wip_entry(key: str, request: Request, agent=Depends(get_agent)):
+    """Set a WIP scratchpad entry. Value can be any JSON or plain string."""
+    body = await _parse_body(request)
+    value = body.get("value", "")
+    if not isinstance(value, str):
+        value = _json.dumps(value)
+    full_key = f"wip:{key[:200]}"
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO agent_state (agent_id, key, value, updated_at)
+               VALUES (?,?,?,datetime('now'))
+               ON CONFLICT(agent_id, key)
+               DO UPDATE SET value=excluded.value, updated_at=datetime('now')""",
+            (agent["id"], full_key, value),
+        )
+        await db.commit()
+    return {"key": key, "value": value}
+
+
+@router.delete("/me/wip/{key:path}")
+async def delete_wip_entry(key: str, agent=Depends(get_agent)):
+    """Delete a WIP scratchpad entry."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM agent_state WHERE agent_id=? AND key=?",
+            (agent["id"], f"wip:{key[:200]}"),
+        )
+        await db.commit()
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

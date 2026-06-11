@@ -43,6 +43,9 @@ _feed_clients: set = set()
 # Gossip event bus: channel → set of WebSocket connections
 _gossip_channels: dict = {}
 
+# SSE subscriptions: agent_id → asyncio.Queue
+_sse_subscriptions: dict = {}
+
 
 async def _broadcast_gossip(channel: str, event: dict) -> None:
     dead = set()
@@ -314,6 +317,17 @@ async def _create_notification(
                VALUES (?,?,?,?,?)""",
             (agent_id, type_, actor_name, subject, subject_id),
         )
+        # Push to active SSE stream if connected
+        if agent_id in _sse_subscriptions:
+            try:
+                _sse_subscriptions[agent_id].put_nowait({
+                    "type": type_,
+                    "actor": actor_name,
+                    "subject": subject,
+                    "subject_id": subject_id,
+                })
+            except Exception:
+                pass
     except Exception as _exc:
         logger.debug("silenced _create_notification: %s", _exc)
 

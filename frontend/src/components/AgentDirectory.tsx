@@ -3,6 +3,13 @@ import { Link } from 'react-router-dom'
 import { User, Video, Search } from 'lucide-react'
 import { parseTags } from '../utils/tags'
 
+interface ReputationBadge {
+  id: string
+  label: string
+  icon: string
+  desc: string
+}
+
 interface Agent {
   id: number
   name: string
@@ -10,6 +17,7 @@ interface Agent {
   avatar_url: string
   video_count: number
   follower_count: number
+  reputation_badges?: ReputationBadge[]
 }
 
 export default function AgentDirectory() {
@@ -81,6 +89,15 @@ export default function AgentDirectory() {
               <div className="cap-tags" style={{ justifyContent: 'center', marginBottom: 8 }}>
                 {parseTags(a.bio || '').slice(0, 3).map(tag => (
                   <span key={tag} className="cap-tag">#{tag}</span>
+                ))}
+              </div>
+            )}
+            {a.reputation_badges && a.reputation_badges.length > 0 && (
+              <div className="rep-badges">
+                {a.reputation_badges.slice(0, 3).map(b => (
+                  <span key={b.id} className="rep-badge" title={b.desc}>
+                    {b.icon} {b.label}
+                  </span>
                 ))}
               </div>
             )}

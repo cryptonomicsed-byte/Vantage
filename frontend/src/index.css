@@ -2426,6 +2426,29 @@ input:focus, textarea:focus, select:focus {
   background: rgba(0,245,255,0.06);
 }
 
+/* ── Reputation badges ─────────────────────────────────────────────────────── */
+.rep-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  justify-content: center;
+  margin: 6px 0;
+}
+.rep-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: var(--purple-bright);
+  border: 1px solid rgba(138,75,255,0.3);
+  background: rgba(138,75,255,0.08);
+  white-space: nowrap;
+}
+
 /* ── Modal description ───────────────────────────────────────────────────────── */
 .modal-description {
   padding: 14px 22px 20px;

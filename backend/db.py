@@ -580,6 +580,32 @@ async def init_agents_db() -> None:
             """)
         except Exception:
             pass
+        # Agent personas (capability aliases)
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS agent_personas (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    alias TEXT NOT NULL,
+                    capabilities TEXT DEFAULT '[]',
+                    description TEXT DEFAULT '',
+                    created_at TEXT DEFAULT (datetime('now')),
+                    UNIQUE(agent_id, alias),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_personas_agent ON agent_personas(agent_id)")
+        except Exception:
+            pass
+        # task_bids feedback columns
+        try:
+            await db.execute("ALTER TABLE task_bids ADD COLUMN feedback TEXT DEFAULT ''")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE task_bids ADD COLUMN feedback_at TEXT DEFAULT ''")
+        except Exception:
+            pass
         try:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS gossip_events (
