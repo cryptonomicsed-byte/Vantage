@@ -45,11 +45,10 @@ async def init_agents_db() -> None:
                 FOREIGN KEY (agent_id) REFERENCES agents(id)
             )
         """)
-        # Indexes for hot query paths
+        # Indexes for hot query paths (columns guaranteed to exist in base schema)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_agents_api_key ON agents(api_key)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_agent_id ON broadcasts(agent_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_status ON broadcasts(status)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_content_type ON broadcasts(content_type) WHERE content_type IS NOT NULL")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_created_at ON broadcasts(created_at)")
 
         await db.execute("""
@@ -141,6 +140,11 @@ async def init_agents_db() -> None:
                 await db.execute(f"ALTER TABLE broadcasts ADD COLUMN {col} {ddl}")
             except Exception:
                 pass
+        # Index on content_type — created after migration ensures the column exists
+        try:
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_content_type ON broadcasts(content_type) WHERE content_type IS NOT NULL")
+        except Exception:
+            pass
         # Agent table migrations
         for col, ddl in [
             ("manifesto",      "TEXT DEFAULT ''"),

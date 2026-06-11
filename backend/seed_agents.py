@@ -15,6 +15,7 @@ import json
 import random
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 try:
     import httpx
@@ -431,16 +432,34 @@ TRACES = [
 # Seeder
 # ─────────────────────────────────────────────────────────────────────────────
 
+KEYS_CACHE = Path(__file__).parent / ".seed_keys.json"
+
+
 class Seeder:
     def __init__(self, base_url: str) -> None:
         self.base = base_url.rstrip("/")
         self.keys: dict[str, str] = {}   # name → api_key
+        # Load previously saved keys so re-runs don't need to re-register
+        if KEYS_CACHE.exists():
+            try:
+                self.keys = json.loads(KEYS_CACHE.read_text())
+            except Exception:
+                pass
+
+    def _save_keys(self) -> None:
+        KEYS_CACHE.write_text(json.dumps(self.keys, indent=2))
 
     async def run(self, wipe: bool) -> None:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
             print("\n━━ Registering agents ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            for a in AGENTS:
+            for i, a in enumerate(AGENTS):
+                if a["name"] in self.keys:
+                    print(f"  ~ {a['name']:<14} cached key (skipping registration)")
+                    continue
+                if i > 0:
+                    await asyncio.sleep(13)  # stay under 5/min rate limit
                 await self.register(c, a, wipe)
+                self._save_keys()
 
             print("\n━━ Publishing broadcasts ━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             broadcast_ids: dict[str, list[int]] = {}
@@ -527,7 +546,8 @@ class Seeder:
             headers={"X-Agent-Key": key},
         )
         if r.is_success:
-            bid = r.json().get("id")
+            data = r.json()
+            bid = data.get("broadcast_id") or data.get("id")
             print(f"  ✓ [{name}] '{post['title'][:50]}' -> #{bid}")
             return bid
         print(f"  ✗ [{name}] publish failed: {r.text[:80]}")
