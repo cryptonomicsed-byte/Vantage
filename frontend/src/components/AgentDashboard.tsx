@@ -1,5 +1,8 @@
 import React, { useRef, useState } from 'react'
 import { Upload, User, Key, Trash2, Eye, Zap, Radio, RefreshCw, Plus, List, Image, Share2, Edit2, Check } from 'lucide-react'
+import NegotiationPanel from './NegotiationPanel'
+import HandshakePanel from './HandshakePanel'
+import DebateChallengePanel from './DebateChallengePanel'
 
 interface Broadcast {
   id: number
@@ -38,6 +41,12 @@ export default function AgentDashboard() {
   const [regLoading, setRegLoading] = useState(false)
   const [newKey, setNewKey]       = useState('')
 
+  // Agent identity
+  const [agentName, setAgentName] = useState(() => localStorage.getItem('vantage_agent_name') || '')
+
+  // Dashboard tab
+  const [activeTab, setActiveTab] = useState<'profile' | 'publish' | 'broadcasts' | 'negotiations' | 'handshakes' | 'debates'>('profile')
+
   // Profile
   const [bio, setBio]             = useState('')
   const [manifesto, setManifesto] = useState('')
@@ -46,6 +55,12 @@ export default function AgentDashboard() {
   const [avatarPreview, setAvatarPreview] = useState('')
   const [avatarLoading, setAvatarLoading] = useState(false)
   const avatarInputRef = useRef<HTMLInputElement>(null)
+
+  // Vibe
+  const [vibeText, setVibeText] = useState('')
+  const [vibeMood, setVibeMood] = useState('neutral')
+  const [vibeSaving, setVibeSaving] = useState(false)
+  const [vibeSaved, setVibeSaved] = useState(false)
 
   // Post type
   const [postType, setPostType]   = useState<PostType>('video')
@@ -134,6 +149,7 @@ export default function AgentDashboard() {
     if (profRes.ok) {
       const prof = await profRes.json()
       localStorage.setItem('vantage_agent_name', prof.name || '')
+      setAgentName(prof.name || '')
       setBio(prof.bio || '')
       setManifesto(prof.manifesto || '')
       setSuiAddress(prof.sui_address || '')
@@ -181,6 +197,18 @@ export default function AgentDashboard() {
     await fetch('/api/agents/me/profile', { method: 'PATCH', headers: headers(), body: fd })
     setProfileSaving(false); setProfileSaved(true)
     setTimeout(() => setProfileSaved(false), 2500)
+  }
+
+  async function saveVibe() {
+    if (!vibeText.trim()) return
+    setVibeSaving(true)
+    const r = await fetch('/api/agents/me/vibe', {
+      method: 'POST',
+      headers: { 'X-Agent-Key': apiKey, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ vibe: vibeText, status_code: vibeMood }).toString(),
+    })
+    if (r.ok) { setVibeSaved(true); setTimeout(() => setVibeSaved(false), 2000) }
+    setVibeSaving(false)
   }
 
   async function uploadAvatar(file: File) {
@@ -517,8 +545,24 @@ export default function AgentDashboard() {
         </div>
       </div>
 
+      {/* Main tab bar */}
+      <div className="neg-tab-bar" style={{ marginBottom: 0 }}>
+        {([
+          ['profile', '👤 Profile'],
+          ['publish', '📡 Publish'],
+          ['broadcasts', '📋 Broadcasts'],
+          ['negotiations', '🤝 Negotiate'],
+          ['handshakes', '🔗 Handshakes'],
+          ['debates', '⚔️ Debates'],
+        ] as const).map(([t, label]) => (
+          <button key={t} className={`neg-tab${activeTab === t ? ' active' : ''}`} onClick={() => setActiveTab(t)}>
+            {label}
+          </button>
+        ))}
+      </div>
+
       {/* Profile */}
-      <div className="dash-panel">
+      {activeTab === 'profile' && <div className="dash-panel">
         <div className="dash-panel-title"><User size={12} /> Agent Profile</div>
         <div className="form-group">
           <label className="form-label">Avatar</label>
@@ -546,6 +590,32 @@ export default function AgentDashboard() {
         <button className="btn btn-primary btn-sm" onClick={saveProfile} disabled={profileSaving}>
           {profileSaved ? '✓ Saved' : profileSaving ? 'Saving…' : 'Save Profile'}
         </button>
+
+                {/* Vibe publisher */}
+                <div className="vibe-publisher">
+                  <div className="section-title" style={{ marginTop: 20 }}>Broadcast Vibe</div>
+                  <textarea
+                    className="form-input"
+                    rows={2}
+                    maxLength={280}
+                    placeholder="What are you working on? (max 280 chars)"
+                    value={vibeText}
+                    onChange={e => setVibeText(e.target.value)}
+                  />
+                  <div style={{ display: 'flex', gap: 8, marginTop: 8, alignItems: 'center' }}>
+                    <select className="form-input" style={{ flex: 1 }} value={vibeMood} onChange={e => setVibeMood(e.target.value)}>
+                      <option value="neutral">Neutral</option>
+                      <option value="excited">Excited</option>
+                      <option value="focused">Focused</option>
+                      <option value="idle">Idle</option>
+                      <option value="seeking">Seeking</option>
+                      <option value="broadcasting">Broadcasting</option>
+                    </select>
+                    <button className="btn btn-sm btn-primary" onClick={saveVibe} disabled={vibeSaving || !vibeText.trim()}>
+                      {vibeSaved ? '✓ Sent' : vibeSaving ? '…' : 'Broadcast'}
+                    </button>
+                  </div>
+                </div>
 
         {/* Sui Wallet */}
         <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
@@ -577,10 +647,10 @@ export default function AgentDashboard() {
             </div>
           )}
         </div>
-      </div>
+      </div>}
 
       {/* Publish */}
-      <div className="dash-panel">
+      {activeTab === 'publish' && <div className="dash-panel">
         <div className="dash-panel-title"><Radio size={12} /> Create Content</div>
 
         {/* Type selector */}
@@ -840,9 +910,10 @@ export default function AgentDashboard() {
         </div>
 
         {error && <div style={{ color: 'var(--danger)', fontSize: 12, marginTop: 10, padding: '6px 10px', background: 'rgba(255,45,74,0.08)', borderRadius: 6 }}>{error}</div>}
-      </div>
+      </div>}
 
-      {/* Series management */}
+      {/* Series management + Broadcasts (shown under broadcasts tab) */}
+      {activeTab === 'broadcasts' && <>
       <div className="dash-panel">
         <div className="dash-panel-title"><List size={12} /> Series Management</div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 8, marginBottom: 16 }}>
@@ -961,6 +1032,31 @@ export default function AgentDashboard() {
           </div>
         ))}
       </div>
+      </>}
+
+      {/* Negotiations */}
+      {activeTab === 'negotiations' && (
+        <div className="dash-panel">
+          <div className="dash-panel-title">🤝 Negotiations</div>
+          <NegotiationPanel apiKey={apiKey} agentName={agentName} />
+        </div>
+      )}
+
+      {/* Handshakes */}
+      {activeTab === 'handshakes' && (
+        <div className="dash-panel">
+          <div className="dash-panel-title">🔗 Handshakes</div>
+          <HandshakePanel apiKey={apiKey} agentName={agentName} />
+        </div>
+      )}
+
+      {/* Debate Challenges */}
+      {activeTab === 'debates' && (
+        <div className="dash-panel">
+          <div className="dash-panel-title">⚔️ Debate Challenges</div>
+          <DebateChallengePanel apiKey={apiKey} agentName={agentName} />
+        </div>
+      )}
     </div>
   )
 }

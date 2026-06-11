@@ -21,6 +21,9 @@ import Settings from './components/Settings'
 import AgentWorkspace from './components/AgentWorkspace'
 import IntentHeatmap from './components/IntentHeatmap'
 import ObserverMode from './components/ObserverMode'
+import GuildProfile from './components/GuildProfile'
+import GuildDirectory from './components/GuildDirectory'
+import ActivityTicker from './components/ActivityTicker'
 import Sidebar from './components/Sidebar'
 import StatusBar from './components/StatusBar'
 import SubNav from './components/SubNav'
@@ -133,6 +136,7 @@ function AppLayout({ searchQuery, onSearchChange, searchOpen, onSearchToggle }: 
           </div>
         )}
         <div id="feed-topbar-slot" />
+        <ActivityTicker />
         {subLinks && <SubNav links={subLinks} />}
         <ObserverMode enabled={observerEnabled} onToggle={() => setObserverEnabled(o => !o)} />
         <main className="main">
@@ -156,6 +160,8 @@ function AppLayout({ searchQuery, onSearchChange, searchOpen, onSearchToggle }: 
             <Route path="/workspace" element={<ErrorBoundary><AgentWorkspace /></ErrorBoundary>} />
             <Route path="/workspace/:roomId" element={<ErrorBoundary><AgentWorkspace /></ErrorBoundary>} />
             <Route path="/heatmap" element={<ErrorBoundary><IntentHeatmap /></ErrorBoundary>} />
+            <Route path="/guilds" element={<ErrorBoundary><GuildDirectory /></ErrorBoundary>} />
+            <Route path="/guild/:slug" element={<ErrorBoundary><GuildProfile /></ErrorBoundary>} />
             <Route path="*" element={
               <div className="not-found">
                 <h1>404</h1><h2>Channel Not Found</h2>

@@ -1,5 +1,5 @@
 export const SECTION_PATHS: Record<string, string[]> = {
-  explore:  ['/agents', '/search', '/leaderboard', '/swarm', '/market', '/knowledge', '/workspace', '/heatmap'],
+  explore:  ['/agents', '/search', '/leaderboard', '/swarm', '/market', '/knowledge', '/workspace', '/heatmap', '/guilds'],
   create:   ['/create', '/pipeline'],
   me:       ['/dashboard', '/analytics', '/inbox'],
   settings: ['/settings', '/api-docs'],
@@ -15,6 +15,7 @@ export const SUB_NAV: Record<string, Array<{ to: string; label: string }>> = {
     { to: '/heatmap',   label: 'Intent'     },
     { to: '/market',    label: 'Market'     },
     { to: '/knowledge', label: 'Knowledge'  },
+    { to: '/guilds',    label: 'Guilds'     },
   ],
   create: [
     { to: '/create',   label: 'Studio' },
@@ -34,6 +35,7 @@ export const SUB_NAV: Record<string, Array<{ to: string; label: string }>> = {
 export function getSection(pathname: string): string {
   if (pathname === '/') return 'feed'
   if (pathname.startsWith('/agent/')) return 'explore'
+  if (pathname.startsWith('/guild/')) return 'explore'
   if (pathname.startsWith('/series/')) return ''
   for (const [section, paths] of Object.entries(SECTION_PATHS)) {
     if (paths.some(p => pathname === p || pathname.startsWith(p + '/'))) return section

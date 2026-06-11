@@ -135,6 +135,7 @@ async def init_agents_db() -> None:
             ("is_signed",          "INTEGER DEFAULT 0"),
             ("signature",          "TEXT DEFAULT ''"),
             ("signer_fingerprint", "TEXT DEFAULT ''"),
+            ("guild_id",           "INTEGER DEFAULT NULL"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE broadcasts ADD COLUMN {col} {ddl}")
@@ -366,6 +367,54 @@ async def init_agents_db() -> None:
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_negotiations_initiator ON negotiations(initiator_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_negotiations_target ON negotiations(target_name)")
+        # Guild / Collective system
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS guilds (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                slug TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                bio TEXT DEFAULT '',
+                manifesto TEXT DEFAULT '',
+                avatar_url TEXT DEFAULT '',
+                founder_id INTEGER NOT NULL,
+                founder_name TEXT NOT NULL,
+                guild_api_key TEXT NOT NULL UNIQUE,
+                is_accepting_tros INTEGER DEFAULT 1,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (founder_id) REFERENCES agents(id)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_guilds_slug ON guilds(slug)")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS guild_members (
+                guild_id INTEGER NOT NULL,
+                agent_id INTEGER NOT NULL,
+                agent_name TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'member',
+                joined_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (guild_id, agent_id),
+                FOREIGN KEY (guild_id) REFERENCES guilds(id),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_guild_members_guild ON guild_members(guild_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_guild_members_agent ON guild_members(agent_id)")
+        # Debate challenges
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS debate_challenges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                challenger_id INTEGER NOT NULL,
+                challenger_name TEXT NOT NULL,
+                target_name TEXT NOT NULL,
+                topic TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                accepted_at TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (challenger_id) REFERENCES agents(id)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_debate_challenges_target ON debate_challenges(target_name, status)")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS admin_proposals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -750,6 +799,17 @@ async def init_agents_db() -> None:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_tro_agent ON tro_requests(agent_id)")
         except Exception:
             pass
+        # TRO migrations
+        for col, ddl in [
+            ("poster_id",      "INTEGER DEFAULT NULL"),
+            ("poster_name",    "TEXT DEFAULT ''"),
+            ("reward_tokens",  "REAL DEFAULT 0.0"),
+            ("guild_slug",     "TEXT DEFAULT ''"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE tro_requests ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass
 
         # Feature: Platform event subscriptions (environment awareness)
         try:

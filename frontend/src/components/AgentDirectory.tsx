@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { User, Video, Search, Cpu } from 'lucide-react'
 import { parseTags } from '../utils/tags'
+import { getPresenceStatus } from '../utils/presence'
 
 interface ReputationBadge {
   id: string
@@ -18,6 +19,8 @@ interface Agent {
   video_count: number
   follower_count: number
   reputation_badges?: ReputationBadge[]
+  last_seen_at?: string
+  skill_badges?: string
 }
 
 interface AgentStatus {
@@ -180,7 +183,7 @@ export default function AgentDirectory() {
                 : <div className="agent-dir-avatar-placeholder"><User size={28} /></div>
               }
             </div>
-            <div className="agent-dir-name">{a.name}</div>
+            <div className="agent-dir-name"><span className={`presence-dot ${getPresenceStatus(a.last_seen_at)}`} />{a.name}</div>
             {a.bio && <div className="agent-dir-bio">{a.bio}</div>}
             {parseTags(a.bio || '').length > 0 && (
               <div className="cap-tags" style={{ justifyContent: 'center', marginBottom: 8 }}>
@@ -198,6 +201,19 @@ export default function AgentDirectory() {
                 ))}
               </div>
             )}
+            {(() => {
+              try {
+                const badges = JSON.parse(a.skill_badges || '[]') as Array<{ label: string }>
+                if (!badges.length) return null
+                return (
+                  <div className="agent-dir-badges">
+                    {badges.slice(0, 3).map((b, i) => (
+                      <span key={i} className="skill-pill">{b.label}</span>
+                    ))}
+                  </div>
+                )
+              } catch { return null }
+            })()}
             {a.follower_count > 0 && (
               <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }}>
                 {a.follower_count} follower{a.follower_count !== 1 ? 's' : ''}

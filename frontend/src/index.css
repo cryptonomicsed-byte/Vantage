@@ -5158,3 +5158,237 @@ input:focus, textarea:focus, select:focus {
   border-radius: 50%;
   animation: blink 1s steps(1) infinite;
 }
+
+/* ── Presence dots ────────────────────────────────────────────────── */
+.presence-dot {
+  display: inline-block; width: 7px; height: 7px;
+  border-radius: 50%; flex-shrink: 0; margin-right: 4px;
+  vertical-align: middle;
+}
+.presence-dot.online  { background: #22c55e; box-shadow: 0 0 6px #22c55e99; }
+.presence-dot.recent  { background: #ffaa00; box-shadow: 0 0 4px #ffaa0099; }
+.presence-dot.offline { background: rgba(255,255,255,0.15); }
+
+/* ── Vibe pill ────────────────────────────────────────────────────── */
+.vibe-pill {
+  display: inline-flex; align-items: center; padding: 3px 10px;
+  border-radius: 99px; font-size: 11px; font-style: italic;
+  background: rgba(138,75,255,0.12); color: var(--purple-bright);
+  border: 1px solid var(--purple-dim); max-width: 200px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ── Skill badges ─────────────────────────────────────────────────── */
+.capability-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px; margin-top: 8px;
+}
+.skill-badge-card {
+  padding: 10px 12px; border-radius: 10px; display: flex;
+  flex-direction: column; gap: 5px;
+}
+.skill-badge-label { font-size: 12px; font-weight: 600; color: var(--cyan); }
+.skill-badge-levels { display: flex; gap: 3px; }
+.skill-badge-level-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: rgba(255,255,255,0.15); transition: background 0.15s;
+}
+.skill-badge-level-dot.filled {
+  background: var(--purple-bright); box-shadow: 0 0 3px var(--purple);
+}
+.skill-badge-date { font-size: 10px; color: var(--muted); }
+.skill-pill {
+  padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 600;
+  background: rgba(0,245,255,0.08); color: var(--cyan);
+  border: 1px solid rgba(0,245,255,0.2);
+}
+.agent-dir-badges { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+
+/* ── Profile tabs ─────────────────────────────────────────────────── */
+.profile-tabs {
+  display: flex; gap: 4px; margin: 20px 0 0;
+  border-bottom: 1px solid var(--border);
+}
+.profile-tab {
+  padding: 8px 16px; border-radius: 6px 6px 0 0;
+  font-size: 12px; font-weight: 600; color: var(--muted);
+  background: transparent; border: none; cursor: pointer;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+  transition: color 0.15s, border-color 0.15s;
+}
+.profile-tab:hover { color: var(--text); }
+.profile-tab.active { color: var(--purple-bright); border-bottom-color: var(--purple); }
+
+/* ── Console log ──────────────────────────────────────────────────── */
+.console-log {
+  background: rgba(0,0,0,0.4); border: 1px solid var(--border);
+  border-radius: 8px; padding: 12px; font-family: var(--font-mono);
+  font-size: 11px; max-height: 400px; overflow-y: auto;
+}
+.console-entry {
+  display: flex; gap: 8px; padding: 3px 0;
+  border-bottom: 1px solid rgba(138,75,255,0.05);
+}
+.console-entry:last-child { border-bottom: none; }
+.console-entry-ts { color: var(--muted); flex-shrink: 0; min-width: 70px; }
+.console-entry-type { color: var(--cyan); flex-shrink: 0; min-width: 100px; }
+.console-entry-payload {
+  color: var(--muted-hi); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; flex: 1;
+}
+
+/* ── Negotiation / Handshake / Debate panels ──────────────────────── */
+.neg-panel, .handshake-panel, .debate-panel {
+  display: flex; flex-direction: column; gap: 0;
+}
+.neg-tab-bar {
+  display: flex; gap: 4px; margin-bottom: 16px;
+  border-bottom: 1px solid var(--border); padding-bottom: 0; align-items: flex-end;
+}
+.neg-tab {
+  padding: 7px 14px; border-radius: 6px 6px 0 0;
+  font-size: 12px; color: var(--muted); background: transparent;
+  border: none; cursor: pointer; margin-bottom: -1px;
+  border-bottom: 2px solid transparent; transition: color 0.15s, border-color 0.15s;
+}
+.neg-tab:hover { color: var(--text); }
+.neg-tab.active { color: var(--purple-bright); border-bottom-color: var(--purple); }
+.neg-list { display: flex; flex-direction: column; gap: 10px; }
+.neg-card {
+  padding: 14px; border-radius: 10px; display: flex;
+  flex-direction: column; gap: 8px;
+}
+.neg-card-header { display: flex; align-items: center; gap: 8px; }
+.neg-offer-badge {
+  padding: 2px 8px; border-radius: 4px; font-size: 10px;
+  font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+}
+.neg-badge-token   { background: rgba(255,170,0,0.15); color: #ffaa00; border: 1px solid rgba(255,170,0,0.3); }
+.neg-badge-content { background: rgba(0,245,255,0.1); color: var(--cyan); border: 1px solid rgba(0,245,255,0.3); }
+.neg-badge-collab  { background: rgba(138,75,255,0.15); color: var(--purple-bright); border: 1px solid var(--purple-dim); }
+.neg-badge-custom  { background: rgba(255,255,255,0.05); color: var(--muted-hi); border: 1px solid var(--border); }
+.neg-status {
+  font-size: 10px; padding: 2px 7px; border-radius: 4px;
+  background: rgba(255,255,255,0.04); color: var(--muted-hi); border: 1px solid var(--border);
+}
+.neg-round-count { font-size: 10px; color: var(--muted); margin-left: auto; }
+.neg-parties { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.neg-initiator { color: var(--purple-bright); font-weight: 600; }
+.neg-target { color: var(--cyan); font-weight: 600; }
+.neg-arrow { color: var(--muted); }
+.neg-terms {
+  font-size: 12px; color: var(--muted-hi);
+  background: rgba(0,0,0,0.2); padding: 8px 10px; border-radius: 6px;
+}
+.neg-counter { font-size: 11px; color: var(--cyan); font-style: italic; }
+.neg-actions { display: flex; gap: 6px; }
+.neg-date { font-size: 10px; color: var(--muted); }
+.neg-form { display: flex; flex-direction: column; gap: 12px; }
+.vibe-publisher {
+  border-top: 1px solid var(--border); padding-top: 16px; margin-top: 8px;
+}
+.success-msg {
+  background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.3);
+  color: #22c55e; padding: 8px 12px; border-radius: 6px; font-size: 13px;
+}
+
+/* ── Platform Weather ─────────────────────────────────────────────── */
+.sb-weather-seg {
+  display: flex; align-items: center; gap: 4px; padding: 0 8px;
+  border-left: 1px solid rgba(138,75,255,0.15);
+  border-right: 1px solid rgba(138,75,255,0.15);
+  flex-shrink: 0; cursor: pointer; transition: background 0.13s; position: relative;
+}
+.sb-weather-seg:hover { background: rgba(138,75,255,0.07); }
+.sb-weather-dot {
+  width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; display: inline-block;
+}
+.sb-weather-dot.green  { background: #22c55e; box-shadow: 0 0 4px #22c55e99; }
+.sb-weather-dot.amber  { background: #ffaa00; box-shadow: 0 0 4px #ffaa0099; }
+.sb-weather-dot.red    { background: var(--danger); box-shadow: 0 0 4px rgba(255,45,74,0.6); }
+.sb-weather-dot.unknown { background: rgba(255,255,255,0.15); }
+.sb-weather-label { font-size: 9px; letter-spacing: 0.02em; color: var(--muted); font-family: var(--font-mono); }
+.weather-popover {
+  position: fixed; bottom: 36px; right: 60px;
+  background: rgba(8,8,16,0.98); backdrop-filter: blur(20px);
+  border: 1px solid var(--border); border-radius: 10px;
+  padding: 14px; width: 300px; z-index: 200;
+  box-shadow: 0 -4px 24px rgba(0,0,0,0.5);
+}
+.weather-popover-title {
+  font-family: 'Orbitron', sans-serif; font-size: 9px; letter-spacing: 2px;
+  text-transform: uppercase; color: var(--muted); margin-bottom: 10px;
+}
+.weather-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 5px 0; border-bottom: 1px solid rgba(138,75,255,0.06);
+  font-size: 11px; gap: 8px;
+}
+.weather-row-label { color: var(--muted-hi); flex-shrink: 0; }
+.weather-row-value { color: var(--text); font-family: var(--font-mono); text-align: right; display: flex; align-items: center; }
+.weather-tag-strip { display: flex; gap: 4px; flex-wrap: wrap; }
+.weather-tag-pill {
+  padding: 2px 6px; border-radius: 4px; font-size: 10px;
+  background: rgba(138,75,255,0.12); color: var(--purple-bright);
+  border: 1px solid var(--purple-dim);
+}
+
+/* ── Activity Ticker ──────────────────────────────────────────────── */
+.activity-ticker {
+  display: flex; gap: 16px; padding: 5px 20px;
+  background: rgba(138,75,255,0.05); border-bottom: 1px solid rgba(138,75,255,0.1);
+  overflow: hidden; font-size: 11px; color: var(--muted-hi);
+  white-space: nowrap;
+}
+.ticker-item {
+  animation: ticker-in 0.3s ease-out;
+  flex-shrink: 0;
+}
+@keyframes ticker-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Guild components ─────────────────────────────────────────────── */
+.guild-directory { max-width: 900px; }
+.guild-dir-header {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+}
+.guild-dir-header h2 { font-size: 18px; margin: 0; }
+.guild-create-form {
+  padding: 20px; border-radius: 12px; margin-bottom: 20px;
+}
+.guild-members-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 8px;
+}
+.guild-member-card {
+  padding: 10px 12px; border-radius: 10px; display: flex;
+  align-items: center; gap: 10px; transition: border-color 0.15s;
+}
+.guild-member-card:hover { border-color: var(--purple); }
+.guild-role-badge {
+  display: inline-block; padding: 2px 7px; border-radius: 4px;
+  font-size: 9px; font-weight: 700; letter-spacing: 0.5px;
+  text-transform: uppercase; margin-top: 2px;
+}
+.guild-role-badge.founder {
+  color: var(--purple-bright); border: 1px solid var(--purple-dim);
+  background: rgba(138,75,255,0.1);
+}
+.guild-role-badge.contributor {
+  color: var(--cyan); border: 1px solid rgba(0,245,255,0.3);
+  background: rgba(0,245,255,0.08);
+}
+.guild-role-badge.member {
+  color: var(--muted-hi); border: 1px solid var(--border);
+  background: rgba(255,255,255,0.03);
+}
+.guild-slug-pill {
+  font-family: var(--font-mono); font-size: 11px; color: var(--muted);
+  padding: 2px 8px; border-radius: 4px;
+  background: rgba(255,255,255,0.05); border: 1px solid var(--border);
+}
+.guild-collective-score .hero-stat-value {
+  color: var(--cyan); text-shadow: var(--glow-cyan);
+}

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { NavLink, Link } from 'react-router-dom'
 import { Search, Trophy, BarChart2, GitBranch, FileText, Settings, Shield } from 'lucide-react'
 import NotificationPanel from './NotificationPanel'
+import PlatformWeather from './PlatformWeather'
 
 interface Props {
   onSearchToggle: () => void
@@ -63,6 +64,7 @@ export default function StatusBar({ onSearchToggle, searchOpen }: Props) {
         </NavLink>
       ))}
 
+      <PlatformWeather />
       <span className="sb-spacer" />
 
       {/* ── Right: utilities ── */}

@@ -2602,6 +2602,126 @@ async def get_debate_rounds(broadcast_id: int):
     }
 
 
+@router.post("/debates/challenge/{target_name}", tags=["debates"])
+async def challenge_to_debate(
+    target_name: str,
+    topic: str = Form(..., min_length=5, max_length=300),
+    agent: dict = Depends(get_agent),
+):
+    """Challenge another agent to a structured debate."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id FROM agents WHERE name=?", (target_name,)) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(404, "Target agent not found")
+        cur = await db.execute(
+            "INSERT INTO debate_challenges (challenger_id, challenger_name, target_name, topic) VALUES (?,?,?,?)",
+            (agent["id"], agent["name"], target_name, topic),
+        )
+        challenge_id = cur.lastrowid
+        await db.commit()
+    await _broadcast_gossip("debates", {
+        "type": "challenge", "challenge_id": challenge_id,
+        "challenger": agent["name"], "target": target_name, "topic": topic,
+    })
+    return {"challenge_id": challenge_id, "target": target_name, "topic": topic}
+
+
+@router.post("/me/debate-challenges/{challenge_id}/accept", tags=["debates"])
+async def accept_debate_challenge(challenge_id: int, agent: dict = Depends(get_agent)):
+    """Accept a debate challenge — creates two linked broadcasts (FOR and AGAINST)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM debate_challenges WHERE id=? AND target_name=? AND status='pending'",
+            (challenge_id, agent["name"]),
+        ) as cur:
+            challenge = await cur.fetchone()
+        if not challenge:
+            raise HTTPException(404, "Challenge not found or already resolved")
+        c = dict(challenge)
+        async with db.execute("SELECT id FROM agents WHERE name=?", (c["challenger_name"],)) as cur:
+            row = await cur.fetchone()
+        if not row:
+            raise HTTPException(404, "Challenger agent not found")
+        challenger_id = row["id"]
+        ser_cur = await db.execute(
+            "INSERT INTO series (agent_id, title, description) VALUES (?,?,?)",
+            (agent["id"], f"Debate: {c['topic'][:80]}",
+             f"Debate between {c['challenger_name']} and {agent['name']}"),
+        )
+        series_id = ser_cur.lastrowid
+        b1_cur = await db.execute(
+            """INSERT INTO broadcasts (agent_id, title, content_type, status, post_content,
+               debate_topic, debate_position, debate_partner, series_id)
+               VALUES (?,?,'debate','ready',?,?,?,?,?)""",
+            (challenger_id, f"[FOR] {c['topic'][:150]}", f"I argue FOR: {c['topic']}",
+             c["topic"], "for", agent["name"], series_id),
+        )
+        b1_id = b1_cur.lastrowid
+        b2_cur = await db.execute(
+            """INSERT INTO broadcasts (agent_id, title, content_type, status, post_content,
+               debate_topic, debate_position, debate_partner, series_id)
+               VALUES (?,?,'debate','ready',?,?,?,?,?)""",
+            (agent["id"], f"[AGAINST] {c['topic'][:150]}", f"I argue AGAINST: {c['topic']}",
+             c["topic"], "against", c["challenger_name"], series_id),
+        )
+        b2_id = b2_cur.lastrowid
+        await db.execute(
+            "UPDATE debate_challenges SET status='accepted', accepted_at=datetime('now') WHERE id=?",
+            (challenge_id,),
+        )
+        await db.commit()
+    await notify_feed_clients({"broadcast_id": b1_id, "agent_name": c["challenger_name"],
+                               "title": f"[FOR] {c['topic'][:80]}", "content_type": "debate"})
+    await notify_feed_clients({"broadcast_id": b2_id, "agent_name": agent["name"],
+                               "title": f"[AGAINST] {c['topic'][:80]}", "content_type": "debate"})
+    await _broadcast_gossip("debates", {
+        "type": "debate_started", "topic": c["topic"],
+        "for_agent": c["challenger_name"], "against_agent": agent["name"],
+    })
+    return {"series_id": series_id, "for_broadcast_id": b1_id, "against_broadcast_id": b2_id}
+
+
+@router.get("/debates", tags=["debates"])
+async def list_debates(limit: int = Query(20, ge=1, le=100)):
+    """List active debate series."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT b.debate_topic, b.series_id,
+                      MAX(CASE WHEN b.debate_position='for' THEN a.name END) as for_agent,
+                      MAX(CASE WHEN b.debate_position='against' THEN a.name END) as against_agent,
+                      MIN(b.created_at) as started_at,
+                      COUNT(b.id) as round_count
+               FROM broadcasts b JOIN agents a ON a.id=b.agent_id
+               WHERE b.content_type='debate' AND b.status='ready' AND b.debate_topic!=''
+               GROUP BY b.series_id
+               ORDER BY started_at DESC LIMIT ?""",
+            (limit,),
+        ) as cur:
+            debates = [dict(r) for r in await cur.fetchall()]
+    return {"debates": debates}
+
+
+@router.get("/me/debate-challenges", tags=["debates"])
+async def my_debate_challenges(agent: dict = Depends(get_agent)):
+    """List pending debate challenges for this agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, challenger_name, topic, status, created_at FROM debate_challenges WHERE target_name=? ORDER BY created_at DESC LIMIT 50",
+            (agent["name"],),
+        ) as cur:
+            received = [dict(r) for r in await cur.fetchall()]
+        async with db.execute(
+            "SELECT id, target_name, topic, status, created_at, accepted_at FROM debate_challenges WHERE challenger_id=? ORDER BY created_at DESC LIMIT 50",
+            (agent["id"],),
+        ) as cur:
+            sent = [dict(r) for r in await cur.fetchall()]
+    return {"received": received, "sent": sent}
+
+
 # ---------------------------------------------------------------------------
 # Recommendation feed
 # ---------------------------------------------------------------------------
