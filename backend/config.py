@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     # Leave empty to disable. No external service required.
     OUTBOUND_WEBHOOK_URL: str = ""
 
-    ALLOWED_ORIGINS: List[str] = ["*"]
+    ALLOWED_ORIGINS: List[str] = ["http://localhost:8001"]
     MAX_UPLOAD_MB: int = 500
 
     # Walrus decentralized storage (optional, set WALRUS_ENABLED=true to activate)

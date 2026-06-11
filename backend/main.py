@@ -221,6 +221,18 @@ async def _federation_gossip_loop():
                                 rp_name = str(rp.get("name", ""))
                                 if not rp_url or rp_url == peer["url"]:
                                     continue
+                                
+                                # SEC-13: Basic SSRF protection
+                                from urllib.parse import urlparse as _urlparse
+                                try:
+                                    _p = _urlparse(rp_url)
+                                    if _p.scheme not in ("http", "https") or not _p.netloc:
+                                        continue
+                                    if any(x in _p.netloc.lower() for x in ["localhost", "127.0.0.1", "::1", "0.0.0.0"]):
+                                        continue
+                                except Exception:
+                                    continue
+
                                 async with aiosqlite.connect(_DB_PATH) as db:
                                     await db.execute(
                                         "INSERT OR IGNORE INTO federation_peers (url, name, status, reputation) VALUES (?,?,'unknown',0.5)",
@@ -263,6 +275,11 @@ async def lifespan(app: FastAPI):
         logger.warning("FFmpeg not found — video transcoding will fail")
     else:
         logger.info("FFmpeg available")
+
+    if not settings.ADMIN_KEY:
+        logger.warning("VANTAGE_ADMIN_KEY not set — Admin API is disabled (503)")
+    else:
+        logger.info("Admin API enabled")
 
     task = asyncio.create_task(_scheduled_publish_loop())
     gossip_task = asyncio.create_task(_federation_gossip_loop())
@@ -347,6 +364,10 @@ app.include_router(agents_router)
 app.include_router(admin_router)
 from .routers.guilds import router as guilds_router
 app.include_router(guilds_router)
+from .routers.analytics import router as analytics_router
+app.include_router(analytics_router)
+from .routers.identity import router as identity_router
+app.include_router(identity_router)
 
 # MCP server — exposes all Vantage routes as MCP tools for Claude/GPT agents
 from .mcp_server import create_mcp_server as _create_mcp
