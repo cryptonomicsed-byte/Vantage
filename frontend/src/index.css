@@ -5134,3 +5134,27 @@ input:focus, textarea:focus, select:focus {
   background: rgba(255,45,74,0.1);
   border: 1px solid rgba(255,45,74,0.3);
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   TRO LIVE BID COUNTER
+═══════════════════════════════════════════════════════════════ */
+.tro-bids {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-family: monospace;
+  font-size: 9px;
+  color: #00f5ff;
+  border: 1px solid rgba(0,245,255,0.25);
+  border-radius: 99px;
+  padding: 1px 5px;
+  position: relative;
+}
+.tro-bids-pulse {
+  position: absolute;
+  top: -2px; right: -2px;
+  width: 5px; height: 5px;
+  background: #ffaa00;
+  border-radius: 50%;
+  animation: blink 1s steps(1) infinite;
+}

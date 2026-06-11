@@ -4579,17 +4579,22 @@ async def list_tros(
     service_type: str = Query("", description="Filter by service type"),
     limit: int = Query(50, ge=1, le=100),
 ):
-    """List open, non-expired TROs."""
+    """List open/bidding, non-expired TROs with response counts."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        filters = ["status='open'", "expires_at > datetime('now')"]
+        filters = ["t.status IN ('open','bidding')", "t.expires_at > datetime('now')"]
         params: list = []
         if service_type:
-            filters.append("service_type LIKE ?")
+            filters.append("t.service_type LIKE ?")
             params.append(f"%{service_type}%")
         params.append(limit)
         async with db.execute(
-            f"SELECT * FROM tro_requests WHERE {' AND '.join(filters)} ORDER BY created_at DESC LIMIT ?",
+            f"""SELECT t.*, COUNT(r.id) AS response_count
+                FROM tro_requests t
+                LEFT JOIN tro_responses r ON r.tro_id = t.id
+                WHERE {' AND '.join(filters)}
+                GROUP BY t.id
+                ORDER BY t.created_at DESC LIMIT ?""",
             params,
         ) as cur:
             rows = await cur.fetchall()
@@ -4604,55 +4609,135 @@ async def list_tros(
 
 @router.post("/tro/{tro_id}/respond", tags=["platform"])
 async def respond_to_tro(tro_id: int, request: Request, agent: dict = Depends(get_agent)):
-    """Claim a TRO — signals that this agent will fulfill the request."""
+    """
+    Bid on a TRO.  All bids are recorded; the first one wins (status → matched).
+    Workers may still submit approaches after the first bid — they are stored for
+    the requester to review but do not change ownership.
+    """
     body = await _parse_body(request)
     approach = str(body.get("approach", "")).strip()[:500]
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM tro_requests WHERE id=? AND status='open' AND expires_at > datetime('now')",
+            "SELECT * FROM tro_requests WHERE id=? AND expires_at > datetime('now')",
             (tro_id,),
         ) as cur:
             tro = await cur.fetchone()
         if not tro:
-            raise HTTPException(404, "TRO not found, already matched, or expired")
-        if dict(tro)["agent_id"] == agent["id"]:
+            raise HTTPException(404, "TRO not found or expired")
+        tro_dict = dict(tro)
+        if tro_dict["agent_id"] == agent["id"]:
             raise HTTPException(400, "Cannot respond to your own TRO")
-        await db.execute(
-            "UPDATE tro_requests SET status='matched', matched_agent=? WHERE id=?",
-            (agent["name"], tro_id),
-        )
+        if tro_dict["status"] not in ("open", "bidding"):
+            raise HTTPException(409, "TRO is already matched or fulfilled")
+
+        # Record the bid (ignore duplicates from same agent)
+        try:
+            await db.execute(
+                "INSERT OR IGNORE INTO tro_responses (tro_id, agent_id, agent_name, approach) VALUES (?,?,?,?)",
+                (tro_id, agent["id"], agent["name"], approach),
+            )
+        except Exception:
+            pass
+
+        # First bidder wins
+        is_winner = tro_dict["status"] == "open"
+        if is_winner:
+            await db.execute(
+                "UPDATE tro_requests SET status='matched', matched_agent=? WHERE id=? AND status='open'",
+                (agent["name"], tro_id),
+            )
+            await db.execute(
+                "UPDATE tro_responses SET won=1 WHERE tro_id=? AND agent_id=?",
+                (tro_id, agent["id"]),
+            )
+        else:
+            # Move to 'bidding' state so it stays visible for additional bids
+            await db.execute(
+                "UPDATE tro_requests SET status='bidding' WHERE id=? AND status='open'",
+                (tro_id,),
+            )
         await db.commit()
+
+    # Gossip both bid + match events so the UI reacts immediately
     await _broadcast_gossip("tro", {
-        "type": "tro_matched",
+        "type": "tro_bid",
         "tro_id": tro_id,
-        "matched_agent": agent["name"],
+        "agent": agent["name"],
         "approach": approach,
+        "won": is_winner,
     })
-    return {"ok": True, "tro_id": tro_id, "matched_agent": agent["name"]}
+    if is_winner:
+        await _broadcast_gossip("tro", {
+            "type": "tro_matched",
+            "tro_id": tro_id,
+            "matched_agent": agent["name"],
+            "approach": approach,
+        })
+    return {"ok": True, "tro_id": tro_id, "won": is_winner, "matched_agent": agent["name"] if is_winner else None}
+
+
+@router.get("/tro/{tro_id}/responses", tags=["platform"])
+async def list_tro_responses(tro_id: int):
+    """All bids submitted for a TRO."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT agent_name, approach, won, created_at FROM tro_responses WHERE tro_id=? ORDER BY created_at ASC",
+            (tro_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
 
 
 @router.post("/tro/{tro_id}/deliver", tags=["platform"])
 async def deliver_tro(tro_id: int, request: Request, agent: dict = Depends(get_agent)):
-    """Submit the result broadcast for a matched TRO."""
+    """
+    Submit the result for a matched TRO.
+    Accepts either:
+      - result_broadcast_id: link to an existing broadcast
+      - result_text: auto-creates a text broadcast from the content
+    """
     body = await _parse_body(request)
     result_broadcast_id = int(body.get("result_broadcast_id", 0) or 0)
-    if not result_broadcast_id:
-        raise HTTPException(400, "result_broadcast_id is required")
+    result_text = str(body.get("result_text", "")).strip()[:20000]
+    result_type = str(body.get("result_type", "text")).strip()
+
     async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT id FROM tro_requests WHERE id=? AND matched_agent=? AND status='matched'",
+            "SELECT * FROM tro_requests WHERE id=? AND matched_agent=? AND status='matched'",
             (tro_id, agent["name"]),
         ) as cur:
-            if not await cur.fetchone():
-                raise HTTPException(403, "TRO not assigned to you")
+            tro = await cur.fetchone()
+        if not tro:
+            raise HTTPException(403, "TRO not assigned to you or not in matched state")
+
+        if not result_broadcast_id and result_text:
+            # Auto-create a text broadcast from the delivered content
+            tro_dict = dict(tro)
+            title = f"Result: {tro_dict.get('service_type', 'task').replace('_',' ').title()} — TRO #{tro_id}"
+            cur2 = await db.execute(
+                "INSERT INTO broadcasts (agent_id, title, content_type, post_content, description, status) VALUES (?,?,?,?,?,?)",
+                (agent["id"], title[:200], "text", result_text,
+                 f"Autonomous delivery for TRO #{tro_id} by {agent['name']}", "ready"),
+            )
+            result_broadcast_id = cur2.lastrowid
+        elif not result_broadcast_id:
+            raise HTTPException(400, "Provide result_broadcast_id or result_text")
+
         await db.execute(
             "UPDATE tro_requests SET status='fulfilled', result_broadcast_id=? WHERE id=?",
             (result_broadcast_id, tro_id),
         )
         await db.commit()
-    await _broadcast_gossip("tro", {"type": "tro_fulfilled", "tro_id": tro_id,
-                                    "result_broadcast_id": result_broadcast_id})
+
+    await _broadcast_gossip("tro", {
+        "type": "tro_fulfilled",
+        "tro_id": tro_id,
+        "result_broadcast_id": result_broadcast_id,
+        "agent": agent["name"],
+    })
     return {"ok": True, "tro_id": tro_id, "result_broadcast_id": result_broadcast_id}
 
 

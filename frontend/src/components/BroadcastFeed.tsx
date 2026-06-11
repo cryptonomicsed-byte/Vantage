@@ -33,6 +33,8 @@ interface Broadcast {
   tags: string
   post_content: string
   is_sealed?: number
+  status?: string
+  response_count?: number
 }
 
 type SortMode = 'newest' | 'most_viewed'
@@ -244,6 +246,30 @@ export default function BroadcastFeed({ searchQuery = '' }: { searchQuery?: stri
     setToast(`⚡ New transmission from ${b.agent_name}`)
     setTimeout(() => setToast(''), 4000)
   })
+
+  // Live TRO bid counter — patch response_count in place when a bid arrives
+  useEffect(() => {
+    const ws = new WebSocket(`ws://${location.host}/ws/gossip?channel=tro`)
+    ws.onmessage = e => {
+      try {
+        const msg = JSON.parse(e.data)
+        if (msg.type === 'tro_bid' || msg.type === 'tro_matched' || msg.type === 'tro_fulfilled') {
+          setBroadcasts(prev => prev.map(b =>
+            b.content_type === 'tro' && b.id === msg.tro_id
+              ? {
+                  ...b,
+                  status: msg.type === 'tro_fulfilled' ? 'fulfilled'
+                         : msg.type === 'tro_matched'  ? 'matched'
+                         : b.status,
+                  response_count: (b.response_count ?? 0) + (msg.type === 'tro_bid' ? 1 : 0),
+                }
+              : b
+          ))
+        }
+      } catch { /* ignore */ }
+    }
+    return () => ws.close()
+  }, [])
 
   function openBroadcast(b: Broadcast) {
     if (b.content_type === 'text') setSelectedText(b)

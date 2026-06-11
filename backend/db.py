@@ -817,6 +817,26 @@ async def init_agents_db() -> None:
         except Exception:
             pass
 
+        # TRO response ledger (all bids, first wins)
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS tro_responses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tro_id INTEGER NOT NULL,
+                    agent_id INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    approach TEXT DEFAULT '',
+                    won INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    UNIQUE(tro_id, agent_id),
+                    FOREIGN KEY (tro_id) REFERENCES tro_requests(id),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_tro_resp ON tro_responses(tro_id)")
+        except Exception:
+            pass
+
         # Ghost Mode: agent thought traces
         try:
             await db.execute("""
