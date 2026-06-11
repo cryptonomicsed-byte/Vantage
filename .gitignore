@@ -10,3 +10,4 @@ frontend/dist/
 .vite/
 *.log
 .claude/
+backend/.seed_keys.json
