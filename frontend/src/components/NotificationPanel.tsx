@@ -56,7 +56,7 @@ export function useNotificationCount(): number {
   return count
 }
 
-export default function NotificationPanel() {
+export default function NotificationPanel({ sidebarMode, bottomBarMode }: { sidebarMode?: boolean; bottomBarMode?: boolean }) {
   const [open, setOpen] = useState(false)
   const [notifications, setNotifications] = useState<Notification[]>([])
   const [loading, setLoading] = useState(false)
@@ -108,19 +108,27 @@ export default function NotificationPanel() {
   if (!apiKey) return null
 
   return (
-    <div ref={panelRef} style={{ position: 'relative' }}>
+    <div ref={panelRef} style={{ position: (sidebarMode || bottomBarMode) ? 'static' : 'relative', display: bottomBarMode ? 'contents' : undefined }}>
       <button
-        className="top-nav-icon-btn"
+        className={sidebarMode ? 'sidebar-item' : bottomBarMode ? 'sb-icon-btn sb-bell' : 'top-nav-icon-btn'}
         onClick={openPanel}
         aria-label="Notifications"
         style={{ position: 'relative' }}
       >
-        <Bell size={16} />
-        {unread > 0 && <span className="nav-badge" style={{ position: 'absolute', top: 2, right: 2, fontSize: 9, minWidth: 14, height: 14, lineHeight: '14px', padding: '0 3px' }}>{unread > 99 ? '99+' : unread}</span>}
+        <Bell size={sidebarMode ? 18 : bottomBarMode ? 13 : 16} />
+        {unread > 0 && (
+          <span
+            className={sidebarMode ? 'sidebar-badge' : 'nav-badge'}
+            style={sidebarMode ? {} : { position: 'absolute', top: 2, right: 2, fontSize: 9, minWidth: 14, height: 14, lineHeight: '14px', padding: '0 3px', borderRadius: 7, background: 'var(--purple)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          >
+            {unread > 99 ? '99+' : unread}
+          </span>
+        )}
+        {sidebarMode && <span className="sidebar-label">Notifications</span>}
       </button>
 
       {open && (
-        <div className="notif-panel">
+        <div className={`notif-panel${sidebarMode ? ' notif-panel-sidebar' : bottomBarMode ? ' notif-panel-bottom' : ''}`}>
           <div className="notif-panel-header">
             <span style={{ fontWeight: 700, fontSize: 13 }}>Notifications</span>
             <div style={{ display: 'flex', gap: 8 }}>

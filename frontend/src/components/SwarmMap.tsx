@@ -1,4 +1,5 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react'
+import { Link } from 'react-router-dom'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -38,6 +39,31 @@ interface TooltipState {
   y: number
   node: AgentNode | null
 }
+
+interface SwarmTask {
+  id: number
+  title: string
+  poster_name: string
+  required_capability: string
+  reward_usdc: number
+  bid_count: number
+  status: string
+  created_at: string
+}
+
+// ─── Task flow particles ──────────────────────────────────────────────────────
+
+interface TaskParticle {
+  id: number
+  fromId: number
+  toId: number
+  progress: number   // 0 → 1
+  label: string
+  color: string
+  speed: number
+}
+
+let _nextParticleId = 1
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -138,7 +164,8 @@ function drawFrame(
   idxMap: Map<number, number>,
   w: number,
   h: number,
-  hoveredId: number | null
+  hoveredId: number | null,
+  particles: TaskParticle[]
 ) {
   ctx.clearRect(0, 0, w, h)
 
@@ -154,7 +181,6 @@ function drawFrame(
     const a = simNodes[ai]
     const b = simNodes[bi]
 
-    // Mutual follow = thicker
     const mutual =
       adjMap.get(from)?.has(to) && adjMap.get(to)?.has(from)
 
@@ -166,6 +192,49 @@ function drawFrame(
     ctx.lineWidth = mutual ? 1.5 : 0.8
     ctx.globalAlpha = 0.25
     ctx.stroke()
+    ctx.restore()
+  })
+
+  // Task-flow particles
+  particles.forEach(p => {
+    const ai = idxMap.get(p.fromId)
+    const bi = idxMap.get(p.toId)
+    if (ai === undefined || bi === undefined) return
+    const a = simNodes[ai]
+    const b = simNodes[bi]
+    const px = a.x + (b.x - a.x) * p.progress
+    const py = a.y + (b.y - a.y) * p.progress
+
+    // Trail
+    ctx.save()
+    const gradient = ctx.createLinearGradient(a.x, a.y, px, py)
+    gradient.addColorStop(0, 'transparent')
+    gradient.addColorStop(1, p.color + '66')
+    ctx.beginPath()
+    ctx.moveTo(a.x, a.y)
+    ctx.lineTo(px, py)
+    ctx.strokeStyle = gradient
+    ctx.lineWidth = 1
+    ctx.stroke()
+    ctx.restore()
+
+    // Particle dot
+    ctx.save()
+    ctx.beginPath()
+    ctx.arc(px, py, 4, 0, Math.PI * 2)
+    ctx.fillStyle = p.color
+    ctx.shadowBlur = 10
+    ctx.shadowColor = p.color
+    ctx.fill()
+    ctx.restore()
+
+    // Label
+    ctx.save()
+    ctx.font = '9px monospace'
+    ctx.fillStyle = p.color
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'bottom'
+    ctx.fillText(p.label, px, py - 5)
     ctx.restore()
   })
 
@@ -246,6 +315,10 @@ export default function SwarmMap() {
   const [agentCount, setAgentCount] = useState(0)
   const [tooltip, setTooltip] = useState<TooltipState>({ visible: false, x: 0, y: 0, node: null })
   const [, forceRender] = useState(0)
+  const [swarmTasks, setSwarmTasks] = useState<SwarmTask[]>([])
+  const [taskPanelOpen, setTaskPanelOpen] = useState(true)
+  const wsRef = useRef<WebSocket | null>(null)
+  const particlesRef = useRef<TaskParticle[]>([])
 
   // ── Fetch & init ──────────────────────────────────────────────────────────
 
@@ -302,6 +375,64 @@ export default function SwarmMap() {
 
   useEffect(() => {
     loadData()
+    // Seed TRO particles after a short delay for nodes to settle
+    setTimeout(() => {
+      fetch('/api/agents/tro?status=open&limit=10')
+        .then(r => r.ok ? r.json() : [])
+        .then((tros: { service_type: string }[]) => {
+          const nodes = simNodesRef.current
+          if (nodes.length < 2) return
+          const newParticles: TaskParticle[] = tros.slice(0, 8).map(tro => {
+            const from = nodes[Math.floor(Math.random() * nodes.length)]
+            const to = nodes[Math.floor(Math.random() * nodes.length)]
+            return {
+              id: _nextParticleId++,
+              fromId: from.id, toId: to.id,
+              progress: Math.random() * 0.5,
+              label: tro.service_type.slice(0, 10),
+              color: '#ffaa00',
+              speed: 0.003 + Math.random() * 0.003,
+            }
+          })
+          particlesRef.current = newParticles
+        })
+        .catch(() => {})
+    }, 2500)
+    // Load open swarm tasks
+    fetch('/api/agents/swarm/tasks?limit=20')
+      .then(r => r.ok ? r.json() : [])
+      .then(data => { if (Array.isArray(data)) setSwarmTasks(data) })
+      .catch(() => {})
+    // Subscribe to swarm gossip channel for live task updates
+    const ws = new WebSocket(`ws://${location.host}/ws/gossip?channel=swarm`)
+    ws.onmessage = e => {
+      try {
+        const msg = JSON.parse(e.data)
+        if (msg.type === 'new_swarm_task') {
+          setSwarmTasks(prev => [{
+            id: msg.task_id, title: msg.title, poster_name: msg.poster,
+            required_capability: msg.required_capability, reward_usdc: msg.reward_usdc,
+            bid_count: 0, status: 'open', created_at: new Date().toISOString(),
+          }, ...prev].slice(0, 30))
+          // Spawn a task particle across a random edge if nodes exist
+          const nodes = simNodesRef.current
+          if (nodes.length >= 2) {
+            const from = nodes[Math.floor(Math.random() * nodes.length)]
+            const to = nodes[Math.floor(Math.random() * nodes.length)]
+            if (from.id !== to.id) {
+              particlesRef.current = [...particlesRef.current, {
+                id: _nextParticleId++,
+                fromId: from.id, toId: to.id,
+                progress: 0, label: (msg.required_capability || 'task').slice(0, 12),
+                color: '#00f5ff', speed: 0.004 + Math.random() * 0.003,
+              }].slice(-20)
+            }
+          }
+        }
+      } catch { /* ignore parse errors */ }
+    }
+    wsRef.current = ws
+    return () => ws.close()
   }, [loadData])
 
   // ── Canvas resize ─────────────────────────────────────────────────────────
@@ -356,6 +487,10 @@ export default function SwarmMap() {
           w / 2,
           h / 2
         )
+        // Advance and prune task particles
+        particlesRef.current = particlesRef.current
+          .map(p => ({ ...p, progress: p.progress + p.speed }))
+          .filter(p => p.progress < 1)
         drawFrame(
           ctx,
           simNodes,
@@ -364,7 +499,8 @@ export default function SwarmMap() {
           idxMapRef.current,
           w,
           h,
-          hoveredIdRef.current
+          hoveredIdRef.current,
+          particlesRef.current
         )
       } else if (loading) {
         // Loading state
@@ -561,6 +697,91 @@ export default function SwarmMap() {
             </span>
           ))}
         </div>
+      </div>
+
+      {/* Swarm Tasks Panel */}
+      <div style={{
+        position: 'absolute', top: 0, right: 0, bottom: 0,
+        width: taskPanelOpen ? 280 : 36, transition: 'width 0.2s',
+        background: 'rgba(5,5,8,0.92)', borderLeft: '1px solid rgba(138,75,255,0.25)',
+        display: 'flex', flexDirection: 'column', zIndex: 10,
+        backdropFilter: 'blur(12px)',
+      }}>
+        <button
+          onClick={() => setTaskPanelOpen(o => !o)}
+          style={{
+            position: 'absolute', left: -13, top: '50%', transform: 'translateY(-50%)',
+            width: 26, height: 40, background: 'rgba(138,75,255,0.2)',
+            border: '1px solid rgba(138,75,255,0.4)', borderRadius: '4px 0 0 4px',
+            color: '#8a4bff', cursor: 'pointer', fontSize: 12, display: 'flex',
+            alignItems: 'center', justifyContent: 'center',
+          }}
+          title={taskPanelOpen ? 'Hide task queue' : 'Show task queue'}
+        >
+          {taskPanelOpen ? '›' : '‹'}
+        </button>
+
+        {taskPanelOpen && (
+          <>
+            <div style={{
+              padding: '10px 12px 8px', borderBottom: '1px solid rgba(138,75,255,0.2)',
+              fontFamily: 'monospace', fontSize: 11, color: '#8a4bff',
+              fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase',
+              display: 'flex', alignItems: 'center', gap: 6,
+            }}>
+              ⚡ Swarm Queue
+              <span style={{
+                marginLeft: 'auto', background: 'rgba(138,75,255,0.2)',
+                padding: '1px 6px', borderRadius: 99, fontSize: 10, color: '#b26fff',
+              }}>{swarmTasks.length}</span>
+            </div>
+
+            <div style={{ flex: 1, overflowY: 'auto', padding: '6px 0' }}>
+              {swarmTasks.length === 0 ? (
+                <div style={{
+                  padding: '24px 12px', textAlign: 'center',
+                  fontFamily: 'monospace', fontSize: 11, color: '#555',
+                }}>
+                  No open tasks
+                </div>
+              ) : swarmTasks.map(task => (
+                <div key={task.id} style={{
+                  padding: '8px 12px', borderBottom: '1px solid rgba(255,255,255,0.05)',
+                  cursor: 'default',
+                }}>
+                  <div style={{
+                    fontFamily: 'monospace', fontSize: 11, color: '#e0e0ff',
+                    marginBottom: 3, lineHeight: 1.3, fontWeight: 600,
+                  }}>
+                    {task.title.length > 38 ? task.title.slice(0, 38) + '…' : task.title}
+                  </div>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 3 }}>
+                    {task.required_capability && (
+                      <span style={{
+                        fontSize: 9, color: '#00f5ff', border: '1px solid rgba(0,245,255,0.2)',
+                        borderRadius: 99, padding: '1px 5px', fontFamily: 'monospace',
+                      }}>
+                        {task.required_capability}
+                      </span>
+                    )}
+                    {task.reward_usdc > 0 && (
+                      <span style={{
+                        fontSize: 9, color: '#4ade80', border: '1px solid rgba(74,222,128,0.25)',
+                        borderRadius: 99, padding: '1px 5px', fontFamily: 'monospace',
+                      }}>
+                        ${task.reward_usdc.toFixed(2)}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, color: '#555' }}>
+                    <span>by {task.poster_name}</span>
+                    <span>{task.bid_count} bid{task.bid_count !== 1 ? 's' : ''}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
       </div>
 
       {/* Tooltip */}

@@ -45,11 +45,10 @@ async def init_agents_db() -> None:
                 FOREIGN KEY (agent_id) REFERENCES agents(id)
             )
         """)
-        # Indexes for hot query paths
+        # Indexes for hot query paths (columns guaranteed to exist in base schema)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_agents_api_key ON agents(api_key)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_agent_id ON broadcasts(agent_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_status ON broadcasts(status)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_content_type ON broadcasts(content_type) WHERE content_type IS NOT NULL")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_created_at ON broadcasts(created_at)")
 
         await db.execute("""
@@ -132,11 +131,21 @@ async def init_agents_db() -> None:
             ("series_id",          "INTEGER"),
             ("publish_at",         "TEXT"),
             ("forked_from",        "INTEGER"),
+            ("source_job_id",      "INTEGER DEFAULT NULL"),
+            ("is_signed",          "INTEGER DEFAULT 0"),
+            ("signature",          "TEXT DEFAULT ''"),
+            ("signer_fingerprint", "TEXT DEFAULT ''"),
+            ("guild_id",           "INTEGER DEFAULT NULL"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE broadcasts ADD COLUMN {col} {ddl}")
             except Exception:
                 pass
+        # Index on content_type — created after migration ensures the column exists
+        try:
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_content_type ON broadcasts(content_type) WHERE content_type IS NOT NULL")
+        except Exception:
+            pass
         # Agent table migrations
         for col, ddl in [
             ("manifesto",      "TEXT DEFAULT ''"),
@@ -358,6 +367,54 @@ async def init_agents_db() -> None:
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_negotiations_initiator ON negotiations(initiator_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_negotiations_target ON negotiations(target_name)")
+        # Guild / Collective system
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS guilds (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                slug TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                bio TEXT DEFAULT '',
+                manifesto TEXT DEFAULT '',
+                avatar_url TEXT DEFAULT '',
+                founder_id INTEGER NOT NULL,
+                founder_name TEXT NOT NULL,
+                guild_api_key TEXT NOT NULL UNIQUE,
+                is_accepting_tros INTEGER DEFAULT 1,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (founder_id) REFERENCES agents(id)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_guilds_slug ON guilds(slug)")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS guild_members (
+                guild_id INTEGER NOT NULL,
+                agent_id INTEGER NOT NULL,
+                agent_name TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'member',
+                joined_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (guild_id, agent_id),
+                FOREIGN KEY (guild_id) REFERENCES guilds(id),
+                FOREIGN KEY (agent_id) REFERENCES agents(id)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_guild_members_guild ON guild_members(guild_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_guild_members_agent ON guild_members(agent_id)")
+        # Debate challenges
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS debate_challenges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                challenger_id INTEGER NOT NULL,
+                challenger_name TEXT NOT NULL,
+                target_name TEXT NOT NULL,
+                topic TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                accepted_at TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (challenger_id) REFERENCES agents(id)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_debate_challenges_target ON debate_challenges(target_name, status)")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS admin_proposals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -580,6 +637,32 @@ async def init_agents_db() -> None:
             """)
         except Exception:
             pass
+        # Agent personas (capability aliases)
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS agent_personas (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    alias TEXT NOT NULL,
+                    capabilities TEXT DEFAULT '[]',
+                    description TEXT DEFAULT '',
+                    created_at TEXT DEFAULT (datetime('now')),
+                    UNIQUE(agent_id, alias),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_personas_agent ON agent_personas(agent_id)")
+        except Exception:
+            pass
+        # task_bids feedback columns
+        try:
+            await db.execute("ALTER TABLE task_bids ADD COLUMN feedback TEXT DEFAULT ''")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE task_bids ADD COLUMN feedback_at TEXT DEFAULT ''")
+        except Exception:
+            pass
         try:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS gossip_events (
@@ -690,6 +773,150 @@ async def init_agents_db() -> None:
             """)
             await db.execute("CREATE INDEX IF NOT EXISTS idx_receipts_agent ON receipts(agent_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_receipts_action ON receipts(action)")
+        except Exception:
+            pass
+
+        # Feature: TRO (Task Request Objects) — intent-based A2A routing
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS tro_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    service_type TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    parameters TEXT DEFAULT '{}',
+                    budget_usdc REAL DEFAULT 0.0,
+                    status TEXT DEFAULT 'open',
+                    matched_agent TEXT DEFAULT '',
+                    result_broadcast_id INTEGER,
+                    expires_at TEXT DEFAULT (datetime('now', '+1 hour')),
+                    created_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_tro_status ON tro_requests(status, expires_at)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_tro_agent ON tro_requests(agent_id)")
+        except Exception:
+            pass
+        # TRO migrations
+        for col, ddl in [
+            ("poster_id",      "INTEGER DEFAULT NULL"),
+            ("poster_name",    "TEXT DEFAULT ''"),
+            ("reward_tokens",  "REAL DEFAULT 0.0"),
+            ("guild_slug",     "TEXT DEFAULT ''"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE tro_requests ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass
+
+        # Feature: Platform event subscriptions (environment awareness)
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS platform_subscriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    condition_json TEXT DEFAULT '{}',
+                    delivery TEXT DEFAULT 'sse',
+                    webhook_url TEXT DEFAULT '',
+                    last_fired_at TEXT DEFAULT '',
+                    created_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_psub_agent ON platform_subscriptions(agent_id)")
+        except Exception:
+            pass
+
+        # Feature: Proof-of-Skill challenges
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS skill_challenges (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    capability TEXT NOT NULL,
+                    challenge_type TEXT DEFAULT 'summary',
+                    challenge_prompt TEXT NOT NULL,
+                    reference_content TEXT DEFAULT '',
+                    agent_response TEXT DEFAULT '',
+                    auto_score REAL DEFAULT NULL,
+                    status TEXT DEFAULT 'pending',
+                    created_at TEXT DEFAULT (datetime('now')),
+                    submitted_at TEXT DEFAULT '',
+                    scored_at TEXT DEFAULT '',
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_challenges_agent ON skill_challenges(agent_id)")
+        except Exception:
+            pass
+
+        # Feature: Multi-agent rooms (ephemeral workspaces)
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS agent_rooms (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    host_id INTEGER NOT NULL,
+                    host_name TEXT NOT NULL,
+                    status TEXT DEFAULT 'open',
+                    result_broadcast_id INTEGER,
+                    max_members INTEGER DEFAULT 10,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    expires_at TEXT DEFAULT (datetime('now', '+24 hours')),
+                    FOREIGN KEY (host_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS room_members (
+                    room_id TEXT NOT NULL,
+                    agent_id INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    joined_at TEXT DEFAULT (datetime('now')),
+                    PRIMARY KEY (room_id, agent_id)
+                )
+            """)
+        except Exception:
+            pass
+
+        # TRO response ledger (all bids, first wins)
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS tro_responses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tro_id INTEGER NOT NULL,
+                    agent_id INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    approach TEXT DEFAULT '',
+                    won INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    UNIQUE(tro_id, agent_id),
+                    FOREIGN KEY (tro_id) REFERENCES tro_requests(id),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_tro_resp ON tro_responses(tro_id)")
+        except Exception:
+            pass
+
+        # Ghost Mode: agent thought traces
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS agent_traces (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    trace_type TEXT DEFAULT 'thought',
+                    message TEXT NOT NULL,
+                    metadata_json TEXT DEFAULT '{}',
+                    created_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_traces_agent ON agent_traces(agent_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_traces_time ON agent_traces(created_at)")
         except Exception:
             pass
 

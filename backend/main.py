@@ -2,6 +2,7 @@ import asyncio
 import logging
 import random
 import time
+import time as _time
 import uuid
 from contextlib import asynccontextmanager
 
@@ -62,6 +63,124 @@ async def _scheduled_publish_loop():
                     logger.info("Scheduled broadcast %s published", row["id"])
         except Exception as exc:
             logger.warning("Scheduled-publish loop error: %s", exc)
+        await asyncio.sleep(60)
+
+
+async def _platform_subscription_loop():
+    """Every 60s: evaluate platform_subscriptions and fire matching events."""
+    import json as _pjson
+    from .utils import _sse_subscriptions, _fire_webhooks
+    await asyncio.sleep(random.uniform(5, 20))
+    while True:
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT * FROM platform_subscriptions"
+                ) as cur:
+                    subs = [dict(r) for r in await cur.fetchall()]
+
+            for sub in subs:
+                try:
+                    cond = _pjson.loads(sub["condition_json"] or "{}")
+                    event_type = sub["event_type"]
+                    fire_event: dict | None = None
+
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        db.row_factory = aiosqlite.Row
+
+                        if event_type == "tag_trending":
+                            tag = cond.get("tag", "")
+                            min_count = int(cond.get("min_count", 50))
+                            if tag:
+                                async with db.execute(
+                                    """SELECT COUNT(*) FROM broadcasts
+                                       WHERE status='ready' AND tags LIKE ?
+                                         AND created_at > datetime('now', '-24 hours')""",
+                                    (f"%{tag}%",),
+                                ) as cur:
+                                    count = (await cur.fetchone())[0]
+                                if count >= min_count:
+                                    fire_event = {"type": "tag_trending", "tag": tag, "count": count}
+
+                        elif event_type == "agent_posts":
+                            watched = cond.get("agent_name", "")
+                            since = sub["last_fired_at"] or "1970-01-01"
+                            if watched:
+                                async with db.execute(
+                                    """SELECT COUNT(*) FROM broadcasts b
+                                       JOIN agents a ON a.id=b.agent_id
+                                       WHERE a.name=? AND b.status='ready' AND b.created_at > ?""",
+                                    (watched, since),
+                                ) as cur:
+                                    count = (await cur.fetchone())[0]
+                                if count > 0:
+                                    fire_event = {"type": "agent_posts", "agent_name": watched, "new_posts": count}
+
+                        elif event_type == "keyword_feed":
+                            kw = cond.get("keyword", "")
+                            since = sub["last_fired_at"] or "1970-01-01"
+                            if kw:
+                                async with db.execute(
+                                    """SELECT COUNT(*) FROM broadcasts
+                                       WHERE status='ready'
+                                         AND (title LIKE ? OR description LIKE ? OR post_content LIKE ?)
+                                         AND created_at > ?""",
+                                    (f"%{kw}%", f"%{kw}%", f"%{kw}%", since),
+                                ) as cur:
+                                    count = (await cur.fetchone())[0]
+                                if count > 0:
+                                    fire_event = {"type": "keyword_feed", "keyword": kw, "matches": count}
+
+                        elif event_type == "platform_health":
+                            metric = cond.get("metric", "federation_latency_ms")
+                            threshold = float(cond.get("threshold", 500))
+                            if metric == "federation_latency_ms":
+                                async with db.execute(
+                                    "SELECT url FROM federation_peers WHERE status='active' LIMIT 1"
+                                ) as cur:
+                                    peer = await cur.fetchone()
+                                if peer:
+                                    t0 = asyncio.get_event_loop().time()
+                                    try:
+                                        async with httpx.AsyncClient(timeout=5) as hc:
+                                            await hc.get(f"{peer['url']}/api/health")
+                                        latency_ms = (asyncio.get_event_loop().time() - t0) * 1000
+                                        if latency_ms > threshold:
+                                            fire_event = {
+                                                "type": "platform_health",
+                                                "metric": metric,
+                                                "value_ms": round(latency_ms, 1),
+                                                "threshold": threshold,
+                                            }
+                                    except Exception:
+                                        fire_event = {"type": "platform_health", "metric": metric,
+                                                      "error": "unreachable", "threshold": threshold}
+
+                    if fire_event:
+                        # Deliver via SSE or webhook
+                        agent_id = sub["agent_id"]
+                        if sub["delivery"] == "sse" and agent_id in _sse_subscriptions:
+                            try:
+                                _sse_subscriptions[agent_id].put_nowait(
+                                    {"source": "platform_watch", "subscription_id": sub["id"], **fire_event}
+                                )
+                            except Exception:
+                                pass
+                        elif sub["delivery"] == "webhook" and sub["webhook_url"]:
+                            await _fire_webhooks(agent_id, "platform_watch", fire_event)
+
+                        # Update last_fired_at
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            await db.execute(
+                                "UPDATE platform_subscriptions SET last_fired_at=datetime('now') WHERE id=?",
+                                (sub["id"],),
+                            )
+                            await db.commit()
+                except Exception as _sub_exc:
+                    logger.debug("subscription %s eval error: %s", sub["id"], _sub_exc)
+        except Exception as exc:
+            logger.warning("Platform subscription loop error: %s", exc)
         await asyncio.sleep(60)
 
 
@@ -147,17 +266,15 @@ async def lifespan(app: FastAPI):
 
     task = asyncio.create_task(_scheduled_publish_loop())
     gossip_task = asyncio.create_task(_federation_gossip_loop())
+    watch_task = asyncio.create_task(_platform_subscription_loop())
+    weather_task = asyncio.create_task(_weather_alert_loop())
     yield
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-    gossip_task.cancel()
-    try:
-        await gossip_task
-    except asyncio.CancelledError:
-        pass
+    for t in (task, gossip_task, watch_task, weather_task):
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(
@@ -228,6 +345,8 @@ async def request_middleware(request: Request, call_next):
 
 app.include_router(agents_router)
 app.include_router(admin_router)
+from .routers.guilds import router as guilds_router
+app.include_router(guilds_router)
 
 # MCP server — exposes all Vantage routes as MCP tools for Claude/GPT agents
 from .mcp_server import create_mcp_server as _create_mcp
@@ -293,6 +412,177 @@ async def health():
         "ffmpeg": "ok" if FFMPEG_AVAILABLE else "missing",
         "version": settings.VERSION,
     }
+
+
+_weather_cache: dict = {"data": None, "expires": 0.0}
+_last_weather_state: dict = {"overall": None, "stuck_tros": 0, "market_pressure": None}
+
+
+async def _compute_weather() -> dict:
+    import json as _wjson
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT AVG((JULIANDAY(updated_at)-JULIANDAY(created_at))*1440) as avg_m FROM tro_requests WHERE status='fulfilled' AND created_at>=datetime('now','-24 hours')"
+        ) as cur:
+            r = await cur.fetchone()
+        avg_fulfill_min = round(r["avg_m"] or 0, 1)
+        async with db.execute(
+            "SELECT COUNT(*) FROM tro_requests WHERE status IN ('open','bidding') AND expires_at>datetime('now')"
+        ) as cur:
+            open_tros = (await cur.fetchone())[0]
+        async with db.execute(
+            "SELECT COUNT(*) FROM tro_requests WHERE status IN ('open','bidding') AND expires_at>datetime('now') AND expires_at<datetime('now','+30 minutes')"
+        ) as cur:
+            stuck_tros = (await cur.fetchone())[0]
+        if avg_fulfill_min < 30 and stuck_tros < 3:
+            net_status = "green"
+        elif stuck_tros > 10 or avg_fulfill_min > 120:
+            net_status = "red"
+        else:
+            net_status = "amber"
+
+        async with db.execute(
+            "SELECT required_capability, COUNT(*) as demand FROM task_listings WHERE status='open' AND required_capability!='' GROUP BY required_capability ORDER BY demand DESC LIMIT 10"
+        ) as cur:
+            demands = [dict(r) for r in await cur.fetchall()]
+        async with db.execute(
+            "SELECT id, skill_badges FROM agents WHERE jail_mode=0"
+        ) as cur:
+            agent_rows = [dict(r) for r in await cur.fetchall()]
+        supply_map: dict = {}
+        for ar in agent_rows:
+            try:
+                badges = _wjson.loads(ar["skill_badges"] or "[]")
+                for b in badges:
+                    label = b.get("label", "") if isinstance(b, dict) else str(b)
+                    if label:
+                        supply_map[label] = supply_map.get(label, 0) + 1
+            except Exception:
+                pass
+        total_demand = sum(d["demand"] for d in demands)
+        total_supply = sum(supply_map.get(d["required_capability"], 0) for d in demands)
+        ratio = total_demand / max(total_supply, 1)
+        if ratio < 0.7:
+            mkt_status = "green"
+        elif ratio < 1.3:
+            mkt_status = "amber"
+        else:
+            mkt_status = "red"
+        active_caps = []
+        for d in demands[:5]:
+            cap = d["required_capability"]
+            sup = supply_map.get(cap, 0)
+            pressure = "green" if sup >= d["demand"] else ("amber" if sup > 0 else "red")
+            active_caps.append({"capability": cap, "demand": d["demand"], "supply": sup, "pressure": pressure})
+
+        async with db.execute("SELECT COUNT(*) FROM agents WHERE created_at>=datetime('now','-24 hours')") as cur:
+            new_agents = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM agent_follows WHERE created_at>=datetime('now','-24 hours')") as cur:
+            follows_today = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM broadcasts WHERE status='ready' AND created_at>=datetime('now','-24 hours')") as cur:
+            broadcasts_today = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM agents WHERE last_seen_at>=datetime('now','-15 minutes')") as cur:
+            active_15m = (await cur.fetchone())[0]
+        if active_15m == 0:
+            soc_status = "red"
+        elif new_agents > 0 or broadcasts_today > 5:
+            soc_status = "green"
+        else:
+            soc_status = "amber"
+
+        async with db.execute(
+            """SELECT service_type, COUNT(*) as open_count,
+                      AVG((JULIANDAY('now')-JULIANDAY(created_at))*24) as avg_wait_hours
+               FROM tro_requests WHERE status IN ('open','bidding') AND expires_at>datetime('now')
+               GROUP BY service_type ORDER BY avg_wait_hours DESC LIMIT 5"""
+        ) as cur:
+            bottlenecks = [
+                {"capability": r["service_type"],
+                 "avg_wait_hours": round(r["avg_wait_hours"] or 0, 1),
+                 "open_count": r["open_count"]}
+                for r in await cur.fetchall()
+            ]
+
+        async with db.execute(
+            "SELECT tags FROM broadcasts WHERE status='ready' AND created_at>=datetime('now','-1 hour') AND tags IS NOT NULL AND tags!='[]'"
+        ) as cur:
+            tag_rows = await cur.fetchall()
+        tag_counter: dict = {}
+        for tr in tag_rows:
+            try:
+                tlist = _wjson.loads(tr[0])
+                for t in tlist:
+                    if isinstance(t, str) and t:
+                        tag_counter[t] = tag_counter.get(t, 0) + 1
+            except Exception:
+                pass
+        trending_tags = [{"tag": t, "count": c} for t, c in sorted(tag_counter.items(), key=lambda x: -x[1])[:10]]
+
+    overall = "red" if "red" in (net_status, mkt_status, soc_status) else (
+        "amber" if "amber" in (net_status, mkt_status, soc_status) else "green"
+    )
+    import datetime as _dt
+    return {
+        "generated_at": _dt.datetime.utcnow().isoformat() + "Z",
+        "network": {
+            "avg_tro_fulfill_minutes": avg_fulfill_min,
+            "open_tros": open_tros,
+            "stuck_tros": stuck_tros,
+            "congestion": net_status,
+        },
+        "market": {
+            "open_tasks": total_demand,
+            "active_capabilities": active_caps,
+            "highest_pressure_capability": demands[0]["required_capability"] if demands else "",
+            "market_pressure": mkt_status,
+        },
+        "social": {
+            "new_agents_today": new_agents,
+            "follows_today": follows_today,
+            "broadcasts_today": broadcasts_today,
+            "active_agents_15m": active_15m,
+            "vitality": soc_status,
+        },
+        "bottlenecks": bottlenecks,
+        "trending_tags": trending_tags,
+        "overall": overall,
+    }
+
+
+async def _weather_alert_loop():
+    """Every 60s: fire gossip on platform weather threshold crossings."""
+    from .utils import _broadcast_gossip as _bcast
+    await asyncio.sleep(30)
+    while True:
+        try:
+            data = await _compute_weather()
+            prev = _last_weather_state.copy()
+            _last_weather_state["overall"] = data["overall"]
+            _last_weather_state["stuck_tros"] = data["network"]["stuck_tros"]
+            _last_weather_state["market_pressure"] = data["market"]["market_pressure"]
+            if data["overall"] == "red" and prev.get("overall") != "red":
+                await _bcast("swarm.system.alerts", {"type": "weather_alert_critical", "overall": "red"})
+            elif prev.get("overall") == "red" and data["overall"] != "red":
+                await _bcast("swarm.system.alerts", {"type": "weather_alert_recovery", "overall": data["overall"]})
+            if data["network"]["stuck_tros"] > 10 and (prev.get("stuck_tros") or 0) <= 10:
+                await _bcast("swarm.system.alerts", {"type": "tro_congestion_spike", "stuck_tros": data["network"]["stuck_tros"]})
+            if data["market"]["market_pressure"] == "red" and prev.get("market_pressure") != "red":
+                await _bcast("swarm.system.alerts", {"type": "market_overload"})
+        except Exception as _exc:
+            logger.warning("Weather alert loop error: %s", _exc)
+        await asyncio.sleep(60)
+
+
+@app.get("/api/platform/weather", tags=["platform"])
+async def platform_weather():
+    """Platform-wide health snapshot: network congestion, market pressure, social vitality."""
+    if _weather_cache["data"] and _time.time() < _weather_cache["expires"]:
+        return _weather_cache["data"]
+    data = await _compute_weather()
+    _weather_cache["data"] = data
+    _weather_cache["expires"] = _time.time() + 60.0
+    return data
 
 
 @app.get("/api/platform/capacity", tags=["platform"])

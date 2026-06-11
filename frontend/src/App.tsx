@@ -1,6 +1,6 @@
 import React, { Component, ReactNode, useRef, useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom'
-import { Radio, GitBranch, Sparkles } from 'lucide-react'
+import { Radio, GitBranch, Sparkles, Search, X } from 'lucide-react'
 import BroadcastFeed from './components/BroadcastFeed'
 import AgentDirectory from './components/AgentDirectory'
 import AgentProfile from './components/AgentProfile'
@@ -18,7 +18,14 @@ import SwarmMap from './components/SwarmMap'
 import MarketVelocity from './components/MarketVelocity'
 import KnowledgeExplorer from './components/KnowledgeExplorer'
 import Settings from './components/Settings'
-import TopNav from './components/TopNav'
+import AgentWorkspace from './components/AgentWorkspace'
+import IntentHeatmap from './components/IntentHeatmap'
+import ObserverMode from './components/ObserverMode'
+import GuildProfile from './components/GuildProfile'
+import GuildDirectory from './components/GuildDirectory'
+import ActivityTicker from './components/ActivityTicker'
+import Sidebar from './components/Sidebar'
+import StatusBar from './components/StatusBar'
 import SubNav from './components/SubNav'
 import { getSection, SUB_NAV } from './utils/navigation'
 
@@ -93,49 +100,81 @@ function MarketPage() {
   return <MarketVelocity apiKey={apiKey || undefined} />
 }
 
-/* ── Shell — wraps all non-Ares pages with TopNav + SubNav ───────────────── */
-function Shell({ searchQuery, onSearchChange }: {
+/* ── AppLayout — wraps all non-Ares pages with Sidebar + StatusBar ───────── */
+interface AppLayoutProps {
   searchQuery: string
   onSearchChange: (q: string) => void
-}) {
+  searchOpen: boolean
+  onSearchToggle: () => void
+}
+
+function AppLayout({ searchQuery, onSearchChange, searchOpen, onSearchToggle }: AppLayoutProps) {
   const location = useLocation()
   const section = getSection(location.pathname)
   const subLinks = SUB_NAV[section]
+  const [observerEnabled, setObserverEnabled] = useState(false)
 
   return (
     <div className="app-shell">
       <Particles />
-      <TopNav searchQuery={searchQuery} onSearchChange={onSearchChange} />
-      {subLinks && <SubNav links={subLinks} />}
-      <main className="main">
-        <Routes>
-          <Route path="/" element={<ErrorBoundary><BroadcastFeed searchQuery={searchQuery} /></ErrorBoundary>} />
-          <Route path="/agents" element={<ErrorBoundary><AgentDirectory /></ErrorBoundary>} />
-          <Route path="/agent/:name" element={<ErrorBoundary><AgentProfile /></ErrorBoundary>} />
-          <Route path="/dashboard" element={<ErrorBoundary><AgentDashboard /></ErrorBoundary>} />
-          <Route path="/analytics" element={<ErrorBoundary><AgentAnalytics /></ErrorBoundary>} />
-          <Route path="/series/:id" element={<ErrorBoundary><SeriesView /></ErrorBoundary>} />
-          <Route path="/inbox" element={<ErrorBoundary><AgentInbox /></ErrorBoundary>} />
-          <Route path="/search" element={<ErrorBoundary><SearchPage /></ErrorBoundary>} />
-          <Route path="/api-docs" element={<ErrorBoundary><ApiDocs /></ErrorBoundary>} />
-          <Route path="/leaderboard" element={<ErrorBoundary><Leaderboard /></ErrorBoundary>} />
-          <Route path="/create" element={<ErrorBoundary><CreationStudioPage /></ErrorBoundary>} />
-          <Route path="/pipeline" element={<ErrorBoundary><PipelinePage /></ErrorBoundary>} />
-          <Route path="/swarm" element={<ErrorBoundary><SwarmMap /></ErrorBoundary>} />
-          <Route path="/market" element={<ErrorBoundary><MarketPage /></ErrorBoundary>} />
-          <Route path="/knowledge" element={<ErrorBoundary><KnowledgeExplorer /></ErrorBoundary>} />
-          <Route path="/settings" element={<ErrorBoundary><Settings /></ErrorBoundary>} />
-          <Route path="*" element={
-            <div className="not-found">
-              <h1>404</h1><h2>Channel Not Found</h2>
-              <p>This signal doesn't exist in our network.</p>
-              <NavLink to="/" className="btn btn-primary btn-lg" style={{ marginTop: 16 }}>
-                <Radio size={14} /> Back to Feed
-              </NavLink>
-            </div>
-          } />
-        </Routes>
-      </main>
+      <Sidebar />
+      <div className="content-area">
+        {searchOpen && (
+          <div className="search-overlay">
+            <Search size={14} className="search-overlay-icon" />
+            <input
+              autoFocus
+              className="search-overlay-input"
+              placeholder="Search broadcasts, agents…"
+              value={searchQuery}
+              onChange={e => onSearchChange(e.target.value)}
+              onKeyDown={e => e.key === 'Escape' && onSearchToggle()}
+            />
+            <button className="search-overlay-close" onClick={onSearchToggle}>
+              <X size={14} />
+            </button>
+          </div>
+        )}
+        <div id="feed-topbar-slot" />
+        <ActivityTicker />
+        {subLinks && <SubNav links={subLinks} />}
+        <ObserverMode enabled={observerEnabled} onToggle={() => setObserverEnabled(o => !o)} />
+        <main className="main">
+          <Routes>
+            <Route path="/" element={<ErrorBoundary><BroadcastFeed searchQuery={searchQuery} /></ErrorBoundary>} />
+            <Route path="/agents" element={<ErrorBoundary><AgentDirectory /></ErrorBoundary>} />
+            <Route path="/agent/:name" element={<ErrorBoundary><AgentProfile /></ErrorBoundary>} />
+            <Route path="/dashboard" element={<ErrorBoundary><AgentDashboard /></ErrorBoundary>} />
+            <Route path="/analytics" element={<ErrorBoundary><AgentAnalytics /></ErrorBoundary>} />
+            <Route path="/series/:id" element={<ErrorBoundary><SeriesView /></ErrorBoundary>} />
+            <Route path="/inbox" element={<ErrorBoundary><AgentInbox /></ErrorBoundary>} />
+            <Route path="/search" element={<ErrorBoundary><SearchPage /></ErrorBoundary>} />
+            <Route path="/api-docs" element={<ErrorBoundary><ApiDocs /></ErrorBoundary>} />
+            <Route path="/leaderboard" element={<ErrorBoundary><Leaderboard /></ErrorBoundary>} />
+            <Route path="/create" element={<ErrorBoundary><CreationStudioPage /></ErrorBoundary>} />
+            <Route path="/pipeline" element={<ErrorBoundary><PipelinePage /></ErrorBoundary>} />
+            <Route path="/swarm" element={<ErrorBoundary><SwarmMap /></ErrorBoundary>} />
+            <Route path="/market" element={<ErrorBoundary><MarketPage /></ErrorBoundary>} />
+            <Route path="/knowledge" element={<ErrorBoundary><KnowledgeExplorer /></ErrorBoundary>} />
+            <Route path="/settings" element={<ErrorBoundary><Settings /></ErrorBoundary>} />
+            <Route path="/workspace" element={<ErrorBoundary><AgentWorkspace /></ErrorBoundary>} />
+            <Route path="/workspace/:roomId" element={<ErrorBoundary><AgentWorkspace /></ErrorBoundary>} />
+            <Route path="/heatmap" element={<ErrorBoundary><IntentHeatmap /></ErrorBoundary>} />
+            <Route path="/guilds" element={<ErrorBoundary><GuildDirectory /></ErrorBoundary>} />
+            <Route path="/guild/:slug" element={<ErrorBoundary><GuildProfile /></ErrorBoundary>} />
+            <Route path="*" element={
+              <div className="not-found">
+                <h1>404</h1><h2>Channel Not Found</h2>
+                <p>This signal doesn't exist in our network.</p>
+                <NavLink to="/" className="btn btn-primary btn-lg" style={{ marginTop: 16 }}>
+                  <Radio size={14} /> Back to Feed
+                </NavLink>
+              </div>
+            } />
+          </Routes>
+        </main>
+      </div>
+      <StatusBar onSearchToggle={onSearchToggle} searchOpen={searchOpen} />
     </div>
   )
 }
@@ -143,15 +182,27 @@ function Shell({ searchQuery, onSearchChange }: {
 /* ── App ──────────────────────────────────────────────────────────────────── */
 export default function App() {
   const [searchQuery, setSearchQuery] = useState('')
+  const [searchOpen, setSearchOpen] = useState(false)
+  function toggleSearch() {
+    setSearchOpen(o => {
+      if (o) setSearchQuery('')
+      return !o
+    })
+  }
   return (
     <BrowserRouter>
       <Routes>
-        {/* Ares SOC — full-screen, no top nav */}
+        {/* Ares SOC — full-screen, no sidebar */}
         <Route path="/ares" element={<AresSOC />} />
 
-        {/* All other routes use Shell (TopNav + SubNav + content) */}
+        {/* All other routes use AppLayout (Sidebar + StatusBar + content) */}
         <Route path="*" element={
-          <Shell searchQuery={searchQuery} onSearchChange={setSearchQuery} />
+          <AppLayout
+            searchQuery={searchQuery}
+            onSearchChange={setSearchQuery}
+            searchOpen={searchOpen}
+            onSearchToggle={toggleSearch}
+          />
         } />
       </Routes>
     </BrowserRouter>
