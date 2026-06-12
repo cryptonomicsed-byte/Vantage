@@ -9110,30 +9110,3 @@ async def restore_platform_snapshot(snapshot_id: int, _: str = Depends(get_admin
         "restored_tables": restored,
         "skipped_tables": [t for t in tables_list if t not in safe_tables],
     }
-st(record.keys())
-                vals = [record[c] for c in cols]
-                placeholders = ",".join(["?" for _ in cols])
-                col_str = ",".join(cols)
-                try:
-                    await db.execute(
-                        f"INSERT OR IGNORE INTO {table} ({col_str}) VALUES ({placeholders})",
-                        vals,
-                    )
-                except Exception:
-                    pass
-            restored[table] = len(rows)
-        await db.commit()
-
-    return {
-        "ok": True,
-        "snapshot_id": snapshot_id,
-        "label": data["label"],
-        "restored_tables": restored,
-        "skipped_tables": [t for t in tables_list if t not in safe_tables],
-    }
-,
-    }
-t in safe_tables],
-    }
-,
-    }
