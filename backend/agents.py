@@ -59,6 +59,9 @@ router = APIRouter(prefix="/api/agents", tags=["agents"])
 # Background processing
 # ---------------------------------------------------------------------------
 
+# SEC-11: cap concurrent FFmpeg transcodes (definition lost in ab8349b merge)
+_ffmpeg_semaphore = asyncio.Semaphore(2)
+
 async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Path) -> None:
     out_dir = agent_dir / str(broadcast_id)
     out_dir.mkdir(parents=True, exist_ok=True)
