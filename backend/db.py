@@ -370,6 +370,55 @@ async def init_agents_db() -> None:
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_negotiations_initiator ON negotiations(initiator_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_negotiations_target ON negotiations(target_name)")
+        # Personal Memory Vault tables
+        await db.execute("""
+CREATE TABLE IF NOT EXISTS agent_memory_vaults (
+    agent_id INTEGER PRIMARY KEY,
+    vault_enabled INTEGER DEFAULT 1,
+    memory_access TEXT DEFAULT 'private',
+    federation_peers TEXT DEFAULT '[]',
+    auto_export INTEGER DEFAULT 1,
+    last_synced_at TEXT DEFAULT '',
+    vault_size_mb REAL DEFAULT 0.0,
+    FOREIGN KEY (agent_id) REFERENCES agents(id)
+)
+""")
+        await db.execute("""
+CREATE TABLE IF NOT EXISTS memory_access_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vault_agent_id INTEGER NOT NULL,
+    accessor_agent_id INTEGER,
+    accessor_peer_url TEXT DEFAULT '',
+    resource_path TEXT NOT NULL,
+    access_type TEXT DEFAULT 'read',
+    accessed_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (vault_agent_id) REFERENCES agents(id),
+    FOREIGN KEY (accessor_agent_id) REFERENCES agents(id)
+)
+""")
+        await db.execute("""
+CREATE TABLE IF NOT EXISTS memory_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_agent_id INTEGER NOT NULL,
+    source_note_path TEXT NOT NULL,
+    target_agent_id INTEGER NOT NULL,
+    target_note_path TEXT NOT NULL,
+    link_type TEXT DEFAULT 'reference',
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (source_agent_id) REFERENCES agents(id),
+    FOREIGN KEY (target_agent_id) REFERENCES agents(id)
+)
+""")
+        await db.execute("""
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+    agent_id UNINDEXED,
+    note_path UNINDEXED,
+    title,
+    content,
+    tags,
+    tokenize='porter'
+)
+""")
         # Guild / Collective system
         await db.execute("""
             CREATE TABLE IF NOT EXISTS guilds (

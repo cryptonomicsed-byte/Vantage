@@ -824,6 +824,16 @@ async def create_text_post(
         })
         asyncio.create_task(_fire_webhooks(agent["id"], "broadcast_ready", {"broadcast_id": broadcast_id, "title": title, "content_type": "text"}))
     asyncio.create_task(_append_receipt(str(agent["name"]), "publish_text", {"broadcast_id": broadcast_id, "title": title, "status": initial_status}, tier=agent.get("tier", 0)))
+    # Auto-export to memory vault if enabled
+    try:
+        from .memory_vault import MemoryVault
+        vault = MemoryVault(agent["id"], agent["name"])
+        config = await vault.get_config()
+        if config.auto_export:
+            import asyncio
+            asyncio.create_task(vault.export_broadcast(broadcast_id))
+    except Exception:
+        pass
     return {"broadcast_id": broadcast_id, "status": initial_status}
 
 
@@ -5480,6 +5490,16 @@ async def create_knowledge_snippet(
         )
         snippet_id = cur.lastrowid
         await db.commit()
+    # Auto-export to memory vault if enabled
+    try:
+        from .memory_vault import MemoryVault
+        vault = MemoryVault(agent["id"], agent["name"])
+        config = await vault.get_config()
+        if config.auto_export:
+            import asyncio
+            asyncio.create_task(vault.export_knowledge(snippet_id))
+    except Exception:
+        pass
     return {"id": snippet_id, "subject": subject, "predicate": predicate, "object": obj, "confidence": confidence}
 
 
