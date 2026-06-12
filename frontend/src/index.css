@@ -5396,3 +5396,258 @@ input:focus, textarea:focus, select:focus {
 .guild-collective-score .hero-stat-value {
   color: var(--cyan); text-shadow: var(--glow-cyan);
 }
+
+/* ── Memory Vault ──────────────────────────────────────────────────────────── */
+.memory-vault-tab {
+  display: flex;
+  flex-direction: column;
+  min-height: 500px;
+}
+.vault-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 0 12px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.vault-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.vault-title h2 {
+  margin: 0;
+  font-family: 'Orbitron', sans-serif;
+  font-size: 16px;
+  color: var(--cyan);
+}
+.vault-access-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid currentColor;
+  background: rgba(0,0,0,0.3);
+  font-family: var(--font-mono);
+}
+.vault-view-tabs {
+  display: flex;
+  gap: 6px;
+}
+.vault-view-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 6px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  transition: color 0.15s, border-color 0.15s;
+}
+.vault-view-btn:hover, .vault-view-btn.active {
+  border-color: var(--cyan);
+  color: var(--cyan);
+}
+.vault-search-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.vault-search-bar input {
+  flex: 1;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.vault-search-bar input:focus { outline: none; border-color: var(--cyan); }
+.vault-search-bar button {
+  background: rgba(0,245,255,0.08);
+  border: 1px solid var(--cyan);
+  color: var(--cyan);
+  padding: 8px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex; align-items: center;
+}
+.vault-sync-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  font-size: 11px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+}
+.vault-sync-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(34,197,94,0.08);
+  border: 1px solid #22c55e;
+  color: #22c55e;
+  padding: 5px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+.vault-lock-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 300px;
+  gap: 12px;
+  color: var(--muted);
+}
+.vault-lock-screen h3 { margin: 0; color: var(--text); font-size: 16px; }
+.vault-lock-screen p { margin: 0; font-size: 13px; }
+/* Galaxy canvas container */
+.galaxy-container {
+  position: relative;
+  width: 100%;
+  height: 500px;
+  background: radial-gradient(ellipse at center, rgba(138,75,255,0.06) 0%, rgba(0,0,0,0) 70%), #040408;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+.galaxy-canvas { width: 100%; height: 100%; display: block; }
+.galaxy-filter-bar {
+  display: flex;
+  gap: 6px;
+  padding: 8px 0;
+  flex-wrap: wrap;
+}
+.galaxy-filter-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 4px 10px;
+  border-radius: 99px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.galaxy-filter-btn.active, .galaxy-filter-btn:hover {
+  border-color: var(--cyan);
+  color: var(--cyan);
+  background: rgba(0,245,255,0.06);
+}
+.galaxy-stats {
+  position: absolute;
+  top: 8px;
+  left: 12px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: rgba(0,245,255,0.5);
+  pointer-events: none;
+}
+.galaxy-tooltip {
+  position: absolute;
+  background: rgba(4,4,10,0.95);
+  border: 1px solid var(--cyan);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--cyan);
+  pointer-events: none;
+  max-width: 200px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Vault files view */
+.vault-file-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+.vault-folder-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+}
+.vault-folder-row span { color: var(--muted); font-size: 11px; font-family: var(--font-mono); }
+.vault-download-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(138,75,255,0.08);
+  border: 1px solid var(--purple);
+  color: var(--purple-bright);
+  padding: 10px 20px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  text-decoration: none;
+}
+/* Vault settings */
+.vault-settings { max-width: 480px; }
+.vault-setting-group { margin-bottom: 20px; }
+.vault-setting-label {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 6px;
+  font-family: var(--font-mono);
+}
+.vault-setting-group select,
+.vault-setting-group textarea {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.vault-save-btn {
+  background: rgba(0,245,255,0.08);
+  border: 1px solid var(--cyan);
+  color: var(--cyan);
+  padding: 10px 20px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+/* Vault search results */
+.vault-search-results {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.vault-search-result {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.vault-search-result:last-child { border-bottom: none; }
+.vault-search-result h5 { margin: 0 0 4px; color: var(--cyan); font-size: 13px; }
+.vault-search-result p { margin: 0; color: var(--muted-hi); font-size: 11px; }
+.vault-search-result code { font-size: 10px; color: var(--muted); font-family: var(--font-mono); }
