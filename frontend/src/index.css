@@ -114,6 +114,7 @@ body::before {
   display: flex;
   flex-direction: row;
   height: 100vh;
+  height: 100dvh; /* dynamic viewport: excludes browser chrome on mobile */
   overflow: hidden;
   position: relative;
   z-index: 1;
@@ -132,6 +133,7 @@ body::before {
   position: sticky;
   top: 0;
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
   padding-bottom: 32px; /* keep clear of status bar */
 }
@@ -707,8 +709,10 @@ body::before {
 .main {
   flex: 1;
   overflow-y: auto;
-  padding: 32px 32px 50px;
+  padding: 32px 32px 80px; /* 80px clears 28px status-bar with generous breathing room */
   scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch; /* smooth momentum scroll on iOS/Android */
+  overscroll-behavior-y: contain;
 }
 .main::-webkit-scrollbar { width: 4px; }
 .main::-webkit-scrollbar-track { background: transparent; }
@@ -3214,7 +3218,7 @@ input:focus, textarea:focus, select:focus {
   .top-nav-tabs { gap: 0; margin-left: 12px; }
   .top-nav-tab { font-size: 11px; padding: 0 8px; }
   .sub-nav { padding: 8px 12px; gap: 4px; }
-  .main { padding: 20px 16px; }
+  .main { padding: 20px 16px 56px; } /* 56px clears 28px status-bar on tablet */
   .agent-hero { flex-direction: column; text-align: center; }
   .agent-stats { justify-content: center; }
   .grid-3 { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
@@ -3235,9 +3239,9 @@ input:focus, textarea:focus, select:focus {
   .sidebar-bottom { flex-direction: row; padding: 4px; gap: 0; }
   .sidebar-item .sidebar-label { display: none; }
   .sidebar-divider { width: 1px; height: 24px; margin: 0 2px; }
-  .content-area { height: calc(100vh - 54px); }
+  .content-area { height: calc(100vh - 54px); height: calc(100dvh - 54px); }
   .status-bar { display: none; }
-  .main { padding: 20px 16px 20px; }
+  .main { padding: 20px 16px 32px; }
 }
 
 /* ── Phase B: Debate ────────────────────────────────────────────────────────── */
