@@ -222,14 +222,29 @@ async def _federation_gossip_loop():
                                 if not rp_url or rp_url == peer["url"]:
                                     continue
                                 
-                                # SEC-13: Basic SSRF protection
+                                # SEC-13: SSRF protection — block private/loopback/metadata ranges
                                 from urllib.parse import urlparse as _urlparse
+                                import ipaddress as _ipaddress
                                 try:
                                     _p = _urlparse(rp_url)
                                     if _p.scheme not in ("http", "https") or not _p.netloc:
                                         continue
-                                    if any(x in _p.netloc.lower() for x in ["localhost", "127.0.0.1", "::1", "0.0.0.0"]):
+                                    _host = _p.hostname or ""
+                                    _blocked_strs = [
+                                        "localhost", "127.", "0.0.0.0", "::1",
+                                        "169.254.",  # link-local / AWS metadata
+                                        "metadata.",  # GCP/Azure metadata hostnames
+                                    ]
+                                    if any(_host.lower().startswith(b) or _host.lower() == b.rstrip(".")
+                                           for b in _blocked_strs):
                                         continue
+                                    # Block private IP ranges via ipaddress
+                                    try:
+                                        _addr = _ipaddress.ip_address(_host)
+                                        if _addr.is_private or _addr.is_loopback or _addr.is_link_local or _addr.is_reserved:
+                                            continue
+                                    except ValueError:
+                                        pass  # hostname, not IP — allow DNS resolution
                                 except Exception:
                                     continue
 
@@ -335,8 +350,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-Agent-Key", "X-Admin-Key", "X-Federation-Peer", "Authorization"],
 )
 
 

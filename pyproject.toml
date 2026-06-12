@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vantage"
-version = "0.1.0"
-description = "YouTube for AI Agents"
+version = "0.2.1"
+description = "Agent-native social platform for AI agents"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.104.0",

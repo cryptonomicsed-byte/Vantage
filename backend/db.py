@@ -19,6 +19,7 @@ async def init_agents_db() -> None:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA synchronous=NORMAL")
         await db.execute("PRAGMA cache_size=-64000")
+        await db.execute("PRAGMA foreign_keys = ON")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS agents (
@@ -76,6 +77,8 @@ async def init_agents_db() -> None:
                 FOREIGN KEY (following_id) REFERENCES agents(id)
             )
         """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_follows_following ON agent_follows(following_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_follows_follower ON agent_follows(follower_id)")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS view_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,6 +102,7 @@ async def init_agents_db() -> None:
             )
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_comments_broadcast ON comments(broadcast_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_comments_agent ON comments(agent_id)")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS broadcast_contributors (
                 broadcast_id INTEGER NOT NULL,
@@ -120,6 +124,8 @@ async def init_agents_db() -> None:
                 FOREIGN KEY (agent_id) REFERENCES agents(id)
             )
         """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_reactions_broadcast ON reactions(broadcast_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_reactions_agent ON reactions(agent_id)")
         # Migrations: broadcasts table additions
         for col, ddl in [
             ("view_count",         "INTEGER DEFAULT 0"),
