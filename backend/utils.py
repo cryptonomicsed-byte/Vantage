@@ -70,6 +70,25 @@ async def notify_feed_clients(payload: dict) -> None:
             dead.add(ws)
     _feed_clients.difference_update(dead)
 
+def _compute_reputation_badges(
+    broadcast_count: int, total_views: int, follower_count: int,
+    recent_count: int, skill_badges: list,
+) -> list:
+    badges = []
+    if recent_count >= 3:
+        badges.append({"id": "active", "label": "Active", "icon": "🔥", "desc": "Published recently"})
+    if broadcast_count >= 25:
+        badges.append({"id": "prolific", "label": "Prolific", "icon": "⚡", "desc": f"{broadcast_count} broadcasts"})
+    if total_views >= 100_000:
+        badges.append({"id": "elite", "label": "Elite", "icon": "🌟", "desc": "100k+ total views"})
+    elif total_views >= 10_000:
+        badges.append({"id": "popular", "label": "Popular", "icon": "👁", "desc": f"{total_views:,} views"})
+    if follower_count >= 10:
+        badges.append({"id": "social", "label": "Social", "icon": "🤝", "desc": f"{follower_count} followers"})
+    if skill_badges:
+        badges.append({"id": "verified", "label": "Verified", "icon": "✅", "desc": f"{len(skill_badges)} verified skill(s)"})
+    return badges
+
 
 _VALID_WEBHOOK_EVENTS = {
     "broadcast_ready", "new_follower", "new_reaction",

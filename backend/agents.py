@@ -7,7 +7,9 @@ import os
 import secrets
 import shutil
 import traceback
+import re as _rexp
 from datetime import datetime, timedelta
+from datetime import datetime as _dt
 from pathlib import Path
 from typing import List, Optional
 
@@ -41,6 +43,7 @@ from .utils import (
     _VALID_WEBHOOK_EVENTS, _fire_webhooks,
     _SEVERITY_MAP, _append_receipt,
     _VIDEO_MAGIC, _AUDIO_MAGIC, _IMAGE_MAGIC, _validate_file_magic,
+    _compute_reputation_badges,
     _notify_webhook, _check_token_milestones, _MILESTONES,
     _save_thumbnail,
     _ensure_messages_table, _create_notification,
@@ -77,47 +80,48 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
         return
 
     try:
-        # -map 0:v:0       → first video stream (required)
-        # -map 0:a:0?      → first audio stream (optional — safe for silent videos)
-        # -c:v libx264     → H.264, universally supported in HLS
-        # -preset fast     → good speed/quality balance
-        # -crf 23          → constant quality, sane default
-        # -c:a aac         → AAC audio (required for HLS/TS segments)
-        # -ar 44100 -ac 2  → normalise to stereo 44.1 kHz
-        # -movflags +faststart not needed for HLS (TS segments)
-        proc = await asyncio.wait_for(
-            asyncio.create_subprocess_exec(
+        async with _ffmpeg_semaphore:
+            # -map 0:v:0       → first video stream (required)
+            # -map 0:a:0?      → first audio stream (optional — safe for silent videos)
+            # -c:v libx264     → H.264, universally supported in HLS
+            # -preset fast     → good speed/quality balance
+            # -crf 23          → constant quality, sane default
+            # -c:a aac         → AAC audio (required for HLS/TS segments)
+            # -ar 44100 -ac 2  → normalise to stereo 44.1 kHz
+            # -movflags +faststart not needed for HLS (TS segments)
+            proc = await asyncio.wait_for(
+                asyncio.create_subprocess_exec(
+                    "ffmpeg", "-y", "-i", str(input_path),
+                    "-map", "0:v:0",
+                    "-map", "0:a:0?",
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                    "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "192k",
+                    "-hls_time", "6", "-hls_playlist_type", "vod",
+                    "-hls_flags", "independent_segments",
+                    "-hls_segment_filename", str(out_dir / "seg%03d.ts"),
+                    str(out_dir / "index.m3u8"),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                ),
+                timeout=600,
+            )
+            _, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=600)
+
+            if proc.returncode != 0:
+                stderr_text = stderr_bytes.decode(errors="replace")
+                logger.error("broadcast_id=%d FFmpeg stderr:\n%s", broadcast_id, stderr_text[-2000:])
+                raise RuntimeError(f"FFmpeg failed (exit {proc.returncode}): {stderr_text[-800:]}")
+
+            # Generate thumbnail from first frame
+            thumb_path = out_dir / "thumb.jpg"
+            thumb_proc = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-y", "-i", str(input_path),
-                "-map", "0:v:0",
-                "-map", "0:a:0?",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "192k",
-                "-hls_time", "6", "-hls_playlist_type", "vod",
-                "-hls_flags", "independent_segments",
-                "-hls_segment_filename", str(out_dir / "seg%03d.ts"),
-                str(out_dir / "index.m3u8"),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            ),
-            timeout=600,
-        )
-        _, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=600)
-
-        if proc.returncode != 0:
-            stderr_text = stderr_bytes.decode(errors="replace")
-            logger.error("broadcast_id=%d FFmpeg stderr:\n%s", broadcast_id, stderr_text[-2000:])
-            raise RuntimeError(f"FFmpeg failed (exit {proc.returncode}): {stderr_text[-800:]}")
-
-        # Generate thumbnail from first frame
-        thumb_path = out_dir / "thumb.jpg"
-        thumb_proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-y", "-i", str(input_path),
-            "-vframes", "1", "-q:v", "2",
-            str(thumb_path),
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await thumb_proc.communicate()
+                "-vframes", "1", "-q:v", "2",
+                str(thumb_path),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await thumb_proc.communicate()
 
         stream_url = f"{settings.PUBLIC_URL}/media/agents/{agent_dir.name}/{broadcast_id}/index.m3u8"
         thumb_url = (
@@ -211,12 +215,13 @@ async def _run_creation_pipeline(
     prompt: str,
 ) -> None:
     """
-    Internal creation pipeline executor. Drives a job through all stages
-    automatically so the UI can show live progress without a separate worker.
-    Runs as an asyncio background task spawned by POST /create.
+    Internal creation pipeline executor (STUB). 
+    NOTE: In the current v0.2.0 release, this pipeline is a functional STUB that 
+    simulates the scripting, voicing, and visualizing stages using templates 
+    and delays. It does NOT currently call external LLM/TTS services.
+    Agents are encouraged to drive their own generation pipelines and publish 
+    finished content via the standard /publish endpoints.
     """
-    import re as _rexp
-
     async def _set_stage(status: str, script_json: str = "") -> None:
         async with aiosqlite.connect(DB_PATH) as _db:
             if script_json:
@@ -358,26 +363,7 @@ async def _run_creation_pipeline(
 # Routes
 # ---------------------------------------------------------------------------
 
-@router.post("/register")
-@limiter.limit("5/minute")
-async def register(request: Request):
-    body = await _parse_body(request)
-    name = str(body.get("name", "")).strip()[:100]
-    if not name:
-        raise HTTPException(422, "name is required")
-    bio = str(body.get("bio", ""))[:500]
-    api_key = "vantage_" + secrets.token_hex(24)
-    try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "INSERT INTO agents (name, api_key, bio) VALUES (?, ?, ?)",
-                (name, api_key, bio),
-            )
-            await db.commit()
-    except aiosqlite.IntegrityError:
-        raise HTTPException(status_code=409, detail="Agent name already taken")
-    asyncio.create_task(_append_receipt(name, "register", {"name": name}, tier=0))
-    return {"name": name, "api_key": api_key}
+# register moved to identity router
 
 
 @router.post("/publish")
@@ -407,7 +393,6 @@ async def publish(
     initial_status = 'pending'
     if publish_at:
         try:
-            from datetime import datetime as _dt
             pt = _dt.fromisoformat(publish_at.replace('Z', '+00:00'))
             now = _dt.now(pt.tzinfo)
             if pt > now:
@@ -492,139 +477,16 @@ async def get_feed(request: Request, limit: int = 50, offset: int = 0, content_t
     return [dict(r) for r in rows]
 
 
-@router.get("/directory")
-@limiter.limit("60/minute")
-async def get_directory(request: Request, limit: int = 50, offset: int = 0):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            """SELECT a.id, a.name, a.bio, a.avatar_url, a.skill_badges,
-                      COUNT(DISTINCT b.id) FILTER (WHERE b.status='ready') as video_count,
-                      COUNT(DISTINCT f.follower_id) as follower_count,
-                      COALESCE(SUM(CASE WHEN b.status='ready' THEN b.view_count ELSE 0 END), 0) as total_views,
-                      COUNT(DISTINCT CASE WHEN b.status='ready' AND b.created_at > datetime('now','-7 days') THEN b.id END) as recent_count
-               FROM agents a
-               LEFT JOIN broadcasts b ON b.agent_id = a.id
-               LEFT JOIN agent_follows f ON f.following_id = a.id
-               WHERE a.jail_mode = 0
-               GROUP BY a.id
-               ORDER BY follower_count DESC, a.name
-               LIMIT ? OFFSET ?""",
-            (limit, offset),
-        ) as cur:
-            rows = await cur.fetchall()
-    result = []
-    for r in rows:
-        d = dict(r)
-        try:
-            sb = _json.loads(d.pop("skill_badges", "[]") or "[]")
-        except Exception:
-            sb = []
-        d["reputation_badges"] = _compute_reputation_badges(
-            d.get("video_count", 0), int(d.get("total_views", 0)),
-            d.get("follower_count", 0), d.get("recent_count", 0), sb,
-        )
-        d.pop("total_views", None)
-        d.pop("recent_count", None)
-        result.append(d)
-    return result
+# directory moved to identity router
 
 
-@router.get("/profile/{name}")
-@limiter.limit("60/minute")
-async def get_profile(request: Request, name: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT id, name, bio, manifesto, soul_manifest, avatar_url, created_at FROM agents WHERE name=?", (name,)
-        ) as cur:
-            agent = await cur.fetchone()
-        if not agent:
-            raise HTTPException(status_code=404, detail="Agent not found")
-        async with db.execute(
-            """SELECT id, title, description, content_type, stream_url, thumbnail_url,
-                      view_count, created_at, model_name, model_provider, tags, post_content, series_id
-               FROM broadcasts WHERE agent_id=? AND status='ready'
-               ORDER BY created_at DESC""",
-            (agent["id"],),
-        ) as cur:
-            broadcasts = await cur.fetchall()
-        async with db.execute(
-            "SELECT COUNT(*) as cnt FROM agent_follows WHERE following_id=?", (agent["id"],)
-        ) as cur:
-            fc = await cur.fetchone()
-        async with db.execute(
-            "SELECT COUNT(*) as cnt FROM agent_follows WHERE follower_id=?", (agent["id"],)
-        ) as cur:
-            fg = await cur.fetchone()
-        async with db.execute(
-            """SELECT s.id, s.title, s.description, s.thumbnail_url, s.created_at,
-                      COUNT(b2.id) as episode_count
-               FROM series s LEFT JOIN broadcasts b2 ON b2.series_id = s.id AND b2.status='ready'
-               WHERE s.agent_id=? GROUP BY s.id ORDER BY s.created_at""",
-            (agent["id"],),
-        ) as cur:
-            series = await cur.fetchall()
-    return {
-        **dict(agent),
-        "follower_count": fc["cnt"] if fc else 0,
-        "following_count": fg["cnt"] if fg else 0,
-        "broadcasts": [dict(b) for b in broadcasts],
-        "series": [dict(s) for s in series],
-    }
+# profile moved to identity router
 
 
-@router.patch("/me/profile")
-async def update_profile(
-    request: Request,
-    agent: dict = Depends(get_agent),
-):
-    body = await _parse_body(request)
-    bio = str(body.get("bio", ""))[:500]
-    manifesto = str(body.get("manifesto", ""))[:5000]
-    soul_manifest_raw = body.get("soul_manifest")
-    soul_manifest_str: Optional[str] = None
-    if soul_manifest_raw is not None:
-        if isinstance(soul_manifest_raw, dict):
-            soul_manifest_str = _json.dumps(soul_manifest_raw)
-        else:
-            try:
-                _json.loads(soul_manifest_raw)
-                soul_manifest_str = str(soul_manifest_raw)
-            except Exception:
-                raise HTTPException(422, "soul_manifest must be valid JSON")
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        if soul_manifest_str is not None:
-            await db.execute(
-                "UPDATE agents SET bio=?, manifesto=?, soul_manifest=? WHERE id=?",
-                (bio, manifesto, soul_manifest_str, agent["id"]),
-            )
-        else:
-            await db.execute(
-                "UPDATE agents SET bio=?, manifesto=? WHERE id=?",
-                (bio, manifesto, agent["id"]),
-            )
-        await db.commit()
-    return {"ok": True}
+# update_profile moved to identity router
 
 
-@router.post("/me/avatar")
-async def upload_avatar(
-    file: UploadFile = File(...),
-    agent: dict = Depends(get_agent),
-):
-    agent_dir = MEDIA_ROOT / agent["name"]
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    ext = Path(file.filename).suffix or ".jpg"
-    avatar_path = agent_dir / f"avatar{ext}"
-    with open(avatar_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-    avatar_url = f"{settings.PUBLIC_URL}/media/agents/{agent['name']}/avatar{ext}"
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE agents SET avatar_url=? WHERE id=?", (avatar_url, agent["id"]))
-        await db.commit()
-    return {"avatar_url": avatar_url}
+# upload_avatar moved to identity router
 
 
 @router.get("/me/broadcasts")
@@ -822,9 +684,8 @@ async def update_broadcast(
         if "tags" in body and body["tags"] is not None:
             tags_raw = body["tags"]
             try:
-                import json as _j
-                tags_list = tags_raw if isinstance(tags_raw, list) else (_j.loads(tags_raw) if str(tags_raw).startswith("[") else [t.strip() for t in str(tags_raw).split(",") if t.strip()])
-                updates["tags"] = _j.dumps(tags_list)
+                tags_list = tags_raw if isinstance(tags_raw, list) else (_json.loads(tags_raw) if str(tags_raw).startswith("[") else [t.strip() for t in str(tags_raw).split(",") if t.strip()])
+                updates["tags"] = _json.dumps(tags_list)
             except Exception:
                 updates["tags"] = "[]"
         if "post_content" in body and body["post_content"] is not None:
@@ -877,9 +738,12 @@ async def stream_playlist(broadcast_id: int):
 
 
 @router.post("/broadcasts/{broadcast_id}/heartbeat")
+@limiter.limit("20/minute")
 async def watch_heartbeat(
+    request: Request,
     broadcast_id: int,
     seconds: float = Form(...),
+    agent: dict = Depends(get_agent),
 ):
     """Record watch progress in seconds. Called periodically by the video player."""
     async with aiosqlite.connect(DB_PATH) as db:
@@ -931,7 +795,6 @@ async def create_text_post(
         initial_status = 'draft'
     elif publish_at:
         try:
-            from datetime import datetime as _dt
             pt = _dt.fromisoformat(publish_at.replace('Z', '+00:00'))
             if pt > _dt.now(pt.tzinfo):
                 initial_status = 'scheduled'
@@ -988,7 +851,6 @@ async def create_audio_post(
     initial_status = 'pending'
     if publish_at:
         try:
-            from datetime import datetime as _dt
             pt = _dt.fromisoformat(publish_at.replace('Z', '+00:00'))
             if pt > _dt.now(pt.tzinfo):
                 initial_status = 'scheduled'
@@ -1356,118 +1218,6 @@ async def personalized_feed(
 
 
 # ---------------------------------------------------------------------------
-# Analytics route
-# ---------------------------------------------------------------------------
-
-@router.get("/me/analytics")
-async def agent_analytics(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-
-        # Views by day (last 30 days)
-        async with db.execute(
-            """SELECT date(ve.viewed_at) as day, COUNT(*) as views
-               FROM view_events ve
-               JOIN broadcasts b ON b.id = ve.broadcast_id
-               WHERE b.agent_id=? AND ve.viewed_at >= datetime('now', '-30 days')
-               GROUP BY day ORDER BY day""",
-            (agent["id"],),
-        ) as cur:
-            vbd = await cur.fetchall()
-
-        # Top 5 broadcasts
-        async with db.execute(
-            """SELECT id, title, thumbnail_url, view_count, content_type
-               FROM broadcasts WHERE agent_id=? AND status='ready'
-               ORDER BY view_count DESC LIMIT 5""",
-            (agent["id"],),
-        ) as cur:
-            top = await cur.fetchall()
-
-        # Totals
-        async with db.execute(
-            """SELECT SUM(view_count) as total_views,
-                      COUNT(*) as total_broadcasts
-               FROM broadcasts WHERE agent_id=? AND status='ready'""",
-            (agent["id"],),
-        ) as cur:
-            totals = await cur.fetchone()
-
-        # Content type breakdown
-        async with db.execute(
-            """SELECT content_type, COUNT(*) as cnt
-               FROM broadcasts WHERE agent_id=? AND status='ready'
-               GROUP BY content_type""",
-            (agent["id"],),
-        ) as cur:
-            breakdown = await cur.fetchall()
-
-        # Reactions by day (last 30 days)
-        async with db.execute(
-            """SELECT date(r.created_at) as day, COUNT(*) as count
-               FROM reactions r
-               JOIN broadcasts b ON b.id = r.broadcast_id
-               WHERE b.agent_id=? AND r.created_at >= datetime('now', '-30 days')
-               GROUP BY day ORDER BY day""",
-            (agent["id"],),
-        ) as cur:
-            rbd = await cur.fetchall()
-
-        # Comments by day (last 30 days)
-        async with db.execute(
-            """SELECT date(c.created_at) as day, COUNT(*) as count
-               FROM comments c
-               JOIN broadcasts b ON b.id = c.broadcast_id
-               WHERE b.agent_id=? AND c.created_at >= datetime('now', '-30 days')
-               GROUP BY day ORDER BY day""",
-            (agent["id"],),
-        ) as cur:
-            cbd = await cur.fetchall()
-
-        # Follower count
-        async with db.execute(
-            "SELECT COUNT(*) as cnt FROM agent_follows WHERE following_id=?", (agent["id"],)
-        ) as cur:
-            fc = await cur.fetchone()
-
-        # Top reacted broadcasts
-        async with db.execute(
-            """SELECT b.id, b.title, b.thumbnail_url, b.content_type,
-                      COUNT(r.broadcast_id) as reaction_count
-               FROM broadcasts b LEFT JOIN reactions r ON r.broadcast_id = b.id
-               WHERE b.agent_id=? AND b.status='ready'
-               GROUP BY b.id ORDER BY reaction_count DESC LIMIT 5""",
-            (agent["id"],),
-        ) as cur:
-            top_reacted = await cur.fetchall()
-
-        # Average watch time
-        async with db.execute(
-            """SELECT AVG(ve.watch_seconds) as avg_watch,
-                      SUM(ve.watch_seconds) / 3600.0 as total_hours
-               FROM view_events ve
-               JOIN broadcasts b ON b.id = ve.broadcast_id
-               WHERE b.agent_id=? AND ve.watch_seconds > 0""",
-            (agent["id"],),
-        ) as cur:
-            wt = await cur.fetchone()
-
-    return {
-        "views_by_day": [dict(r) for r in vbd],
-        "top_broadcasts": [dict(r) for r in top],
-        "total_views": totals["total_views"] or 0 if totals else 0,
-        "total_broadcasts": totals["total_broadcasts"] or 0 if totals else 0,
-        "content_type_breakdown": {r["content_type"]: r["cnt"] for r in breakdown},
-        "reactions_by_day": [dict(r) for r in rbd],
-        "comments_by_day": [dict(r) for r in cbd],
-        "follower_count": fc["cnt"] if fc else 0,
-        "top_reacted": [dict(r) for r in top_reacted],
-        "avg_watch_seconds": wt["avg_watch"] or 0.0 if wt else 0.0,
-        "total_watch_hours": wt["total_hours"] or 0.0 if wt else 0.0,
-    }
-
-
-# ---------------------------------------------------------------------------
 # Image gallery posts
 # ---------------------------------------------------------------------------
 
@@ -1496,7 +1246,6 @@ async def create_image_post(
     initial_status = 'pending'
     if publish_at:
         try:
-            from datetime import datetime as _dt
             pt = _dt.fromisoformat(publish_at.replace('Z', '+00:00'))
             if pt > _dt.now(pt.tzinfo):
                 initial_status = 'scheduled'
@@ -1613,7 +1362,6 @@ async def create_graph_post(
         initial_status = 'draft'
     elif publish_at:
         try:
-            from datetime import datetime as _dt
             pt = _dt.fromisoformat(publish_at.replace('Z', '+00:00'))
             if pt > _dt.now(pt.tzinfo):
                 initial_status = 'scheduled'
@@ -1651,6 +1399,7 @@ async def create_graph_post(
 # ---------------------------------------------------------------------------
 
 @router.post("/broadcasts/{broadcast_id}/comments")
+@limiter.limit("10/minute")
 async def add_comment(
     broadcast_id: int,
     request: Request,
@@ -2114,24 +1863,7 @@ async def sse_event_stream(agent: dict = Depends(get_agent)):
 # Feature: Computed reputation badges
 # ---------------------------------------------------------------------------
 
-def _compute_reputation_badges(
-    broadcast_count: int, total_views: int, follower_count: int,
-    recent_count: int, skill_badges: list,
-) -> list:
-    badges = []
-    if recent_count >= 3:
-        badges.append({"id": "active", "label": "Active", "icon": "🔥", "desc": "Published recently"})
-    if broadcast_count >= 25:
-        badges.append({"id": "prolific", "label": "Prolific", "icon": "⚡", "desc": f"{broadcast_count} broadcasts"})
-    if total_views >= 100_000:
-        badges.append({"id": "elite", "label": "Elite", "icon": "🌟", "desc": "100k+ total views"})
-    elif total_views >= 10_000:
-        badges.append({"id": "popular", "label": "Popular", "icon": "👁", "desc": f"{total_views:,} views"})
-    if follower_count >= 10:
-        badges.append({"id": "social", "label": "Social", "icon": "🤝", "desc": f"{follower_count} followers"})
-    if skill_badges:
-        badges.append({"id": "verified", "label": "Verified", "icon": "✅", "desc": f"{len(skill_badges)} verified skill(s)"})
-    return badges
+# _compute_reputation_badges moved to utils.py
 
 
 @router.get("/agents/{agent_name}/reputation")
@@ -3035,30 +2767,7 @@ async def get_token_milestones(agent: dict = Depends(get_agent)):
     }
 
 
-@router.get("/leaderboard")
-async def get_leaderboard(limit: int = 20):
-    """Agent leaderboard ranked by token balance (SUI-enabled) or view count."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        if settings.SUI_ENABLED:
-            async with db.execute(
-                """SELECT a.name, a.avatar_url, a.bio, a.sui_address, a.token_balance,
-                          COUNT(b.id) as broadcast_count, SUM(COALESCE(b.view_count,0)) as total_views
-                   FROM agents a LEFT JOIN broadcasts b ON b.agent_id=a.id AND b.status='ready'
-                   GROUP BY a.id ORDER BY a.token_balance DESC, total_views DESC LIMIT ?""",
-                (limit,),
-            ) as cur:
-                rows = [dict(r) for r in await cur.fetchall()]
-        else:
-            async with db.execute(
-                """SELECT a.name, a.avatar_url, a.bio, a.sui_address, COALESCE(a.token_balance,0) as token_balance,
-                          COUNT(b.id) as broadcast_count, SUM(COALESCE(b.view_count,0)) as total_views
-                   FROM agents a LEFT JOIN broadcasts b ON b.agent_id=a.id AND b.status='ready'
-                   GROUP BY a.id ORDER BY total_views DESC LIMIT ?""",
-                (limit,),
-            ) as cur:
-                rows = [dict(r) for r in await cur.fetchall()]
-    return rows
+# leaderboard moved to analytics router
 
 
 # ── Phase C: Seal Encryption ─────────────────────────────────────────────────
@@ -3193,7 +2902,7 @@ async def get_federation_peers():
 @router.post("/federation/peers")
 async def add_federation_peer(
     request: Request,
-    agent: dict = Depends(get_agent),
+    admin_key: str = Depends(get_admin),
 ):
     """Register a peer Vantage instance for cross-instance discovery."""
     if not settings.FEDERATION_ENABLED:
@@ -3639,8 +3348,7 @@ async def update_creation_job(
         updated_context = error_context
         if status == "error":
             try:
-                import json as _ecj
-                ctx = _ecj.loads(error_context or "{}") or {}
+                ctx = _json.loads(error_context or "{}") or {}
             except Exception:
                 ctx = {}
             ctx["failure_count"] = ctx.get("failure_count", 0) + 1
@@ -4625,44 +4333,12 @@ async def get_my_resources(agent: dict = Depends(get_agent)):
     }
 
 
-# 2. Agent Liveness Heartbeat
-
-@router.post("/me/heartbeat", tags=["identity"])
-async def agent_heartbeat(agent: dict = Depends(get_agent)):
-    """Update last_seen_at and return it."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT last_seen_at FROM agents WHERE id=?", (agent["id"],)
-        ) as cur:
-            row = await cur.fetchone()
-    return {"ok": True, "last_seen_at": row["last_seen_at"] if row else ""}
+# agent_heartbeat moved to identity router
 
 
 # 3. Versioned Capabilities
 
-@router.get("/profile/{name}/capabilities", tags=["identity"])
-async def get_agent_capabilities(name: str):
-    """Return capabilities extracted from soul_manifest."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT soul_manifest FROM agents WHERE name=?", (name,)
-        ) as cur:
-            row = await cur.fetchone()
-    if not row:
-        raise HTTPException(404, "Agent not found")
-    manifest_str = row["soul_manifest"] or ""
-    caps: list = []
-    version = ""
-    if manifest_str:
-        try:
-            manifest = _json.loads(manifest_str)
-            caps = manifest.get("capabilities", [])
-            version = str(manifest.get("version", ""))
-        except Exception:
-            pass
-    return {"agent": name, "capabilities": caps, "raw_manifest_version": version}
+# get_agent_capabilities moved to identity router
 
 
 # 4. Creation Job Trace
@@ -6732,10 +6408,9 @@ async def create_workspace_snapshot(request: Request, agent: dict = Depends(get_
             "state": state,
             "jobs": jobs_data,
         }
-        import json as _snapshot_json
         cur = await db.execute(
             "INSERT INTO workspace_snapshots (agent_id, label, snapshot_json) VALUES (?,?,?)",
-            (agent["id"], label, _snapshot_json.dumps(snapshot)),
+            (agent["id"], label, _json.dumps(snapshot)),
         )
         snap_id = cur.lastrowid
         await db.commit()
@@ -6769,8 +6444,7 @@ async def load_workspace_snapshot(snapshot_id: int, agent: dict = Depends(get_ag
     if not row:
         raise HTTPException(404, "Snapshot not found")
     r = dict(row)
-    import json as _sj
-    r["snapshot"] = _sj.loads(r["snapshot_json"])
+    r["snapshot"] = _json.loads(r["snapshot_json"])
     del r["snapshot_json"]
     return r
 
@@ -6798,8 +6472,7 @@ async def get_capability_schema(agent_name: str):
     manifest_data: dict = {}
     raw_manifest = agent_row.get("soul_manifest") or ""
     try:
-        import json as _mj
-        manifest_data = _mj.loads(raw_manifest)
+        manifest_data = _json.loads(raw_manifest)
     except Exception:
         manifest_data = {"description": raw_manifest}
 
@@ -8389,7 +8062,6 @@ async def admin_telemetry(_: str = Depends(get_admin)):
     Returns active job queue depth, sentinel alerts, market velocity,
     error hotspots, swarm vibe summary, and platform throughput.
     """
-    from datetime import datetime as _dt, timedelta as _td
     now_str = _dt.utcnow().isoformat()
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -9437,4 +9109,31 @@ async def restore_platform_snapshot(snapshot_id: int, _: str = Depends(get_admin
         "label": data["label"],
         "restored_tables": restored,
         "skipped_tables": [t for t in tables_list if t not in safe_tables],
+    }
+st(record.keys())
+                vals = [record[c] for c in cols]
+                placeholders = ",".join(["?" for _ in cols])
+                col_str = ",".join(cols)
+                try:
+                    await db.execute(
+                        f"INSERT OR IGNORE INTO {table} ({col_str}) VALUES ({placeholders})",
+                        vals,
+                    )
+                except Exception:
+                    pass
+            restored[table] = len(rows)
+        await db.commit()
+
+    return {
+        "ok": True,
+        "snapshot_id": snapshot_id,
+        "label": data["label"],
+        "restored_tables": restored,
+        "skipped_tables": [t for t in tables_list if t not in safe_tables],
+    }
+,
+    }
+t in safe_tables],
+    }
+,
     }

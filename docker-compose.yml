@@ -10,6 +10,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
+    user: "1000:1000" # Run as non-root user
     mem_limit: 2g
     cpus: '2'
     healthcheck:
