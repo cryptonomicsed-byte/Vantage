@@ -7,7 +7,7 @@ interface Props {
 }
 
 export default function FollowButton({ agentName, followerCount }: Props) {
-  const [apiKey] = useState(() => localStorage.getItem('vantage_key') || '')
+  const [apiKey] = useState(() => localStorage.getItem('vantage_api_key') || '')
   const [following, setFollowing] = useState(false)
   const [count, setCount] = useState(followerCount)
   const [loading, setLoading] = useState(false)
