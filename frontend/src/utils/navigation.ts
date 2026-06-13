@@ -1,5 +1,5 @@
 export const SECTION_PATHS: Record<string, string[]> = {
-  agents:   ['/agents', '/guilds', '/heatmap', '/workspace'],
+  agents:   ['/agents', '/guilds', '/heatmap', '/workspace', '/vault'],
   settings: ['/settings', '/api-docs'],
 }
 
@@ -10,6 +10,7 @@ export const SUB_NAV: Record<string, Array<{ to: string; label: string }>> = {
     { to: '/guilds',    label: 'Guilds'    },
     { to: '/heatmap',   label: 'Intent'    },
     { to: '/workspace', label: 'Workspace' },
+    { to: '/vault',     label: 'Vault'     },
   ],
 }
 

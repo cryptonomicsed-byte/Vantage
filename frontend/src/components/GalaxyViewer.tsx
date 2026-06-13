@@ -440,7 +440,9 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
         const hovered = hoveredId === node.id
 
         const [screenX, screenY] = toScreen(node.x, node.y)
-        const r = Math.max(3, node.size * sc)
+        // Breathing radius — each node pulses at its own phase
+        const breathe = 1 + 0.1 * Math.sin(now * 0.0025 + nodeIndex * 0.87)
+        const r = Math.max(3, node.size * sc) * breathe
 
         ctx.save()
 
@@ -456,56 +458,117 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
           return
         }
 
-        // Outer halo — pulsing ring
-        const haloAlpha = 0.04 + Math.sin(now * 0.002 + nodeIndex * 0.7) * 0.02
+        // ── Rotating orbit ring ─────────────────────────────────────────────
+        const rotDir = nodeIndex % 2 === 0 ? 1 : -1
+        ctx.save()
+        ctx.translate(screenX, screenY)
+        ctx.rotate(now * 0.0012 * rotDir + nodeIndex * 1.05)
+        ctx.beginPath()
+        ctx.setLineDash([4, 8])
+        ctx.arc(0, 0, r * 2.1, 0, Math.PI * 2)
+        ctx.strokeStyle = node.color + 'cc'
+        ctx.lineWidth = 0.9
+        ctx.shadowBlur = 7
+        ctx.shadowColor = node.color
+        ctx.stroke()
+        ctx.setLineDash([])
+        ctx.restore()
+
+        // ── Counter-rotating outer ring (for connected nodes) ───────────────
+        if (node.degree > 1) {
+          ctx.save()
+          ctx.translate(screenX, screenY)
+          ctx.rotate(-now * 0.0007 * rotDir + nodeIndex * 0.65)
+          ctx.beginPath()
+          ctx.setLineDash([2, 12])
+          ctx.arc(0, 0, r * 3.5, 0, Math.PI * 2)
+          ctx.strokeStyle = node.color + '55'
+          ctx.lineWidth = 0.6
+          ctx.shadowBlur = 4
+          ctx.shadowColor = node.color
+          ctx.stroke()
+          ctx.setLineDash([])
+          ctx.restore()
+        }
+
+        // ── Orbiting sparkle dots ───────────────────────────────────────────
+        const sparkleCount = Math.min(4, 1 + Math.floor(node.degree / 2))
+        for (let i = 0; i < sparkleCount; i++) {
+          const angle = now * 0.002 * rotDir + nodeIndex * 1.3 + (i * Math.PI * 2) / sparkleCount
+          const orbitR = r * 2.1
+          const spx = screenX + Math.cos(angle) * orbitR
+          const spy = screenY + Math.sin(angle) * orbitR
+          const sparkAlpha = 0.5 + 0.4 * Math.sin(now * 0.005 + i * 2.1 + nodeIndex)
+          ctx.save()
+          ctx.globalAlpha = sparkAlpha
+          ctx.beginPath()
+          ctx.arc(spx, spy, 1.5, 0, Math.PI * 2)
+          ctx.fillStyle = '#ffffff'
+          ctx.shadowBlur = 10
+          ctx.shadowColor = node.color
+          ctx.fill()
+          ctx.restore()
+        }
+
+        // ── Outer halo — soft pulsing bloom ────────────────────────────────
+        const haloAlpha = 0.05 + Math.sin(now * 0.002 + nodeIndex * 0.7) * 0.03
         ctx.save()
         ctx.globalAlpha = haloAlpha
-        ctx.shadowBlur = r * 4
+        ctx.shadowBlur = r * 5
         ctx.shadowColor = node.color
         ctx.beginPath()
-        ctx.arc(screenX, screenY, r * 2.4, 0, Math.PI * 2)
+        ctx.arc(screenX, screenY, r * 2.6, 0, Math.PI * 2)
         ctx.fillStyle = node.color
         ctx.fill()
         ctx.restore()
 
-        // Glow
-        ctx.shadowBlur = hovered ? r * 6 : r * 4
+        // ── Glow ────────────────────────────────────────────────────────────
+        ctx.shadowBlur = hovered ? r * 8 : r * 4
         ctx.shadowColor = node.color
 
-        // Radial gradient fill
+        // ── Radial gradient fill ─────────────────────────────────────────────
         const grad = ctx.createRadialGradient(
-          screenX - r * 0.25, screenY - r * 0.25, 0,
+          screenX - r * 0.28, screenY - r * 0.28, 0,
           screenX, screenY, r
         )
         grad.addColorStop(0, '#ffffff')
-        grad.addColorStop(0.3, node.color)
-        grad.addColorStop(1, node.color + '88')
+        grad.addColorStop(0.25, node.color)
+        grad.addColorStop(0.7, node.color + 'bb')
+        grad.addColorStop(1, node.color + '44')
 
         ctx.beginPath()
         ctx.arc(screenX, screenY, r, 0, Math.PI * 2)
         ctx.fillStyle = grad
         ctx.fill()
 
+        // ── Hover ring ───────────────────────────────────────────────────────
         if (hovered) {
           ctx.shadowBlur = 0
+          // spinning accent dashes on hover
+          ctx.save()
+          ctx.translate(screenX, screenY)
+          ctx.rotate(now * 0.003)
           ctx.beginPath()
-          ctx.arc(screenX, screenY, r + 3, 0, Math.PI * 2)
+          ctx.setLineDash([6, 6])
+          ctx.arc(0, 0, r + 5, 0, Math.PI * 2)
           ctx.strokeStyle = '#00f5ff'
           ctx.lineWidth = 1.5
-          ctx.shadowBlur = 10
+          ctx.shadowBlur = 16
           ctx.shadowColor = '#00f5ff'
           ctx.stroke()
+          ctx.setLineDash([])
+          ctx.restore()
         }
 
-        // Label: only for well-connected nodes or hovered
+        // ── Label ─────────────────────────────────────────────────────────
         if ((node.degree > 2 || hovered) && !isFiltered && inConst) {
           ctx.shadowBlur = 0
-          ctx.font = '10px Orbitron, sans-serif'
-          ctx.fillStyle = hovered ? '#00f5ff' : 'rgba(232,232,248,0.75)'
+          ctx.font = hovered ? 'bold 11px Orbitron, sans-serif' : '10px Orbitron, sans-serif'
+          ctx.fillStyle = hovered ? '#00f5ff' : 'rgba(232,232,248,0.78)'
           ctx.textAlign = 'center'
           ctx.textBaseline = 'top'
           const label = star.title.length > 22 ? star.title.slice(0, 22) + '…' : star.title
-          ctx.fillText(label, screenX, screenY + r + 3)
+          ctx.fillText(label, screenX, screenY + r + 5)
         }
 
         ctx.restore()
