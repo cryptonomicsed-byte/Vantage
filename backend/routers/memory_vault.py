@@ -8,7 +8,7 @@ from typing import Optional, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Query, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 import aiosqlite
 
 from ..deps import get_agent, _parse_body
@@ -70,7 +70,11 @@ async def update_vault_config(
     await vault.set_access(access, peers)
     return {"status": "updated", "access": access}
 
-@router.get("/{agent_name}/vault/galaxy")
+@router.get(
+    "/{agent_name}/vault/galaxy",
+    summary="Get agent memory galaxy",
+    description="Returns all memory stars (broadcasts, knowledge, traces) as a spatial graph. Each star has 3D coordinates, content_type, tags, constellation group, and creation date. Access-controlled by vault privacy setting.",
+)
 async def get_galaxy_data(
     agent_name: str,
     x_agent_key: Optional[str] = Header(None),
@@ -84,7 +88,11 @@ async def get_galaxy_data(
     await vault.log_access(accessor_id, x_federation_peer or "", "galaxy", "read")
     return vault.get_galaxy_data()
 
-@router.get("/{agent_name}/vault/search")
+@router.get(
+    "/{agent_name}/vault/search",
+    summary="Search agent memory vault",
+    description="Full-text search across all vault notes using FTS5 with Porter stemming. Returns matching note paths, titles, and highlighted snippets. Use this to retrieve relevant memories by keyword.",
+)
 async def search_vault(
     agent_name: str,
     q: str = Query(..., min_length=1),
@@ -188,7 +196,11 @@ async def get_vault_stats(
 
 _VALID_CATEGORIES = {"drafts", "templates", "broadcasts", "knowledge"}
 
-@router.post("/{agent_name}/vault/note")
+@router.post(
+    "/{agent_name}/vault/note",
+    summary="Create memory note",
+    description="Manually create an Obsidian-style markdown note in the agent's memory vault. The note gets spatial galaxy coordinates and is indexed in FTS5. Categories: drafts, templates, broadcasts, knowledge.",
+)
 async def create_vault_note(
     agent_name: str,
     request: Request,
@@ -289,3 +301,42 @@ async def create_memory_link(
         await db.commit()
 
     return {"linked": True}
+
+
+# ── RDF / Turtle knowledge graph export ──────────────────────────────────────
+
+@router.get(
+    "/{agent_name}/vault/graph.ttl",
+    summary="Export knowledge graph as RDF/Turtle",
+    description="Export all knowledge triples (subject→predicate→object) from the agent's memory vault as W3C Turtle RDF format. Compatible with SPARQL endpoints, Neo4j, and graph analysis tools.",
+    response_class=Response,
+)
+async def export_rdf_turtle(
+    agent_name: str,
+    x_agent_key: Optional[str] = Header(None),
+    x_federation_peer: Optional[str] = Header(None),
+):
+    target = await _resolve_agent(agent_name)
+    vault = MemoryVault(target["id"], target["name"])
+    accessor_id = await _resolve_accessor(x_agent_key)
+    if not await vault.check_access(accessor_id, x_federation_peer or ""):
+        raise HTTPException(403, "Access denied to this memory vault")
+
+    data = vault.get_galaxy_data()
+    lines = [
+        f"@prefix vantage: <https://vantage.agent/knowledge/{agent_name}/> .",
+        "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .",
+        "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .",
+        "",
+    ]
+    for edge in data.get("edges", []):
+        subj = re.sub(r"[^\w-]", "_", str(edge.get("subject", "")).strip())
+        pred = re.sub(r"[^\w-]", "_", str(edge.get("predicate", "")).strip())
+        obj = re.sub(r"[^\w-]", "_", str(edge.get("object", "")).strip())
+        if subj and pred and obj:
+            lines.append(f"vantage:{subj} vantage:{pred} vantage:{obj} .")
+    return Response(
+        "\n".join(lines),
+        media_type="text/turtle",
+        headers={"Content-Disposition": f'attachment; filename="{agent_name}-knowledge.ttl"'},
+    )

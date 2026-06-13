@@ -2,7 +2,7 @@ import React, { useRef, useEffect, useState, useCallback } from 'react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-interface GalaxyStar {
+export interface GalaxyStar {
   id: string
   title: string
   x: number
@@ -14,6 +14,7 @@ interface GalaxyStar {
   tags: string[]
   content_type: string
   path: string
+  created?: string
 }
 
 interface GalaxyEdge {
@@ -51,6 +52,7 @@ export interface GalaxyData {
 interface Props {
   data: GalaxyData
   agentName: string
+  onStarSelect?: (star: GalaxyStar) => void
 }
 
 // ─── Projection ───────────────────────────────────────────────────────────────
@@ -82,9 +84,12 @@ function drawScene(
   offsetY: number,
   hoveredStarId: string | null,
   activeFilter: string,
-  selectedConstellation: string | null
+  selectedConstellation: string | null,
+  dateRange: [number, number]
 ) {
   ctx.clearRect(0, 0, w, h)
+
+  const t = Date.now() * 0.0001
 
   // Background
   ctx.fillStyle = '#040408'
@@ -114,26 +119,35 @@ function drawScene(
     ctx.restore()
   })
 
-  // ── Edges ──────────────────────────────────────────────────────────────────
-  edges.forEach(edge => {
+  // ── Edges (Bezier curves) ──────────────────────────────────────────────────
+  edges.forEach((edge) => {
     const [sx1, sy1] = project(edge.source[0], edge.source[1], edge.source[2], scale, offsetX, offsetY)
     const [sx2, sy2] = project(edge.target[0], edge.target[1], edge.target[2], scale, offsetX, offsetY)
+
+    const ctrlX = (sx1 + sx2) / 2
+    const ctrlY = (sy1 + sy2) / 2 - 20 // arc upward
+
+    const alpha = selectedConstellation
+      ? 0.12  // dim when constellation selected
+      : Math.min(edge.weight, 1) * 0.25
 
     ctx.save()
     ctx.beginPath()
     ctx.moveTo(sx1, sy1)
-    ctx.lineTo(sx2, sy2)
-    ctx.strokeStyle = 'rgba(0,245,255,0.3)'
-    ctx.lineWidth = Math.max(0.5, edge.weight * 0.5)
-    ctx.globalAlpha = 0.3
+    ctx.quadraticCurveTo(ctrlX, ctrlY, sx2, sy2)
+    ctx.strokeStyle = `rgba(0,245,255,1)`
+    ctx.globalAlpha = alpha
+    ctx.lineWidth = Math.max(0.5, edge.weight)
     ctx.stroke()
     ctx.restore()
   })
 
   // ── Constellation labels ───────────────────────────────────────────────────
   const constellationCenters: Record<string, { x: number; y: number; count: number }> = {}
-  filteredStars.forEach(star => {
-    const [sx, sy] = project(star.x, star.y, star.z, scale, offsetX, offsetY)
+  filteredStars.forEach((star, idx) => {
+    const driftX = Math.sin(t + idx * 1.3) * 0.25
+    const driftY = Math.cos(t * 0.7 + idx) * 0.15
+    const [sx, sy] = project(star.x + driftX, star.y + driftY, star.z, scale, offsetX, offsetY)
     if (!constellationCenters[star.constellation]) {
       constellationCenters[star.constellation] = { x: 0, y: 0, count: 0 }
     }
@@ -156,16 +170,33 @@ function drawScene(
   })
 
   // ── Stars ──────────────────────────────────────────────────────────────────
-  filteredStars.forEach(star => {
-    const [sx, sy] = project(star.x, star.y, star.z, scale, offsetX, offsetY)
+  filteredStars.forEach((star, idx) => {
+    const driftX = Math.sin(t + idx * 1.3) * 0.25
+    const driftY = Math.cos(t * 0.7 + idx) * 0.15
+    const [sx, sy] = project(star.x + driftX, star.y + driftY, star.z, scale, offsetX, offsetY)
     const r = Math.max(2, (star.size / 50) * 10 * scale)
     const hovered = hoveredStarId === star.id
     const inSelectedConstellation = !selectedConstellation || star.constellation === selectedConstellation
+
+    // Date range filtering
+    const starTime = star.created ? new Date(star.created).getTime() : 0
+    const inDateRange = starTime === 0 || (starTime >= dateRange[0] && starTime <= dateRange[1])
 
     ctx.save()
 
     if (!inSelectedConstellation) {
       ctx.globalAlpha = 0.3
+    }
+
+    if (!inDateRange) {
+      // Render as extremely faint ghost and skip label
+      ctx.globalAlpha = 0.06
+      ctx.beginPath()
+      ctx.arc(sx, sy, r, 0, Math.PI * 2)
+      ctx.fillStyle = star.color
+      ctx.fill()
+      ctx.restore()
+      return
     }
 
     // Outer glow
@@ -225,7 +256,7 @@ function drawScene(
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function GalaxyViewer({ data, agentName: _agentName }: Props) {
+export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const canvasSizeRef = useRef({ w: 0, h: 0 })
@@ -241,12 +272,14 @@ export default function GalaxyViewer({ data, agentName: _agentName }: Props) {
   const isDraggingRef = useRef(false)
   const lastMouseRef = useRef({ x: 0, y: 0 })
   const mouseDownPosRef = useRef({ x: 0, y: 0 })
+  const dateRangeRef = useRef<[number, number]>([0, Infinity])
 
   // React state for UI
   const [activeFilter, setActiveFilter] = useState<string>('all')
   const [hoveredStar, setHoveredStar] = useState<GalaxyStar | null>(null)
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 })
   const [selectedConstellation, setSelectedConstellation] = useState<string | null>(null)
+  const [dateLabel, setDateLabel] = useState<string>('All time')
 
   const stars = data.stars || []
   const edges = data.edges || []
@@ -254,6 +287,13 @@ export default function GalaxyViewer({ data, agentName: _agentName }: Props) {
 
   // Derive unique content types for filter bar
   const contentTypes = Array.from(new Set(stars.map(s => s.content_type).filter(Boolean)))
+
+  // Compute min/max dates from stars
+  const starDates = stars
+    .map(s => s.created ? new Date(s.created).getTime() : NaN)
+    .filter(t => !isNaN(t))
+  const minDate = starDates.length ? Math.min(...starDates) : 0
+  const maxDate = starDates.length ? Math.max(...starDates) : Date.now()
 
   // ── Center the view on mount ───────────────────────────────────────────────
   useEffect(() => {
@@ -328,7 +368,8 @@ export default function GalaxyViewer({ data, agentName: _agentName }: Props) {
           scaleRef.current, offsetXRef.current, offsetYRef.current,
           hoveredStarIdRef.current,
           activeFilterRef.current,
-          selectedConstellationRef.current
+          selectedConstellationRef.current,
+          dateRangeRef.current
         )
       }
 
@@ -359,6 +400,9 @@ export default function GalaxyViewer({ data, agentName: _agentName }: Props) {
 
       const clickedStar = stars.find(s => s.id === hoveredStarIdRef.current)
       if (!clickedStar) return
+
+      // call star select callback first
+      onStarSelect?.(clickedStar)
 
       const clickedConstellation = clickedStar.constellation
       const currentSelected = selectedConstellationRef.current
@@ -398,7 +442,7 @@ export default function GalaxyViewer({ data, agentName: _agentName }: Props) {
         setSelectedConstellation(clickedConstellation)
       }
     }
-  }, [stars])
+  }, [stars, onStarSelect])
 
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current
@@ -421,11 +465,14 @@ export default function GalaxyViewer({ data, agentName: _agentName }: Props) {
     const filterActive = activeFilterRef.current
     const visibleStars = filterActive === 'all' ? stars : stars.filter(s => s.content_type === filterActive)
 
+    const t = Date.now() * 0.0001
     let closest: GalaxyStar | null = null
     let closestDist = 15
 
-    visibleStars.forEach(star => {
-      const [sx, sy] = project(star.x, star.y, star.z, scaleRef.current, offsetXRef.current, offsetYRef.current)
+    visibleStars.forEach((star, idx) => {
+      const driftX = Math.sin(t + idx * 1.3) * 0.25
+      const driftY = Math.cos(t * 0.7 + idx) * 0.15
+      const [sx, sy] = project(star.x + driftX, star.y + driftY, star.z, scaleRef.current, offsetXRef.current, offsetYRef.current)
       const d = Math.sqrt((sx - mx) ** 2 + (sy - my) ** 2)
       if (d < closestDist) {
         closestDist = d
@@ -549,6 +596,48 @@ export default function GalaxyViewer({ data, agentName: _agentName }: Props) {
           </button>
         ))}
       </div>
+
+      {/* Date range slider */}
+      {stars.length > 0 && (
+        <div className="galaxy-time-bar">
+          <span style={{whiteSpace:'nowrap',fontSize:'0.7rem',color:'var(--muted)'}}>⏱</span>
+          <input
+            type="range"
+            min={minDate}
+            max={maxDate}
+            defaultValue={minDate}
+            style={{flex:1,accentColor:'var(--cyan)'}}
+            onChange={e => {
+              const from = Number(e.target.value)
+              dateRangeRef.current = [from, dateRangeRef.current[1]]
+              const fromStr = from <= minDate ? 'Start' : new Date(from).toLocaleDateString()
+              const toVal = dateRangeRef.current[1]
+              const toStr = toVal >= maxDate ? 'Now' : new Date(toVal).toLocaleDateString()
+              setDateLabel(fromStr === 'Start' && toStr === 'Now' ? 'All time' : `${fromStr} → ${toStr}`)
+            }}
+          />
+          <span className="galaxy-time-label">{dateLabel}</span>
+          <input
+            type="range"
+            min={minDate}
+            max={maxDate}
+            defaultValue={maxDate}
+            style={{flex:1,accentColor:'var(--cyan)'}}
+            onChange={e => {
+              const to = Number(e.target.value)
+              dateRangeRef.current = [dateRangeRef.current[0], to]
+              const fromVal = dateRangeRef.current[0]
+              const fromStr = fromVal <= minDate ? 'Start' : new Date(fromVal).toLocaleDateString()
+              const toStr = to >= maxDate ? 'Now' : new Date(to).toLocaleDateString()
+              setDateLabel(fromStr === 'Start' && toStr === 'Now' ? 'All time' : `${fromStr} → ${toStr}`)
+            }}
+          />
+          <button
+            style={{fontSize:'0.7rem',background:'none',border:'none',color:'var(--muted)',cursor:'pointer',padding:'0 4px'}}
+            onClick={() => { dateRangeRef.current = [0, Infinity]; setDateLabel('All time') }}
+          >Reset</button>
+        </div>
+      )}
     </div>
   )
 }

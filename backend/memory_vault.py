@@ -309,6 +309,7 @@ last_synced: {config.last_synced or 'never'}
                         "tags": fm.get("tags", []) if isinstance(fm.get("tags"), list) else [],
                         "content_type": fm.get("content_type", "text"),
                         "path": str(md_file.relative_to(self.vault_path)),
+                        "created": str(fm.get("created", "")),
                     })
                 elif node_type == "edge":
                     edges.append({

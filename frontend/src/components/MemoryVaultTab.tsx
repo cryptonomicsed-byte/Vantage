@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { Lock, Globe, Users, Radio, Search, RefreshCw, Settings, Download, BarChart2, PlusCircle } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import GalaxyViewer, { GalaxyData } from './GalaxyViewer'
+import type { GalaxyStar } from './GalaxyViewer'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -83,6 +86,13 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
   // Stats
   const [stats, setStats] = useState<VaultStats | null>(null)
   const [loadingStats, setLoadingStats] = useState(false)
+
+  // Star detail panel
+  const [selectedStar, setSelectedStar] = useState<GalaxyStar | null>(null)
+  const [starMarkdown, setStarMarkdown] = useState<string>('')
+  const [loadingStarContent, setLoadingStarContent] = useState(false)
+  const [linkTargetInput, setLinkTargetInput] = useState('')
+  const [linkCreated, setLinkCreated] = useState(false)
 
   // Create note form
   const [showNoteForm, setShowNoteForm] = useState(false)
@@ -244,6 +254,46 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
   useEffect(() => {
     if (view === 'stats') fetchStats()
   }, [view, fetchStats])
+
+  // ── Star select ─────────────────────────────────────────────────────────────
+  const handleStarSelect = useCallback(async (star: GalaxyStar) => {
+    setSelectedStar(star)
+    setStarMarkdown('')
+    setLoadingStarContent(true)
+    setLinkCreated(false)
+    try {
+      const apiKey = localStorage.getItem('vantage_api_key') || ''
+      const headers: Record<string, string> = {}
+      if (apiKey) headers['X-Agent-Key'] = apiKey
+      const resp = await fetch(
+        `/api/agents/${agentName}/vault/file/${encodeURIComponent(star.path)}`,
+        { headers }
+      )
+      if (resp.ok) {
+        setStarMarkdown(await resp.text())
+      } else {
+        setStarMarkdown('> Could not load note content.')
+      }
+    } catch {
+      setStarMarkdown('> Failed to fetch note.')
+    } finally {
+      setLoadingStarContent(false)
+    }
+  }, [agentName])
+
+  // ── Create link ─────────────────────────────────────────────────────────────
+  const handleCreateLink = useCallback(async () => {
+    if (!selectedStar || !linkTargetInput.trim()) return
+    const apiKey = localStorage.getItem('vantage_api_key') || ''
+    if (!apiKey) return
+    await fetch(`/api/agents/${agentName}/vault/link`, {
+      method: 'POST',
+      headers: { 'X-Agent-Key': apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to_agent_name: linkTargetInput.trim(), link_type: 'references', note: selectedStar.path }),
+    }).catch(() => {})
+    setLinkCreated(true)
+    setLinkTargetInput('')
+  }, [agentName, selectedStar, linkTargetInput])
 
   // ── Create note ─────────────────────────────────────────────────────────────
   const handleCreateNote = useCallback(async () => {
@@ -408,7 +458,54 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
           )}
 
           {!loadingGalaxy && !locked && galaxy && (
-            <GalaxyViewer data={galaxy} agentName={agentName} />
+            <GalaxyViewer data={galaxy} agentName={agentName} onStarSelect={handleStarSelect} />
+          )}
+
+          {selectedStar && (
+            <div className="star-detail-panel">
+              <div className="star-detail-header">
+                <span className="star-detail-title" style={{ color: selectedStar.color }}>
+                  {selectedStar.title}
+                </span>
+                <span className="tag-pill" style={{ fontSize: '0.7rem' }}>
+                  {selectedStar.constellation}
+                </span>
+                <button className="star-detail-close" onClick={() => setSelectedStar(null)}>×</button>
+              </div>
+              <div className="star-detail-meta">
+                <span className="tag-pill">{selectedStar.content_type}</span>
+                {selectedStar.tags.slice(0, 5).map(tag => (
+                  <span key={tag} className="tag-pill" style={{ opacity: 0.7 }}>{tag}</span>
+                ))}
+                {selectedStar.created && (
+                  <span style={{ fontSize: '0.7rem', color: 'var(--muted)' }}>
+                    {new Date(selectedStar.created).toLocaleDateString()}
+                  </span>
+                )}
+              </div>
+              <div className="star-detail-content">
+                {loadingStarContent ? (
+                  <span style={{ color: 'var(--muted)' }}>Loading…</span>
+                ) : (
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{starMarkdown}</ReactMarkdown>
+                )}
+              </div>
+              {isOwner && (
+                <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <input
+                    type="text"
+                    placeholder="Link to agent name…"
+                    value={linkTargetInput}
+                    onChange={e => setLinkTargetInput(e.target.value)}
+                    style={{ flex: 1, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: 6, padding: '6px 10px', color: 'var(--text)', fontSize: '0.82rem' }}
+                  />
+                  <button className="btn btn-sm" onClick={handleCreateLink} disabled={!linkTargetInput.trim()}>
+                    Link
+                  </button>
+                  {linkCreated && <span style={{ color: 'var(--cyan)', fontSize: '0.8rem' }}>✓ Linked</span>}
+                </div>
+              )}
+            </div>
           )}
 
           {!loadingGalaxy && !locked && !galaxy && (
