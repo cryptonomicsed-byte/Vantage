@@ -93,6 +93,21 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
   const [loadingStarContent, setLoadingStarContent] = useState(false)
   const [linkTargetInput, setLinkTargetInput] = useState('')
   const [linkCreated, setLinkCreated] = useState(false)
+  const [noteLinks, setNoteLinks] = useState<Array<{
+    id: number
+    link_type: string
+    source_agent_name: string
+    source_note_path: string
+    target_agent_name: string
+    target_note_path: string
+    created_at: string
+  }>>([])
+
+  // Compare mode
+  const [compareInput, setCompareInput] = useState('')
+  const [compareGalaxy, setCompareGalaxy] = useState<GalaxyData | null>(null)
+  const [comparing, setComparing] = useState(false)
+  const [showCompare, setShowCompare] = useState(false)
 
   // Create note form
   const [showNoteForm, setShowNoteForm] = useState(false)
@@ -279,6 +294,14 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
     } finally {
       setLoadingStarContent(false)
     }
+    // Fetch note-level links
+    setNoteLinks([])
+    const apiKey = getApiKey()
+    fetch(`/api/agents/${agentName}/vault/note-links?path=${encodeURIComponent(star.path)}`, {
+      headers: apiKey ? { 'X-Agent-Key': apiKey } : {},
+    }).then(r => r.ok ? r.json() : null)
+      .then(data => { if (data?.links) setNoteLinks(data.links) })
+      .catch(() => {})
   }, [agentName])
 
   // ── Create link ─────────────────────────────────────────────────────────────
@@ -327,6 +350,32 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
       setCreatingNote(false)
     }
   }, [agentName, noteTitle, noteBody, noteCategory, noteTags, fetchGalaxy])
+
+  // ── Compare galaxies ────────────────────────────────────────────────────────
+  const handleCompare = useCallback(async () => {
+    const peers = compareInput.split(',').map(s => s.trim()).filter(Boolean)
+    if (peers.length === 0) return
+    // Include the current agent in the merge
+    const allPeers = [agentName, ...peers].join(',')
+    setComparing(true)
+    try {
+      const apiKey = getApiKey()
+      const headers: Record<string, string> = {}
+      if (apiKey) headers['X-Agent-Key'] = apiKey
+      const res = await fetch(
+        `/api/federation/galaxy?peers=${encodeURIComponent(allPeers)}`,
+        { headers }
+      )
+      if (res.ok) {
+        const data: GalaxyData = await res.json()
+        setCompareGalaxy(data)
+      }
+    } catch {
+      // ignore
+    } finally {
+      setComparing(false)
+    }
+  }, [agentName, compareInput])
 
   // ── Derived ─────────────────────────────────────────────────────────────────
   const accessMeta = config ? ACCESS_META[config.access] : null
@@ -490,6 +539,25 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{starMarkdown}</ReactMarkdown>
                 )}
               </div>
+              {noteLinks.length > 0 && (
+                <div style={{ marginTop: 10, fontSize: '0.78rem' }}>
+                  <div style={{ color: 'var(--muted)', marginBottom: 4 }}>Memory links:</div>
+                  {noteLinks.map(link => (
+                    <div key={link.id} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, padding: '3px 6px', background: 'rgba(255,255,255,0.03)', borderRadius: 4 }}>
+                      <span style={{ color: '#c7ceea', fontSize: '0.7rem', padding: '1px 5px', background: 'rgba(199,206,234,0.1)', borderRadius: 3 }}>
+                        {link.link_type}
+                      </span>
+                      <span style={{ color: 'var(--muted)' }}>
+                        {link.source_agent_name} · {link.source_note_path?.split('/').pop()}
+                      </span>
+                      <span style={{ color: 'var(--muted)' }}>→</span>
+                      <span style={{ color: 'var(--text)' }}>
+                        {link.target_agent_name} · {link.target_note_path?.split('/').pop() || '(self)'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
               {isOwner && (
                 <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center' }}>
                   <input
@@ -507,6 +575,40 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
               )}
             </div>
           )}
+
+          {/* Compare mode */}
+          <div className="vault-compare-bar">
+            <button
+              className="vault-sync-btn"
+              style={{ fontSize: '0.78rem' }}
+              onClick={() => { setShowCompare(v => !v); if (compareGalaxy) setCompareGalaxy(null) }}
+            >
+              {showCompare ? '× Close Compare' : '⊕ Compare Galaxies'}
+            </button>
+            {showCompare && (
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 }}>
+                <input
+                  type="text"
+                  placeholder="Agent names (comma-separated)…"
+                  value={compareInput}
+                  onChange={e => setCompareInput(e.target.value)}
+                  style={{ flex: 1, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: 6, padding: '6px 10px', color: 'var(--text)', fontSize: '0.82rem' }}
+                  onKeyDown={e => { if (e.key === 'Enter') handleCompare() }}
+                />
+                <button className="btn btn-sm" onClick={handleCompare} disabled={comparing || !compareInput.trim()}>
+                  {comparing ? '…' : 'Merge'}
+                </button>
+              </div>
+            )}
+            {compareGalaxy && !loadingGalaxy && (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginBottom: 6 }}>
+                  Merged galaxy: {(compareGalaxy as any).included?.join(', ') || 'multiple agents'} — {compareGalaxy.stars?.length ?? 0} stars
+                </div>
+                <GalaxyViewer data={compareGalaxy} agentName="merged" onStarSelect={handleStarSelect} />
+              </div>
+            )}
+          </div>
 
           {!loadingGalaxy && !locked && !galaxy && (
             <div className="vault-lock-screen">

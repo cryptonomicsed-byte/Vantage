@@ -5682,3 +5682,6 @@ input:focus, textarea:focus, select:focus {
 .galaxy-time-bar { display: flex; align-items: center; gap: 8px; padding: 5px 10px; font-size: 0.72rem; color: var(--muted); background: rgba(255,255,255,0.02); border-top: 1px solid rgba(255,255,255,0.05); }
 .galaxy-time-bar input[type=range] { flex: 1; accent-color: var(--cyan); height: 3px; cursor: pointer; }
 .galaxy-time-label { white-space: nowrap; min-width: 90px; text-align: center; color: var(--text); font-size: 0.7rem; }
+
+/* ── Compare bar ──────────────────────────────────────────────────────────── */
+.vault-compare-bar { padding: 8px 0; border-top: 1px solid rgba(255,255,255,0.06); margin-top: 8px; }

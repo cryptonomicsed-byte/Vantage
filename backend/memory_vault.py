@@ -230,6 +230,7 @@ class MemoryVault:
             )
             await db.commit()
         await self._write_readme()
+        await self.auto_summarize_constellations()
 
     async def _write_readme(self):
         config = await self.get_config()
@@ -376,6 +377,58 @@ last_synced: {config.last_synced or 'never'}
             if line.startswith("# "):
                 return line[2:].strip()
         return "Untitled"
+
+    async def semantic_search(self, query: str, top_k: int = 20) -> list:
+        # Try wildcard-expanded FTS5 first for partial matching
+        expanded = " ".join(f"{w}*" for w in query.split() if len(w) > 2)
+        async with aiosqlite.connect(DB_PATH) as db:
+            for fts_q in [expanded, query]:
+                if not fts_q.strip():
+                    continue
+                try:
+                    rows = await (await db.execute(
+                        """SELECT note_path, title,
+                                  snippet(memory_fts, 3, '**', '**', '...', 30) as snip,
+                                  rank
+                           FROM memory_fts
+                           WHERE agent_id=? AND memory_fts MATCH ?
+                           ORDER BY rank LIMIT ?""",
+                        (self.agent_id, fts_q, top_k)
+                    )).fetchall()
+                    if rows:
+                        return [{"path": r[0], "title": r[1], "snippet": r[2], "score": round(abs(r[3]), 4)} for r in rows]
+                except Exception:
+                    continue
+        return []
+
+    async def auto_summarize_constellations(self):
+        data = self.get_galaxy_data()
+        for constellation, stars in data["clusters"].items():
+            if len(stars) < 10:
+                continue
+            safe_c = re.sub(r"[^\w-]", "_", constellation[:40])
+            summary_path = self.vault_path / "knowledge" / f"_summary_{safe_c}.md"
+            if summary_path.exists():
+                continue
+            titles = [s.get("title", "Untitled") for s in stars[:50]]
+            coords = self._spatial_hash(constellation, "knowledge")
+            frontmatter = {
+                "id": f"summary_{safe_c[:20]}",
+                "type": "star",
+                "content_type": "text",
+                "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
+                "galaxy_size": 14, "galaxy_color": "#c7ceea",
+                "constellation": constellation,
+                "tags": ["summary", constellation],
+                "created": datetime.utcnow().isoformat(),
+            }
+            body = f"# Constellation Summary: {constellation}\n\n**{len(stars)} stars in this constellation**\n\n## Star Index\n\n"
+            body += "\n".join(f"- {t}" for t in titles)
+            if len(stars) > 50:
+                body += f"\n\n_…and {len(stars) - 50} more_"
+            self._write_note(summary_path, frontmatter, body)
+            relative = str(summary_path.relative_to(self.vault_path))
+            await self._update_fts(relative, f"{constellation} — Constellation Summary", body, ["summary", constellation])
 
     async def get_stats(self) -> dict:
         config = await self.get_config()

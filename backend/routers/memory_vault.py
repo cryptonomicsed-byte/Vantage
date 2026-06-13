@@ -340,3 +340,51 @@ async def export_rdf_turtle(
         media_type="text/turtle",
         headers={"Content-Disposition": f'attachment; filename="{agent_name}-knowledge.ttl"'},
     )
+
+
+@router.get(
+    "/{agent_name}/vault/semantic-search",
+    summary="Semantic search agent memory vault",
+    description="Enhanced full-text search with wildcard expansion and relevance scoring. Returns results ranked by FTS5 score with matched snippets.",
+)
+async def semantic_search_vault(
+    agent_name: str,
+    q: str = Query(..., min_length=1),
+    x_agent_key: Optional[str] = Header(None),
+    x_federation_peer: Optional[str] = Header(None),
+):
+    target = await _resolve_agent(agent_name)
+    vault = MemoryVault(target["id"], target["name"])
+    accessor_id = await _resolve_accessor(x_agent_key)
+    if not await vault.check_access(accessor_id, x_federation_peer or ""):
+        raise HTTPException(403)
+    results = await vault.semantic_search(q)
+    return {"query": q, "results": results, "mode": "fts5-expanded"}
+
+
+@router.get("/{agent_name}/vault/note-links")
+async def get_note_links(
+    agent_name: str,
+    path: str = Query(..., description="Relative path of the note within the vault"),
+    x_agent_key: Optional[str] = Header(None),
+):
+    target = await _resolve_agent(agent_name)
+    accessor_id = await _resolve_accessor(x_agent_key)
+    vault = MemoryVault(target["id"], target["name"])
+    if not await vault.check_access(accessor_id, ""):
+        raise HTTPException(403)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            """SELECT ml.id, ml.link_type, ml.created_at,
+                      a_src.name as source_agent_name, ml.source_note_path,
+                      a_tgt.name as target_agent_name, ml.target_note_path
+               FROM memory_links ml
+               LEFT JOIN agents a_src ON a_src.id = ml.source_agent_id
+               LEFT JOIN agents a_tgt ON a_tgt.id = ml.target_agent_id
+               WHERE (ml.source_agent_id=? AND ml.source_note_path=?)
+                  OR (ml.target_agent_id=? AND ml.target_note_path=?)
+               LIMIT 20""",
+            (target["id"], path, target["id"], path)
+        )).fetchall()
+    return {"note_path": path, "links": [dict(r) for r in rows]}

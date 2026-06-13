@@ -272,6 +272,8 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
   const isDraggingRef = useRef(false)
   const lastMouseRef = useRef({ x: 0, y: 0 })
   const mouseDownPosRef = useRef({ x: 0, y: 0 })
+  const lastTouchDistRef = useRef<number>(0)
+  const touchStartPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
   const dateRangeRef = useRef<[number, number]>([0, Infinity])
 
   // React state for UI
@@ -517,6 +519,66 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
     scaleRef.current = newScale
   }, [])
 
+  // ── Touch: pan + pinch-to-zoom ────────────────────────────────────────────
+  const handleTouchStart = useCallback((e: React.TouchEvent<HTMLCanvasElement>) => {
+    e.preventDefault()
+    if (e.touches.length === 1) {
+      const t = e.touches[0]
+      isDraggingRef.current = true
+      lastMouseRef.current = { x: t.clientX, y: t.clientY }
+      mouseDownPosRef.current = { x: t.clientX, y: t.clientY }
+      touchStartPosRef.current = { x: t.clientX, y: t.clientY }
+      lastTouchDistRef.current = 0
+    } else if (e.touches.length === 2) {
+      const dx = e.touches[1].clientX - e.touches[0].clientX
+      const dy = e.touches[1].clientY - e.touches[0].clientY
+      lastTouchDistRef.current = Math.sqrt(dx * dx + dy * dy)
+      isDraggingRef.current = false
+    }
+  }, [])
+
+  const handleTouchMove = useCallback((e: React.TouchEvent<HTMLCanvasElement>) => {
+    e.preventDefault()
+    if (e.touches.length === 1 && isDraggingRef.current) {
+      const t = e.touches[0]
+      const dx = t.clientX - lastMouseRef.current.x
+      const dy = t.clientY - lastMouseRef.current.y
+      offsetXRef.current += dx
+      offsetYRef.current += dy
+      lastMouseRef.current = { x: t.clientX, y: t.clientY }
+    } else if (e.touches.length === 2) {
+      const dx = e.touches[1].clientX - e.touches[0].clientX
+      const dy = e.touches[1].clientY - e.touches[0].clientY
+      const dist = Math.sqrt(dx * dx + dy * dy)
+      if (lastTouchDistRef.current > 0) {
+        const delta = dist - lastTouchDistRef.current
+        const oldScale = scaleRef.current
+        const newScale = Math.min(Math.max(oldScale * (1 + delta * 0.008), 0.01), 1.5)
+        // Zoom toward pinch center
+        const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2
+        const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2
+        const canvas = canvasRef.current
+        const rect = canvas?.getBoundingClientRect()
+        if (rect) {
+          const px = cx - rect.left
+          const py = cy - rect.top
+          offsetXRef.current = px - (px - offsetXRef.current) * (newScale / oldScale)
+          offsetYRef.current = py - (py - offsetYRef.current) * (newScale / oldScale)
+        }
+        scaleRef.current = newScale
+      }
+      lastTouchDistRef.current = dist
+    }
+  }, [])
+
+  const handleTouchEnd = useCallback((e: React.TouchEvent<HTMLCanvasElement>) => {
+    e.preventDefault()
+    if (e.touches.length === 0) {
+      isDraggingRef.current = false
+      lastTouchDistRef.current = 0
+    }
+  }, [])
+
   // ── Filter change ─────────────────────────────────────────────────────────
   const handleFilterChange = useCallback((filter: string) => {
     activeFilterRef.current = filter
@@ -532,12 +594,15 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
         <canvas
           ref={canvasRef}
           className="galaxy-canvas"
-          style={{ cursor: isDraggingRef.current ? 'grabbing' : 'crosshair' }}
+          style={{ touchAction: 'none', cursor: hoveredStar ? 'pointer' : 'default' }}
           onMouseDown={handleMouseDown}
           onMouseUp={handleMouseUp}
           onMouseMove={handleMouseMove}
           onMouseLeave={handleMouseLeave}
           onWheel={handleWheel}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
         />
 
         {/* Constellation label overlay */}
