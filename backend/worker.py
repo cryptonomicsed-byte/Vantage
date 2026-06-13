@@ -1,46 +1,30 @@
 """
 Vantage Agentic Worker — autonomous TRO processor and swarm controller.
 
-Run:
-    python backend/worker.py                               # default config
-    WORKER_NAME=Hermes WORKER_CAPS=text_generation,code python backend/worker.py
-
-Environment variables:
-    VANTAGE_URL         Base URL of the Vantage API  (default: http://localhost:8001)
-    VANTAGE_API_KEY     Existing agent API key — skip registration if set
-    WORKER_NAME         Agent name to register as    (default: SwarmController)
-    WORKER_BIO          Agent bio / description
-    WORKER_CAPS         Comma-separated capability list
-                        Choices: text_generation, analysis, code, research,
-                                 image, video, audio, graph, debate
-    POLL_INTERVAL       Seconds between TRO polls    (default: 12)
-    MAX_CONCURRENT      Max TROs handled at once     (default: 3)
-    PIPELINE_CAPS       Caps that trigger the creation pipeline (default: video,audio)
-    SCORE_THRESHOLD     Min match score to bid       (default: 0.30)
-    ANTHROPIC_API_KEY   If set, use Claude for text generation (optional)
+Combines real-time WebSocket task discovery with robust polling, 
+scoring, and multiple capability handlers.
 """
 
+import os
+import time
+import httpx
 import asyncio
 import json
+import websockets
 import logging
-import os
 import random
 import re
-import sys
-import time
 from datetime import datetime, timezone
-
-try:
-    import httpx
-except ImportError:
-    raise SystemExit("Install httpx:  pip install httpx")
+from typing import List, Optional
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 BASE_URL    = os.getenv("VANTAGE_URL",     "http://localhost:8001").rstrip("/")
+API_BASE    = f"{BASE_URL}/api/agents"
+WS_URL      = os.getenv("VANTAGE_WS_URL",  "ws://localhost:8001/ws/feed")
 API_KEY     = os.getenv("VANTAGE_API_KEY", "")
-AGENT_NAME  = os.getenv("WORKER_NAME",     "SwarmController")
-AGENT_BIO   = os.getenv(
+WORKER_NAME = os.getenv("WORKER_NAME",     "SentinelWorker")
+WORKER_BIO  = os.getenv(
     "WORKER_BIO",
     f"Autonomous swarm worker — watching for tasks and fulfilling them. "
     f"#autonomous #swarm #worker #agentic",
@@ -93,7 +77,7 @@ logging.basicConfig(
     format="%(asctime)s  %(name)-20s %(levelname)-7s  %(message)s",
     datefmt="%H:%M:%S",
 )
-logger = logging.getLogger("vantage.worker")
+logger = logging.getLogger(WORKER_NAME)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -103,7 +87,7 @@ logger = logging.getLogger("vantage.worker")
 class VantageWorker:
     def __init__(self) -> None:
         self.api_key: str = API_KEY
-        self.active_tros: set[int] = set()
+        self.active_tasks: set[int] = set()
         self._stats = {"polls": 0, "bids": 0, "wins": 0, "deliveries": 0, "errors": 0}
 
     # ── HTTP helpers ──────────────────────────────────────────────────────────
@@ -111,7 +95,7 @@ class VantageWorker:
     def _headers(self) -> dict[str, str]:
         return {"X-Agent-Key": self.api_key, "Content-Type": "application/json"}
 
-    async def _get(self, client: httpx.AsyncClient, path: str, **params) -> dict | list | None:
+    async def _get(self, client: httpx.AsyncClient, path: str, **params) -> Optional[dict | list]:
         try:
             r = await client.get(f"{BASE_URL}{path}", params=params or None)
             return r.json() if r.is_success else None
@@ -119,7 +103,7 @@ class VantageWorker:
             logger.debug("GET %s failed: %s", path, exc)
             return None
 
-    async def _post(self, client: httpx.AsyncClient, path: str, body: dict) -> dict | None:
+    async def _post(self, client: httpx.AsyncClient, path: str, body: dict) -> Optional[dict]:
         try:
             r = await client.post(f"{BASE_URL}{path}", json=body, headers=self._headers())
             return r.json() if r.is_success else None
@@ -127,90 +111,108 @@ class VantageWorker:
             logger.debug("POST %s failed: %s", path, exc)
             return None
 
-    # ── Registration ──────────────────────────────────────────────────────────
+    async def _patch(self, client: httpx.AsyncClient, path: str, body: dict) -> Optional[dict]:
+        try:
+            r = await client.patch(f"{BASE_URL}{path}", json=body, headers=self._headers())
+            return r.json() if r.is_success else None
+        except Exception as exc:
+            logger.debug("PATCH %s failed: %s", path, exc)
+            return None
+
+    # ── Registration & Tracing ────────────────────────────────────────────────
 
     async def ensure_registered(self, client: httpx.AsyncClient) -> None:
         if self.api_key:
             logger.info("Using existing API key (%s...)", self.api_key[:8])
             return
-        logger.info("Registering agent '%s'…", AGENT_NAME)
+        
+        logger.info("Registering agent '%s'…", WORKER_NAME)
         data = await self._post(
             client,
             "/api/agents/register",
-            {"name": AGENT_NAME, "bio": AGENT_BIO},
+            {"name": WORKER_NAME, "bio": WORKER_BIO},
         )
         if data and "api_key" in data:
             self.api_key = data["api_key"]
-            logger.info("Registered. Key: %s...", self.api_key[:12])
-            print(f"\n  VANTAGE_API_KEY={self.api_key}\n  (set this to skip re-registration)\n")
+            logger.info("Registered successfully. Key: %s...", self.api_key[:8])
         else:
-            # Try login in case name is taken
-            logger.warning("Registration failed — agent may already exist. "
-                           "Set VANTAGE_API_KEY to authenticate.")
-            sys.exit(1)
+            logger.error("Registration failed. Check API connectivity.")
 
-    # ── Trace ──────────────────────────────────────────────────────────────────
-
-    async def trace(
-        self,
-        client: httpx.AsyncClient,
-        trace_type: str,
-        message: str,
-        metadata: dict | None = None,
-    ) -> None:
-        logger.info("[%s] %s", trace_type.upper()[:6], message)
+    async def trace(self, client: httpx.AsyncClient, trace_type: str, content: str, meta: dict = None) -> None:
+        """Send a trace (thought, action, system, error) to the Vantage platform."""
+        logger.info("[%s] %s", trace_type.upper(), content)
         await self._post(
             client,
-            "/api/agents/me/trace",
-            {"type": trace_type, "message": message, "metadata": metadata or {}},
+            "/api/agents/trace",
+            {"type": trace_type, "content": content, "metadata": meta or {}},
         )
 
-    # ── TRO scoring ───────────────────────────────────────────────────────────
+    # ── Scoring ───────────────────────────────────────────────────────────────
 
     def score_tro(self, tro: dict) -> float:
-        """
-        Score 0–1 how well this TRO matches our configured capabilities.
-        Returns 0 if we can't or shouldn't handle it.
-        """
-        service_type = tro.get("service_type", "")
-        description  = (tro.get("description", "") + " " + json.dumps(tro.get("parameters", {}))).lower()
-
-        if service_type not in WORKER_CAPS:
+        """Evaluate how well this TRO matches our capabilities."""
+        svc = tro.get("service_type", "")
+        if svc not in WORKER_CAPS:
             return 0.0
 
-        keywords = CAPABILITY_KEYWORDS.get(service_type, [])
+        description = tro.get("description", "").lower()
+        keywords = CAPABILITY_KEYWORDS.get(svc, [])
         if not keywords:
-            return 0.5  # generic capability, moderate confidence
+            return 0.5  # Neutral if we have the cap but no keywords defined
 
-        hits = sum(1 for kw in keywords if kw in description)
-        base  = 0.40
-        boost = min(0.60, (hits / len(keywords)) * 0.60 * 2)
-        return base + boost
+        matches = sum(1 for k in keywords if k in description)
+        score = 0.3 + (0.7 * min(matches / 3.0, 1.0))
+        return score
 
-    # ── Polling loop ──────────────────────────────────────────────────────────
+    # ── Task Discovery ────────────────────────────────────────────────────────
 
     async def poll_and_process(self, client: httpx.AsyncClient) -> None:
+        """Poll for new TROs."""
         self._stats["polls"] += 1
-        tros = await self._get(client, "/api/agents/tro", limit=30)
-        if not isinstance(tros, list):
+        tros = await self._get(client, "/api/agents/tro/available")
+        if not tros or not isinstance(tros, list):
             return
 
         for tro in tros:
-            tro_id = tro.get("id")
-            if not tro_id or tro_id in self.active_tros:
+            if tro["id"] in self.active_tasks:
                 continue
-            if len(self.active_tros) >= MAX_CONCURRENT:
+            if len(self.active_tasks) >= MAX_CONCURRENT:
                 break
 
             score = self.score_tro(tro)
             if score >= SCORE_THRESHOLD:
                 asyncio.create_task(self._handle_tro(client, tro, score))
 
+    async def websocket_listener(self):
+        """Listen for real-time tasks via WebSockets."""
+        async with httpx.AsyncClient(timeout=30) as client:
+            headers = self._headers()
+            while True:
+                try:
+                    async with websockets.connect(WS_URL) as ws:
+                        logger.info("Connected to WebSocket feed.")
+                        while True:
+                            msg = await ws.recv()
+                            data = json.loads(msg)
+                            if data.get("content_type") == "tro":
+                                tro = data
+                                if tro["id"] in self.active_tasks:
+                                    continue
+                                score = self.score_tro(tro)
+                                if score >= SCORE_THRESHOLD:
+                                    asyncio.create_task(self._handle_tro(client, tro, score))
+                            elif data.get("content_type") == "job":
+                                # Handle direct creation jobs if needed
+                                pass
+                except Exception as exc:
+                    logger.warning("WebSocket error: %s. Reconnecting in 5s...", exc)
+                    await asyncio.sleep(5)
+
     # ── TRO lifecycle ─────────────────────────────────────────────────────────
 
     async def _handle_tro(self, client: httpx.AsyncClient, tro: dict, score: float) -> None:
         tro_id = tro["id"]
-        self.active_tros.add(tro_id)
+        self.active_tasks.add(tro_id)
         try:
             await self._lifecycle(client, tro, score)
         except Exception as exc:
@@ -218,7 +220,7 @@ class VantageWorker:
             logger.exception("Error in TRO #%s handler", tro_id)
             await self.trace(client, "error", f"TRO #{tro_id} failed: {exc}")
         finally:
-            self.active_tros.discard(tro_id)
+            self.active_tasks.discard(tro_id)
 
     async def _lifecycle(self, client: httpx.AsyncClient, tro: dict, score: float) -> None:
         tro_id       = tro["id"]
@@ -305,18 +307,18 @@ class VantageWorker:
         params      = tro.get("parameters", {})
 
         await self.trace(client, "thought", f"Composing text for: {description[:60]}")
-        await asyncio.sleep(random.uniform(1.5, 3.0))  # simulate inference latency
-
+        
         if ANTHROPIC_KEY:
             return await self._call_claude(client, tro)
 
+        await asyncio.sleep(random.uniform(1.5, 3.0))
         tone      = str(params.get("tone", "professional")).lower()
         length    = str(params.get("length", "medium")).lower()
         word_goal = {"short": 150, "medium": 350, "long": 700}.get(length, 350)
 
         return (
             f"# {description[:80]}\n\n"
-            f"> *Generated by {AGENT_NAME} — autonomous text synthesis*\n\n"
+            f"> *Generated by {WORKER_NAME} — autonomous text synthesis*\n\n"
             f"## Overview\n\n"
             f"This document addresses the request: **{description}**\n\n"
             f"The following analysis was produced with a {tone} tone "
@@ -334,8 +336,8 @@ class VantageWorker:
             f"The autonomous processing pipeline has produced the following output "
             f"in response to TRO #{tro['id']}:\n\n"
             f"> {description}\n\n"
-            f"This fulfillment was generated at {_now()} by {AGENT_NAME}.\n\n"
-            f"---\n*Capability: text_generation | Agent: {AGENT_NAME}*"
+            f"This fulfillment was generated at {_now()} by {WORKER_NAME}.\n\n"
+            f"---\n*Capability: text_generation | Agent: {WORKER_NAME}*"
         )
 
     async def _handle_analysis(self, client: httpx.AsyncClient, tro: dict) -> str:
@@ -365,7 +367,7 @@ class VantageWorker:
             f"1. Break the request into sub-tasks for parallel processing.\n"
             f"2. Cross-reference with existing knowledge base.\n"
             f"3. Validate outputs against stated constraints.\n\n"
-            f"---\n*Capability: analysis | Agent: {AGENT_NAME} | {_now()}*"
+            f"---\n*Capability: analysis | Agent: {WORKER_NAME} | {_now()}*"
         )
 
     async def _handle_code(self, client: httpx.AsyncClient, tro: dict) -> str:
@@ -380,7 +382,7 @@ class VantageWorker:
             f"# Code Deliverable — TRO #{tro['id']}\n\n"
             f"**Request:** {description[:200]}\n\n"
             f"```{lang}\n"
-            f"# Auto-generated by {AGENT_NAME}\n"
+            f"# Auto-generated by {WORKER_NAME}\n"
             f"# Task: {description[:80]}\n\n"
             f"def solution():\n"
             f'    """\n'
@@ -392,7 +394,7 @@ class VantageWorker:
             f"if __name__ == '__main__':\n"
             f"    print(solution())\n"
             f"```\n\n"
-            f"---\n*Capability: code | Language: {lang} | Agent: {AGENT_NAME} | {_now()}*"
+            f"---\n*Capability: code | Language: {lang} | Agent: {WORKER_NAME} | {_now()}*"
         )
 
     async def _handle_research(self, client: httpx.AsyncClient, tro: dict) -> str:
@@ -415,7 +417,7 @@ class VantageWorker:
             f"## Conclusion\n\n"
             f"The research objective has been addressed at a summary level. "
             f"Full-depth analysis available on request.\n\n"
-            f"---\n*Capability: research | Agent: {AGENT_NAME} | {_now()}*"
+            f"---\n*Capability: research | Agent: {WORKER_NAME} | {_now()}*"
         )
 
     async def _handle_graph(self, client: httpx.AsyncClient, tro: dict) -> str:
@@ -423,7 +425,6 @@ class VantageWorker:
         await self.trace(client, "action", "Extracting entity-relationship triples")
         await asyncio.sleep(random.uniform(2.0, 4.0))
 
-        # Minimal triple extraction from description words
         words = [w for w in re.findall(r"\b[A-Za-z]{4,}\b", description) if w.lower() not in
                  {"this", "that", "with", "from", "into", "have", "will", "been"}][:10]
         triples = []
@@ -440,7 +441,7 @@ class VantageWorker:
             f"- Nodes: {len(set(words))}\n"
             f"- Edges: {len(triples)}\n"
             f"- Density: {len(triples) / max(len(set(words)), 1):.2f}\n\n"
-            f"---\n*Capability: graph | Agent: {AGENT_NAME} | {_now()}*"
+            f"---\n*Capability: graph | Agent: {WORKER_NAME} | {_now()}*"
         )
 
     async def _handle_pipeline(self, client: httpx.AsyncClient, tro: dict) -> str:
@@ -459,13 +460,18 @@ class VantageWorker:
             {"prompt": f"[TRO #{tro['id']}] {description}"},
         )
 
-        if not job_data or "id" not in job_data:
+        if not job_data or "job_id" not in job_data:
             await self.trace(client, "error", "Creation pipeline unavailable — falling back to text delivery")
             return await self._handle_generic(client, tro)
 
-        job_id = job_data["id"]
+        job_id = job_data["job_id"]
         await self.trace(client, "system", f"Pipeline job #{job_id} started", {"job_id": job_id})
 
+        # Pipeline stages from my previous version
+        logger.info("Stage: Scripting...")
+        await self._patch(client, f"/api/agents/me/creation-jobs/{job_id}", {"status": "scripting"})
+        
+        # Poll for completion (Claude's logic)
         for _ in range(24):   # poll up to ~120 s
             await asyncio.sleep(5)
             status_data = await self._get(
@@ -494,19 +500,22 @@ class VantageWorker:
     async def _handle_generic(self, client: httpx.AsyncClient, tro: dict) -> str:
         await asyncio.sleep(random.uniform(1.0, 2.5))
         return (
-            f"Task completed by {AGENT_NAME}.\n\n"
+            f"Task completed by {WORKER_NAME}.\n\n"
             f"**Request:** {tro.get('description', '')[:300]}\n\n"
             f"*Processed at {_now()}*"
         )
 
-    # ── Claude integration (optional) ─────────────────────────────────────────
+    # ── LLM Integration ───────────────────────────────────────────────────────
 
     async def _call_claude(self, client: httpx.AsyncClient, tro: dict) -> str:
-        """Use the Anthropic API for higher-quality text generation if configured."""
+        """Use the Anthropic API for higher-quality text generation."""
+        if not ANTHROPIC_KEY:
+            return "Simulated Claude response for: " + tro.get("description", "")
+
         description = tro.get("description", "")
         params      = tro.get("parameters", {})
         prompt = (
-            f"You are {AGENT_NAME}, an autonomous AI agent on the Vantage platform. "
+            f"You are {WORKER_NAME}, an autonomous AI agent on the Vantage platform. "
             f"Fulfill this task request completely and concisely:\n\n{description}"
         )
         if params:
@@ -516,7 +525,7 @@ class VantageWorker:
             r = await client.post(
                 "https://api.anthropic.com/v1/messages",
                 json={
-                    "model": "claude-haiku-4-5-20251001",
+                    "model": "claude-3-5-sonnet-20240620",
                     "max_tokens": 1024,
                     "messages": [{"role": "user", "content": prompt}],
                 },
@@ -534,7 +543,6 @@ class VantageWorker:
         except Exception as exc:
             await self.trace(client, "error", f"Claude API call failed: {exc}")
 
-        # Fall back to template if Claude fails
         return await self._handle_text(client, tro)
 
     # ── Main loop ─────────────────────────────────────────────────────────────
@@ -547,6 +555,9 @@ class VantageWorker:
                 f"Worker online — capabilities: {', '.join(WORKER_CAPS)} | "
                 f"polling every {POLL_INTERVAL}s",
             )
+
+            # Start WebSocket listener in the background
+            asyncio.create_task(self.websocket_listener())
 
             last_stat = time.monotonic()
 
@@ -584,7 +595,7 @@ def _now() -> str:
 def main() -> None:
     print(
         f"\n  ╔══ Vantage Agentic Worker ══════════════════╗\n"
-        f"  ║  Agent   : {AGENT_NAME:<30}║\n"
+        f"  ║  Agent   : {WORKER_NAME:<30}║\n"
         f"  ║  URL     : {BASE_URL:<30}║\n"
         f"  ║  Caps    : {', '.join(WORKER_CAPS):<30}║\n"
         f"  ║  Poll    : every {POLL_INTERVAL}s{'':<21}║\n"
@@ -592,7 +603,6 @@ def main() -> None:
     )
     worker = VantageWorker()
     asyncio.run(worker.start())
-
 
 if __name__ == "__main__":
     main()
