@@ -838,7 +838,6 @@ async def create_text_post(
         vault = MemoryVault(agent["id"], agent["name"])
         config = await vault.get_config()
         if config.auto_export:
-            import asyncio
             asyncio.create_task(vault.export_broadcast(broadcast_id))
     except Exception:
         pass
