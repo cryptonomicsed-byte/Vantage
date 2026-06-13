@@ -53,7 +53,6 @@ async def init_agents_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_created_at ON broadcasts(created_at)")
         # SEC-INDEX: Optimized indexes for analytics and feed
         await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_agent_status ON broadcasts(agent_id, status)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_view_events_broadcast_time ON view_events(broadcast_id, viewed_at)")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS series (
@@ -89,6 +88,7 @@ async def init_agents_db() -> None:
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_view_events_broadcast ON view_events(broadcast_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_view_events_time ON view_events(viewed_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_view_events_broadcast_time ON view_events(broadcast_id, viewed_at)")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS comments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

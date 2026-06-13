@@ -77,6 +77,7 @@ async def update_vault_config(
 )
 async def get_galaxy_data(
     agent_name: str,
+    format: Optional[str] = Query(None, description="Response format: 'turtle' or 'jsonld'. Default JSON."),
     x_agent_key: Optional[str] = Header(None),
     x_federation_peer: Optional[str] = Header(None),
 ):
@@ -86,7 +87,24 @@ async def get_galaxy_data(
     if not await vault.check_access(accessor_id, x_federation_peer or ""):
         raise HTTPException(403, "Access denied to this memory vault")
     await vault.log_access(accessor_id, x_federation_peer or "", "galaxy", "read")
-    return vault.get_galaxy_data()
+    data = vault.get_galaxy_data()
+    if format == "turtle":
+        lines = [
+            f"@prefix vantage: <https://vantage.agent/knowledge/{agent_name}/> .",
+            "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .",
+            "",
+        ]
+        for edge in data.get("edges", []):
+            s = re.sub(r"[^\w-]", "_", str(edge.get("subject", "")).strip())
+            p = re.sub(r"[^\w-]", "_", str(edge.get("predicate", "")).strip())
+            o = re.sub(r"[^\w-]", "_", str(edge.get("object", "")).strip())
+            if s and p and o:
+                lines.append(f"vantage:{s} vantage:{p} vantage:{o} .")
+        return Response("\n".join(lines), media_type="text/turtle")
+    if format == "jsonld":
+        stars_ld = [{"@id": f"vantage:{s.get('id')}", "@type": "vantage:Star", "vantage:label": s.get("title")} for s in data.get("stars", [])]
+        return {"@context": {"vantage": f"https://vantage.agent/knowledge/{agent_name}/"}, "@graph": stars_ld}
+    return data
 
 @router.get(
     "/{agent_name}/vault/search",
@@ -469,3 +487,119 @@ async def fact_feedback(
         "retrieval_count": retrieval,
         "helpful_count": helpful_total,
     }
+
+
+# ── Workspace document editing ────────────────────────────────────────────────
+
+@router.put(
+    "/{agent_name}/vault/workspace/{doc}",
+    summary="Update workspace document",
+    description="Edit the agent's Layer-1 workspace document (MEMORY, USER, or CREATIVE). Preserves YAML frontmatter; replaces the markdown body. Also re-indexes the content in FTS5 for vault search.",
+)
+async def update_workspace_doc(
+    agent_name: str,
+    doc: Literal["MEMORY", "USER", "CREATIVE"],
+    request: Request,
+    agent: dict = Depends(get_agent),
+):
+    if agent["name"] != agent_name:
+        raise HTTPException(403, "Can only edit your own workspace documents")
+    body = await _parse_body(request)
+    content = str(body.get("content", "")).strip()
+    if not content:
+        raise HTTPException(422, "content is required")
+    vault = MemoryVault(agent["id"], agent["name"])
+    path = vault.vault_path / "workspace" / f"{doc}.md"
+    if path.exists():
+        existing = path.read_text(encoding="utf-8")
+        parts = existing.split("---", 2)
+        fm = f"---{parts[1]}---\n" if len(parts) >= 3 else ""
+    else:
+        fm = f"---\ntype: workspace\nlayer: 1\nrole: {doc.lower()}\n---\n"
+    path.write_text(fm + "\n" + content, encoding="utf-8")
+    relative = str(path.relative_to(vault.vault_path))
+    await vault._update_fts(relative, f"{doc} Workspace — {agent_name}", content, ["workspace", doc.lower()])
+    return {"updated": doc, "path": relative}
+
+
+# ── Pre-action protocol preflight ─────────────────────────────────────────────
+
+@router.get(
+    "/{agent_name}/vault/preflight",
+    summary="Memory vault preflight check",
+    description="Check the agent's memory vault before executing external searches. Implements the mandatory pre-action protocol from SOUL.md: inventory vault first, then decide whether external search is needed. Use this as the FIRST step of any research task.",
+)
+async def vault_preflight(
+    agent_name: str,
+    q: str = Query(..., min_length=1, description="The question or topic to check vault memory for"),
+    x_agent_key: Optional[str] = Header(None),
+    x_federation_peer: Optional[str] = Header(None),
+):
+    target = await _resolve_agent(agent_name)
+    vault = MemoryVault(target["id"], target["name"])
+    accessor_id = await _resolve_accessor(x_agent_key)
+    if not await vault.check_access(accessor_id, x_federation_peer or ""):
+        raise HTTPException(403)
+    memories = await vault.semantic_search(q, top_k=5)
+    has_memories = len(memories) > 0
+    soul_path = vault.vault_path / "SOUL.md"
+    soul_summary = ""
+    if soul_path.exists():
+        try:
+            soul_summary = soul_path.read_text(encoding="utf-8")[:300]
+        except Exception:
+            pass
+    return {
+        "should_search_externally": not has_memories,
+        "reason": (
+            f"Found {len(memories)} relevant memories — use them before searching externally."
+            if has_memories
+            else "No relevant memories found in vault. External search is appropriate."
+        ),
+        "memories": memories,
+        "vault_inventory_summary": soul_summary,
+    }
+
+
+# ── Galaxy content negotiation (?format=) ─────────────────────────────────────
+
+@router.get(
+    "/{agent_name}/vault/galaxy.ttl",
+    summary="Galaxy as RDF/Turtle (content-negotiation shortcut)",
+    description="Returns the memory galaxy's knowledge edges in W3C Turtle format. Equivalent to GET /vault/galaxy?format=turtle.",
+    response_class=Response,
+)
+async def get_galaxy_turtle(
+    agent_name: str,
+    x_agent_key: Optional[str] = Header(None),
+    x_federation_peer: Optional[str] = Header(None),
+):
+    target = await _resolve_agent(agent_name)
+    vault = MemoryVault(target["id"], target["name"])
+    accessor_id = await _resolve_accessor(x_agent_key)
+    if not await vault.check_access(accessor_id, x_federation_peer or ""):
+        raise HTTPException(403)
+    data = vault.get_galaxy_data()
+    lines = [
+        f"@prefix vantage: <https://vantage.agent/knowledge/{agent_name}/> .",
+        "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .",
+        "",
+    ]
+    for star in data.get("stars", []):
+        sid = re.sub(r"[^\w-]", "_", str(star.get("id", "")).strip())
+        if sid:
+            for tag in (star.get("tags") or [])[:5]:
+                t = re.sub(r"[^\w-]", "_", str(tag).strip())
+                if t:
+                    lines.append(f"vantage:{sid} vantage:hasTag vantage:{t} .")
+    for edge in data.get("edges", []):
+        subj = re.sub(r"[^\w-]", "_", str(edge.get("subject", "")).strip())
+        pred = re.sub(r"[^\w-]", "_", str(edge.get("predicate", "")).strip())
+        obj = re.sub(r"[^\w-]", "_", str(edge.get("object", "")).strip())
+        if subj and pred and obj:
+            lines.append(f"vantage:{subj} vantage:{pred} vantage:{obj} .")
+    return Response(
+        "\n".join(lines),
+        media_type="text/turtle",
+        headers={"Content-Disposition": f'attachment; filename="{agent_name}-galaxy.ttl"'},
+    )

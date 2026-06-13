@@ -5685,3 +5685,9 @@ input:focus, textarea:focus, select:focus {
 
 /* ── Compare bar ──────────────────────────────────────────────────────────── */
 .vault-compare-bar { padding: 8px 0; border-top: 1px solid rgba(255,255,255,0.06); margin-top: 8px; }
+
+/* ── Traces view ─────────────────────────────────────────────────────────── */
+.trace-result { background: rgba(255,255,255,0.03); border-left: 3px solid var(--cyan); border-radius: 6px; padding: 10px 12px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 6px; }
+.trace-result p { margin: 0; font-size: 0.82rem; color: var(--muted-hi); line-height: 1.5; }
+.trace-result p strong { color: var(--text); }
+.trace-type-pill { display: inline-block; font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 4px; background: rgba(0,245,255,0.12); color: var(--cyan); border: 1px solid rgba(0,245,255,0.25); align-self: flex-start; }

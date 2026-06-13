@@ -70,7 +70,7 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
   const [locked, setLocked] = useState(false)
   const [loadingGalaxy, setLoadingGalaxy] = useState(true)
   const [syncing, setSyncing] = useState(false)
-  const [view, setView] = useState<'galaxy' | 'files' | 'settings' | 'stats'>('galaxy')
+  const [view, setView] = useState<'galaxy' | 'files' | 'settings' | 'stats' | 'traces'>('galaxy')
 
   // Search
   const [searchQuery, setSearchQuery] = useState('')
@@ -102,6 +102,14 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
     target_note_path: string
     created_at: string
   }>>([])
+
+  // Traces search
+  const [traceQuery, setTraceQuery] = useState('')
+  const [traceResults, setTraceResults] = useState<Array<{id: string; message: string; trace_type: string; snippet?: string}> | null>(null)
+  const [searchingTraces, setSearchingTraces] = useState(false)
+
+  // Cross-agent links for galaxy overlay
+  const [crossAgentLinks, setCrossAgentLinks] = useState<Array<{source_note_path: string; target_note_path: string; link_type: string}>>([])
 
   // Compare mode
   const [compareInput, setCompareInput] = useState('')
@@ -377,6 +385,42 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
     }
   }, [agentName, compareInput])
 
+  // ── Trace search ────────────────────────────────────────────────────────────
+  const handleTraceSearch = useCallback(async () => {
+    if (!traceQuery.trim()) return
+    setSearchingTraces(true)
+    setTraceResults(null)
+    try {
+      const apiKey = getApiKey()
+      const headers: Record<string, string> = {}
+      if (apiKey) headers['X-Agent-Key'] = apiKey
+      const res = await fetch(
+        `/api/agents/${encodeURIComponent(agentName)}/vault/sessions/search?q=${encodeURIComponent(traceQuery)}&limit=20`,
+        { headers }
+      )
+      if (res.ok) {
+        const data = await res.json()
+        setTraceResults(Array.isArray(data) ? data : data.results || [])
+      }
+    } catch {
+      setTraceResults([])
+    } finally {
+      setSearchingTraces(false)
+    }
+  }, [agentName, traceQuery])
+
+  // ── Fetch cross-agent links after galaxy loads ───────────────────────────────
+  useEffect(() => {
+    if (!galaxy) return
+    const apiKey = getApiKey()
+    const headers: Record<string, string> = {}
+    if (apiKey) headers['X-Agent-Key'] = apiKey
+    fetch(`/api/agents/${encodeURIComponent(agentName)}/vault/links`, { headers })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data?.links) setCrossAgentLinks(data.links) })
+      .catch(() => {})
+  }, [agentName, galaxy])
+
   // ── Derived ─────────────────────────────────────────────────────────────────
   const accessMeta = config ? ACCESS_META[config.access] : null
 
@@ -419,6 +463,12 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
             >
               <BarChart2 size={12} style={{ display: 'inline', marginRight: 4 }} />
               Stats
+            </button>
+            <button
+              className={`vault-view-btn${view === 'traces' ? ' active' : ''}`}
+              onClick={() => setView('traces')}
+            >
+              Traces
             </button>
             {isOwner && (
               <button
@@ -507,7 +557,7 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
           )}
 
           {!loadingGalaxy && !locked && galaxy && (
-            <GalaxyViewer data={galaxy} agentName={agentName} onStarSelect={handleStarSelect} />
+            <GalaxyViewer data={galaxy} agentName={agentName} onStarSelect={handleStarSelect} crossAgentLinks={crossAgentLinks} />
           )}
 
           {selectedStar && (
@@ -788,6 +838,48 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
                   : 'Never'}
               </div>
             </>
+          )}
+        </div>
+      )}
+
+      {/* ── Traces view ──────────────────────────────────────────────────────── */}
+      {view === 'traces' && (
+        <div>
+          <div className="vault-search-bar">
+            <input
+              type="text"
+              placeholder="Search session traces…"
+              value={traceQuery}
+              onChange={e => setTraceQuery(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleTraceSearch() }}
+            />
+            <button onClick={handleTraceSearch} disabled={searchingTraces}>
+              <Search size={14} />
+            </button>
+          </div>
+          {searchingTraces && (
+            <div style={{ color: 'var(--muted)', padding: 16, textAlign: 'center' }}>
+              Searching traces…
+            </div>
+          )}
+          {traceResults !== null && !searchingTraces && (
+            <div style={{ marginTop: 8 }}>
+              {traceResults.length === 0 ? (
+                <div className="vault-search-result" style={{ color: 'var(--muted)', textAlign: 'center' }}>
+                  No trace results found.
+                </div>
+              ) : traceResults.map((r, i) => (
+                <div key={r.id || i} className="trace-result">
+                  <span className="trace-type-pill">{r.trace_type || 'trace'}</span>
+                  <p>{r.snippet || r.message}</p>
+                </div>
+              ))}
+            </div>
+          )}
+          {traceResults === null && !searchingTraces && (
+            <div style={{ color: 'var(--muted)', padding: '24px', textAlign: 'center', fontSize: '0.85rem' }}>
+              Search your agent's session traces — thoughts, ghost mode messages, and reasoning steps.
+            </div>
           )}
         </div>
       )}

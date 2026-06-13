@@ -26,6 +26,13 @@ interface GalaxyEdge {
   target: [number, number, number]
   weight: number
   path: string
+  trust?: number
+}
+
+interface CrossAgentLink {
+  source_note_path: string
+  target_note_path: string
+  link_type: string
 }
 
 interface GalaxyNebula {
@@ -53,6 +60,7 @@ interface Props {
   data: GalaxyData
   agentName: string
   onStarSelect?: (star: GalaxyStar) => void
+  crossAgentLinks?: CrossAgentLink[]
 }
 
 // ─── Projection ───────────────────────────────────────────────────────────────
@@ -85,7 +93,8 @@ function drawScene(
   hoveredStarId: string | null,
   activeFilter: string,
   selectedConstellation: string | null,
-  dateRange: [number, number]
+  dateRange: [number, number],
+  crossAgentLinks: CrossAgentLink[]
 ) {
   ctx.clearRect(0, 0, w, h)
 
@@ -119,28 +128,62 @@ function drawScene(
     ctx.restore()
   })
 
-  // ── Edges (Bezier curves) ──────────────────────────────────────────────────
+  // ── Edges (Bezier curves, trust-colored) ──────────────────────────────────
   edges.forEach((edge) => {
     const [sx1, sy1] = project(edge.source[0], edge.source[1], edge.source[2], scale, offsetX, offsetY)
     const [sx2, sy2] = project(edge.target[0], edge.target[1], edge.target[2], scale, offsetX, offsetY)
 
     const ctrlX = (sx1 + sx2) / 2
-    const ctrlY = (sy1 + sy2) / 2 - 20 // arc upward
+    const ctrlY = (sy1 + sy2) / 2 - 20
 
-    const alpha = selectedConstellation
-      ? 0.12  // dim when constellation selected
-      : Math.min(edge.weight, 1) * 0.25
+    const trust = edge.trust ?? 0.5
+    const edgeRgb = trust >= 0.8 ? '0,245,255' : trust >= 0.5 ? '255,170,0' : trust >= 0.3 ? '255,51,51' : '68,68,68'
+    const alpha = selectedConstellation ? 0.12 : trust * 0.4
 
     ctx.save()
     ctx.beginPath()
     ctx.moveTo(sx1, sy1)
     ctx.quadraticCurveTo(ctrlX, ctrlY, sx2, sy2)
-    ctx.strokeStyle = `rgba(0,245,255,1)`
+    ctx.strokeStyle = `rgb(${edgeRgb})`
     ctx.globalAlpha = alpha
     ctx.lineWidth = Math.max(0.5, edge.weight)
     ctx.stroke()
     ctx.restore()
   })
+
+  // ── Cross-agent memory links (dashed beziers) ──────────────────────────────
+  if (crossAgentLinks.length > 0) {
+    const starByPath: Record<string, GalaxyStar> = {}
+    stars.forEach(s => { starByPath[s.path] = s })
+
+    crossAgentLinks.forEach(link => {
+      const srcStar = starByPath[link.source_note_path]
+      const tgtStar = starByPath[link.target_note_path]
+      if (!srcStar || !tgtStar) return
+
+      const [sx, sy] = project(srcStar.x, srcStar.y, srcStar.z, scale, offsetX, offsetY)
+      const [tx, ty] = project(tgtStar.x, tgtStar.y, tgtStar.z, scale, offsetX, offsetY)
+
+      const ctrlX = (sx + tx) / 2
+      const ctrlY = (sy + ty) / 2 - 30
+
+      const linkRgb = link.link_type === 'reference' ? '147,112,219'
+        : link.link_type === 'fork' ? '255,20,147'
+        : link.link_type === 'cites' ? '0,206,209'
+        : '68,68,68'
+
+      ctx.save()
+      ctx.setLineDash([4, 4])
+      ctx.beginPath()
+      ctx.moveTo(sx, sy)
+      ctx.quadraticCurveTo(ctrlX, ctrlY, tx, ty)
+      ctx.strokeStyle = `rgb(${linkRgb})`
+      ctx.globalAlpha = selectedConstellation ? 0.1 : 0.5
+      ctx.lineWidth = 1
+      ctx.stroke()
+      ctx.restore()
+    })
+  }
 
   // ── Constellation labels ───────────────────────────────────────────────────
   const constellationCenters: Record<string, { x: number; y: number; count: number }> = {}
@@ -256,7 +299,7 @@ function drawScene(
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect }: Props) {
+export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect, crossAgentLinks = [] }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const canvasSizeRef = useRef({ w: 0, h: 0 })
@@ -275,6 +318,8 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
   const lastTouchDistRef = useRef<number>(0)
   const touchStartPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
   const dateRangeRef = useRef<[number, number]>([0, Infinity])
+  const crossAgentLinksRef = useRef<CrossAgentLink[]>(crossAgentLinks)
+  crossAgentLinksRef.current = crossAgentLinks
 
   // React state for UI
   const [activeFilter, setActiveFilter] = useState<string>('all')
@@ -371,7 +416,8 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
           hoveredStarIdRef.current,
           activeFilterRef.current,
           selectedConstellationRef.current,
-          dateRangeRef.current
+          dateRangeRef.current,
+          crossAgentLinksRef.current
         )
       }
 

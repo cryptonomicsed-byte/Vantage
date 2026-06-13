@@ -177,6 +177,7 @@ class MemoryVault:
             "galaxy_source_x": src[0], "galaxy_source_y": src[1], "galaxy_source_z": src[2],
             "galaxy_target_x": tgt[0], "galaxy_target_y": tgt[1], "galaxy_target_z": tgt[2],
             "galaxy_weight": k.get("confidence", 1.0),
+            "last_accessed_at": k.get("last_accessed_at") or k.get("created_at", ""),
             "trust": k.get("trust_score", 0.5),
             "created": k.get("created_at", ""),
         }
@@ -322,7 +323,7 @@ last_synced: {config.last_synced or 'never'}
                         "source": [float(fm.get("galaxy_source_x", 0)), float(fm.get("galaxy_source_y", 0)), float(fm.get("galaxy_source_z", 0))],
                         "target": [float(fm.get("galaxy_target_x", 0)), float(fm.get("galaxy_target_y", 0)), float(fm.get("galaxy_target_z", 0))],
                         "weight": float(fm.get("galaxy_weight", 1.0)),
-                        "trust": float(fm.get("trust", 0.5)),
+                        "trust": self._decayed_trust(float(fm.get("trust", 0.5)), str(fm.get("last_accessed_at", ""))),
                         "path": str(md_file.relative_to(self.vault_path)),
                     })
                 elif node_type == "nebula":
@@ -433,6 +434,17 @@ last_synced: {config.last_synced or 'never'}
             self._write_note(summary_path, frontmatter, body)
             relative = str(summary_path.relative_to(self.vault_path))
             await self._update_fts(relative, f"{constellation} — Constellation Summary", body, ["summary", constellation])
+
+    def _decayed_trust(self, trust: float, last_accessed: str) -> float:
+        """Apply time decay to a trust score: 5% per day, floor at 0.05."""
+        if not last_accessed:
+            return max(0.05, trust * 0.70)  # 30% penalty for never-accessed knowledge
+        try:
+            last = datetime.fromisoformat(last_accessed.replace("Z", "").strip())
+            days_old = max(0, (datetime.utcnow() - last).days)
+            return max(0.05, trust * (0.95 ** days_old))
+        except Exception:
+            return trust
 
     async def get_stats(self) -> dict:
         config = await self.get_config()
@@ -593,8 +605,14 @@ last_synced: {config.last_synced or 'never'}
 
     async def get_context_pack(self, query: str = "") -> dict:
         """Bundle ground-truth + workspace + the most relevant memories for injection."""
-        await self.ensure_workspace()
-        await self.generate_soul_md()
+        import uuid as _uuid
+        workspace = self.vault_path / "workspace"
+        soul_path = self.vault_path / "SOUL.md"
+        cached = soul_path.exists() and (workspace / "MEMORY.md").exists()
+        if not soul_path.exists():
+            await self.generate_soul_md()
+        if not all((workspace / f).exists() for f in ("MEMORY.md", "USER.md", "CREATIVE.md")):
+            await self.ensure_workspace()
 
         def _read(p: Path) -> str:
             try:
@@ -602,14 +620,16 @@ last_synced: {config.last_synced or 'never'}
             except Exception:
                 return ""
 
-        soul = _read(self.vault_path / "SOUL.md")
-        memory = _read(self.vault_path / "workspace" / "MEMORY.md")
+        soul = _read(soul_path)
+        memory = _read(workspace / "MEMORY.md")
 
         relevant: list = []
         if query.strip():
             relevant = await self.semantic_search(query, top_k=8)
 
         return {
+            "context_id": _uuid.uuid4().hex[:8],
+            "cached": cached,
             "agent_name": self.agent_name,
             "soul": soul,
             "memory": memory,
