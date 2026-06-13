@@ -111,6 +111,9 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
   // Cross-agent links for galaxy overlay
   const [crossAgentLinks, setCrossAgentLinks] = useState<Array<{source_note_path: string; target_note_path: string; link_type: string}>>([])
 
+  // Import/export
+  const [importStatus, setImportStatus] = useState<string | null>(null)
+
   // Compare mode
   const [compareInput, setCompareInput] = useState('')
   const [compareGalaxy, setCompareGalaxy] = useState<GalaxyData | null>(null)
@@ -358,6 +361,36 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
       setCreatingNote(false)
     }
   }, [agentName, noteTitle, noteBody, noteCategory, noteTags, fetchGalaxy])
+
+  // ── Import vault file ────────────────────────────────────────────────────────
+  const handleImportFile = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const apiKey = getApiKey()
+    if (!apiKey) { setImportStatus('✗ No API key — connect first'); return }
+    setImportStatus('Importing…')
+    const formData = new FormData()
+    formData.append('file', file)
+    try {
+      const res = await fetch(`/api/agents/${encodeURIComponent(agentName)}/vault/import`, {
+        method: 'POST',
+        headers: { 'X-Agent-Key': apiKey },
+        body: formData,
+      })
+      if (res.ok) {
+        const data = await res.json()
+        setImportStatus(`✓ Imported ${data.imported_nodes} nodes, ${data.imported_links} links`)
+        await fetchGalaxy()
+      } else {
+        const err = await res.text()
+        setImportStatus(`✗ ${err}`)
+      }
+    } catch {
+      setImportStatus('✗ Import failed')
+    }
+    // Reset file input
+    e.target.value = ''
+  }, [agentName, fetchGalaxy])
 
   // ── Compare galaxies ────────────────────────────────────────────────────────
   const handleCompare = useCallback(async () => {
@@ -917,6 +950,108 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
           >
             {savingSettings ? 'Saving…' : settingsSaved ? '✓ Saved' : 'Save Settings'}
           </button>
+
+          {/* Export */}
+          <div className="dash-panel" style={{ marginTop: 20 }}>
+            <div className="dash-panel-title" style={{ marginBottom: 8 }}>Export Memory Vault</div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <a
+                className="btn btn-ghost btn-sm"
+                href={`/api/agents/${encodeURIComponent(agentName)}/vault/export?format=universal`}
+                onClick={e => {
+                  const apiKey = getApiKey()
+                  if (!apiKey) return
+                  e.preventDefault()
+                  fetch(`/api/agents/${encodeURIComponent(agentName)}/vault/export?format=universal`, {
+                    headers: { 'X-Agent-Key': apiKey },
+                  })
+                    .then(r => r.blob())
+                    .then(blob => {
+                      const url = URL.createObjectURL(blob)
+                      const a = document.createElement('a')
+                      a.href = url
+                      a.download = `${agentName}-vault-universal.json`
+                      a.click()
+                      URL.revokeObjectURL(url)
+                    })
+                    .catch(() => {})
+                }}
+              >
+                Universal JSON
+              </a>
+              <a
+                className="btn btn-ghost btn-sm"
+                href={`/api/agents/${encodeURIComponent(agentName)}/vault/download`}
+                onClick={e => {
+                  const apiKey = getApiKey()
+                  if (!apiKey) return
+                  e.preventDefault()
+                  fetch(`/api/agents/${encodeURIComponent(agentName)}/vault/download`, {
+                    headers: { 'X-Agent-Key': apiKey },
+                  })
+                    .then(r => r.blob())
+                    .then(blob => {
+                      const url = URL.createObjectURL(blob)
+                      const a = document.createElement('a')
+                      a.href = url
+                      a.download = `${agentName}-vault.zip`
+                      a.click()
+                      URL.revokeObjectURL(url)
+                    })
+                    .catch(() => {})
+                }}
+              >
+                Obsidian ZIP
+              </a>
+              <a
+                className="btn btn-ghost btn-sm"
+                href={`/api/agents/${encodeURIComponent(agentName)}/vault/graph.ttl`}
+                onClick={e => {
+                  const apiKey = getApiKey()
+                  if (!apiKey) return
+                  e.preventDefault()
+                  fetch(`/api/agents/${encodeURIComponent(agentName)}/vault/graph.ttl`, {
+                    headers: { 'X-Agent-Key': apiKey },
+                  })
+                    .then(r => r.blob())
+                    .then(blob => {
+                      const url = URL.createObjectURL(blob)
+                      const a = document.createElement('a')
+                      a.href = url
+                      a.download = `${agentName}-knowledge.ttl`
+                      a.click()
+                      URL.revokeObjectURL(url)
+                    })
+                    .catch(() => {})
+                }}
+              >
+                RDF / Turtle
+              </a>
+            </div>
+          </div>
+
+          {/* Import */}
+          <div className="dash-panel" style={{ marginTop: 12 }}>
+            <div className="dash-panel-title" style={{ marginBottom: 6 }}>Import to Memory Vault</div>
+            <p style={{ fontSize: '0.8rem', color: 'var(--muted)', marginBottom: 10 }}>
+              Accepts Universal JSON (.json) or Obsidian vault ZIP (.zip)
+            </p>
+            <input
+              type="file"
+              accept=".json,.zip"
+              onChange={handleImportFile}
+              style={{ fontSize: '0.82rem', color: 'var(--text)' }}
+            />
+            {importStatus && (
+              <div style={{
+                marginTop: 8,
+                fontSize: '0.82rem',
+                color: importStatus.startsWith('✓') ? 'var(--cyan)' : importStatus.startsWith('✗') ? '#ff5555' : 'var(--muted)',
+              }}>
+                {importStatus}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>

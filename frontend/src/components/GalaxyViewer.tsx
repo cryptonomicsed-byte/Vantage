@@ -1,4 +1,13 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react'
+import {
+  forceSimulation,
+  forceLink,
+  forceManyBody,
+  forceCenter,
+  forceCollide,
+  SimulationNodeDatum,
+  SimulationLinkDatum,
+} from 'd3-force'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -56,6 +65,19 @@ export interface GalaxyData {
   bounds: { min: number[]; max: number[] }
 }
 
+interface SimNode extends SimulationNodeDatum {
+  id: string
+  star: GalaxyStar
+  degree: number
+  size: number
+  color: string
+}
+
+interface SimLink extends SimulationLinkDatum<SimNode> {
+  weight: number
+  trust: number
+}
+
 interface Props {
   data: GalaxyData
   agentName: string
@@ -63,237 +85,27 @@ interface Props {
   crossAgentLinks?: CrossAgentLink[]
 }
 
-// ─── Projection ───────────────────────────────────────────────────────────────
+// ─── Color by content type ────────────────────────────────────────────────────
 
-function project(
-  x: number,
-  y: number,
-  z: number,
-  scale: number,
-  offsetX: number,
-  offsetY: number
-): [number, number] {
-  const sx = (x - z * 0.5) * scale + offsetX
-  const sy = (y + z * 0.25) * scale + offsetY
-  return [sx, sy]
-}
-
-// ─── Drawing ──────────────────────────────────────────────────────────────────
-
-function drawScene(
-  ctx: CanvasRenderingContext2D,
-  w: number,
-  h: number,
-  stars: GalaxyStar[],
-  edges: GalaxyEdge[],
-  nebulae: GalaxyNebula[],
-  scale: number,
-  offsetX: number,
-  offsetY: number,
-  hoveredStarId: string | null,
-  activeFilter: string,
-  selectedConstellation: string | null,
-  dateRange: [number, number],
-  crossAgentLinks: CrossAgentLink[]
-) {
-  ctx.clearRect(0, 0, w, h)
-
-  const t = Date.now() * 0.0001
-
-  // Background
-  ctx.fillStyle = '#040408'
-  ctx.fillRect(0, 0, w, h)
-
-  const filteredStars = activeFilter === 'all'
-    ? stars
-    : stars.filter(s => s.content_type === activeFilter)
-
-  const filteredStarIds = new Set(filteredStars.map(s => s.id))
-
-  // ── Nebulae ────────────────────────────────────────────────────────────────
-  nebulae.forEach(neb => {
-    const [sx, sy] = project(neb.x, neb.y, neb.z, scale, offsetX, offsetY)
-    const r = neb.size * scale * 0.15
-    if (r < 1) return
-
-    ctx.save()
-    const grad = ctx.createRadialGradient(sx, sy, 0, sx, sy, r)
-    grad.addColorStop(0, `rgba(138,75,255,${neb.opacity * 0.35})`)
-    grad.addColorStop(0.5, `rgba(138,75,255,${neb.opacity * 0.1})`)
-    grad.addColorStop(1, 'rgba(138,75,255,0)')
-    ctx.beginPath()
-    ctx.arc(sx, sy, r, 0, Math.PI * 2)
-    ctx.fillStyle = grad
-    ctx.fill()
-    ctx.restore()
-  })
-
-  // ── Edges (Bezier curves, trust-colored) ──────────────────────────────────
-  edges.forEach((edge) => {
-    const [sx1, sy1] = project(edge.source[0], edge.source[1], edge.source[2], scale, offsetX, offsetY)
-    const [sx2, sy2] = project(edge.target[0], edge.target[1], edge.target[2], scale, offsetX, offsetY)
-
-    const ctrlX = (sx1 + sx2) / 2
-    const ctrlY = (sy1 + sy2) / 2 - 20
-
-    const trust = edge.trust ?? 0.5
-    const edgeRgb = trust >= 0.8 ? '0,245,255' : trust >= 0.5 ? '255,170,0' : trust >= 0.3 ? '255,51,51' : '68,68,68'
-    const alpha = selectedConstellation ? 0.12 : trust * 0.4
-
-    ctx.save()
-    ctx.beginPath()
-    ctx.moveTo(sx1, sy1)
-    ctx.quadraticCurveTo(ctrlX, ctrlY, sx2, sy2)
-    ctx.strokeStyle = `rgb(${edgeRgb})`
-    ctx.globalAlpha = alpha
-    ctx.lineWidth = Math.max(0.5, edge.weight)
-    ctx.stroke()
-    ctx.restore()
-  })
-
-  // ── Cross-agent memory links (dashed beziers) ──────────────────────────────
-  if (crossAgentLinks.length > 0) {
-    const starByPath: Record<string, GalaxyStar> = {}
-    stars.forEach(s => { starByPath[s.path] = s })
-
-    crossAgentLinks.forEach(link => {
-      const srcStar = starByPath[link.source_note_path]
-      const tgtStar = starByPath[link.target_note_path]
-      if (!srcStar || !tgtStar) return
-
-      const [sx, sy] = project(srcStar.x, srcStar.y, srcStar.z, scale, offsetX, offsetY)
-      const [tx, ty] = project(tgtStar.x, tgtStar.y, tgtStar.z, scale, offsetX, offsetY)
-
-      const ctrlX = (sx + tx) / 2
-      const ctrlY = (sy + ty) / 2 - 30
-
-      const linkRgb = link.link_type === 'reference' ? '147,112,219'
-        : link.link_type === 'fork' ? '255,20,147'
-        : link.link_type === 'cites' ? '0,206,209'
-        : '68,68,68'
-
-      ctx.save()
-      ctx.setLineDash([4, 4])
-      ctx.beginPath()
-      ctx.moveTo(sx, sy)
-      ctx.quadraticCurveTo(ctrlX, ctrlY, tx, ty)
-      ctx.strokeStyle = `rgb(${linkRgb})`
-      ctx.globalAlpha = selectedConstellation ? 0.1 : 0.5
-      ctx.lineWidth = 1
-      ctx.stroke()
-      ctx.restore()
-    })
-  }
-
-  // ── Constellation labels ───────────────────────────────────────────────────
-  const constellationCenters: Record<string, { x: number; y: number; count: number }> = {}
-  filteredStars.forEach((star, idx) => {
-    const driftX = Math.sin(t + idx * 1.3) * 0.25
-    const driftY = Math.cos(t * 0.7 + idx) * 0.15
-    const [sx, sy] = project(star.x + driftX, star.y + driftY, star.z, scale, offsetX, offsetY)
-    if (!constellationCenters[star.constellation]) {
-      constellationCenters[star.constellation] = { x: 0, y: 0, count: 0 }
-    }
-    constellationCenters[star.constellation].x += sx
-    constellationCenters[star.constellation].y += sy
-    constellationCenters[star.constellation].count++
-  })
-
-  Object.entries(constellationCenters).forEach(([name, center]) => {
-    if (center.count < 1) return
-    const cx = center.x / center.count
-    const cy = center.y / center.count
-    ctx.save()
-    ctx.font = '9px Orbitron, sans-serif'
-    ctx.fillStyle = 'rgba(107,114,128,0.6)'
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    ctx.fillText(name.toUpperCase(), cx, cy - 24)
-    ctx.restore()
-  })
-
-  // ── Stars ──────────────────────────────────────────────────────────────────
-  filteredStars.forEach((star, idx) => {
-    const driftX = Math.sin(t + idx * 1.3) * 0.25
-    const driftY = Math.cos(t * 0.7 + idx) * 0.15
-    const [sx, sy] = project(star.x + driftX, star.y + driftY, star.z, scale, offsetX, offsetY)
-    const r = Math.max(2, (star.size / 50) * 10 * scale)
-    const hovered = hoveredStarId === star.id
-    const inSelectedConstellation = !selectedConstellation || star.constellation === selectedConstellation
-
-    // Date range filtering
-    const starTime = star.created ? new Date(star.created).getTime() : 0
-    const inDateRange = starTime === 0 || (starTime >= dateRange[0] && starTime <= dateRange[1])
-
-    ctx.save()
-
-    if (!inSelectedConstellation) {
-      ctx.globalAlpha = 0.3
-    }
-
-    if (!inDateRange) {
-      // Render as extremely faint ghost and skip label
-      ctx.globalAlpha = 0.06
-      ctx.beginPath()
-      ctx.arc(sx, sy, r, 0, Math.PI * 2)
-      ctx.fillStyle = star.color
-      ctx.fill()
-      ctx.restore()
-      return
-    }
-
-    // Outer glow
-    ctx.shadowBlur = hovered ? 30 : 14
-    ctx.shadowColor = star.color
-
-    // Radial gradient
-    const grad = ctx.createRadialGradient(sx - r * 0.25, sy - r * 0.25, 0, sx, sy, r)
-    grad.addColorStop(0, '#ffffff')
-    grad.addColorStop(0.3, star.color)
-    grad.addColorStop(1, star.color + '88')
-
-    ctx.beginPath()
-    ctx.arc(sx, sy, r, 0, Math.PI * 2)
-    ctx.fillStyle = grad
-    ctx.fill()
-
-    // Hover ring
-    if (hovered) {
-      ctx.beginPath()
-      ctx.arc(sx, sy, r + 3, 0, Math.PI * 2)
-      ctx.strokeStyle = '#00f5ff'
-      ctx.lineWidth = 1.5
-      ctx.shadowBlur = 10
-      ctx.shadowColor = '#00f5ff'
-      ctx.stroke()
-    }
-
-    // Label for larger stars
-    if (r >= 4 || hovered) {
-      ctx.shadowBlur = 0
-      ctx.font = '10px Orbitron, sans-serif'
-      ctx.fillStyle = hovered ? '#00f5ff' : 'rgba(232,232,248,0.75)'
-      ctx.textAlign = 'center'
-      ctx.textBaseline = 'top'
-      const label = star.title.length > 22 ? star.title.slice(0, 22) + '…' : star.title
-      ctx.fillText(label, sx, sy + r + 3)
-    }
-
-    ctx.restore()
-  })
-
-  // Dimmed overlay for filtered-out stars (show as very faint)
-  if (activeFilter !== 'all') {
-    stars.filter(s => !filteredStarIds.has(s.id)).forEach(star => {
-      const [sx, sy] = project(star.x, star.y, star.z, scale, offsetX, offsetY)
-      const r = Math.max(1, (star.size / 50) * 6 * scale)
-      ctx.save()
-      ctx.beginPath()
-      ctx.arc(sx, sy, r, 0, Math.PI * 2)
-      ctx.fillStyle = 'rgba(107,114,128,0.15)'
-      ctx.fill()
-      ctx.restore()
-    })
+function nodeColor(content_type: string): string {
+  switch (content_type) {
+    case 'text':
+    case 'broadcast':
+      return '#ffe66d'
+    case 'knowledge':
+      return '#00f5ff'
+    case 'trace':
+    case 'traces':
+      return '#8a4bff'
+    case 'note':
+    case 'draft':
+    case 'drafts':
+      return '#a8ff78'
+    case 'template':
+    case 'templates':
+      return '#ff9ff3'
+    default:
+      return '#c7ceea'
   }
 }
 
@@ -305,23 +117,28 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
   const canvasSizeRef = useRef({ w: 0, h: 0 })
   const rafRef = useRef<number>(0)
 
-  // View state in refs for rAF loop
-  const scaleRef = useRef(0.06)
+  // Simulation
+  const simRef = useRef<ReturnType<typeof forceSimulation<SimNode>> | null>(null)
+  const nodesRef = useRef<SimNode[]>([])
+  const linksRef = useRef<SimLink[]>([])
+
+  // View state
+  const scaleRef = useRef(1.0)
   const offsetXRef = useRef(0)
   const offsetYRef = useRef(0)
+  const isDraggingRef = useRef(false)
+  const dragNodeRef = useRef<SimNode | null>(null)
+  const lastMouseRef = useRef({ x: 0, y: 0 })
+  const mouseDownPosRef = useRef({ x: 0, y: 0 })
   const hoveredStarIdRef = useRef<string | null>(null)
   const activeFilterRef = useRef<string>('all')
   const selectedConstellationRef = useRef<string | null>(null)
-  const isDraggingRef = useRef(false)
-  const lastMouseRef = useRef({ x: 0, y: 0 })
-  const mouseDownPosRef = useRef({ x: 0, y: 0 })
   const lastTouchDistRef = useRef<number>(0)
-  const touchStartPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
   const dateRangeRef = useRef<[number, number]>([0, Infinity])
   const crossAgentLinksRef = useRef<CrossAgentLink[]>(crossAgentLinks)
   crossAgentLinksRef.current = crossAgentLinks
 
-  // React state for UI
+  // React UI state
   const [activeFilter, setActiveFilter] = useState<string>('all')
   const [hoveredStar, setHoveredStar] = useState<GalaxyStar | null>(null)
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 })
@@ -330,48 +147,20 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
 
   const stars = data.stars || []
   const edges = data.edges || []
-  const nebulae = data.nebulae || []
-
-  // Derive unique content types for filter bar
   const contentTypes = Array.from(new Set(stars.map(s => s.content_type).filter(Boolean)))
 
-  // Compute min/max dates from stars
   const starDates = stars
     .map(s => s.created ? new Date(s.created).getTime() : NaN)
     .filter(t => !isNaN(t))
   const minDate = starDates.length ? Math.min(...starDates) : 0
   const maxDate = starDates.length ? Math.max(...starDates) : Date.now()
 
-  // ── Center the view on mount ───────────────────────────────────────────────
-  useEffect(() => {
-    if (stars.length === 0) return
-    const bounds = data.bounds
-    if (bounds && bounds.min && bounds.max) {
-      const midX = (bounds.min[0] + bounds.max[0]) / 2
-      const midY = (bounds.min[1] + bounds.max[1]) / 2
-      const midZ = (bounds.min[2] + bounds.max[2]) / 2
-      // After projection, center this point at canvas center
-      const canvas = canvasRef.current
-      const cw = canvas ? canvas.clientWidth : 800
-      const ch = canvas ? canvas.clientHeight : 500
-      const scale = scaleRef.current
-      const [px, py] = [
-        (midX - midZ * 0.5) * scale,
-        (midY + midZ * 0.25) * scale,
-      ]
-      offsetXRef.current = cw / 2 - px
-      offsetYRef.current = ch / 2 - py
-    }
-  }, [data, stars.length])
-
   // ── Canvas resize ──────────────────────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current
     const container = containerRef.current
     if (!canvas || !container) return
-
     const dpr = window.devicePixelRatio || 1
-
     const resize = () => {
       const w = container.clientWidth
       const h = container.clientHeight
@@ -381,120 +170,342 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
       const ctx = canvas.getContext('2d')
       if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     }
-
     resize()
     const ro = new ResizeObserver(resize)
     ro.observe(container)
     return () => ro.disconnect()
   }, [])
 
+  // ── Build / restart simulation when data changes ───────────────────────────
+  useEffect(() => {
+    if (stars.length === 0) { nodesRef.current = []; linksRef.current = []; return }
+
+    const { w, h } = canvasSizeRef.current
+    const cw = w || 800
+    const ch = h || 500
+
+    const nodes: SimNode[] = stars.map(star => ({
+      id: star.id,
+      star,
+      degree: 0,
+      size: 6,
+      color: nodeColor(star.content_type),
+      x: cw / 2 + (Math.random() - 0.5) * cw * 0.6,
+      y: ch / 2 + (Math.random() - 0.5) * ch * 0.6,
+    }))
+
+    const nodeById = new Map(nodes.map(n => [n.id, n]))
+    const nodeTitleMap = new Map(nodes.map(n => [n.star.title.toLowerCase(), n]))
+
+    const links: SimLink[] = []
+    edges.forEach(edge => {
+      const src = nodeTitleMap.get((edge.subject || '').toLowerCase())
+      const tgt = nodeTitleMap.get((edge.object || '').toLowerCase())
+      if (src && tgt && src !== tgt) {
+        links.push({
+          source: src.id,
+          target: tgt.id,
+          weight: edge.weight || 1,
+          trust: edge.trust ?? 0.5,
+        } as SimLink)
+        src.degree = (src.degree || 0) + 1
+        tgt.degree = (tgt.degree || 0) + 1
+      }
+    })
+
+    // Size by degree
+    nodes.forEach(n => {
+      n.size = Math.min(24, 4 + (n.degree || 0) * 1.5)
+    })
+
+    nodesRef.current = nodes
+    linksRef.current = links
+    void nodeById  // suppress unused warning
+
+    simRef.current?.stop()
+
+    const sim = forceSimulation<SimNode>(nodes)
+      .force(
+        'link',
+        forceLink<SimNode, SimLink>(links)
+          .id(d => d.id)
+          .distance(80)
+          .strength(0.4)
+      )
+      .force('charge', forceManyBody<SimNode>().strength(-120))
+      .force('center', forceCenter<SimNode>(cw / 2, ch / 2))
+      .force('collide', forceCollide<SimNode>(d => d.size * 3))
+      .alphaDecay(0.02)
+
+    simRef.current = sim
+    return () => { sim.stop() }
+  }, [stars, edges])  // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── rAF render loop ────────────────────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
 
-    const loop = () => {
+    const draw = () => {
       const ctx = canvas.getContext('2d')
-      if (!ctx) { rafRef.current = requestAnimationFrame(loop); return }
+      if (!ctx) { rafRef.current = requestAnimationFrame(draw); return }
       const { w, h } = canvasSizeRef.current
-      if (w === 0 || h === 0) { rafRef.current = requestAnimationFrame(loop); return }
+      if (w === 0 || h === 0) { rafRef.current = requestAnimationFrame(draw); return }
 
-      if (stars.length === 0) {
-        ctx.clearRect(0, 0, w, h)
-        ctx.fillStyle = '#040408'
-        ctx.fillRect(0, 0, w, h)
+      ctx.clearRect(0, 0, w, h)
+      ctx.fillStyle = '#040408'
+      ctx.fillRect(0, 0, w, h)
+
+      const nodes = nodesRef.current
+      const links = linksRef.current
+
+      if (nodes.length === 0) {
         ctx.font = '14px Orbitron, sans-serif'
         ctx.fillStyle = '#6b7280'
         ctx.textAlign = 'center'
         ctx.textBaseline = 'middle'
         ctx.fillText('No memory stars in this vault yet', w / 2, h / 2)
-      } else {
-        drawScene(
-          ctx, w, h,
-          stars, edges, nebulae,
-          scaleRef.current, offsetXRef.current, offsetYRef.current,
-          hoveredStarIdRef.current,
-          activeFilterRef.current,
-          selectedConstellationRef.current,
-          dateRangeRef.current,
-          crossAgentLinksRef.current
-        )
+        rafRef.current = requestAnimationFrame(draw)
+        return
       }
 
-      rafRef.current = requestAnimationFrame(loop)
+      const sc = scaleRef.current
+      const ox = offsetXRef.current
+      const oy = offsetYRef.current
+      const filterActive = activeFilterRef.current
+      const selConst = selectedConstellationRef.current
+      const dateRange = dateRangeRef.current
+      const hoveredId = hoveredStarIdRef.current
+      const crossLinks = crossAgentLinksRef.current
+
+      const toScreen = (x: number, y: number): [number, number] => [x * sc + ox, y * sc + oy]
+
+      // ── Draw edges ──────────────────────────────────────────────────────────
+      links.forEach(link => {
+        const s = link.source as SimNode
+        const t = link.target as SimNode
+        if (typeof s === 'string' || typeof t === 'string') return
+        if (s.x == null || s.y == null || t.x == null || t.y == null) return
+
+        const [x1, y1] = toScreen(s.x, s.y)
+        const [x2, y2] = toScreen(t.x, t.y)
+
+        const trust = link.trust ?? 0.5
+        let strokeStyle = 'rgba(255,255,255,0.06)'
+        if (hoveredId === s.id || hoveredId === t.id) {
+          const rgb = trust >= 0.8 ? '0,245,255' : trust >= 0.5 ? '255,170,0' : trust >= 0.3 ? '255,51,51' : '68,68,68'
+          strokeStyle = `rgba(${rgb},0.65)`
+        } else if (selConst && (s.star.constellation === selConst || t.star.constellation === selConst)) {
+          strokeStyle = 'rgba(255,255,255,0.18)'
+        }
+
+        ctx.save()
+        ctx.beginPath()
+        ctx.moveTo(x1, y1)
+        ctx.lineTo(x2, y2)
+        ctx.strokeStyle = strokeStyle
+        ctx.lineWidth = Math.max(0.4, link.weight * 0.5)
+        ctx.stroke()
+        ctx.restore()
+      })
+
+      // ── Cross-agent dashed beziers ──────────────────────────────────────────
+      if (crossLinks.length > 0) {
+        const starByPath: Record<string, SimNode> = {}
+        nodes.forEach(n => { starByPath[n.star.path] = n })
+
+        ctx.save()
+        ctx.setLineDash([4, 4])
+        crossLinks.forEach(link => {
+          const sn = starByPath[link.source_note_path]
+          const tn = starByPath[link.target_note_path]
+          if (!sn || !tn || sn.x == null || sn.y == null || tn.x == null || tn.y == null) return
+
+          const [x1, y1] = toScreen(sn.x, sn.y)
+          const [x2, y2] = toScreen(tn.x, tn.y)
+          const ctrlX = (x1 + x2) / 2
+          const ctrlY = (y1 + y2) / 2 - 30
+
+          const rgb = link.link_type === 'reference' ? '147,112,219'
+            : link.link_type === 'fork' ? '255,20,147'
+            : link.link_type === 'cites' ? '0,206,209'
+            : '68,68,68'
+
+          ctx.beginPath()
+          ctx.moveTo(x1, y1)
+          ctx.quadraticCurveTo(ctrlX, ctrlY, x2, y2)
+          ctx.strokeStyle = `rgba(${rgb},0.5)`
+          ctx.lineWidth = 1
+          ctx.stroke()
+        })
+        ctx.restore()
+      }
+
+      // ── Draw nodes ──────────────────────────────────────────────────────────
+      nodes.forEach(node => {
+        if (node.x == null || node.y == null) return
+
+        const star = node.star
+        const isFiltered = filterActive !== 'all' && star.content_type !== filterActive
+        const inConst = !selConst || star.constellation === selConst
+        const starTime = star.created ? new Date(star.created).getTime() : 0
+        const inDateRange = starTime === 0 || (starTime >= dateRange[0] && starTime <= dateRange[1])
+        const hovered = hoveredId === node.id
+
+        const [screenX, screenY] = toScreen(node.x, node.y)
+        const r = Math.max(3, node.size * sc)
+
+        ctx.save()
+
+        if (isFiltered || !inConst) {
+          ctx.globalAlpha = 0.1
+        } else if (!inDateRange) {
+          ctx.globalAlpha = 0.06
+          ctx.beginPath()
+          ctx.arc(screenX, screenY, r, 0, Math.PI * 2)
+          ctx.fillStyle = node.color
+          ctx.fill()
+          ctx.restore()
+          return
+        }
+
+        // Glow
+        ctx.shadowBlur = hovered ? r * 5 : r * 3
+        ctx.shadowColor = node.color
+
+        // Radial gradient fill
+        const grad = ctx.createRadialGradient(
+          screenX - r * 0.25, screenY - r * 0.25, 0,
+          screenX, screenY, r
+        )
+        grad.addColorStop(0, '#ffffff')
+        grad.addColorStop(0.3, node.color)
+        grad.addColorStop(1, node.color + '88')
+
+        ctx.beginPath()
+        ctx.arc(screenX, screenY, r, 0, Math.PI * 2)
+        ctx.fillStyle = grad
+        ctx.fill()
+
+        if (hovered) {
+          ctx.shadowBlur = 0
+          ctx.beginPath()
+          ctx.arc(screenX, screenY, r + 3, 0, Math.PI * 2)
+          ctx.strokeStyle = '#00f5ff'
+          ctx.lineWidth = 1.5
+          ctx.shadowBlur = 10
+          ctx.shadowColor = '#00f5ff'
+          ctx.stroke()
+        }
+
+        // Label: only for well-connected nodes or hovered
+        if ((node.degree > 2 || hovered) && !isFiltered && inConst) {
+          ctx.shadowBlur = 0
+          ctx.font = '10px Orbitron, sans-serif'
+          ctx.fillStyle = hovered ? '#00f5ff' : 'rgba(232,232,248,0.75)'
+          ctx.textAlign = 'center'
+          ctx.textBaseline = 'top'
+          const label = star.title.length > 22 ? star.title.slice(0, 22) + '…' : star.title
+          ctx.fillText(label, screenX, screenY + r + 3)
+        }
+
+        ctx.restore()
+      })
+
+      rafRef.current = requestAnimationFrame(draw)
     }
 
-    rafRef.current = requestAnimationFrame(loop)
+    rafRef.current = requestAnimationFrame(draw)
     return () => cancelAnimationFrame(rafRef.current)
-  }, [stars, edges, nebulae])
-
-  // ── Mouse: pan + click ───────────────────────────────────────────────────
-  const handleMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    isDraggingRef.current = true
-    lastMouseRef.current = { x: e.clientX, y: e.clientY }
-    mouseDownPosRef.current = { x: e.clientX, y: e.clientY }
   }, [])
+
+  // ── Hit-test: find node under screen coords ─────────────────────────────────
+  const getNodeAt = useCallback((mx: number, my: number): SimNode | null => {
+    const sc = scaleRef.current
+    const ox = offsetXRef.current
+    const oy = offsetYRef.current
+    const filterActive = activeFilterRef.current
+    let closest: SimNode | null = null
+    let closestDist = 24
+
+    nodesRef.current.forEach(node => {
+      if (node.x == null || node.y == null) return
+      if (filterActive !== 'all' && node.star.content_type !== filterActive) return
+      const screenX = node.x * sc + ox
+      const screenY = node.y * sc + oy
+      const r = Math.max(3, node.size * sc)
+      const d = Math.sqrt((screenX - mx) ** 2 + (screenY - my) ** 2)
+      if (d < r + 8 && d < closestDist) {
+        closestDist = d
+        closest = node
+      }
+    })
+
+    return closest
+  }, [])
+
+  // ── Mouse handlers ─────────────────────────────────────────────────────────
+  const handleMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const rect = canvas.getBoundingClientRect()
+    const mx = e.clientX - rect.left
+    const my = e.clientY - rect.top
+    mouseDownPosRef.current = { x: e.clientX, y: e.clientY }
+    lastMouseRef.current = { x: e.clientX, y: e.clientY }
+
+    const node = getNodeAt(mx, my)
+    if (node) {
+      dragNodeRef.current = node
+      node.fx = node.x
+      node.fy = node.y
+      simRef.current?.alphaTarget(0.3).restart()
+    } else {
+      isDraggingRef.current = true
+    }
+  }, [getNodeAt])
 
   const handleMouseUp = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const wasDragged =
-      Math.abs(e.clientX - mouseDownPosRef.current.x) > 4 ||
-      Math.abs(e.clientY - mouseDownPosRef.current.y) > 4
-    isDraggingRef.current = false
+      Math.abs(e.clientX - mouseDownPosRef.current.x) > 5 ||
+      Math.abs(e.clientY - mouseDownPosRef.current.y) > 5
 
-    if (!wasDragged && hoveredStarIdRef.current) {
-      const canvas = canvasRef.current
-      const container = containerRef.current
-      if (!canvas || !container) return
-
-      const clickedStar = stars.find(s => s.id === hoveredStarIdRef.current)
-      if (!clickedStar) return
-
-      // call star select callback first
-      onStarSelect?.(clickedStar)
-
-      const clickedConstellation = clickedStar.constellation
-      const currentSelected = selectedConstellationRef.current
-
-      if (currentSelected === clickedConstellation) {
-        // Zoom in to center on constellation bounding box
-        const constellationStars = stars.filter(s => s.constellation === clickedConstellation)
-        if (constellationStars.length === 0) return
-
-        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
-        constellationStars.forEach(s => {
-          const [px, py] = project(s.x, s.y, s.z, 1, 0, 0)
-          if (px < minX) minX = px
-          if (px > maxX) maxX = px
-          if (py < minY) minY = py
-          if (py > maxY) maxY = py
-        })
-
-        const cw = container.clientWidth
-        const ch = container.clientHeight
-        const bboxW = maxX - minX || 100
-        const bboxH = maxY - minY || 100
-        const padding = 0.8
-        const newScale = Math.min(
-          (cw * padding) / bboxW,
-          (ch * padding) / bboxH,
-          2
-        )
-        const centerPX = (minX + maxX) / 2
-        const centerPY = (minY + maxY) / 2
-        scaleRef.current = newScale
-        offsetXRef.current = cw / 2 - centerPX * newScale
-        offsetYRef.current = ch / 2 - centerPY * newScale
-      } else {
-        // Select this constellation
-        selectedConstellationRef.current = clickedConstellation
-        setSelectedConstellation(clickedConstellation)
+    if (dragNodeRef.current) {
+      if (!wasDragged) {
+        const clicked = dragNodeRef.current
+        onStarSelect?.(clicked.star)
+        const clickedConst = clicked.star.constellation
+        if (selectedConstellationRef.current === clickedConst) {
+          selectedConstellationRef.current = null
+          setSelectedConstellation(null)
+        } else {
+          selectedConstellationRef.current = clickedConst
+          setSelectedConstellation(clickedConst)
+        }
       }
+      dragNodeRef.current.fx = null
+      dragNodeRef.current.fy = null
+      simRef.current?.alphaTarget(0)
+      dragNodeRef.current = null
     }
-  }, [stars, onStarSelect])
+
+    isDraggingRef.current = false
+  }, [onStarSelect])
 
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current
     if (!canvas) return
+    const rect = canvas.getBoundingClientRect()
+    const mx = e.clientX - rect.left
+    const my = e.clientY - rect.top
+
+    if (dragNodeRef.current) {
+      const node = dragNodeRef.current
+      node.fx = (mx - offsetXRef.current) / scaleRef.current
+      node.fy = (my - offsetYRef.current) / scaleRef.current
+      lastMouseRef.current = { x: e.clientX, y: e.clientY }
+      return
+    }
 
     if (isDraggingRef.current) {
       const dx = e.clientX - lastMouseRef.current.x
@@ -505,67 +516,44 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
       return
     }
 
-    // Hover detection
-    const rect = canvas.getBoundingClientRect()
-    const mx = e.clientX - rect.left
-    const my = e.clientY - rect.top
-
-    const filterActive = activeFilterRef.current
-    const visibleStars = filterActive === 'all' ? stars : stars.filter(s => s.content_type === filterActive)
-
-    const t = Date.now() * 0.0001
-    let closest: GalaxyStar | null = null
-    let closestDist = 15
-
-    visibleStars.forEach((star, idx) => {
-      const driftX = Math.sin(t + idx * 1.3) * 0.25
-      const driftY = Math.cos(t * 0.7 + idx) * 0.15
-      const [sx, sy] = project(star.x + driftX, star.y + driftY, star.z, scaleRef.current, offsetXRef.current, offsetYRef.current)
-      const d = Math.sqrt((sx - mx) ** 2 + (sy - my) ** 2)
-      if (d < closestDist) {
-        closestDist = d
-        closest = star
-      }
-    })
-
-    const closestStar = closest as GalaxyStar | null
-    hoveredStarIdRef.current = closestStar ? closestStar.id : null
-    setHoveredStar(closestStar)
-    if (closestStar) setTooltipPos({ x: e.clientX, y: e.clientY })
-  }, [stars])
+    const node = getNodeAt(mx, my)
+    hoveredStarIdRef.current = node ? node.id : null
+    setHoveredStar(node ? node.star : null)
+    if (node) setTooltipPos({ x: e.clientX, y: e.clientY })
+  }, [getNodeAt])
 
   const handleMouseLeave = useCallback(() => {
     isDraggingRef.current = false
+    if (dragNodeRef.current) {
+      dragNodeRef.current.fx = null
+      dragNodeRef.current.fy = null
+      simRef.current?.alphaTarget(0)
+      dragNodeRef.current = null
+    }
     hoveredStarIdRef.current = null
     setHoveredStar(null)
   }, [])
 
-  // ── Clear constellation selection ────────────────────────────────────────
   const handleClearConstellation = useCallback(() => {
     selectedConstellationRef.current = null
     setSelectedConstellation(null)
   }, [])
 
-  // ── Scroll: zoom ──────────────────────────────────────────────────────────
   const handleWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault()
     const canvas = canvasRef.current
     if (!canvas) return
-
     const rect = canvas.getBoundingClientRect()
     const mx = e.clientX - rect.left
     const my = e.clientY - rect.top
-
     const zoomFactor = e.deltaY < 0 ? 1.1 : 0.9
-    const newScale = Math.max(0.01, Math.min(2, scaleRef.current * zoomFactor))
-
-    // Zoom towards mouse position
+    const newScale = Math.max(0.1, Math.min(8, scaleRef.current * zoomFactor))
     offsetXRef.current = mx + (offsetXRef.current - mx) * (newScale / scaleRef.current)
     offsetYRef.current = my + (offsetYRef.current - my) * (newScale / scaleRef.current)
     scaleRef.current = newScale
   }, [])
 
-  // ── Touch: pan + pinch-to-zoom ────────────────────────────────────────────
+  // ── Touch handlers ─────────────────────────────────────────────────────────
   const handleTouchStart = useCallback((e: React.TouchEvent<HTMLCanvasElement>) => {
     e.preventDefault()
     if (e.touches.length === 1) {
@@ -573,7 +561,6 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
       isDraggingRef.current = true
       lastMouseRef.current = { x: t.clientX, y: t.clientY }
       mouseDownPosRef.current = { x: t.clientX, y: t.clientY }
-      touchStartPosRef.current = { x: t.clientX, y: t.clientY }
       lastTouchDistRef.current = 0
     } else if (e.touches.length === 2) {
       const dx = e.touches[1].clientX - e.touches[0].clientX
@@ -599,8 +586,7 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
       if (lastTouchDistRef.current > 0) {
         const delta = dist - lastTouchDistRef.current
         const oldScale = scaleRef.current
-        const newScale = Math.min(Math.max(oldScale * (1 + delta * 0.008), 0.01), 1.5)
-        // Zoom toward pinch center
+        const newScale = Math.min(Math.max(oldScale * (1 + delta * 0.008), 0.1), 8)
         const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2
         const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2
         const canvas = canvasRef.current
@@ -625,7 +611,6 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
     }
   }, [])
 
-  // ── Filter change ─────────────────────────────────────────────────────────
   const handleFilterChange = useCallback((filter: string) => {
     activeFilterRef.current = filter
     setActiveFilter(filter)
@@ -635,7 +620,6 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column' }}>
-      {/* Canvas container */}
       <div ref={containerRef} className="galaxy-container">
         <canvas
           ref={canvasRef}
@@ -651,7 +635,6 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
           onTouchEnd={handleTouchEnd}
         />
 
-        {/* Constellation label overlay */}
         {selectedConstellation && (
           <div className="galaxy-constellation-label">
             <span>{selectedConstellation.toUpperCase()}</span>
@@ -659,22 +642,16 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
           </div>
         )}
 
-        {/* Stats overlay */}
         <div className="galaxy-stats">
-          ✦ {filteredCount} stars · {edges.length} edges · {nebulae.length} nebulae
+          ✦ {filteredCount} stars · {edges.length} edges
         </div>
 
-        {/* Hover tooltip */}
         {hoveredStar && (
           <div
             className="galaxy-tooltip"
-            style={{
-              position: 'fixed',
-              left: tooltipPos.x + 14,
-              top: tooltipPos.y - 10,
-            }}
+            style={{ position: 'fixed', left: tooltipPos.x + 14, top: tooltipPos.y - 10 }}
           >
-            <div style={{ color: hoveredStar.color, fontWeight: 700, marginBottom: 3 }}>
+            <div style={{ color: nodeColor(hoveredStar.content_type), fontWeight: 700, marginBottom: 3 }}>
               {hoveredStar.title}
             </div>
             <div style={{ fontSize: 10, color: '#6b7280' }}>
@@ -711,13 +688,13 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
       {/* Date range slider */}
       {stars.length > 0 && (
         <div className="galaxy-time-bar">
-          <span style={{whiteSpace:'nowrap',fontSize:'0.7rem',color:'var(--muted)'}}>⏱</span>
+          <span style={{ whiteSpace: 'nowrap', fontSize: '0.7rem', color: 'var(--muted)' }}>⏱</span>
           <input
             type="range"
             min={minDate}
             max={maxDate}
             defaultValue={minDate}
-            style={{flex:1,accentColor:'var(--cyan)'}}
+            style={{ flex: 1, accentColor: 'var(--cyan)' }}
             onChange={e => {
               const from = Number(e.target.value)
               dateRangeRef.current = [from, dateRangeRef.current[1]]
@@ -733,7 +710,7 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
             min={minDate}
             max={maxDate}
             defaultValue={maxDate}
-            style={{flex:1,accentColor:'var(--cyan)'}}
+            style={{ flex: 1, accentColor: 'var(--cyan)' }}
             onChange={e => {
               const to = Number(e.target.value)
               dateRangeRef.current = [dateRangeRef.current[0], to]
@@ -744,7 +721,7 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
             }}
           />
           <button
-            style={{fontSize:'0.7rem',background:'none',border:'none',color:'var(--muted)',cursor:'pointer',padding:'0 4px'}}
+            style={{ fontSize: '0.7rem', background: 'none', border: 'none', color: 'var(--muted)', cursor: 'pointer', padding: '0 4px' }}
             onClick={() => { dateRangeRef.current = [0, Infinity]; setDateLabel('All time') }}
           >Reset</button>
         </div>

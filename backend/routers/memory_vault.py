@@ -1,5 +1,6 @@
 """Memory vault API endpoints."""
 import io
+import json as _json
 import re
 import zipfile
 from datetime import datetime
@@ -7,7 +8,7 @@ from pathlib import Path
 from typing import Optional, Literal
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Header, Query, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Header, Query, Request, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 import aiosqlite
 
@@ -603,3 +604,279 @@ async def get_galaxy_turtle(
         media_type="text/turtle",
         headers={"Content-Disposition": f'attachment; filename="{agent_name}-galaxy.ttl"'},
     )
+
+
+# ── Universal export ──────────────────────────────────────────────────────────
+
+@router.get(
+    "/{agent_name}/vault/export",
+    summary="Export memory vault",
+    description="Export the agent's memory vault in universal JSON format (storage-agnostic, portable to Obsidian/Roam/Logseq). Use ?format=obsidian for a ZIP download, ?format=universal (default) for JSON.",
+)
+async def export_vault(
+    agent_name: str,
+    format: str = Query("universal", description="Export format: 'universal' (JSON) or 'obsidian' (ZIP)"),
+    x_agent_key: Optional[str] = Header(None),
+    x_federation_peer: Optional[str] = Header(None),
+):
+    target = await _resolve_agent(agent_name)
+    vault = MemoryVault(target["id"], target["name"])
+    accessor_id = await _resolve_accessor(x_agent_key)
+    if not await vault.check_access(accessor_id, x_federation_peer or ""):
+        raise HTTPException(403, "Access denied to this memory vault")
+
+    if format == "obsidian":
+        if not vault.vault_path.exists():
+            raise HTTPException(404, "Vault not synced yet")
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for fpath in vault.vault_path.rglob("*"):
+                if fpath.is_file() and not str(fpath).endswith(".sqlite"):
+                    zf.write(fpath, fpath.relative_to(vault.vault_path))
+        buf.seek(0)
+        return StreamingResponse(
+            buf,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{agent_name}-vault.zip"'},
+        )
+
+    if format == "roam":
+        raise HTTPException(501, "Roam export not yet implemented")
+
+    # Universal JSON
+    data = vault.get_galaxy_data()
+    universal = {
+        "version": "1.0",
+        "format": "vantage-galaxy",
+        "agent": agent_name,
+        "exported_at": datetime.utcnow().isoformat() + "Z",
+        "nodes": [
+            {
+                "id": s.get("id"),
+                "name": s.get("title"),
+                "type": s.get("content_type"),
+                "tags": s.get("tags", []),
+                "created": s.get("created"),
+                "constellation": s.get("constellation"),
+            }
+            for s in data.get("stars", [])
+        ],
+        "links": [
+            {
+                "source": e.get("subject"),
+                "target": e.get("object"),
+                "label": e.get("predicate"),
+                "weight": e.get("weight", 1.0),
+            }
+            for e in data.get("edges", [])
+        ],
+    }
+    return Response(
+        _json.dumps(universal, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{agent_name}-vault-universal.json"'},
+    )
+
+
+# ── Universal import ──────────────────────────────────────────────────────────
+
+def _parse_obsidian_frontmatter(text: str) -> tuple[dict, str]:
+    if not text.startswith("---"):
+        return {}, text
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {}, text
+    fm: dict = {}
+    for line in parts[1].splitlines():
+        if ":" in line:
+            k, _, v = line.partition(":")
+            fm[k.strip()] = v.strip()
+    return fm, parts[2].strip()
+
+
+async def _import_nodes_from_universal(vault: MemoryVault, nodes: list, links: list) -> tuple[int, int]:
+    imported_nodes = 0
+    imported_links = 0
+    for node in nodes:
+        name = str(node.get("name") or node.get("title") or "").strip()
+        if not name:
+            continue
+        ntype = str(node.get("type") or "note").strip()
+        tags = node.get("tags") or []
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(",") if t.strip()]
+        category_map = {
+            "knowledge": "knowledge",
+            "broadcast": "broadcasts",
+            "text": "broadcasts",
+            "trace": "traces",
+            "template": "templates",
+        }
+        category = category_map.get(ntype, "drafts")
+        coords = vault._spatial_hash(name, category)
+        fm = {
+            "id": f"import_{uuid4().hex[:8]}",
+            "type": "star",
+            "content_type": ntype,
+            "galaxy_x": coords[0],
+            "galaxy_y": coords[1],
+            "galaxy_z": coords[2],
+            "galaxy_size": 8,
+            "galaxy_color": "#c7ceea",
+            "constellation": tags[0] if tags else category,
+            "tags": list(tags),
+            "created": node.get("created") or datetime.utcnow().isoformat(),
+        }
+        safe = re.sub(r"[^\w-]", "_", name[:50])
+        note_path = vault.vault_path / category / f"{safe}.md"
+        body = str(node.get("content") or "")
+        vault._write_note(note_path, fm, body)
+        rel = str(note_path.relative_to(vault.vault_path))
+        await vault._update_fts(rel, name, body, list(tags))
+        imported_nodes += 1
+
+    for link in links:
+        subj = str(link.get("source") or "").strip()
+        pred = str(link.get("label") or "relates_to").strip()
+        obj = str(link.get("target") or "").strip()
+        if not subj or not obj:
+            continue
+        weight = float(link.get("weight") or 1.0)
+        coords_s = vault._spatial_hash(subj, "knowledge")
+        coords_t = vault._spatial_hash(obj, "knowledge")
+        fm = {
+            "id": f"klink_{uuid4().hex[:8]}",
+            "type": "edge",
+            "subject": subj,
+            "predicate": pred,
+            "object": obj,
+            "weight": round(weight, 3),
+            "trust": 0.5,
+            "source_x": coords_s[0], "source_y": coords_s[1], "source_z": coords_s[2],
+            "target_x": coords_t[0], "target_y": coords_t[1], "target_z": coords_t[2],
+            "created": datetime.utcnow().isoformat(),
+        }
+        safe = re.sub(r"[^\w-]", "_", f"{subj[:20]}_{pred[:10]}_{obj[:20]}")
+        note_path = vault.vault_path / "knowledge" / f"{safe}.md"
+        vault._write_note(note_path, fm, f"{subj} {pred} {obj}")
+        imported_links += 1
+
+    return imported_nodes, imported_links
+
+
+async def _import_obsidian_zip(vault: MemoryVault, file_bytes: bytes) -> tuple[int, int]:
+    imported_nodes = 0
+    imported_links = 0
+    pending_links: list[tuple[str, str]] = []
+
+    with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+        for name in zf.namelist():
+            if not name.endswith(".md"):
+                continue
+            try:
+                text = zf.read(name).decode("utf-8", errors="replace")
+            except Exception:
+                continue
+            fm, body = _parse_obsidian_frontmatter(text)
+            title = fm.get("title") or Path(name).stem.replace("-", " ").replace("_", " ")
+            raw_tags = fm.get("tags", "")
+            tags = [t.strip() for t in str(raw_tags).split(",") if t.strip()]
+            wikilinks = re.findall(r"\[\[(.+?)(?:\|.+?)?\]\]", body)
+            for wl in wikilinks:
+                pending_links.append((title, wl.strip()))
+
+            coords = vault._spatial_hash(title, "drafts")
+            note_fm = {
+                "id": f"obs_{uuid4().hex[:8]}",
+                "type": "star",
+                "content_type": "note",
+                "galaxy_x": coords[0],
+                "galaxy_y": coords[1],
+                "galaxy_z": coords[2],
+                "galaxy_size": 7,
+                "galaxy_color": "#a8ff78",
+                "constellation": tags[0] if tags else "imported",
+                "tags": tags,
+                "created": fm.get("date") or datetime.utcnow().isoformat(),
+                "source": "obsidian",
+            }
+            safe = re.sub(r"[^\w-]", "_", title[:50])
+            note_path = vault.vault_path / "drafts" / f"{safe}.md"
+            vault._write_note(note_path, note_fm, body)
+            rel = str(note_path.relative_to(vault.vault_path))
+            await vault._update_fts(rel, title, body, tags)
+            imported_nodes += 1
+
+    # Create knowledge triples for wiki links
+    for src_title, tgt_title in pending_links:
+        coords_s = vault._spatial_hash(src_title, "knowledge")
+        coords_t = vault._spatial_hash(tgt_title, "knowledge")
+        fm2 = {
+            "id": f"wl_{uuid4().hex[:8]}",
+            "type": "edge",
+            "subject": src_title,
+            "predicate": "references",
+            "object": tgt_title,
+            "weight": 0.5,
+            "trust": 0.5,
+            "source_x": coords_s[0], "source_y": coords_s[1], "source_z": coords_s[2],
+            "target_x": coords_t[0], "target_y": coords_t[1], "target_z": coords_t[2],
+            "created": datetime.utcnow().isoformat(),
+        }
+        safe2 = re.sub(r"[^\w-]", "_", f"{src_title[:20]}_ref_{tgt_title[:20]}")
+        kpath = vault.vault_path / "knowledge" / f"{safe2}.md"
+        vault._write_note(kpath, fm2, f"{src_title} references {tgt_title}")
+        imported_links += 1
+
+    return imported_nodes, imported_links
+
+
+@router.post(
+    "/{agent_name}/vault/import",
+    summary="Import to memory vault",
+    description="Import nodes into the agent's memory vault. Accepts Universal JSON body, Universal JSON file, or Obsidian vault ZIP. Auto-detects format from Content-Type or file extension.",
+)
+async def import_vault(
+    agent_name: str,
+    request: Request,
+    agent: dict = Depends(get_agent),
+    file: Optional[UploadFile] = File(None),
+):
+    if agent["name"] != agent_name:
+        raise HTTPException(403, "Can only import to your own vault")
+
+    vault = MemoryVault(agent["id"], agent["name"])
+    ct = request.headers.get("content-type", "")
+
+    if file is not None:
+        # Multipart file upload
+        file_bytes = await file.read()
+        filename = file.filename or ""
+        if filename.endswith(".zip"):
+            n, l = await _import_obsidian_zip(vault, file_bytes)
+            return {"imported_nodes": n, "imported_links": l, "format": "obsidian-zip"}
+        else:
+            try:
+                universal = _json.loads(file_bytes.decode("utf-8"))
+            except Exception:
+                raise HTTPException(422, "Invalid JSON file")
+            n, l = await _import_nodes_from_universal(
+                vault,
+                universal.get("nodes", []),
+                universal.get("links", []),
+            )
+            return {"imported_nodes": n, "imported_links": l, "format": "universal-json"}
+
+    if "application/json" in ct:
+        try:
+            universal = await request.json()
+        except Exception:
+            raise HTTPException(422, "Invalid JSON body")
+        n, l = await _import_nodes_from_universal(
+            vault,
+            universal.get("nodes", []),
+            universal.get("links", []),
+        )
+        return {"imported_nodes": n, "imported_links": l, "format": "universal-json"}
+
+    raise HTTPException(415, "Provide a file upload (.json or .zip) or application/json body")
