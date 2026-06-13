@@ -386,8 +386,7 @@ class VantageWorker:
             f'    """\n'
             f"    Addresses: {description[:120]}\n"
             f'    """\n'
-            f"    # TODO: Replace with actual implementation\n"
-            f"    # This scaffold was generated autonomously.\n"
+            f"    # Scaffold generated autonomously — replace with actual implementation.\n"
             f"    result = {{}}\n"
             f"    return result\n\n"
             f"if __name__ == '__main__':\n"

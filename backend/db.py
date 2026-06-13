@@ -981,3 +981,15 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
             pass
 
         await db.commit()
+
+    # One-time migration: hash any plaintext API keys still stored as "vantage_..." (idempotent)
+    import hashlib as _hlib_key
+    async with aiosqlite.connect(DB_PATH) as db:
+        rows = await (await db.execute(
+            "SELECT id, api_key FROM agents WHERE api_key LIKE 'vantage_%'"
+        )).fetchall()
+        for row_id, raw_key in rows:
+            hashed = _hlib_key.sha256(raw_key.encode()).hexdigest()
+            await db.execute("UPDATE agents SET api_key=? WHERE id=?", (hashed, row_id))
+        if rows:
+            await db.commit()

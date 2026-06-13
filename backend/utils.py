@@ -1,6 +1,7 @@
 """Shared utility functions: WebSocket fans, webhooks, receipts, file validation."""
 import asyncio
 import hashlib as _hashlib_receipts
+import ipaddress as _ipaddress
 import json as _json
 import json as _json_receipts
 import logging
@@ -8,6 +9,7 @@ from collections import deque as _deque
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse as _urlparse
 
 import aiosqlite
 import httpx
@@ -118,6 +120,9 @@ async def _fire_webhooks(agent_id: int, event: str, data: dict) -> None:
                 if event not in subscribed and "all" not in subscribed:
                     continue
                 try:
+                    if not _is_ssrf_safe_url(hook["url"]):
+                        logger.warning("Skipping webhook delivery to unsafe URL: %s", hook["url"])
+                        continue
                     hdrs = {"Content-Type": "application/json"}
                     if hook["secret"]:
                         import hmac as _hmac
@@ -239,6 +244,27 @@ def _validate_file_magic(path: Path, content_type: str) -> bool:
         return False
 
 
+def _is_ssrf_safe_url(url: str) -> bool:
+    """Return True iff url is safe to contact (not a private/loopback/metadata address)."""
+    try:
+        _p = _urlparse(url)
+        if _p.scheme not in ("http", "https") or not _p.netloc:
+            return False
+        _host = (_p.hostname or "").lower()
+        _blocked = ["localhost", "127.", "0.0.0.0", "::1", "169.254.", "metadata."]
+        if any(_host.startswith(b) or _host == b.rstrip(".") for b in _blocked):
+            return False
+        try:
+            _addr = _ipaddress.ip_address(_host)
+            if _addr.is_private or _addr.is_loopback or _addr.is_link_local or _addr.is_reserved:
+                return False
+        except ValueError:
+            pass  # hostname — allow DNS resolution
+    except Exception:
+        return False
+    return True
+
+
 async def _notify_webhook(
     broadcast_id: int, agent_name: str, title: str, stream_url: str, thumbnail_url: str
 ) -> None:
@@ -290,12 +316,13 @@ async def _check_token_milestones(broadcast_id: int, view_count: int) -> None:
         await db.commit()
 
 
-_THUMB_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+_THUMB_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
 
 
 async def _save_thumbnail(
     upload: Optional[UploadFile], agent_name: str, broadcast_id: int
 ) -> Optional[str]:
+    import uuid as _uuid_thumb
     if not upload or not upload.filename:
         return None
     ext = Path(upload.filename).suffix.lower()
@@ -307,7 +334,12 @@ async def _save_thumbnail(
     thumbs_dir = MEDIA_ROOT / agent_name / "thumbs"
     thumbs_dir.mkdir(parents=True, exist_ok=True)
     dest = thumbs_dir / f"{broadcast_id}{ext}"
-    dest.write_bytes(content)
+    tmp = thumbs_dir / f"tmp_{_uuid_thumb.uuid4().hex}{ext}"
+    tmp.write_bytes(content)
+    if not _validate_file_magic(tmp, "image"):
+        tmp.unlink(missing_ok=True)
+        return None
+    tmp.rename(dest)
     return f"{settings.PUBLIC_URL}/media/agents/{agent_name}/thumbs/{broadcast_id}{ext}"
 
 

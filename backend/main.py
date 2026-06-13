@@ -1,14 +1,12 @@
 import asyncio
 import hashlib
 import hmac
-import ipaddress as _ipaddress
 import logging
 import random
 import time
 import time as _time
 import uuid
 from contextlib import asynccontextmanager
-from urllib.parse import urlparse as _urlparse
 
 import aiosqlite
 import httpx
@@ -192,29 +190,7 @@ async def _platform_subscription_loop():
         await asyncio.sleep(60)
 
 
-def _is_ssrf_safe_url(url: str) -> bool:
-    """Return True iff the URL is safe to contact (not a private/loopback/metadata address)."""
-    try:
-        _p = _urlparse(url)
-        if _p.scheme not in ("http", "https") or not _p.netloc:
-            return False
-        _host = (_p.hostname or "").lower()
-        _blocked_prefixes = [
-            "localhost", "127.", "0.0.0.0", "::1",
-            "169.254.",   # link-local / AWS metadata
-            "metadata.",  # GCP/Azure metadata hostnames
-        ]
-        if any(_host.startswith(b) or _host == b.rstrip(".") for b in _blocked_prefixes):
-            return False
-        try:
-            _addr = _ipaddress.ip_address(_host)
-            if _addr.is_private or _addr.is_loopback or _addr.is_link_local or _addr.is_reserved:
-                return False
-        except ValueError:
-            pass  # hostname — allow DNS resolution
-    except Exception:
-        return False
-    return True
+from .utils import _is_ssrf_safe_url  # canonical definition lives in utils.py
 
 
 async def _federation_gossip_loop():
@@ -419,6 +395,14 @@ async def lifespan(app: FastAPI):
         logger.warning("VANTAGE_ADMIN_KEY not set — Admin API is disabled (503)")
     else:
         logger.info("Admin API enabled")
+
+    # Validate outbound webhook URL at startup — clear if it targets a private/reserved address
+    if settings.OUTBOUND_WEBHOOK_URL and not _is_ssrf_safe_url(settings.OUTBOUND_WEBHOOK_URL):
+        logger.warning(
+            "OUTBOUND_WEBHOOK_URL=%s targets a private/reserved address — disabling outbound webhook",
+            settings.OUTBOUND_WEBHOOK_URL,
+        )
+        settings.OUTBOUND_WEBHOOK_URL = ""
 
     task = asyncio.create_task(_scheduled_publish_loop())
     gossip_task = asyncio.create_task(_federation_gossip_loop())
