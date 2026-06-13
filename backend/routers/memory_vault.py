@@ -388,3 +388,84 @@ async def get_note_links(
             (target["id"], path, target["id"], path)
         )).fetchall()
     return {"note_path": path, "links": [dict(r) for r in rows]}
+
+
+# ── Layer 2: Session (trace) search ──────────────────────────────────────────
+
+@router.get(
+    "/{agent_name}/vault/sessions/search",
+    summary="Search agent thought traces",
+    description="Full-text search over the agent's ghost-mode reasoning traces (session memory). Returns matching trace snippets ranked by relevance.",
+)
+async def search_sessions_endpoint(
+    agent_name: str,
+    q: str = Query(..., min_length=1),
+    limit: int = Query(10, ge=1, le=50),
+    x_agent_key: Optional[str] = Header(None),
+    x_federation_peer: Optional[str] = Header(None),
+):
+    target = await _resolve_agent(agent_name)
+    vault = MemoryVault(target["id"], target["name"])
+    accessor_id = await _resolve_accessor(x_agent_key)
+    if not await vault.check_access(accessor_id, x_federation_peer or ""):
+        raise HTTPException(403)
+    return {"query": q, "results": await vault.search_sessions(q, limit)}
+
+
+# ── Layer 7 + 1: MCP context pack (ground truth + workspace + relevant memory) ─
+
+@router.get(
+    "/{agent_name}/vault/context",
+    summary="Get agent memory context pack",
+    description="Returns the agent's ground-truth hierarchy (SOUL), core identity (MEMORY), and the most relevant memories for a query. Inject this before reasoning so the agent uses its own documented knowledge instead of re-deriving it.",
+)
+async def get_context_pack(
+    agent_name: str,
+    q: str = Query("", description="Optional query to surface relevant memories"),
+    x_agent_key: Optional[str] = Header(None),
+    x_federation_peer: Optional[str] = Header(None),
+):
+    target = await _resolve_agent(agent_name)
+    vault = MemoryVault(target["id"], target["name"])
+    accessor_id = await _resolve_accessor(x_agent_key)
+    if not await vault.check_access(accessor_id, x_federation_peer or ""):
+        raise HTTPException(403, "Access denied to this memory vault")
+    return await vault.get_context_pack(q)
+
+
+# ── Layer 3: Knowledge trust scoring ─────────────────────────────────────────
+
+@router.post("/{agent_name}/vault/knowledge/{fact_id}/feedback")
+async def fact_feedback(
+    agent_name: str,
+    fact_id: int,
+    helpful: bool = Query(..., description="Whether the fact was helpful"),
+    agent: dict = Depends(get_agent),
+):
+    """Record helpful/unhelpful feedback on a knowledge fact and recompute its trust score."""
+    if agent["name"] != agent_name:
+        raise HTTPException(403, "Can only score facts in your own vault")
+    async with aiosqlite.connect(DB_PATH) as db:
+        row = await (await db.execute(
+            "SELECT retrieval_count, helpful_count FROM knowledge_snippets WHERE id=? AND agent_id=?",
+            (fact_id, agent["id"]),
+        )).fetchone()
+        if not row:
+            raise HTTPException(404, "Fact not found")
+        retrieval = (row[0] or 0) + 1
+        helpful_total = (row[1] or 0) + (1 if helpful else 0)
+        # Laplace-smoothed trust: (helpful + 1) / (retrieval + 2), uniform prior 0.5
+        trust = (helpful_total + 1) / (retrieval + 2)
+        await db.execute(
+            """UPDATE knowledge_snippets
+               SET retrieval_count=?, helpful_count=?, trust_score=?, last_accessed_at=datetime('now')
+               WHERE id=? AND agent_id=?""",
+            (retrieval, helpful_total, round(trust, 4), fact_id, agent["id"]),
+        )
+        await db.commit()
+    return {
+        "id": fact_id,
+        "trust_score": round(trust, 4),
+        "retrieval_count": retrieval,
+        "helpful_count": helpful_total,
+    }

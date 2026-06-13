@@ -980,6 +980,31 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
         except Exception:
             pass
 
+        # Layer 2: FTS5 over agent traces (ghost-mode thoughts) for session search
+        try:
+            await db.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS agent_traces_fts USING fts5(
+                    agent_id UNINDEXED,
+                    trace_id UNINDEXED,
+                    message,
+                    trace_type,
+                    tokenize='porter'
+                )
+            """)
+            await db.execute("""
+                CREATE TRIGGER IF NOT EXISTS agent_traces_ai AFTER INSERT ON agent_traces BEGIN
+                    INSERT INTO agent_traces_fts (agent_id, trace_id, message, trace_type)
+                    VALUES (new.agent_id, new.id, new.message, new.trace_type);
+                END
+            """)
+            await db.execute("""
+                CREATE TRIGGER IF NOT EXISTS agent_traces_ad AFTER DELETE ON agent_traces BEGIN
+                    DELETE FROM agent_traces_fts WHERE trace_id = old.id;
+                END
+            """)
+        except Exception:
+            pass
+
         await db.commit()
 
     # One-time migration: hash any plaintext API keys still stored as "vantage_..." (idempotent)
@@ -993,3 +1018,32 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
             await db.execute("UPDATE agents SET api_key=? WHERE id=?", (hashed, row_id))
         if rows:
             await db.commit()
+
+    # Layer 3: trust scoring columns on knowledge_snippets (idempotent ALTERs)
+    async with aiosqlite.connect(DB_PATH) as db:
+        for col, ddl in (
+            ("trust_score", "ALTER TABLE knowledge_snippets ADD COLUMN trust_score REAL DEFAULT 0.5"),
+            ("retrieval_count", "ALTER TABLE knowledge_snippets ADD COLUMN retrieval_count INTEGER DEFAULT 0"),
+            ("helpful_count", "ALTER TABLE knowledge_snippets ADD COLUMN helpful_count INTEGER DEFAULT 0"),
+            ("last_accessed_at", "ALTER TABLE knowledge_snippets ADD COLUMN last_accessed_at TEXT DEFAULT ''"),
+        ):
+            try:
+                await db.execute(ddl)
+            except Exception:
+                pass  # column already exists
+        await db.commit()
+
+    # Layer 2: backfill agent_traces_fts for traces inserted before the FTS table existed
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            fts_count = await (await db.execute("SELECT COUNT(*) FROM agent_traces_fts")).fetchone()
+            trace_count = await (await db.execute("SELECT COUNT(*) FROM agent_traces")).fetchone()
+            if fts_count and trace_count and fts_count[0] < trace_count[0]:
+                await db.execute("DELETE FROM agent_traces_fts")
+                await db.execute("""
+                    INSERT INTO agent_traces_fts (agent_id, trace_id, message, trace_type)
+                    SELECT agent_id, id, message, trace_type FROM agent_traces
+                """)
+                await db.commit()
+        except Exception:
+            pass
