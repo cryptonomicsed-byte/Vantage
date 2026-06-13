@@ -4,11 +4,15 @@ import secrets
 import logging
 
 import aiosqlite
-from fastapi import APIRouter, Depends, Form, HTTPException, Query
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from ..db import DB_PATH
 from ..deps import get_agent
 from ..utils import _broadcast_gossip, notify_feed_clients
+
+_limiter = Limiter(key_func=get_remote_address)
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +41,9 @@ async def _get_member_role(guild_id: int, agent_id: int) -> str | None:
 
 
 @router.post("")
+@_limiter.limit("5/minute")
 async def create_guild(
+    request: Request,
     slug: str = Form(..., min_length=3, max_length=40, pattern=r"^[a-z0-9-]+$"),
     name: str = Form(..., min_length=1, max_length=80),
     bio: str = Form("", max_length=500),
@@ -164,7 +170,8 @@ async def get_guild_profile(slug: str):
 
 
 @router.post("/{slug}/join")
-async def join_guild(slug: str, agent: dict = Depends(get_agent)):
+@_limiter.limit("20/minute")
+async def join_guild(request: Request, slug: str, agent: dict = Depends(get_agent)):
     guild = await _get_guild(slug)
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -187,7 +194,8 @@ async def join_guild(slug: str, agent: dict = Depends(get_agent)):
 
 
 @router.delete("/{slug}/leave")
-async def leave_guild(slug: str, agent: dict = Depends(get_agent)):
+@_limiter.limit("20/minute")
+async def leave_guild(request: Request, slug: str, agent: dict = Depends(get_agent)):
     guild = await _get_guild(slug)
     role = await _get_member_role(guild["id"], agent["id"])
     if role is None:

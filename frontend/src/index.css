@@ -5651,3 +5651,14 @@ input:focus, textarea:focus, select:focus {
 .vault-search-result h5 { margin: 0 0 4px; color: var(--cyan); font-size: 13px; }
 .vault-search-result p { margin: 0; color: var(--muted-hi); font-size: 11px; }
 .vault-search-result code { font-size: 10px; color: var(--muted); font-family: var(--font-mono); }
+
+/* ── Memory Vault Stats & Note Form ─────────────────────────────────────────── */
+.vault-stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin: 16px 0; }
+.vault-stat-tile { background: rgba(0,255,200,0.06); border: 1px solid rgba(0,255,200,0.2); border-radius: 8px; padding: 12px; text-align: center; }
+.vault-stat-tile .vst-value { font-size: 1.6rem; font-weight: 700; color: var(--cyan); font-family: 'Orbitron', monospace; }
+.vault-stat-tile .vst-label { font-size: 0.7rem; color: var(--muted); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.05em; }
+.vault-note-form { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.1); border-radius: 10px; padding: 16px; margin: 12px 0; display: flex; flex-direction: column; gap: 10px; }
+.vault-note-form input, .vault-note-form textarea, .vault-note-form select { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; padding: 8px 10px; color: var(--text); font-size: 0.85rem; width: 100%; box-sizing: border-box; }
+.vault-note-form textarea { min-height: 80px; resize: vertical; }
+.galaxy-constellation-label { position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,0.7); border: 1px solid var(--cyan); border-radius: 6px; padding: 4px 10px; font-size: 0.75rem; color: var(--cyan); display: flex; align-items: center; gap: 8px; }
+.galaxy-constellation-label button { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 0.85rem; padding: 0; }

@@ -58,5 +58,8 @@ class Settings(BaseSettings):
 
     ADMIN_KEY: str = ""  # set via VANTAGE_ADMIN_KEY env var — no hardcoded default
 
+    # Federation signing key — HMAC-SHA256 key for peer manifest verification (optional)
+    FEDERATION_KEY: str = ""
+
 
 settings = Settings()

@@ -1,10 +1,14 @@
 import asyncio
+import hashlib
+import hmac
+import ipaddress as _ipaddress
 import logging
 import random
 import time
 import time as _time
 import uuid
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse as _urlparse
 
 import aiosqlite
 import httpx
@@ -28,6 +32,10 @@ logger = logging.getLogger(__name__)
 
 limiter = Limiter(key_func=get_remote_address)
 FFMPEG_AVAILABLE = False
+
+# Per-peer circuit breaker state (in-memory; DB columns shadow for observability)
+# Structure: {peer_id: {"failures": int, "open_until": float}}
+_peer_breakers: dict[int, dict] = {}
 
 
 async def _scheduled_publish_loop():
@@ -184,8 +192,43 @@ async def _platform_subscription_loop():
         await asyncio.sleep(60)
 
 
+def _is_ssrf_safe_url(url: str) -> bool:
+    """Return True iff the URL is safe to contact (not a private/loopback/metadata address)."""
+    try:
+        _p = _urlparse(url)
+        if _p.scheme not in ("http", "https") or not _p.netloc:
+            return False
+        _host = (_p.hostname or "").lower()
+        _blocked_prefixes = [
+            "localhost", "127.", "0.0.0.0", "::1",
+            "169.254.",   # link-local / AWS metadata
+            "metadata.",  # GCP/Azure metadata hostnames
+        ]
+        if any(_host.startswith(b) or _host == b.rstrip(".") for b in _blocked_prefixes):
+            return False
+        try:
+            _addr = _ipaddress.ip_address(_host)
+            if _addr.is_private or _addr.is_loopback or _addr.is_link_local or _addr.is_reserved:
+                return False
+        except ValueError:
+            pass  # hostname — allow DNS resolution
+    except Exception:
+        return False
+    return True
+
+
 async def _federation_gossip_loop():
-    """Every 5 minutes: ping all known peers, discover new ones, adjust reputation."""
+    """Every 5 minutes: ping all known peers, discover new ones, adjust reputation.
+
+    Hardening additions:
+    - Per-peer circuit breaker: skip peers that have failed 3+ consecutive times
+      until 30 minutes have elapsed since the breaker opened.
+    - Rate limit peer discovery: at most 10 new peer inserts per loop run.
+    - Signed peer manifest: if X-Peer-Signature header is present, verify HMAC-SHA256
+      with settings.FEDERATION_KEY; bad signature → −20 reputation and skip discovery.
+    - Reputation gate: only insert newly discovered peers if the referring peer has
+      reputation ≥ 30.0.
+    """
     from .agents import DB_PATH as _DB_PATH
     from .config import settings as _settings
     while True:
@@ -196,73 +239,154 @@ async def _federation_gossip_loop():
             async with aiosqlite.connect(_DB_PATH) as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
-                    "SELECT id, url, name, reputation FROM federation_peers WHERE flagged=0"
+                    "SELECT id, url, name, reputation, failure_count, circuit_open_until "
+                    "FROM federation_peers WHERE flagged=0"
                 ) as cur:
                     peers = [dict(r) for r in await cur.fetchall()]
 
+            now = _time.time()
+            new_peers_inserted = 0  # rate-limit: max 10 new peer inserts per loop run
+
             async with httpx.AsyncClient(timeout=8) as hc:
                 for peer in peers:
+                    peer_id = peer["id"]
+
+                    # --- Circuit breaker check ---
+                    breaker = _peer_breakers.get(peer_id, {"failures": 0, "open_until": 0.0})
+                    db_failure_count = peer.get("failure_count") or 0
+                    db_open_until_str = peer.get("circuit_open_until") or ""
+                    # Reconcile in-memory state with DB (in case of restart)
+                    if breaker["failures"] == 0 and db_failure_count >= 3:
+                        try:
+                            db_open_until = float(db_open_until_str) if db_open_until_str else 0.0
+                        except (ValueError, TypeError):
+                            db_open_until = 0.0
+                        breaker = {"failures": db_failure_count, "open_until": db_open_until}
+                        _peer_breakers[peer_id] = breaker
+
+                    if breaker["failures"] >= 3 and breaker["open_until"] > now:
+                        logger.debug(
+                            "Federation peer %s circuit open — skipping (retry at %.0f)",
+                            peer["url"], breaker["open_until"],
+                        )
+                        continue
+
+                    # --- Contact peer ---
                     try:
                         resp = await hc.get(f"{peer['url']}/api/agents/federation/peers")
-                        if resp.status_code == 200:
-                            # Update reputation upward (max 100)
-                            new_rep = min(100.0, peer["reputation"] + 5.0)
+                        if resp.status_code != 200:
+                            raise Exception(f"HTTP {resp.status_code}")
+
+                        # --- Signed manifest verification ---
+                        sig_header = resp.headers.get("X-Peer-Signature", "")
+                        sig_invalid = False
+                        if sig_header and _settings.FEDERATION_KEY:
+                            expected = hmac.new(
+                                _settings.FEDERATION_KEY.encode(),
+                                resp.content,
+                                hashlib.sha256,
+                            ).hexdigest()
+                            if not hmac.compare_digest(expected, sig_header.strip()):
+                                sig_invalid = True
+                                logger.warning(
+                                    "Federation peer %s sent invalid manifest signature — "
+                                    "penalising reputation −20 and skipping discovery",
+                                    peer["url"],
+                                )
+
+                        if sig_invalid:
+                            # Aggressive reputation penalty for bad signatures
+                            new_rep = max(0.0, peer["reputation"] - 20.0)
+                            flagged = 1 if new_rep < 20.0 else 0
                             async with aiosqlite.connect(_DB_PATH) as db:
                                 await db.execute(
-                                    "UPDATE federation_peers SET last_seen=datetime('now'), status='active', reputation=?, flagged=0 WHERE id=?",
-                                    (new_rep, peer["id"]),
+                                    "UPDATE federation_peers "
+                                    "SET status='active', reputation=?, flagged=? WHERE id=?",
+                                    (new_rep, flagged, peer_id),
                                 )
                                 await db.commit()
-                            # Discover new peers from their list
-                            data = resp.json()
-                            remote_peers = data.get("peers", [])
-                            for rp in remote_peers:
-                                rp_url = str(rp.get("url", "")).strip().rstrip("/")
-                                rp_name = str(rp.get("name", ""))
-                                if not rp_url or rp_url == peer["url"]:
-                                    continue
-                                
-                                # SEC-13: SSRF protection — block private/loopback/metadata ranges
-                                from urllib.parse import urlparse as _urlparse
-                                import ipaddress as _ipaddress
-                                try:
-                                    _p = _urlparse(rp_url)
-                                    if _p.scheme not in ("http", "https") or not _p.netloc:
-                                        continue
-                                    _host = _p.hostname or ""
-                                    _blocked_strs = [
-                                        "localhost", "127.", "0.0.0.0", "::1",
-                                        "169.254.",  # link-local / AWS metadata
-                                        "metadata.",  # GCP/Azure metadata hostnames
-                                    ]
-                                    if any(_host.lower().startswith(b) or _host.lower() == b.rstrip(".")
-                                           for b in _blocked_strs):
-                                        continue
-                                    # Block private IP ranges via ipaddress
-                                    try:
-                                        _addr = _ipaddress.ip_address(_host)
-                                        if _addr.is_private or _addr.is_loopback or _addr.is_link_local or _addr.is_reserved:
-                                            continue
-                                    except ValueError:
-                                        pass  # hostname, not IP — allow DNS resolution
-                                except Exception:
-                                    continue
+                            # Still counts as a contact success for circuit-breaker purposes
+                            breaker["failures"] = 0
+                            breaker["open_until"] = 0.0
+                            _peer_breakers[peer_id] = breaker
+                            async with aiosqlite.connect(_DB_PATH) as db:
+                                await db.execute(
+                                    "UPDATE federation_peers SET failure_count=0, circuit_open_until=NULL WHERE id=?",
+                                    (peer_id,),
+                                )
+                                await db.commit()
+                            continue  # skip discovery from this peer
 
-                                async with aiosqlite.connect(_DB_PATH) as db:
-                                    await db.execute(
-                                        "INSERT OR IGNORE INTO federation_peers (url, name, status, reputation) VALUES (?,?,'unknown',0.5)",
-                                        (rp_url, rp_name),
-                                    )
-                                    await db.commit()
-                        else:
-                            raise Exception(f"HTTP {resp.status_code}")
-                    except Exception:
-                        new_rep = max(0.0, peer["reputation"] - 10.0)
-                        flagged = 1 if new_rep < 20.0 else 0
+                        # --- Success: update reputation, reset circuit breaker ---
+                        new_rep = min(100.0, peer["reputation"] + 5.0)
+                        breaker["failures"] = 0
+                        breaker["open_until"] = 0.0
+                        _peer_breakers[peer_id] = breaker
                         async with aiosqlite.connect(_DB_PATH) as db:
                             await db.execute(
-                                "UPDATE federation_peers SET status='unreachable', reputation=?, flagged=? WHERE id=?",
-                                (new_rep, flagged, peer["id"]),
+                                "UPDATE federation_peers "
+                                "SET last_seen=datetime('now'), status='active', reputation=?, flagged=0, "
+                                "    failure_count=0, circuit_open_until=NULL "
+                                "WHERE id=?",
+                                (new_rep, peer_id),
+                            )
+                            await db.commit()
+
+                        # --- Reputation gate: only discover from trusted peers ---
+                        if peer["reputation"] < 30.0:
+                            logger.debug(
+                                "Federation peer %s reputation %.1f < 30 — skipping peer discovery",
+                                peer["url"], peer["reputation"],
+                            )
+                            continue
+
+                        # --- Discover new peers from their list ---
+                        data = resp.json()
+                        remote_peers = data.get("peers", [])
+                        for rp in remote_peers:
+                            if new_peers_inserted >= 10:
+                                logger.debug(
+                                    "Federation: reached 10 new-peer insert limit for this loop run"
+                                )
+                                break
+                            rp_url = str(rp.get("url", "")).strip().rstrip("/")
+                            rp_name = str(rp.get("name", ""))
+                            if not rp_url or rp_url == peer["url"]:
+                                continue
+                            # SSRF protection — block private/loopback/metadata ranges
+                            if not _is_ssrf_safe_url(rp_url):
+                                continue
+                            async with aiosqlite.connect(_DB_PATH) as db:
+                                cur = await db.execute(
+                                    "INSERT OR IGNORE INTO federation_peers (url, name, status, reputation) "
+                                    "VALUES (?,?,'unknown',0.5)",
+                                    (rp_url, rp_name),
+                                )
+                                await db.commit()
+                                if cur.rowcount and cur.rowcount > 0:
+                                    new_peers_inserted += 1
+
+                    except Exception as _peer_exc:
+                        # --- Failure: increment circuit breaker ---
+                        breaker["failures"] = breaker.get("failures", 0) + 1
+                        if breaker["failures"] >= 3:
+                            breaker["open_until"] = now + 1800  # 30 minutes
+                            logger.warning(
+                                "Federation peer %s circuit opened after %d failures (retry at %.0f)",
+                                peer["url"], breaker["failures"], breaker["open_until"],
+                            )
+                        _peer_breakers[peer_id] = breaker
+
+                        new_rep = max(0.0, peer["reputation"] - 10.0)
+                        flagged = 1 if new_rep < 20.0 else 0
+                        open_until_str = str(breaker["open_until"]) if breaker["open_until"] > now else None
+                        async with aiosqlite.connect(_DB_PATH) as db:
+                            await db.execute(
+                                "UPDATE federation_peers "
+                                "SET status='unreachable', reputation=?, flagged=?, "
+                                "    failure_count=?, circuit_open_until=? "
+                                "WHERE id=?",
+                                (new_rep, flagged, breaker["failures"], open_until_str, peer_id),
                             )
                             await db.commit()
         except Exception as exc:

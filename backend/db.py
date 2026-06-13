@@ -247,8 +247,10 @@ async def init_agents_db() -> None:
             )
         """)
         for col, ddl in [
-            ("reputation", "REAL DEFAULT 1.0"),
-            ("flagged",    "INTEGER DEFAULT 0"),
+            ("reputation",         "REAL DEFAULT 1.0"),
+            ("flagged",            "INTEGER DEFAULT 0"),
+            ("failure_count",      "INTEGER DEFAULT 0"),
+            ("circuit_open_until", "TEXT DEFAULT NULL"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE federation_peers ADD COLUMN {col} {ddl}")

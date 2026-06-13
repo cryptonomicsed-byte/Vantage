@@ -1,5 +1,6 @@
 """FastAPI dependency injection helpers: auth, body parsing."""
 import asyncio
+import hmac
 import logging
 from typing import Optional
 
@@ -66,7 +67,7 @@ async def get_agent(request: Request, x_agent_key: Optional[str] = Header(None))
 async def get_admin(x_admin_key: Optional[str] = Header(None)) -> str:
     if not settings.ADMIN_KEY:
         raise HTTPException(503, "Admin API not configured — set VANTAGE_ADMIN_KEY env var")
-    if not x_admin_key or x_admin_key != settings.ADMIN_KEY:
+    if not x_admin_key or not hmac.compare_digest(x_admin_key, settings.ADMIN_KEY):
         raise HTTPException(403, "Invalid admin key")
     return x_admin_key
 

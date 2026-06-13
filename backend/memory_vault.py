@@ -375,3 +375,35 @@ last_synced: {config.last_synced or 'never'}
             if line.startswith("# "):
                 return line[2:].strip()
         return "Untitled"
+
+    async def get_stats(self) -> dict:
+        config = await self.get_config()
+        stars = edges = nebulae = 0
+        vault_size = 0
+        for md in self.vault_path.rglob("*.md"):
+            try:
+                vault_size += md.stat().st_size
+                fm = self._parse_frontmatter(md.read_text())
+                t = fm.get("type")
+                if t == "star":
+                    stars += 1
+                elif t == "edge":
+                    edges += 1
+                elif t == "nebula":
+                    nebulae += 1
+            except Exception:
+                pass
+        broadcasts_dir = self.vault_path / "broadcasts"
+        knowledge_dir = self.vault_path / "knowledge"
+        traces_dir = self.vault_path / "traces"
+        return {
+            "stars": stars,
+            "edges": edges,
+            "nebulae": nebulae,
+            "broadcasts": len(list(broadcasts_dir.glob("*.md"))) if broadcasts_dir.exists() else 0,
+            "knowledge": len(list(knowledge_dir.glob("*.md"))) if knowledge_dir.exists() else 0,
+            "traces": len(list(traces_dir.glob("*.md"))) if traces_dir.exists() else 0,
+            "vault_size_bytes": vault_size,
+            "last_synced": config.last_synced,
+            "access": config.access,
+        }

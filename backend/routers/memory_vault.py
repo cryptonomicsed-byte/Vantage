@@ -1,14 +1,17 @@
 """Memory vault API endpoints."""
 import io
+import re
 import zipfile
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Literal
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Header, Query
+from fastapi import APIRouter, Depends, HTTPException, Header, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 import aiosqlite
 
-from ..deps import get_agent
+from ..deps import get_agent, _parse_body
 from ..memory_vault import MemoryVault, VAULT_ROOT
 from ..db import DB_PATH
 
@@ -163,3 +166,126 @@ async def get_vault_file(
         raise HTTPException(404, "File not found")
     await vault.log_access(accessor_id, x_federation_peer or "", path, "read")
     return FileResponse(file_path, media_type="text/markdown")
+
+
+# ── Vault stats ───────────────────────────────────────────────────────────────
+
+@router.get("/{agent_name}/vault/stats")
+async def get_vault_stats(
+    agent_name: str,
+    x_agent_key: Optional[str] = Header(None),
+    x_federation_peer: Optional[str] = Header(None),
+):
+    target = await _resolve_agent(agent_name)
+    vault = MemoryVault(target["id"], target["name"])
+    accessor_id = await _resolve_accessor(x_agent_key)
+    if not await vault.check_access(accessor_id, x_federation_peer or ""):
+        raise HTTPException(403, "Access denied to this memory vault")
+    return await vault.get_stats()
+
+
+# ── Manual note creation ──────────────────────────────────────────────────────
+
+_VALID_CATEGORIES = {"drafts", "templates", "broadcasts", "knowledge"}
+
+@router.post("/{agent_name}/vault/note")
+async def create_vault_note(
+    agent_name: str,
+    request: Request,
+    agent: dict = Depends(get_agent),
+):
+    if agent["name"] != agent_name:
+        raise HTTPException(403, "Can only create notes in your own vault")
+
+    body = await _parse_body(request)
+    title: str = str(body.get("title", "")).strip()
+    note_body: str = str(body.get("body", ""))
+    category: str = str(body.get("category", "drafts")).strip()
+    raw_tags = body.get("tags", [])
+
+    if not title:
+        raise HTTPException(422, "title is required")
+    if category not in _VALID_CATEGORIES:
+        raise HTTPException(422, f"category must be one of: {', '.join(sorted(_VALID_CATEGORIES))}")
+
+    tags: list = list(raw_tags) if isinstance(raw_tags, list) else [t.strip() for t in str(raw_tags).split(",") if t.strip()]
+
+    vault = MemoryVault(agent["id"], agent["name"])
+    note_id = f"note_{uuid4().hex[:8]}"
+    coords = vault._spatial_hash(title, category)
+
+    frontmatter = {
+        "id": note_id,
+        "type": "star",
+        "content_type": "text",
+        "galaxy_x": coords[0],
+        "galaxy_y": coords[1],
+        "galaxy_z": coords[2],
+        "galaxy_size": 8,
+        "galaxy_color": "#ffe66d",
+        "constellation": tags[0] if tags else category,
+        "tags": tags,
+        "created": datetime.utcnow().isoformat(),
+    }
+
+    safe_title = re.sub(r"[^\w-]", "_", title[:50])
+    filename = f"{safe_title}.md"
+    note_path = vault.vault_path / category / filename
+    vault._write_note(note_path, frontmatter, note_body)
+    relative_path = str(note_path.relative_to(vault.vault_path))
+    await vault._update_fts(relative_path, title, note_body, tags)
+
+    return {"path": relative_path, "id": note_id}
+
+
+# ── Cross-agent memory links ──────────────────────────────────────────────────
+
+@router.get("/{agent_name}/vault/links")
+async def get_memory_links(agent_name: str):
+    target = await _resolve_agent(agent_name)
+    agent_id = target["id"]
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            """SELECT * FROM memory_links
+               WHERE source_agent_id=? OR target_agent_id=?
+               LIMIT 50""",
+            (agent_id, agent_id),
+        )).fetchall()
+    return {"links": [dict(r) for r in rows]}
+
+
+@router.post("/{agent_name}/vault/link")
+async def create_memory_link(
+    agent_name: str,
+    request: Request,
+    agent: dict = Depends(get_agent),
+):
+    if agent["name"] != agent_name:
+        raise HTTPException(403, "Can only create links from your own vault")
+
+    body = await _parse_body(request)
+    to_agent_name: str = str(body.get("to_agent_name", "")).strip()
+    link_type: str = str(body.get("link_type", "knows")).strip() or "knows"
+    source_note: str = str(body.get("note", "")).strip()
+
+    if not to_agent_name:
+        raise HTTPException(422, "to_agent_name is required")
+
+    # Resolve target agent
+    async with aiosqlite.connect(DB_PATH) as db:
+        row = await (await db.execute(
+            "SELECT id FROM agents WHERE name=?", (to_agent_name,)
+        )).fetchone()
+        if not row:
+            raise HTTPException(404, f"Agent '{to_agent_name}' not found")
+        to_agent_id: int = row[0]
+
+        await db.execute(
+            """INSERT INTO memory_links (source_agent_id, source_note_path, target_agent_id, target_note_path, link_type)
+               VALUES (?, ?, ?, ?, ?)""",
+            (agent["id"], source_note, to_agent_id, "", link_type),
+        )
+        await db.commit()
+
+    return {"linked": True}

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { Lock, Globe, Users, Radio, Search, RefreshCw, Settings, Download } from 'lucide-react'
+import { Lock, Globe, Users, Radio, Search, RefreshCw, Settings, Download, BarChart2, PlusCircle } from 'lucide-react'
 import GalaxyViewer, { GalaxyData } from './GalaxyViewer'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -18,6 +18,18 @@ interface SearchResult {
   path: string
   snippet?: string
   score?: number
+}
+
+interface VaultStats {
+  stars: number
+  edges: number
+  nebulae: number
+  broadcasts: number
+  knowledge: number
+  traces: number
+  vault_size_bytes: number
+  last_synced: string | null
+  access: string
 }
 
 interface Props {
@@ -41,6 +53,12 @@ function getApiKey(): string {
   return localStorage.getItem('vantage_api_key') || ''
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function MemoryVaultTab({ agentName, isOwner }: Props) {
@@ -49,7 +67,7 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
   const [locked, setLocked] = useState(false)
   const [loadingGalaxy, setLoadingGalaxy] = useState(true)
   const [syncing, setSyncing] = useState(false)
-  const [view, setView] = useState<'galaxy' | 'files' | 'settings'>('galaxy')
+  const [view, setView] = useState<'galaxy' | 'files' | 'settings' | 'stats'>('galaxy')
 
   // Search
   const [searchQuery, setSearchQuery] = useState('')
@@ -61,6 +79,19 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
   const [settingsPeers, setSettingsPeers] = useState('')
   const [savingSettings, setSavingSettings] = useState(false)
   const [settingsSaved, setSettingsSaved] = useState(false)
+
+  // Stats
+  const [stats, setStats] = useState<VaultStats | null>(null)
+  const [loadingStats, setLoadingStats] = useState(false)
+
+  // Create note form
+  const [showNoteForm, setShowNoteForm] = useState(false)
+  const [noteTitle, setNoteTitle] = useState('')
+  const [noteBody, setNoteBody] = useState('')
+  const [noteCategory, setNoteCategory] = useState<'drafts' | 'templates' | 'broadcasts' | 'knowledge'>('drafts')
+  const [noteTags, setNoteTags] = useState('')
+  const [creatingNote, setCreatingNote] = useState(false)
+  const [noteCreated, setNoteCreated] = useState(false)
 
   // ── Fetch config ────────────────────────────────────────────────────────────
   const fetchConfig = useCallback(async () => {
@@ -188,6 +219,65 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
     }
   }, [agentName, settingsAccess, settingsPeers, fetchConfig])
 
+  // ── Fetch stats ─────────────────────────────────────────────────────────────
+  const fetchStats = useCallback(async () => {
+    setLoadingStats(true)
+    try {
+      const apiKey = getApiKey()
+      const headers: Record<string, string> = {}
+      if (apiKey) headers['X-Agent-Key'] = apiKey
+      const res = await fetch(
+        `/api/agents/${encodeURIComponent(agentName)}/vault/stats`,
+        { headers }
+      )
+      if (res.ok) {
+        const data: VaultStats = await res.json()
+        setStats(data)
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoadingStats(false)
+    }
+  }, [agentName])
+
+  useEffect(() => {
+    if (view === 'stats') fetchStats()
+  }, [view, fetchStats])
+
+  // ── Create note ─────────────────────────────────────────────────────────────
+  const handleCreateNote = useCallback(async () => {
+    const apiKey = getApiKey()
+    if (!apiKey || !noteTitle.trim()) return
+    setCreatingNote(true)
+    try {
+      const tags = noteTags.split(',').map(t => t.trim()).filter(Boolean)
+      const res = await fetch(
+        `/api/agents/${encodeURIComponent(agentName)}/vault/note`,
+        {
+          method: 'POST',
+          headers: { 'X-Agent-Key': apiKey, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: noteTitle, body: noteBody, category: noteCategory, tags }),
+        }
+      )
+      if (res.ok) {
+        setNoteCreated(true)
+        setNoteTitle('')
+        setNoteBody('')
+        setNoteTags('')
+        setNoteCategory('drafts')
+        setShowNoteForm(false)
+        setTimeout(() => setNoteCreated(false), 3000)
+        // Refresh galaxy to pick up new star
+        await fetchGalaxy()
+      }
+    } catch {
+      // ignore
+    } finally {
+      setCreatingNote(false)
+    }
+  }, [agentName, noteTitle, noteBody, noteCategory, noteTags, fetchGalaxy])
+
   // ── Derived ─────────────────────────────────────────────────────────────────
   const accessMeta = config ? ACCESS_META[config.access] : null
 
@@ -223,6 +313,13 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
               onClick={() => setView('files')}
             >
               Files
+            </button>
+            <button
+              className={`vault-view-btn${view === 'stats' ? ' active' : ''}`}
+              onClick={() => setView('stats')}
+            >
+              <BarChart2 size={12} style={{ display: 'inline', marginRight: 4 }} />
+              Stats
             </button>
             {isOwner && (
               <button
@@ -327,6 +424,64 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
       {/* ── Files view ───────────────────────────────────────────────────────── */}
       {view === 'files' && (
         <div>
+          {/* Create Note button (owner only) */}
+          {isOwner && (
+            <div style={{ marginBottom: 10 }}>
+              <button
+                className="vault-sync-btn"
+                onClick={() => setShowNoteForm(v => !v)}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+              >
+                <PlusCircle size={13} />
+                {showNoteForm ? 'Cancel' : 'Create Note'}
+              </button>
+              {noteCreated && (
+                <span style={{ marginLeft: 10, color: 'var(--cyan)', fontSize: 12 }}>
+                  ✓ Note created
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* Create Note form */}
+          {isOwner && showNoteForm && (
+            <div className="vault-note-form">
+              <input
+                type="text"
+                placeholder="Note title…"
+                value={noteTitle}
+                onChange={e => setNoteTitle(e.target.value)}
+              />
+              <textarea
+                placeholder="Note body (Markdown)…"
+                value={noteBody}
+                onChange={e => setNoteBody(e.target.value)}
+              />
+              <select
+                value={noteCategory}
+                onChange={e => setNoteCategory(e.target.value as typeof noteCategory)}
+              >
+                <option value="drafts">Drafts</option>
+                <option value="templates">Templates</option>
+                <option value="broadcasts">Broadcasts</option>
+                <option value="knowledge">Knowledge</option>
+              </select>
+              <input
+                type="text"
+                placeholder="Tags (comma-separated)…"
+                value={noteTags}
+                onChange={e => setNoteTags(e.target.value)}
+              />
+              <button
+                className="vault-save-btn"
+                onClick={handleCreateNote}
+                disabled={creatingNote || !noteTitle.trim()}
+              >
+                {creatingNote ? 'Creating…' : 'Create Note'}
+              </button>
+            </div>
+          )}
+
           <div className="vault-file-tree">
             {galaxy ? (
               Object.entries(galaxy.clusters).map(([constellation, items]) => (
@@ -373,6 +528,68 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
             <Download size={14} />
             Download Vault Archive
           </a>
+        </div>
+      )}
+
+      {/* ── Stats view ───────────────────────────────────────────────────────── */}
+      {view === 'stats' && (
+        <div>
+          {loadingStats && (
+            <div style={{ color: 'var(--muted)', padding: 20, textAlign: 'center' }}>
+              Loading stats…
+            </div>
+          )}
+          {!loadingStats && !stats && (
+            <div style={{ color: 'var(--muted)', padding: 20, textAlign: 'center' }}>
+              Unable to load stats. Vault may be locked.
+            </div>
+          )}
+          {!loadingStats && stats && (
+            <>
+              <div className="vault-stats-grid">
+                <div className="vault-stat-tile">
+                  <div className="vst-value">{stats.stars}</div>
+                  <div className="vst-label">Stars</div>
+                </div>
+                <div className="vault-stat-tile">
+                  <div className="vst-value">{stats.edges}</div>
+                  <div className="vst-label">Edges</div>
+                </div>
+                <div className="vault-stat-tile">
+                  <div className="vst-value">{stats.nebulae}</div>
+                  <div className="vst-label">Nebulae</div>
+                </div>
+                <div className="vault-stat-tile">
+                  <div className="vst-value">{stats.broadcasts}</div>
+                  <div className="vst-label">Broadcasts</div>
+                </div>
+                <div className="vault-stat-tile">
+                  <div className="vst-value">{stats.knowledge}</div>
+                  <div className="vst-label">Knowledge</div>
+                </div>
+                <div className="vault-stat-tile">
+                  <div className="vst-value">{stats.traces}</div>
+                  <div className="vst-label">Traces</div>
+                </div>
+                <div className="vault-stat-tile">
+                  <div className="vst-value">{formatBytes(stats.vault_size_bytes)}</div>
+                  <div className="vst-label">Vault Size</div>
+                </div>
+                <div className="vault-stat-tile">
+                  <div className="vst-value" style={{ fontSize: '0.85rem' }}>
+                    {stats.access.toUpperCase()}
+                  </div>
+                  <div className="vst-label">Access Level</div>
+                </div>
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>
+                Last synced:{' '}
+                {stats.last_synced
+                  ? new Date(stats.last_synced).toLocaleString()
+                  : 'Never'}
+              </div>
+            </>
+          )}
         </div>
       )}
 

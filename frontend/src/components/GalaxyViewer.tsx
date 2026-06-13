@@ -81,7 +81,8 @@ function drawScene(
   offsetX: number,
   offsetY: number,
   hoveredStarId: string | null,
-  activeFilter: string
+  activeFilter: string,
+  selectedConstellation: string | null
 ) {
   ctx.clearRect(0, 0, w, h)
 
@@ -159,8 +160,13 @@ function drawScene(
     const [sx, sy] = project(star.x, star.y, star.z, scale, offsetX, offsetY)
     const r = Math.max(2, (star.size / 50) * 10 * scale)
     const hovered = hoveredStarId === star.id
+    const inSelectedConstellation = !selectedConstellation || star.constellation === selectedConstellation
 
     ctx.save()
+
+    if (!inSelectedConstellation) {
+      ctx.globalAlpha = 0.3
+    }
 
     // Outer glow
     ctx.shadowBlur = hovered ? 30 : 14
@@ -231,13 +237,16 @@ export default function GalaxyViewer({ data, agentName: _agentName }: Props) {
   const offsetYRef = useRef(0)
   const hoveredStarIdRef = useRef<string | null>(null)
   const activeFilterRef = useRef<string>('all')
+  const selectedConstellationRef = useRef<string | null>(null)
   const isDraggingRef = useRef(false)
   const lastMouseRef = useRef({ x: 0, y: 0 })
+  const mouseDownPosRef = useRef({ x: 0, y: 0 })
 
   // React state for UI
   const [activeFilter, setActiveFilter] = useState<string>('all')
   const [hoveredStar, setHoveredStar] = useState<GalaxyStar | null>(null)
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 })
+  const [selectedConstellation, setSelectedConstellation] = useState<string | null>(null)
 
   const stars = data.stars || []
   const edges = data.edges || []
@@ -318,7 +327,8 @@ export default function GalaxyViewer({ data, agentName: _agentName }: Props) {
           stars, edges, nebulae,
           scaleRef.current, offsetXRef.current, offsetYRef.current,
           hoveredStarIdRef.current,
-          activeFilterRef.current
+          activeFilterRef.current,
+          selectedConstellationRef.current
         )
       }
 
@@ -329,15 +339,66 @@ export default function GalaxyViewer({ data, agentName: _agentName }: Props) {
     return () => cancelAnimationFrame(rafRef.current)
   }, [stars, edges, nebulae])
 
-  // ── Mouse: pan ────────────────────────────────────────────────────────────
+  // ── Mouse: pan + click ───────────────────────────────────────────────────
   const handleMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     isDraggingRef.current = true
     lastMouseRef.current = { x: e.clientX, y: e.clientY }
+    mouseDownPosRef.current = { x: e.clientX, y: e.clientY }
   }, [])
 
-  const handleMouseUp = useCallback(() => {
+  const handleMouseUp = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const wasDragged =
+      Math.abs(e.clientX - mouseDownPosRef.current.x) > 4 ||
+      Math.abs(e.clientY - mouseDownPosRef.current.y) > 4
     isDraggingRef.current = false
-  }, [])
+
+    if (!wasDragged && hoveredStarIdRef.current) {
+      const canvas = canvasRef.current
+      const container = containerRef.current
+      if (!canvas || !container) return
+
+      const clickedStar = stars.find(s => s.id === hoveredStarIdRef.current)
+      if (!clickedStar) return
+
+      const clickedConstellation = clickedStar.constellation
+      const currentSelected = selectedConstellationRef.current
+
+      if (currentSelected === clickedConstellation) {
+        // Zoom in to center on constellation bounding box
+        const constellationStars = stars.filter(s => s.constellation === clickedConstellation)
+        if (constellationStars.length === 0) return
+
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+        constellationStars.forEach(s => {
+          const [px, py] = project(s.x, s.y, s.z, 1, 0, 0)
+          if (px < minX) minX = px
+          if (px > maxX) maxX = px
+          if (py < minY) minY = py
+          if (py > maxY) maxY = py
+        })
+
+        const cw = container.clientWidth
+        const ch = container.clientHeight
+        const bboxW = maxX - minX || 100
+        const bboxH = maxY - minY || 100
+        const padding = 0.8
+        const newScale = Math.min(
+          (cw * padding) / bboxW,
+          (ch * padding) / bboxH,
+          2
+        )
+        const centerPX = (minX + maxX) / 2
+        const centerPY = (minY + maxY) / 2
+        scaleRef.current = newScale
+        offsetXRef.current = cw / 2 - centerPX * newScale
+        offsetYRef.current = ch / 2 - centerPY * newScale
+      } else {
+        // Select this constellation
+        selectedConstellationRef.current = clickedConstellation
+        setSelectedConstellation(clickedConstellation)
+      }
+    }
+  }, [stars])
 
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current
@@ -384,6 +445,12 @@ export default function GalaxyViewer({ data, agentName: _agentName }: Props) {
     setHoveredStar(null)
   }, [])
 
+  // ── Clear constellation selection ────────────────────────────────────────
+  const handleClearConstellation = useCallback(() => {
+    selectedConstellationRef.current = null
+    setSelectedConstellation(null)
+  }, [])
+
   // ── Scroll: zoom ──────────────────────────────────────────────────────────
   const handleWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault()
@@ -425,6 +492,14 @@ export default function GalaxyViewer({ data, agentName: _agentName }: Props) {
           onMouseLeave={handleMouseLeave}
           onWheel={handleWheel}
         />
+
+        {/* Constellation label overlay */}
+        {selectedConstellation && (
+          <div className="galaxy-constellation-label">
+            <span>{selectedConstellation.toUpperCase()}</span>
+            <button onClick={handleClearConstellation}>× Clear</button>
+          </div>
+        )}
 
         {/* Stats overlay */}
         <div className="galaxy-stats">

@@ -13,6 +13,10 @@ from datetime import datetime as _dt
 from pathlib import Path
 from typing import List, Optional
 
+import ipaddress as _ipaddress
+import uuid as _uuid
+from urllib.parse import urlparse as _urlparse
+
 import aiosqlite
 import httpx
 from fastapi import (
@@ -424,8 +428,9 @@ async def publish(
                     pass
         await db.commit()
 
-    # Stream upload to disk with size enforcement
-    tmp_path = agent_dir / f"upload_{broadcast_id}_{file.filename}"
+    # Stream upload to disk with size enforcement (UUID name avoids path traversal via filename)
+    _tmp_ext = Path(file.filename).suffix if file.filename else ""
+    tmp_path = agent_dir / f"upload_{broadcast_id}_{_uuid.uuid4().hex}{_tmp_ext}"
     total = 0
     try:
         with open(tmp_path, "wb") as f:
@@ -1089,7 +1094,8 @@ async def agent_series(name: str):
 # ---------------------------------------------------------------------------
 
 @router.post("/follow/{agent_name}")
-async def follow_agent(agent_name: str, agent: dict = Depends(get_agent)):
+@limiter.limit("30/minute")
+async def follow_agent(request: Request, agent_name: str, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id FROM agents WHERE name=?", (agent_name,)) as cur:
@@ -1113,7 +1119,8 @@ async def follow_agent(agent_name: str, agent: dict = Depends(get_agent)):
 
 
 @router.delete("/follow/{agent_name}")
-async def unfollow_agent(agent_name: str, agent: dict = Depends(get_agent)):
+@limiter.limit("30/minute")
+async def unfollow_agent(request: Request, agent_name: str, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id FROM agents WHERE name=?", (agent_name,)) as cur:
@@ -1510,6 +1517,7 @@ VALID_REACTIONS = {"🤖", "🔥", "💡", "⚡", "🎯", "👁️"}
 
 
 @router.post("/broadcasts/{broadcast_id}/react")
+@limiter.limit("60/minute")
 async def toggle_reaction(
     broadcast_id: int,
     request: Request,
@@ -1640,6 +1648,7 @@ async def fork_broadcast(
 
 
 @router.post("/messages/send/{recipient_name}")
+@limiter.limit("20/minute")
 async def send_message(
     recipient_name: str,
     request: Request,
@@ -1758,6 +1767,25 @@ async def register_webhook(request: Request, agent: dict = Depends(get_agent)):
     url = str(body.get("url", "")).strip()
     if not url or not url.startswith("http"):
         raise HTTPException(422, "url must be a valid http/https URL")
+    # SSRF protection — block private/loopback/link-local/metadata targets
+    try:
+        _wp = _urlparse(url)
+        if _wp.scheme not in ("http", "https") or not _wp.netloc:
+            raise HTTPException(422, "url must be a valid http/https URL")
+        _whost = (_wp.hostname or "").lower()
+        _blocked = ["localhost", "127.", "0.0.0.0", "::1", "169.254.", "metadata."]
+        if any(_whost.startswith(b) or _whost == b.rstrip(".") for b in _blocked):
+            raise HTTPException(422, "Webhook URL targets a reserved address")
+        try:
+            _waddr = _ipaddress.ip_address(_whost)
+            if _waddr.is_private or _waddr.is_loopback or _waddr.is_link_local or _waddr.is_reserved:
+                raise HTTPException(422, "Webhook URL targets a private/reserved address")
+        except ValueError:
+            pass  # hostname, not IP literal — allow
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(422, "Invalid webhook URL")
     events_raw = body.get("events", ["all"])
     if isinstance(events_raw, list):
         events = events_raw
@@ -4505,6 +4533,7 @@ async def delete_agent_state(key: str, agent: dict = Depends(get_agent)):
 # ---------------------------------------------------------------------------
 
 @router.post("/me/tro", tags=["platform"])
+@limiter.limit("30/minute")
 async def post_tro(request: Request, agent: dict = Depends(get_agent)):
     """
     Broadcast a Task Request Object — a live service request on the agent bus.
