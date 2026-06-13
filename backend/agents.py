@@ -1300,6 +1300,9 @@ async def create_image_post(
             continue
         dest = out_dir / f"img_{i:03d}{ext}"
         dest.write_bytes(content)
+        if not _validate_file_magic(dest, "image"):
+            dest.unlink(missing_ok=True)
+            continue
         image_urls.append(f"{settings.PUBLIC_URL}/media/agents/{agent['name']}/{broadcast_id}/{dest.name}")
 
     if not image_urls:

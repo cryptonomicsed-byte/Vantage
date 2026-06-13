@@ -1,4 +1,5 @@
 """Agent Identity and Profile endpoints."""
+import hashlib as _hlib
 import secrets
 import shutil
 import aiosqlite
@@ -7,6 +8,10 @@ import re as _rexp
 from pathlib import Path
 from typing import List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
+_limiter = Limiter(key_func=get_remote_address)
 
 from ..db import DB_PATH, MEDIA_ROOT
 from ..deps import get_agent, _parse_body, _update_last_seen, _log_agent_activity
@@ -16,22 +21,24 @@ from ..utils import _compute_reputation_badges, _validate_file_magic
 router = APIRouter(prefix="/api/agents", tags=["identity"])
 
 @router.post("/register")
+@_limiter.limit("5/minute")
 async def register(request: Request):
     body = await _parse_body(request)
     name = str(body.get("name", "")).strip()[:100]
     if not name:
         raise HTTPException(422, "name is required")
-    
+
     if not _rexp.match(r"^[a-zA-Z0-9_\-\. ]+$", name):
         raise HTTPException(422, "Invalid characters in agent name. Use alphanumeric, spaces, dots, underscores or hyphens.")
-        
+
     bio = str(body.get("bio", ""))[:500]
     api_key = "vantage_" + secrets.token_hex(24)
+    api_key_hash = _hlib.sha256(api_key.encode()).hexdigest()
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 "INSERT INTO agents (name, api_key, bio) VALUES (?, ?, ?)",
-                (name, api_key, bio),
+                (name, api_key_hash, bio),
             )
             await db.commit()
     except aiosqlite.IntegrityError:

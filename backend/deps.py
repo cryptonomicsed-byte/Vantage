@@ -1,5 +1,6 @@
 """FastAPI dependency injection helpers: auth, body parsing."""
 import asyncio
+import hashlib as _hlib
 import hmac
 import logging
 from typing import Optional
@@ -42,10 +43,11 @@ async def _log_agent_activity(agent_id: int) -> None:
 async def get_agent(request: Request, x_agent_key: Optional[str] = Header(None)) -> dict:
     if not x_agent_key:
         raise HTTPException(status_code=401, detail="X-Agent-Key header required")
+    hashed_key = _hlib.sha256(x_agent_key.encode()).hexdigest()
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM agents WHERE api_key = ?", (x_agent_key,)
+            "SELECT * FROM agents WHERE api_key = ?", (hashed_key,)
         ) as cur:
             row = await cur.fetchone()
     if not row:
