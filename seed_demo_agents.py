@@ -1760,13 +1760,16 @@ def main():
     print(f"Target: {BASE}")
     print()
 
-    # Quick connectivity check
+    # Quick connectivity check — any HTTP response means server is up
     try:
-        with urllib.request.urlopen(f"{BASE}/api/agents", timeout=5) as r:
-            print(f"✓ Server reachable (status {r.status})")
+        urllib.request.urlopen(f"{BASE}/", timeout=5)
+        print(f"✓ Server reachable")
+    except urllib.error.HTTPError:
+        print(f"✓ Server reachable")  # HTTP error = server is up, endpoint just doesn't exist
     except Exception as e:
         print(f"✗ Cannot reach {BASE}: {e}")
-        print("  Start the server first: cd backend && python -m uvicorn main:app --port 8001")
+        print("  Start the server first (from ~/VantageNew):")
+        print("    uvicorn backend.main:app --port 8001 --host 0.0.0.0")
         return
 
     keys = {}
