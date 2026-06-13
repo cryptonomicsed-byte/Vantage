@@ -122,6 +122,11 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
   const nodesRef = useRef<SimNode[]>([])
   const linksRef = useRef<SimLink[]>([])
 
+  // Visual FX refs
+  const bgStarsRef = useRef<Array<{ x: number; y: number; r: number; phase: number }>>([])
+  const nebulasRef = useRef<Array<{ x: number; y: number; r: number; color: string }>>([])
+  const edgeParticlesRef = useRef<Array<{ progress: number; linkIdx: number }>>([])
+
   // View state
   const scaleRef = useRef(1.0)
   const offsetXRef = useRef(0)
@@ -173,6 +178,22 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
     resize()
     const ro = new ResizeObserver(resize)
     ro.observe(container)
+
+    // Initialize background starfield and nebulas once
+    bgStarsRef.current = Array.from({ length: 220 }, () => ({
+      x: Math.random(),
+      y: Math.random(),
+      r: Math.random() * 1.3 + 0.3,
+      phase: Math.random() * Math.PI * 2,
+    }))
+    nebulasRef.current = [
+      { x: 0.18, y: 0.28, r: 190, color: '138,75,255' },
+      { x: 0.76, y: 0.62, r: 155, color: '0,245,255' },
+      { x: 0.50, y: 0.12, r: 130, color: '120,60,220' },
+      { x: 0.88, y: 0.22, r: 105, color: '0,180,255' },
+      { x: 0.30, y: 0.82, r: 115, color: '80,40,180' },
+    ]
+
     return () => ro.disconnect()
   }, [])
 
@@ -256,6 +277,40 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
       ctx.fillStyle = '#040408'
       ctx.fillRect(0, 0, w, h)
 
+      const now = Date.now()
+      const t = now * 0.001
+
+      // ── Nebula depth blobs ──────────────────────────────────────────────────
+      nebulasRef.current.forEach(neb => {
+        const nx = neb.x * w, ny = neb.y * h
+        const grad = ctx.createRadialGradient(nx, ny, 0, nx, ny, neb.r)
+        grad.addColorStop(0, `rgba(${neb.color},0.07)`)
+        grad.addColorStop(0.5, `rgba(${neb.color},0.03)`)
+        grad.addColorStop(1, 'rgba(0,0,0,0)')
+        ctx.save()
+        ctx.beginPath()
+        ctx.arc(nx, ny, neb.r, 0, Math.PI * 2)
+        ctx.fillStyle = grad
+        ctx.fill()
+        ctx.restore()
+      })
+
+      // ── Twinkling background starfield ──────────────────────────────────────
+      bgStarsRef.current.forEach(star => {
+        const alpha = 0.18 + Math.sin(t * 0.5 + star.phase) * 0.22 + 0.18
+        const sx = star.x * w, sy = star.y * h
+        ctx.save()
+        if (Math.sin(t * 0.3 + star.phase) > 0.65) {
+          ctx.shadowBlur = 5
+          ctx.shadowColor = 'rgba(255,255,255,0.85)'
+        }
+        ctx.beginPath()
+        ctx.arc(sx, sy, star.r, 0, Math.PI * 2)
+        ctx.fillStyle = `rgba(255,255,255,${alpha})`
+        ctx.fill()
+        ctx.restore()
+      })
+
       const nodes = nodesRef.current
       const links = linksRef.current
 
@@ -283,30 +338,62 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
       // ── Draw edges ──────────────────────────────────────────────────────────
       links.forEach(link => {
         const s = link.source as SimNode
-        const t = link.target as SimNode
-        if (typeof s === 'string' || typeof t === 'string') return
-        if (s.x == null || s.y == null || t.x == null || t.y == null) return
+        const tgt = link.target as SimNode
+        if (typeof s === 'string' || typeof tgt === 'string') return
+        if (s.x == null || s.y == null || tgt.x == null || tgt.y == null) return
 
         const [x1, y1] = toScreen(s.x, s.y)
-        const [x2, y2] = toScreen(t.x, t.y)
+        const [x2, y2] = toScreen(tgt.x, tgt.y)
 
         const trust = link.trust ?? 0.5
-        let strokeStyle = 'rgba(255,255,255,0.06)'
-        if (hoveredId === s.id || hoveredId === t.id) {
-          const rgb = trust >= 0.8 ? '0,245,255' : trust >= 0.5 ? '255,170,0' : trust >= 0.3 ? '255,51,51' : '68,68,68'
-          strokeStyle = `rgba(${rgb},0.65)`
-        } else if (selConst && (s.star.constellation === selConst || t.star.constellation === selConst)) {
-          strokeStyle = 'rgba(255,255,255,0.18)'
+        let strokeStyle = 'rgba(0,245,255,0.22)'
+        if (hoveredId === s.id || hoveredId === tgt.id) {
+          const rgb = trust >= 0.8 ? '0,245,255' : trust >= 0.5 ? '255,170,0' : trust >= 0.3 ? '255,51,51' : '150,150,180'
+          strokeStyle = `rgba(${rgb},0.85)`
+        } else if (selConst && (s.star.constellation === selConst || tgt.star.constellation === selConst)) {
+          strokeStyle = 'rgba(0,245,255,0.4)'
         }
 
         ctx.save()
+        ctx.shadowBlur = 4
+        ctx.shadowColor = 'rgba(0,200,255,0.35)'
         ctx.beginPath()
         ctx.moveTo(x1, y1)
         ctx.lineTo(x2, y2)
         ctx.strokeStyle = strokeStyle
-        ctx.lineWidth = Math.max(0.4, link.weight * 0.5)
+        ctx.lineWidth = Math.max(1.0, link.weight * 0.6)
         ctx.stroke()
         ctx.restore()
+      })
+
+      // ── Edge pulse particles (firing-off effect) ────────────────────────────
+      if (links.length > 0 && Math.random() < 0.10) {
+        edgeParticlesRef.current.push({
+          progress: 0,
+          linkIdx: Math.floor(Math.random() * links.length),
+        })
+      }
+      edgeParticlesRef.current = edgeParticlesRef.current.filter(p => {
+        p.progress += 0.014
+        const link = links[p.linkIdx]
+        if (!link) return false
+        const s = link.source as SimNode
+        const tgt = link.target as SimNode
+        if (typeof s === 'string' || s.x == null || s.y == null || tgt.x == null || tgt.y == null) return false
+        const [x1, y1] = toScreen(s.x as number, s.y as number)
+        const [x2, y2] = toScreen(tgt.x as number, tgt.y as number)
+        const px = x1 + (x2 - x1) * p.progress
+        const py = y1 + (y2 - y1) * p.progress
+        ctx.save()
+        ctx.beginPath()
+        ctx.arc(px, py, 2.5, 0, Math.PI * 2)
+        ctx.fillStyle = '#00f5ff'
+        ctx.shadowBlur = 14
+        ctx.shadowColor = '#00f5ff'
+        ctx.globalAlpha = 1 - p.progress * 0.4
+        ctx.fill()
+        ctx.restore()
+        return p.progress < 1
       })
 
       // ── Cross-agent dashed beziers ──────────────────────────────────────────
@@ -342,7 +429,7 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
       }
 
       // ── Draw nodes ──────────────────────────────────────────────────────────
-      nodes.forEach(node => {
+      nodes.forEach((node, nodeIndex) => {
         if (node.x == null || node.y == null) return
 
         const star = node.star
@@ -369,8 +456,20 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
           return
         }
 
+        // Outer halo — pulsing ring
+        const haloAlpha = 0.04 + Math.sin(now * 0.002 + nodeIndex * 0.7) * 0.02
+        ctx.save()
+        ctx.globalAlpha = haloAlpha
+        ctx.shadowBlur = r * 4
+        ctx.shadowColor = node.color
+        ctx.beginPath()
+        ctx.arc(screenX, screenY, r * 2.4, 0, Math.PI * 2)
+        ctx.fillStyle = node.color
+        ctx.fill()
+        ctx.restore()
+
         // Glow
-        ctx.shadowBlur = hovered ? r * 5 : r * 3
+        ctx.shadowBlur = hovered ? r * 6 : r * 4
         ctx.shadowColor = node.color
 
         // Radial gradient fill

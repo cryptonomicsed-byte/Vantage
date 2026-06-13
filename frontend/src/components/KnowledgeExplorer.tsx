@@ -89,6 +89,7 @@ export default function KnowledgeExplorer() {
   const nodesRef = useRef<GNode[]>([])
   const edgesRef = useRef<GEdge[]>([])
   const [renderTick, setRenderTick] = useState(0)
+  const touchRef = useRef({ x: 0, y: 0, dist: 0 })
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -193,6 +194,44 @@ export default function KnowledgeExplorer() {
     setTooltip(closest ? { x: e.clientX + 14, y: e.clientY - 10, node: closest, edge: null } : null)
   }
 
+  const handleTouchStart = (e: React.TouchEvent<SVGSVGElement>) => {
+    e.preventDefault()
+    if (e.touches.length === 1) {
+      touchRef.current.dist = 0
+      setDragging(true)
+      setDragStart({ x: e.touches[0].clientX, y: e.touches[0].clientY })
+    } else if (e.touches.length === 2) {
+      const dx = e.touches[1].clientX - e.touches[0].clientX
+      const dy = e.touches[1].clientY - e.touches[0].clientY
+      touchRef.current.dist = Math.sqrt(dx * dx + dy * dy)
+      setDragging(false)
+    }
+  }
+
+  const handleTouchMove = (e: React.TouchEvent<SVGSVGElement>) => {
+    e.preventDefault()
+    if (e.touches.length === 1 && dragging) {
+      const dx = e.touches[0].clientX - dragStart.x
+      const dy = e.touches[0].clientY - dragStart.y
+      setPan(p => ({ x: p.x + dx, y: p.y + dy }))
+      setDragStart({ x: e.touches[0].clientX, y: e.touches[0].clientY })
+    } else if (e.touches.length === 2) {
+      const dx = e.touches[1].clientX - e.touches[0].clientX
+      const dy = e.touches[1].clientY - e.touches[0].clientY
+      const dist = Math.sqrt(dx * dx + dy * dy)
+      if (touchRef.current.dist > 0) {
+        const ratio = dist / touchRef.current.dist
+        setZoom(z => Math.max(0.3, Math.min(3, z * ratio)))
+      }
+      touchRef.current.dist = dist
+    }
+  }
+
+  const handleTouchEnd = (e: React.TouchEvent<SVGSVGElement>) => {
+    e.preventDefault()
+    if (e.touches.length === 0) setDragging(false)
+  }
+
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault()
     setZoom(z => Math.max(0.3, Math.min(3, z * (e.deltaY > 0 ? 0.9 : 1.1))))
@@ -239,11 +278,15 @@ export default function KnowledgeExplorer() {
         ) : (
           <svg
             className="kg-svg"
+            style={{ touchAction: 'none' }}
             onMouseMove={handleSvgMouseMove}
             onMouseLeave={() => { setTooltip(null); if (!dragging) {} }}
             onMouseDown={e => { setDragging(true); setDragStart({ x: e.clientX, y: e.clientY }) }}
             onMouseUp={() => setDragging(false)}
             onWheel={handleWheel}
+            onTouchStart={handleTouchStart}
+            onTouchMove={handleTouchMove}
+            onTouchEnd={handleTouchEnd}
             onClick={e => {
               const rect = (e.target as SVGElement).closest('svg')!.getBoundingClientRect()
               const svgX = (e.clientX - rect.left - pan.x) / zoom
