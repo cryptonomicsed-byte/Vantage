@@ -13,7 +13,7 @@ import httpx
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -459,6 +459,11 @@ async def lifespan(app: FastAPI):
         )
         settings.OUTBOUND_WEBHOOK_URL = ""
 
+    # Start batch writers before any request handlers run
+    from .utils import view_events_writer, activity_log_writer
+    view_events_writer.start()
+    activity_log_writer.start()
+
     task = asyncio.create_task(_scheduled_publish_loop())
     gossip_task = asyncio.create_task(_federation_gossip_loop())
     watch_task = asyncio.create_task(_platform_subscription_loop())
@@ -466,6 +471,8 @@ async def lifespan(app: FastAPI):
     stuck_task = asyncio.create_task(_stuck_broadcast_recovery_loop())
     rollup_task = asyncio.create_task(_view_events_rollup_loop())
     yield
+    view_events_writer.stop()
+    activity_log_writer.stop()
     for t in (task, gossip_task, watch_task, weather_task, stuck_task, rollup_task):
         t.cancel()
         try:
@@ -573,6 +580,17 @@ async def mcp_manifest():
         "docs": "/docs",
         "openapi": "/openapi.json",
     }
+
+
+@app.api_route(
+    "/api/v1/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    include_in_schema=False,
+)
+async def api_v1_compat(path: str, request: Request):
+    """HTTP 308 redirect — /api/v1/* → /api/* (method + body preserved)."""
+    qs = f"?{request.url.query}" if request.url.query else ""
+    return RedirectResponse(url=f"/api/{path}{qs}", status_code=308)
 
 
 @app.websocket("/ws/feed")

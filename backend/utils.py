@@ -427,6 +427,71 @@ async def _create_notification(
         logger.debug("silenced _create_notification: %s", _exc)
 
 
+# ── SQLite write batcher ──────────────────────────────────────────────────────
+# Buffers high-frequency INSERT/UPDATE writes in memory and flushes them to
+# SQLite in a single transaction every `flush_interval` seconds (or when
+# `max_pending` rows accumulate).  This prevents per-request DB round-trips
+# for view_events and agent_activity_log, which together can dominate write load.
+
+import time as _time_mod
+
+
+class _BatchWriter:
+    """Collect (sql, params) pairs and flush as a batch transaction."""
+
+    def __init__(self, flush_interval: float = 5.0, max_pending: int = 200):
+        self._pending: list[tuple[str, tuple]] = []
+        self._flush_interval = flush_interval
+        self._max_pending = max_pending
+        self._last_flush: float = _time_mod.monotonic()
+        self._lock = asyncio.Lock()
+        self._task: asyncio.Task | None = None
+
+    def start(self) -> None:
+        """Start the background flush loop. Call once from lifespan."""
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._flush_loop())
+
+    def stop(self) -> None:
+        if self._task and not self._task.done():
+            self._task.cancel()
+
+    async def add(self, sql: str, params: tuple) -> None:
+        async with self._lock:
+            self._pending.append((sql, params))
+            should_flush = (
+                len(self._pending) >= self._max_pending
+                or (_time_mod.monotonic() - self._last_flush) >= self._flush_interval
+            )
+        if should_flush:
+            await self._flush()
+
+    async def _flush(self) -> None:
+        async with self._lock:
+            if not self._pending:
+                return
+            batch = self._pending[:]
+            self._pending.clear()
+            self._last_flush = _time_mod.monotonic()
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                for sql, params in batch:
+                    await db.execute(sql, params)
+                await db.commit()
+        except Exception as _exc:
+            logger.warning("_BatchWriter flush error: %s", _exc)
+
+    async def _flush_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._flush_interval)
+            await self._flush()
+
+
+# Module-level shared batch writers
+view_events_writer = _BatchWriter(flush_interval=3.0, max_pending=100)
+activity_log_writer = _BatchWriter(flush_interval=5.0, max_pending=200)
+
+
 async def _check_dead_letter(job_id: int, agent_id: int) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row

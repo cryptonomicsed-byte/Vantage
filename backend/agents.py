@@ -53,6 +53,7 @@ from .utils import (
     _ensure_messages_table, _create_notification,
     _check_dead_letter,
     sanitize_markdown, sanitize_text,
+    view_events_writer,
 )
 
 logger = logging.getLogger(__name__)
@@ -727,19 +728,19 @@ async def stream_playlist(broadcast_id: int):
     if not row:
         raise HTTPException(status_code=404, detail="Stream not found")
 
-    # Increment view count and record event
+    # Increment view count and record event (view_event batched; view_count updated immediately)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE broadcasts SET view_count = view_count + 1 WHERE id=?", (broadcast_id,)
-        )
-        await db.execute(
-            "INSERT INTO view_events (broadcast_id) VALUES (?)", (broadcast_id,)
         )
         await db.commit()
         async with db.execute(
             "SELECT view_count FROM broadcasts WHERE id=?", (broadcast_id,)
         ) as _vc_cur:
             _vc_row = await _vc_cur.fetchone()
+    asyncio.create_task(view_events_writer.add(
+        "INSERT INTO view_events (broadcast_id) VALUES (?)", (broadcast_id,)
+    ))
     new_count = _vc_row[0] if _vc_row else 0
     asyncio.create_task(_check_token_milestones(broadcast_id, new_count))
 
@@ -755,12 +756,10 @@ async def watch_heartbeat(
     agent: dict = Depends(get_agent),
 ):
     """Record watch progress in seconds. Called periodically by the video player."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO view_events (broadcast_id, watch_seconds) VALUES (?,?)",
-            (broadcast_id, max(0.0, min(seconds, 86400.0))),
-        )
-        await db.commit()
+    await view_events_writer.add(
+        "INSERT INTO view_events (broadcast_id, watch_seconds) VALUES (?,?)",
+        (broadcast_id, max(0.0, min(seconds, 86400.0))),
+    )
     return {"ok": True}
 
 
@@ -1797,15 +1796,23 @@ async def register_webhook(request: Request, agent: dict = Depends(get_agent)):
     else:
         events = [e.strip() for e in str(events_raw).split(",") if e.strip()]
     events = [e for e in events if e in _VALID_WEBHOOK_EVENTS] or ["all"]
-    secret = str(body.get("secret", ""))[:200]
+    # Generate a server-side signing secret — never accept one from the client.
+    # Returned once here; not exposed again by GET /me/webhooks.
+    signing_secret = secrets.token_hex(32)
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             "INSERT INTO agent_webhooks (agent_id, url, events, secret) VALUES (?,?,?,?)",
-            (agent["id"], url, _json.dumps(events), secret),
+            (agent["id"], url, _json.dumps(events), signing_secret),
         )
         webhook_id = cur.lastrowid
         await db.commit()
-    return {"webhook_id": webhook_id, "url": url, "events": events}
+    return {
+        "webhook_id": webhook_id,
+        "url": url,
+        "events": events,
+        "signing_secret": signing_secret,
+        "signing_secret_note": "Store this secret — it will not be shown again. Use it to verify X-Vantage-Signature headers.",
+    }
 
 @router.get("/me/webhooks")
 async def list_webhooks(agent: dict = Depends(get_agent)):
