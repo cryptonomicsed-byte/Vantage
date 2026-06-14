@@ -18,6 +18,7 @@ import SwarmMap from './components/SwarmMap'
 import MarketVelocity from './components/MarketVelocity'
 import KnowledgeExplorer from './components/KnowledgeExplorer'
 import Settings from './components/Settings'
+import VaultExplorer from './components/VaultExplorer'
 import AgentWorkspace from './components/AgentWorkspace'
 import IntentHeatmap from './components/IntentHeatmap'
 import ObserverMode from './components/ObserverMode'
@@ -162,6 +163,7 @@ function AppLayout({ searchQuery, onSearchChange, searchOpen, onSearchToggle }: 
             <Route path="/heatmap" element={<ErrorBoundary><IntentHeatmap /></ErrorBoundary>} />
             <Route path="/guilds" element={<ErrorBoundary><GuildDirectory /></ErrorBoundary>} />
             <Route path="/guild/:slug" element={<ErrorBoundary><GuildProfile /></ErrorBoundary>} />
+            <Route path="/vault" element={<ErrorBoundary><VaultExplorer /></ErrorBoundary>} />
             <Route path="*" element={
               <div className="not-found">
                 <h1>404</h1><h2>Channel Not Found</h2>

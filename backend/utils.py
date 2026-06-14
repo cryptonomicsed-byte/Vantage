@@ -3,6 +3,7 @@ import asyncio
 import hashlib as _hashlib_receipts
 import ipaddress as _ipaddress
 import json as _json
+import re as _re
 import json as _json_receipts
 import logging
 from collections import deque as _deque
@@ -20,7 +21,47 @@ from .db import DB_PATH, MEDIA_ROOT
 
 logger = logging.getLogger(__name__)
 
-# In-memory log ring buffer (tail of recent log entries for admin dashboard)
+# ── XSS / injection sanitization ─────────────────────────────────────────────
+
+_BLOCK_TAGS = _re.compile(
+    r'<(script|style|iframe|object|embed|form|link|meta|base)'
+    r'[^>]*>.*?</\1>',
+    _re.IGNORECASE | _re.DOTALL,
+)
+_BLOCK_TAGS_VOID = _re.compile(
+    r'<(script|style|iframe|object|embed|form|link|meta|base)[^>]*/?>',
+    _re.IGNORECASE,
+)
+_EVENT_HANDLERS = _re.compile(r'\bon\w+\s*=\s*(?:"[^"]*"|\'[^\']*\'|\S+)', _re.IGNORECASE)
+_DANGEROUS_MD_LINKS = _re.compile(
+    r'\[([^\]]*)\]\((javascript|data|vbscript|file):[^)]*\)', _re.IGNORECASE
+)
+_ALL_HTML_TAGS = _re.compile(r'<[^>]+>')
+_DANGEROUS_PROTO_INLINE = _re.compile(r'(javascript|data|vbscript):', _re.IGNORECASE)
+
+
+def sanitize_markdown(text: str) -> str:
+    """Strip dangerous HTML/script injection from markdown content before storage."""
+    if not text:
+        return ""
+    text = _re.sub(r'<!--.*?-->', '', text, flags=_re.DOTALL)
+    text = _BLOCK_TAGS.sub('', text)
+    text = _BLOCK_TAGS_VOID.sub('', text)
+    text = _EVENT_HANDLERS.sub('', text)
+    text = _DANGEROUS_MD_LINKS.sub(r'[\1](#)', text)
+    return text
+
+
+def sanitize_text(text: str) -> str:
+    """Strip all HTML tags and dangerous protocols from a short plain-text field."""
+    if not text:
+        return ""
+    text = _ALL_HTML_TAGS.sub('', text)
+    text = _DANGEROUS_PROTO_INLINE.sub('', text)
+    return text.strip()
+
+
+# ── In-memory log ring buffer (tail of recent log entries for admin dashboard)
 _log_buffer: _deque = _deque(maxlen=1000)
 
 
@@ -340,7 +381,7 @@ async def _save_thumbnail(
         tmp.unlink(missing_ok=True)
         return None
     tmp.rename(dest)
-    return f"{settings.PUBLIC_URL}/media/agents/{agent_name}/thumbs/{broadcast_id}{ext}"
+    return f"/media/agents/{agent_name}/thumbs/{broadcast_id}{ext}"
 
 
 async def _ensure_messages_table(db) -> None:
@@ -384,6 +425,71 @@ async def _create_notification(
                 pass
     except Exception as _exc:
         logger.debug("silenced _create_notification: %s", _exc)
+
+
+# ── SQLite write batcher ──────────────────────────────────────────────────────
+# Buffers high-frequency INSERT/UPDATE writes in memory and flushes them to
+# SQLite in a single transaction every `flush_interval` seconds (or when
+# `max_pending` rows accumulate).  This prevents per-request DB round-trips
+# for view_events and agent_activity_log, which together can dominate write load.
+
+import time as _time_mod
+
+
+class _BatchWriter:
+    """Collect (sql, params) pairs and flush as a batch transaction."""
+
+    def __init__(self, flush_interval: float = 5.0, max_pending: int = 200):
+        self._pending: list[tuple[str, tuple]] = []
+        self._flush_interval = flush_interval
+        self._max_pending = max_pending
+        self._last_flush: float = _time_mod.monotonic()
+        self._lock = asyncio.Lock()
+        self._task: asyncio.Task | None = None
+
+    def start(self) -> None:
+        """Start the background flush loop. Call once from lifespan."""
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._flush_loop())
+
+    def stop(self) -> None:
+        if self._task and not self._task.done():
+            self._task.cancel()
+
+    async def add(self, sql: str, params: tuple) -> None:
+        async with self._lock:
+            self._pending.append((sql, params))
+            should_flush = (
+                len(self._pending) >= self._max_pending
+                or (_time_mod.monotonic() - self._last_flush) >= self._flush_interval
+            )
+        if should_flush:
+            await self._flush()
+
+    async def _flush(self) -> None:
+        async with self._lock:
+            if not self._pending:
+                return
+            batch = self._pending[:]
+            self._pending.clear()
+            self._last_flush = _time_mod.monotonic()
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                for sql, params in batch:
+                    await db.execute(sql, params)
+                await db.commit()
+        except Exception as _exc:
+            logger.warning("_BatchWriter flush error: %s", _exc)
+
+    async def _flush_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._flush_interval)
+            await self._flush()
+
+
+# Module-level shared batch writers
+view_events_writer = _BatchWriter(flush_interval=3.0, max_pending=100)
+activity_log_writer = _BatchWriter(flush_interval=5.0, max_pending=200)
 
 
 async def _check_dead_letter(job_id: int, agent_id: int) -> None:

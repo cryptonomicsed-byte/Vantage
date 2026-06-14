@@ -1,15 +1,19 @@
 """Guild / Collective endpoints."""
 import json as _json
+import re as _re
 import secrets
 import logging
+from datetime import datetime
+from typing import Optional
 
 import aiosqlite
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from ..db import DB_PATH
-from ..deps import get_agent
+from ..deps import get_agent, _parse_body
+from ..memory_vault import MemoryVault
 from ..utils import _broadcast_gossip, notify_feed_clients
 
 _limiter = Limiter(key_func=get_remote_address)
@@ -368,3 +372,74 @@ async def guild_reputation(slug: str):
         "top_capabilities": all_badges[:10],
         "member_count": len(members),
     }
+
+
+@router.get("/{slug}/vault/galaxy")
+async def guild_vault_galaxy(slug: str, x_agent_key: Optional[str] = Header(None)):
+    """Merged galaxy of all public-vault guild members."""
+    guild = await _get_guild(slug)
+    from ..routers.memory_vault import _resolve_accessor
+    accessor_id = await _resolve_accessor(x_agent_key)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        members = await (await db.execute(
+            "SELECT agent_id, agent_name FROM guild_members WHERE guild_id=?",
+            (guild["id"],)
+        )).fetchall()
+
+    _COLORS = ["#ff6b6b","#4ecdc4","#ffe66d","#a8e6cf","#c7ceea","#ff8b94","#ffd93d","#6c5ce7"]
+    all_stars, all_edges, all_nebulae = [], [], []
+    for i, m in enumerate(members):
+        try:
+            vault = MemoryVault(m["agent_id"], m["agent_name"])
+            if not await vault.check_access(accessor_id, ""):
+                continue
+            data = vault.get_galaxy_data()
+            color = _COLORS[i % len(_COLORS)]
+            for star in data["stars"]:
+                star["agent_name"] = m["agent_name"]
+                star["agent_color"] = color
+            all_stars.extend(data["stars"])
+            all_edges.extend(data["edges"])
+            all_nebulae.extend(data["nebulae"])
+        except Exception:
+            continue
+
+    return {
+        "guild_slug": slug, "stars": all_stars, "edges": all_edges,
+        "nebulae": all_nebulae, "clusters": {},
+        "bounds": {"min": [0, 0, 0], "max": [8000, 1000, 500]},
+    }
+
+
+@router.post("/{slug}/vault/note")
+async def guild_vault_note(slug: str, request: Request, agent: dict = Depends(get_agent)):
+    """Contribute a note to the guild's shared knowledge (writes to contributor's vault)."""
+    guild = await _get_guild(slug)
+    role = await _get_member_role(guild["id"], agent["id"])
+    if role is None:
+        raise HTTPException(403, "Must be a guild member to contribute notes")
+    body = await _parse_body(request)
+    title = str(body.get("title", "")).strip()
+    note_body_text = str(body.get("body", ""))
+    if not title:
+        raise HTTPException(422, "title is required")
+    from uuid import uuid4
+    vault = MemoryVault(agent["id"], agent["name"])
+    note_id = f"guild_{uuid4().hex[:8]}"
+    coords = vault._spatial_hash(title, "knowledge")
+    tags = ["guild", slug]
+    frontmatter = {
+        "id": note_id, "type": "star", "content_type": "text",
+        "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
+        "galaxy_size": 10, "galaxy_color": "#c7ceea",
+        "constellation": f"guild_{slug}", "tags": tags,
+        "guild_slug": slug,
+        "created": datetime.utcnow().isoformat(),
+    }
+    safe_title = _re.sub(r"[^\w-]", "_", title[:50])
+    note_path = vault.vault_path / "knowledge" / f"guild_{slug}_{safe_title}.md"
+    vault._write_note(note_path, frontmatter, note_body_text)
+    relative = str(note_path.relative_to(vault.vault_path))
+    await vault._update_fts(relative, title, note_body_text, tags)
+    return {"path": relative, "id": note_id, "guild_slug": slug}

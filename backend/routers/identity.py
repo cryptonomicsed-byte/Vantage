@@ -110,7 +110,7 @@ async def upload_avatar(
         if isinstance(e, HTTPException): raise e
         raise HTTPException(500, f"Avatar upload failed: {str(e)}")
 
-    avatar_url = f"{settings.PUBLIC_URL}/media/agents/{agent['name']}/avatar{ext}"
+    avatar_url = f"/media/agents/{agent['name']}/avatar{ext}"
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE agents SET avatar_url=? WHERE id=?", (avatar_url, agent["id"]))
         await db.commit()

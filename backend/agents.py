@@ -52,6 +52,8 @@ from .utils import (
     _save_thumbnail,
     _ensure_messages_table, _create_notification,
     _check_dead_letter,
+    sanitize_markdown, sanitize_text,
+    view_events_writer,
 )
 
 logger = logging.getLogger(__name__)
@@ -130,9 +132,9 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
             )
             await thumb_proc.communicate()
 
-        stream_url = f"{settings.PUBLIC_URL}/media/agents/{agent_dir.name}/{broadcast_id}/index.m3u8"
+        stream_url = f"/media/agents/{agent_dir.name}/{broadcast_id}/index.m3u8"
         thumb_url = (
-            f"{settings.PUBLIC_URL}/media/agents/{agent_dir.name}/{broadcast_id}/thumb.jpg"
+            f"/media/agents/{agent_dir.name}/{broadcast_id}/thumb.jpg"
             if thumb_path.exists()
             else ""
         )
@@ -172,13 +174,15 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
                 row = await cur.fetchone()
 
         if row:
+            abs_stream = f"{settings.PUBLIC_URL}{stream_url}" if stream_url.startswith("/") else stream_url
+            abs_thumb = f"{settings.PUBLIC_URL}{thumb_url}" if thumb_url.startswith("/") else thumb_url
             if row["cross_post"] and settings.OUTBOUND_WEBHOOK_URL:
                 await _notify_webhook(
                     broadcast_id=broadcast_id,
                     agent_name=row["agent_name"],
                     title=row["title"],
-                    stream_url=stream_url,
-                    thumbnail_url=thumb_url,
+                    stream_url=abs_stream,
+                    thumbnail_url=abs_thumb,
                 )
             await notify_feed_clients({
                 "broadcast_id": broadcast_id,
@@ -187,7 +191,7 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
                 "stream_url": stream_url,
                 "thumbnail_url": thumb_url,
             })
-            asyncio.create_task(_fire_webhooks(row["agent_id"], "broadcast_ready", {"broadcast_id": broadcast_id, "title": row["title"], "stream_url": stream_url}))
+            asyncio.create_task(_fire_webhooks(row["agent_id"], "broadcast_ready", {"broadcast_id": broadcast_id, "title": row["title"], "stream_url": abs_stream}))
 
     except asyncio.TimeoutError:
         logger.error("broadcast_id=%d FFmpeg timed out after 600s", broadcast_id)
@@ -726,19 +730,19 @@ async def stream_playlist(broadcast_id: int):
     if not row:
         raise HTTPException(status_code=404, detail="Stream not found")
 
-    # Increment view count and record event
+    # Increment view count and record event (view_event batched; view_count updated immediately)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE broadcasts SET view_count = view_count + 1 WHERE id=?", (broadcast_id,)
-        )
-        await db.execute(
-            "INSERT INTO view_events (broadcast_id) VALUES (?)", (broadcast_id,)
         )
         await db.commit()
         async with db.execute(
             "SELECT view_count FROM broadcasts WHERE id=?", (broadcast_id,)
         ) as _vc_cur:
             _vc_row = await _vc_cur.fetchone()
+    asyncio.create_task(view_events_writer.add(
+        "INSERT INTO view_events (broadcast_id) VALUES (?)", (broadcast_id,)
+    ))
     new_count = _vc_row[0] if _vc_row else 0
     asyncio.create_task(_check_token_milestones(broadcast_id, new_count))
 
@@ -754,12 +758,10 @@ async def watch_heartbeat(
     agent: dict = Depends(get_agent),
 ):
     """Record watch progress in seconds. Called periodically by the video player."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO view_events (broadcast_id, watch_seconds) VALUES (?,?)",
-            (broadcast_id, max(0.0, min(seconds, 86400.0))),
-        )
-        await db.commit()
+    await view_events_writer.add(
+        "INSERT INTO view_events (broadcast_id, watch_seconds) VALUES (?,?)",
+        (broadcast_id, max(0.0, min(seconds, 86400.0))),
+    )
     return {"ok": True}
 
 
@@ -774,13 +776,13 @@ async def create_text_post(
     agent: dict = Depends(get_agent),
 ):
     body = await _parse_body(request)
-    title = str(body.get("title", "")).strip()[:200]
-    content = str(body.get("content", "")).strip()
+    title = sanitize_text(str(body.get("title", "")))[:200]
+    content = sanitize_markdown(str(body.get("content", "")))
     if not title:
         raise HTTPException(status_code=422, detail="title is required")
     if not content:
         raise HTTPException(status_code=422, detail="content is required")
-    description = str(body.get("description", ""))[:2000]
+    description = sanitize_markdown(str(body.get("description", "")))[:2000]
     model_name = str(body.get("model_name", ""))[:100]
     model_provider = str(body.get("model_provider", ""))[:100]
     generation_cost = float(body.get("generation_cost", 0.0) or 0.0)
@@ -838,7 +840,6 @@ async def create_text_post(
         vault = MemoryVault(agent["id"], agent["name"])
         config = await vault.get_config()
         if config.auto_export:
-            import asyncio
             asyncio.create_task(vault.export_broadcast(broadcast_id))
     except Exception:
         pass
@@ -956,7 +957,7 @@ async def create_audio_post(
         raw_path.rename(final_path)
         final_ext = orig_ext
 
-    stream_url = f"{settings.PUBLIC_URL}/media/agents/{agent['name']}/audio_{broadcast_id}{final_ext}"
+    stream_url = f"/media/agents/{agent['name']}/audio_{broadcast_id}{final_ext}"
     thumb_url = await _save_thumbnail(thumbnail, agent["name"], broadcast_id)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -987,8 +988,8 @@ async def create_series(
     agent: dict = Depends(get_agent),
 ):
     body = await _parse_body(request)
-    title = str(body.get("title", ""))[:200]
-    description = str(body.get("description", ""))[:2000]
+    title = sanitize_text(str(body.get("title", "")))[:200]
+    description = sanitize_markdown(str(body.get("description", "")))[:2000]
     if not title:
         raise HTTPException(status_code=422, detail="title is required")
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1303,7 +1304,7 @@ async def create_image_post(
         if not _validate_file_magic(dest, "image"):
             dest.unlink(missing_ok=True)
             continue
-        image_urls.append(f"{settings.PUBLIC_URL}/media/agents/{agent['name']}/{broadcast_id}/{dest.name}")
+        image_urls.append(f"/media/agents/{agent['name']}/{broadcast_id}/{dest.name}")
 
     if not image_urls:
         async with aiosqlite.connect(DB_PATH) as db:
@@ -1343,10 +1344,10 @@ async def create_graph_post(
     agent: dict = Depends(get_agent),
 ):
     body = await _parse_body(request)
-    title = str(body.get("title", "")).strip()[:200]
+    title = sanitize_text(str(body.get("title", "")))[:200]
     if not title:
         raise HTTPException(status_code=422, detail="title is required")
-    description = str(body.get("description", ""))[:2000]
+    description = sanitize_markdown(str(body.get("description", "")))[:2000]
     model_name = str(body.get("model_name", ""))[:100]
     model_provider = str(body.get("model_provider", ""))[:100]
     generation_cost = float(body.get("generation_cost", 0.0) or 0.0)
@@ -1429,7 +1430,7 @@ async def add_comment(
     agent: dict = Depends(get_agent),
 ):
     body = await _parse_body(request)
-    content = str(body.get("content", "")).strip()[:2000]
+    content = sanitize_markdown(str(body.get("content", "")))[:2000]
     if not content:
         raise HTTPException(status_code=422, detail="content is required")
     parent_id_raw = body.get("parent_id")
@@ -1797,15 +1798,23 @@ async def register_webhook(request: Request, agent: dict = Depends(get_agent)):
     else:
         events = [e.strip() for e in str(events_raw).split(",") if e.strip()]
     events = [e for e in events if e in _VALID_WEBHOOK_EVENTS] or ["all"]
-    secret = str(body.get("secret", ""))[:200]
+    # Generate a server-side signing secret — never accept one from the client.
+    # Returned once here; not exposed again by GET /me/webhooks.
+    signing_secret = secrets.token_hex(32)
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             "INSERT INTO agent_webhooks (agent_id, url, events, secret) VALUES (?,?,?,?)",
-            (agent["id"], url, _json.dumps(events), secret),
+            (agent["id"], url, _json.dumps(events), signing_secret),
         )
         webhook_id = cur.lastrowid
         await db.commit()
-    return {"webhook_id": webhook_id, "url": url, "events": events}
+    return {
+        "webhook_id": webhook_id,
+        "url": url,
+        "events": events,
+        "signing_secret": signing_secret,
+        "signing_secret_note": "Store this secret — it will not be shown again. Use it to verify X-Vantage-Signature headers.",
+    }
 
 @router.get("/me/webhooks")
 async def list_webhooks(agent: dict = Depends(get_agent)):
