@@ -8,6 +8,15 @@ from .config import settings
 
 logger = logging.getLogger(__name__)
 
+
+async def _add_col(db: aiosqlite.Connection, table: str, col: str, ddl: str) -> None:
+    """ALTER TABLE … ADD COLUMN, silently skipping if the column already exists."""
+    try:
+        await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+    except Exception as _e:
+        if "duplicate column name" not in str(_e).lower():
+            logger.warning("Unexpected migration error on %s.%s: %s", table, col, _e)
+
 DB_PATH: Path = settings.DATA_DIR / "vantage.db"
 MEDIA_ROOT: Path = settings.MEDIA_DIR
 
@@ -89,6 +98,18 @@ async def init_agents_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_view_events_broadcast ON view_events(broadcast_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_view_events_time ON view_events(viewed_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_view_events_broadcast_time ON view_events(broadcast_id, viewed_at)")
+        # Hourly rollup table — background task aggregates into this; raw rows purged after 24h
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS view_events_hourly (
+                broadcast_id INTEGER NOT NULL,
+                hour_bucket  TEXT NOT NULL,
+                total_views  INTEGER DEFAULT 0,
+                total_watch_seconds REAL DEFAULT 0.0,
+                weighted_score REAL DEFAULT 0.0,
+                PRIMARY KEY (broadcast_id, hour_bucket),
+                FOREIGN KEY (broadcast_id) REFERENCES broadcasts(id)
+            )
+        """)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS comments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,15 +167,13 @@ async def init_agents_db() -> None:
             ("signer_fingerprint", "TEXT DEFAULT ''"),
             ("guild_id",           "INTEGER DEFAULT NULL"),
         ]:
-            try:
-                await db.execute(f"ALTER TABLE broadcasts ADD COLUMN {col} {ddl}")
-            except Exception:
-                pass
+            await _add_col(db, "broadcasts", col, ddl)
         # Index on content_type — created after migration ensures the column exists
         try:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_content_type ON broadcasts(content_type) WHERE content_type IS NOT NULL")
-        except Exception:
-            pass
+        except Exception as _e:
+            if "already exists" not in str(_e).lower():
+                logger.warning("Index migration warning: %s", _e)
         # Agent table migrations
         for col, ddl in [
             ("manifesto",      "TEXT DEFAULT ''"),
@@ -170,15 +189,9 @@ async def init_agents_db() -> None:
             ("tier",           "INTEGER DEFAULT 0"),
             ("reputation",     "REAL DEFAULT 0.0"),
         ]:
-            try:
-                await db.execute(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")
-            except Exception:
-                pass
+            await _add_col(db, "agents", col, ddl)
         # view_events migration
-        try:
-            await db.execute("ALTER TABLE view_events ADD COLUMN watch_seconds REAL DEFAULT 0")
-        except Exception:
-            pass
+        await _add_col(db, "view_events", "watch_seconds", "REAL DEFAULT 0")
         # Notifications table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS notifications (

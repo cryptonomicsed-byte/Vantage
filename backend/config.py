@@ -1,5 +1,7 @@
+import hashlib as _hashlib
 from pathlib import Path
-from typing import List
+from typing import List, Optional
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Check backend/.env first, then project root .env, then cwd .env
@@ -57,6 +59,20 @@ class Settings(BaseSettings):
     # using their own LLM, TTS, and image/video tools, then publish via standard endpoints.
 
     ADMIN_KEY: str = ""  # set via VANTAGE_ADMIN_KEY env var — no hardcoded default
+
+    @field_validator("ADMIN_KEY")
+    @classmethod
+    def validate_admin_key(cls, v: str) -> str:
+        if v and len(v) < 32:
+            raise ValueError("VANTAGE_ADMIN_KEY must be at least 32 characters")
+        return v
+
+    @property
+    def ADMIN_KEY_HASH(self) -> Optional[str]:
+        """SHA-256 of admin key, computed once. None if admin key is not set."""
+        if not self.ADMIN_KEY:
+            return None
+        return _hashlib.sha256(self.ADMIN_KEY.encode()).hexdigest()
 
     # Federation signing key — HMAC-SHA256 key for peer manifest verification (optional)
     FEDERATION_KEY: str = ""

@@ -3,6 +3,7 @@ import asyncio
 import hashlib as _hashlib_receipts
 import ipaddress as _ipaddress
 import json as _json
+import re as _re
 import json as _json_receipts
 import logging
 from collections import deque as _deque
@@ -20,7 +21,47 @@ from .db import DB_PATH, MEDIA_ROOT
 
 logger = logging.getLogger(__name__)
 
-# In-memory log ring buffer (tail of recent log entries for admin dashboard)
+# ── XSS / injection sanitization ─────────────────────────────────────────────
+
+_BLOCK_TAGS = _re.compile(
+    r'<(script|style|iframe|object|embed|form|link|meta|base)'
+    r'[^>]*>.*?</\1>',
+    _re.IGNORECASE | _re.DOTALL,
+)
+_BLOCK_TAGS_VOID = _re.compile(
+    r'<(script|style|iframe|object|embed|form|link|meta|base)[^>]*/?>',
+    _re.IGNORECASE,
+)
+_EVENT_HANDLERS = _re.compile(r'\bon\w+\s*=\s*(?:"[^"]*"|\'[^\']*\'|\S+)', _re.IGNORECASE)
+_DANGEROUS_MD_LINKS = _re.compile(
+    r'\[([^\]]*)\]\((javascript|data|vbscript|file):[^)]*\)', _re.IGNORECASE
+)
+_ALL_HTML_TAGS = _re.compile(r'<[^>]+>')
+_DANGEROUS_PROTO_INLINE = _re.compile(r'(javascript|data|vbscript):', _re.IGNORECASE)
+
+
+def sanitize_markdown(text: str) -> str:
+    """Strip dangerous HTML/script injection from markdown content before storage."""
+    if not text:
+        return ""
+    text = _re.sub(r'<!--.*?-->', '', text, flags=_re.DOTALL)
+    text = _BLOCK_TAGS.sub('', text)
+    text = _BLOCK_TAGS_VOID.sub('', text)
+    text = _EVENT_HANDLERS.sub('', text)
+    text = _DANGEROUS_MD_LINKS.sub(r'[\1](#)', text)
+    return text
+
+
+def sanitize_text(text: str) -> str:
+    """Strip all HTML tags and dangerous protocols from a short plain-text field."""
+    if not text:
+        return ""
+    text = _ALL_HTML_TAGS.sub('', text)
+    text = _DANGEROUS_PROTO_INLINE.sub('', text)
+    return text.strip()
+
+
+# ── In-memory log ring buffer (tail of recent log entries for admin dashboard)
 _log_buffer: _deque = _deque(maxlen=1000)
 
 

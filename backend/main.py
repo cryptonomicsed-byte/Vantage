@@ -72,6 +72,61 @@ async def _scheduled_publish_loop():
         await asyncio.sleep(60)
 
 
+async def _stuck_broadcast_recovery_loop():
+    """Every 5 minutes: mark broadcasts stuck in 'processing' for >30 minutes as error."""
+    await asyncio.sleep(90)
+    while True:
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    """UPDATE broadcasts
+                       SET status = 'error',
+                           description = COALESCE(description, '') || ' [auto-recovered: processing timeout]'
+                       WHERE status = 'processing'
+                         AND created_at < datetime('now', '-30 minutes')"""
+                )
+                recovered = db.total_changes
+                await db.commit()
+                if recovered > 0:
+                    logger.warning("Auto-recovered %d stuck broadcasts to error state", recovered)
+        except Exception as exc:
+            logger.warning("Stuck broadcast recovery error: %s", exc)
+        await asyncio.sleep(300)
+
+
+async def _view_events_rollup_loop():
+    """Every hour: aggregate view_events into hourly buckets, purge rows older than 24h."""
+    await asyncio.sleep(random.uniform(60, 120))
+    while True:
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("""
+                    INSERT OR REPLACE INTO view_events_hourly
+                    (broadcast_id, hour_bucket, total_views, total_watch_seconds, weighted_score)
+                    SELECT
+                        broadcast_id,
+                        strftime('%Y-%m-%d %H', viewed_at) AS hour_bucket,
+                        COUNT(*)                            AS total_views,
+                        SUM(COALESCE(watch_seconds, 0))    AS total_watch_seconds,
+                        SUM(CASE
+                            WHEN watch_seconds > 300 THEN 1.0
+                            WHEN watch_seconds > 60  THEN 0.5
+                            ELSE 0.1
+                        END)                               AS weighted_score
+                    FROM view_events
+                    WHERE viewed_at >= datetime('now', '-7 days')
+                    GROUP BY broadcast_id, hour_bucket
+                """)
+                await db.execute(
+                    "DELETE FROM view_events WHERE viewed_at < datetime('now', '-24 hours')"
+                )
+                await db.commit()
+                logger.info("View events hourly rollup complete; purged raw rows older than 24h")
+        except Exception as exc:
+            logger.warning("View events rollup error: %s", exc)
+        await asyncio.sleep(3600)
+
+
 async def _platform_subscription_loop():
     """Every 60s: evaluate platform_subscriptions and fire matching events."""
     import json as _pjson
@@ -408,8 +463,10 @@ async def lifespan(app: FastAPI):
     gossip_task = asyncio.create_task(_federation_gossip_loop())
     watch_task = asyncio.create_task(_platform_subscription_loop())
     weather_task = asyncio.create_task(_weather_alert_loop())
+    stuck_task = asyncio.create_task(_stuck_broadcast_recovery_loop())
+    rollup_task = asyncio.create_task(_view_events_rollup_loop())
     yield
-    for t in (task, gossip_task, watch_task, weather_task):
+    for t in (task, gossip_task, watch_task, weather_task, stuck_task, rollup_task):
         t.cancel()
         try:
             await t
@@ -453,13 +510,15 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
-# CORS
+# CORS — disable credentials when wildcard origins are allowed (CSRF safety)
+_cors_credentials = '*' not in settings.ALLOWED_ORIGINS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
-    allow_credentials=True,
+    allow_credentials=_cors_credentials,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "X-Agent-Key", "X-Admin-Key", "X-Federation-Peer", "Authorization"],
+    allow_headers=["Content-Type", "X-Agent-Key", "X-Admin-Key", "X-Federation-Peer", "Authorization", "X-Request-ID"],
+    max_age=600,
 )
 
 

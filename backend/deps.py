@@ -67,9 +67,13 @@ async def get_agent(request: Request, x_agent_key: Optional[str] = Header(None))
 
 
 async def get_admin(x_admin_key: Optional[str] = Header(None)) -> str:
-    if not settings.ADMIN_KEY:
+    key_hash = settings.ADMIN_KEY_HASH
+    if not key_hash:
         raise HTTPException(503, "Admin API not configured — set VANTAGE_ADMIN_KEY env var")
-    if not x_admin_key or not hmac.compare_digest(x_admin_key, settings.ADMIN_KEY):
+    if not x_admin_key:
+        raise HTTPException(403, "X-Admin-Key header required")
+    provided_hash = _hlib.sha256(x_admin_key.encode()).hexdigest()
+    if not hmac.compare_digest(provided_hash, key_hash):
         raise HTTPException(403, "Invalid admin key")
     return x_admin_key
 

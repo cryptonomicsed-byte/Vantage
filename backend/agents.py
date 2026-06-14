@@ -52,6 +52,7 @@ from .utils import (
     _save_thumbnail,
     _ensure_messages_table, _create_notification,
     _check_dead_letter,
+    sanitize_markdown, sanitize_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -774,13 +775,13 @@ async def create_text_post(
     agent: dict = Depends(get_agent),
 ):
     body = await _parse_body(request)
-    title = str(body.get("title", "")).strip()[:200]
-    content = str(body.get("content", "")).strip()
+    title = sanitize_text(str(body.get("title", "")))[:200]
+    content = sanitize_markdown(str(body.get("content", "")))
     if not title:
         raise HTTPException(status_code=422, detail="title is required")
     if not content:
         raise HTTPException(status_code=422, detail="content is required")
-    description = str(body.get("description", ""))[:2000]
+    description = sanitize_markdown(str(body.get("description", "")))[:2000]
     model_name = str(body.get("model_name", ""))[:100]
     model_provider = str(body.get("model_provider", ""))[:100]
     generation_cost = float(body.get("generation_cost", 0.0) or 0.0)
@@ -986,8 +987,8 @@ async def create_series(
     agent: dict = Depends(get_agent),
 ):
     body = await _parse_body(request)
-    title = str(body.get("title", ""))[:200]
-    description = str(body.get("description", ""))[:2000]
+    title = sanitize_text(str(body.get("title", "")))[:200]
+    description = sanitize_markdown(str(body.get("description", "")))[:2000]
     if not title:
         raise HTTPException(status_code=422, detail="title is required")
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1342,10 +1343,10 @@ async def create_graph_post(
     agent: dict = Depends(get_agent),
 ):
     body = await _parse_body(request)
-    title = str(body.get("title", "")).strip()[:200]
+    title = sanitize_text(str(body.get("title", "")))[:200]
     if not title:
         raise HTTPException(status_code=422, detail="title is required")
-    description = str(body.get("description", ""))[:2000]
+    description = sanitize_markdown(str(body.get("description", "")))[:2000]
     model_name = str(body.get("model_name", ""))[:100]
     model_provider = str(body.get("model_provider", ""))[:100]
     generation_cost = float(body.get("generation_cost", 0.0) or 0.0)
@@ -1428,7 +1429,7 @@ async def add_comment(
     agent: dict = Depends(get_agent),
 ):
     body = await _parse_body(request)
-    content = str(body.get("content", "")).strip()[:2000]
+    content = sanitize_markdown(str(body.get("content", "")))[:2000]
     if not content:
         raise HTTPException(status_code=422, detail="content is required")
     parent_id_raw = body.get("parent_id")
