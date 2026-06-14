@@ -132,9 +132,9 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
             )
             await thumb_proc.communicate()
 
-        stream_url = f"{settings.PUBLIC_URL}/media/agents/{agent_dir.name}/{broadcast_id}/index.m3u8"
+        stream_url = f"/media/agents/{agent_dir.name}/{broadcast_id}/index.m3u8"
         thumb_url = (
-            f"{settings.PUBLIC_URL}/media/agents/{agent_dir.name}/{broadcast_id}/thumb.jpg"
+            f"/media/agents/{agent_dir.name}/{broadcast_id}/thumb.jpg"
             if thumb_path.exists()
             else ""
         )
@@ -174,13 +174,15 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
                 row = await cur.fetchone()
 
         if row:
+            abs_stream = f"{settings.PUBLIC_URL}{stream_url}" if stream_url.startswith("/") else stream_url
+            abs_thumb = f"{settings.PUBLIC_URL}{thumb_url}" if thumb_url.startswith("/") else thumb_url
             if row["cross_post"] and settings.OUTBOUND_WEBHOOK_URL:
                 await _notify_webhook(
                     broadcast_id=broadcast_id,
                     agent_name=row["agent_name"],
                     title=row["title"],
-                    stream_url=stream_url,
-                    thumbnail_url=thumb_url,
+                    stream_url=abs_stream,
+                    thumbnail_url=abs_thumb,
                 )
             await notify_feed_clients({
                 "broadcast_id": broadcast_id,
@@ -189,7 +191,7 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
                 "stream_url": stream_url,
                 "thumbnail_url": thumb_url,
             })
-            asyncio.create_task(_fire_webhooks(row["agent_id"], "broadcast_ready", {"broadcast_id": broadcast_id, "title": row["title"], "stream_url": stream_url}))
+            asyncio.create_task(_fire_webhooks(row["agent_id"], "broadcast_ready", {"broadcast_id": broadcast_id, "title": row["title"], "stream_url": abs_stream}))
 
     except asyncio.TimeoutError:
         logger.error("broadcast_id=%d FFmpeg timed out after 600s", broadcast_id)
@@ -955,7 +957,7 @@ async def create_audio_post(
         raw_path.rename(final_path)
         final_ext = orig_ext
 
-    stream_url = f"{settings.PUBLIC_URL}/media/agents/{agent['name']}/audio_{broadcast_id}{final_ext}"
+    stream_url = f"/media/agents/{agent['name']}/audio_{broadcast_id}{final_ext}"
     thumb_url = await _save_thumbnail(thumbnail, agent["name"], broadcast_id)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -1302,7 +1304,7 @@ async def create_image_post(
         if not _validate_file_magic(dest, "image"):
             dest.unlink(missing_ok=True)
             continue
-        image_urls.append(f"{settings.PUBLIC_URL}/media/agents/{agent['name']}/{broadcast_id}/{dest.name}")
+        image_urls.append(f"/media/agents/{agent['name']}/{broadcast_id}/{dest.name}")
 
     if not image_urls:
         async with aiosqlite.connect(DB_PATH) as db:

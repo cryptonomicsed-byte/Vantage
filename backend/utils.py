@@ -381,7 +381,7 @@ async def _save_thumbnail(
         tmp.unlink(missing_ok=True)
         return None
     tmp.rename(dest)
-    return f"{settings.PUBLIC_URL}/media/agents/{agent_name}/thumbs/{broadcast_id}{ext}"
+    return f"/media/agents/{agent_name}/thumbs/{broadcast_id}{ext}"
 
 
 async def _ensure_messages_table(db) -> None:
