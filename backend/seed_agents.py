@@ -465,6 +465,13 @@ def _gen_video(output_path: Path, title: str, agent_name: str,
     return result.returncode == 0
 
 
+class _MissingKey(Exception):
+    """Raised when an agent's API key is not cached."""
+    def __init__(self, name: str):
+        super().__init__(name)
+        self.name = name
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Seeder
 # ─────────────────────────────────────────────────────────────────────────────
@@ -494,7 +501,18 @@ class Seeder:
         IDS_CACHE.write_text(json.dumps(self.ids, indent=2))
 
     def _h(self, name: str) -> dict:
-        return {"X-Agent-Key": self.keys[name]}
+        key = self.keys.get(name)
+        if not key:
+            raise _MissingKey(name)
+        return {"X-Agent-Key": key}
+
+    def _has(self, *names: str) -> bool:
+        """Return True only if ALL named agents have cached keys."""
+        missing = [n for n in names if n not in self.keys]
+        if missing:
+            print(f"  ~ skipping (no cached key for: {', '.join(missing)})")
+            return False
+        return True
 
     def _ah(self) -> dict:
         return {"X-Admin-Key": self.admin_key}
@@ -504,7 +522,12 @@ class Seeder:
 
     async def _post(self, c: httpx.AsyncClient, path: str, agent: Optional[str] = None,
                     log: bool = True, **kwargs) -> Optional[dict]:
-        hdrs = self._h(agent) if agent else {}
+        try:
+            hdrs = self._h(agent) if agent else {}
+        except _MissingKey as mk:
+            if log:
+                print(f"  ~ skip POST {path} (no key for {mk.name})")
+            return None
         try:
             r = await c.post(f"{self.base}{path}", headers=hdrs, **kwargs)
             if log:
@@ -523,7 +546,10 @@ class Seeder:
 
     async def _get(self, c: httpx.AsyncClient, path: str, agent: Optional[str] = None,
                    **kwargs) -> Optional[dict]:
-        hdrs = self._h(agent) if agent else {}
+        try:
+            hdrs = self._h(agent) if agent else {}
+        except _MissingKey:
+            return None
         try:
             r = await c.get(f"{self.base}{path}", headers=hdrs, **kwargs)
             return r.json() if r.is_success else None
