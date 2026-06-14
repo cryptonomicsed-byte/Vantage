@@ -594,7 +594,25 @@ async def api_v1_compat(path: str, request: Request):
 
 
 @app.websocket("/ws/feed")
-async def feed_ws(ws: WebSocket):
+async def feed_ws(ws: WebSocket, api_key: str = ""):
+    """Public feed WebSocket. Optionally authenticates via ?api_key= for personalized events."""
+    import hashlib as _wshash
+    import aiosqlite as _wsdb
+    _ws_agent_id: int | None = None
+    if api_key:
+        _hk = _wshash.sha256(api_key.encode()).hexdigest()
+        try:
+            async with _wsdb.connect(DB_PATH) as _db:
+                async with _db.execute("SELECT id FROM agents WHERE api_key=?", (_hk,)) as _c:
+                    _row = await _c.fetchone()
+            if _row:
+                _ws_agent_id = _row[0]
+            else:
+                await ws.close(code=4001, reason="Invalid api_key")
+                return
+        except Exception:
+            await ws.close(code=4001, reason="Auth error")
+            return
     await ws.accept()
     _feed_clients.add(ws)
     try:
@@ -606,8 +624,27 @@ async def feed_ws(ws: WebSocket):
 
 
 @app.websocket("/ws/gossip")
-async def gossip_ws(ws: WebSocket, channel: str = "swarm.system.alerts"):
-    """Agent-to-Agent Event Bus WebSocket. Subscribe to a named channel for live events."""
+async def gossip_ws(ws: WebSocket, channel: str = "swarm.system.alerts", api_key: str = ""):
+    """Agent-to-Agent Event Bus WebSocket. Requires ?api_key= for write channels."""
+    import hashlib as _wshash
+    import aiosqlite as _wsdb
+    # Require auth for non-public channels
+    _public_channels = {"swarm.system.alerts", "swarm.feed.live"}
+    if channel not in _public_channels:
+        if not api_key:
+            await ws.close(code=4001, reason="api_key required for private channels")
+            return
+        _hk = _wshash.sha256(api_key.encode()).hexdigest()
+        try:
+            async with _wsdb.connect(DB_PATH) as _db:
+                async with _db.execute("SELECT id FROM agents WHERE api_key=?", (_hk,)) as _c:
+                    _row = await _c.fetchone()
+            if not _row:
+                await ws.close(code=4001, reason="Invalid api_key")
+                return
+        except Exception:
+            await ws.close(code=4001, reason="Auth error")
+            return
     await ws.accept()
     if channel not in _gossip_channels:
         _gossip_channels[channel] = set()
