@@ -85,6 +85,27 @@ interface Props {
   crossAgentLinks?: CrossAgentLink[]
 }
 
+// ─── Trust-aware edge styling ────────────────────────────────────────────────
+
+function trustRgb(t: number): string {
+  if (t >= 0.8) return '0,245,255'    // Cyan  — high trust (verified)
+  if (t >= 0.5) return '255,170,0'    // Amber — medium (stale)
+  if (t >= 0.3) return '255,51,51'    // Red   — low (aging)
+  return '120,120,150'                 // Gray  — untrusted
+}
+function trustEdgeAlpha(t: number): number {
+  if (t >= 0.8) return 0.45
+  if (t >= 0.5) return 0.28
+  if (t >= 0.3) return 0.18
+  return 0.10
+}
+function trustEdgeDash(t: number): number[] {
+  if (t >= 0.8) return []       // Solid — verified
+  if (t >= 0.5) return [6, 3]   // Dashed — stale
+  if (t >= 0.3) return [3, 6]   // Dotted — aging
+  return [2, 8]                  // Sparse — untrusted
+}
+
 // ─── Color by content type ────────────────────────────────────────────────────
 
 function nodeColor(content_type: string): string {
@@ -346,23 +367,29 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
         const [x2, y2] = toScreen(tgt.x, tgt.y)
 
         const trust = link.trust ?? 0.5
-        let strokeStyle = 'rgba(0,245,255,0.22)'
+        const rgb = trustRgb(trust)
+        let alpha = trustEdgeAlpha(trust)
+        let dash = trustEdgeDash(trust)
+
+        // Hover and constellation-selection overrides
         if (hoveredId === s.id || hoveredId === tgt.id) {
-          const rgb = trust >= 0.8 ? '0,245,255' : trust >= 0.5 ? '255,170,0' : trust >= 0.3 ? '255,51,51' : '150,150,180'
-          strokeStyle = `rgba(${rgb},0.85)`
+          alpha = 0.9
+          dash = []
         } else if (selConst && (s.star.constellation === selConst || tgt.star.constellation === selConst)) {
-          strokeStyle = 'rgba(0,245,255,0.4)'
+          alpha = Math.min(0.65, alpha + 0.2)
         }
 
         ctx.save()
-        ctx.shadowBlur = 4
-        ctx.shadowColor = 'rgba(0,200,255,0.35)'
+        ctx.shadowBlur = trust >= 0.8 ? 7 : 3
+        ctx.shadowColor = `rgba(${rgb},0.3)`
         ctx.beginPath()
         ctx.moveTo(x1, y1)
         ctx.lineTo(x2, y2)
-        ctx.strokeStyle = strokeStyle
-        ctx.lineWidth = Math.max(1.0, link.weight * 0.6)
+        ctx.strokeStyle = `rgba(${rgb},${alpha})`
+        ctx.lineWidth = Math.max(0.5, link.weight * Math.max(0.4, trust) * 0.9)
+        if (dash.length) ctx.setLineDash(dash)
         ctx.stroke()
+        if (dash.length) ctx.setLineDash([])
         ctx.restore()
       })
 

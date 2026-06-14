@@ -880,3 +880,107 @@ async def import_vault(
         return {"imported_nodes": n, "imported_links": l, "format": "universal-json"}
 
     raise HTTPException(415, "Provide a file upload (.json or .zip) or application/json body")
+
+
+# ── Pre-action protocol preflight ────────────────────────────────────────────
+
+@router.get(
+    "/{agent_name}/vault/preflight",
+    summary="Check vault before acting",
+    description=(
+        "Pre-action protocol check: query the vault BEFORE external searches or tool calls. "
+        "Returns whether high-trust memories already cover the query, so agents can use vault "
+        "knowledge instead of re-deriving facts externally. MCP-accessible via auto-exposure."
+    ),
+)
+async def vault_preflight(
+    agent_name: str,
+    q: str = Query(..., min_length=1, description="The query or task you are about to perform"),
+    x_agent_key: Optional[str] = Header(None),
+    x_federation_peer: Optional[str] = Header(None),
+):
+    target = await _resolve_agent(agent_name)
+    vault = MemoryVault(target["id"], target["name"])
+    accessor_id = await _resolve_accessor(x_agent_key)
+    if not await vault.check_access(accessor_id, x_federation_peer or ""):
+        raise HTTPException(403)
+
+    memories = await vault.semantic_search(q, top_k=5)
+    high_trust = [m for m in memories if m.get("score", 0) > 0.5]
+
+    has_memories = len(memories) > 0
+    has_high_trust = len(high_trust) > 0
+
+    if has_high_trust:
+        action = "USE_MEMORY"
+        should_search = False
+        reason = f"Found {len(high_trust)} high-relevance memories. Use vault knowledge — do not re-derive externally."
+    elif has_memories:
+        action = "DECLARE_GAP"
+        should_search = True
+        reason = f"Found {len(memories)} low-confidence memories. External search permitted; compare against vault results."
+    else:
+        action = "NO_MEMORY"
+        should_search = True
+        reason = "No relevant memories found. External search permitted. Document findings in vault after."
+
+    # Vault inventory summary
+    stats_path = vault.vault_path
+    note_count = sum(1 for _ in stats_path.rglob("*.md"))
+
+    return {
+        "action": action,
+        "should_search_externally": should_search,
+        "reason": reason,
+        "memories": memories,
+        "memory_count": len(memories),
+        "vault_inventory_summary": f"{note_count} notes in vault for {agent_name}",
+        "directive": (
+            "GROUND TRUTH PROTOCOL: Inventory → Match → Use/Declare → Act. "
+            "If USE_MEMORY: stop, use the memories above. "
+            "If DECLARE_GAP: search externally, then reconcile with vault. "
+            "If NO_MEMORY: search freely, then document findings."
+        ),
+    }
+
+
+# ── Vector semantic search ─────────────────────────────────────────────────────
+
+@router.get(
+    "/{agent_name}/vault/search/vector",
+    summary="Vector semantic search (OpenRouter)",
+    description=(
+        "High-quality semantic search using OpenRouter text-embedding-3-large embeddings. "
+        "Falls back to wildcard FTS5 if OPENROUTER_KEY is not configured. "
+        "Results include cosine similarity scores."
+    ),
+)
+async def vector_search(
+    agent_name: str,
+    q: str = Query(..., min_length=1),
+    top_k: int = Query(10, ge=1, le=50),
+    x_agent_key: Optional[str] = Header(None),
+    x_federation_peer: Optional[str] = Header(None),
+):
+    target = await _resolve_agent(agent_name)
+    vault = MemoryVault(target["id"], target["name"])
+    accessor_id = await _resolve_accessor(x_agent_key)
+    if not await vault.check_access(accessor_id, x_federation_peer or ""):
+        raise HTTPException(403)
+
+    results = await vault.semantic_search_vector(q, top_k)
+    mode = "vector" if results and results[0].get("source") == "vector" else "fts-fallback"
+    return {"query": q, "results": results, "count": len(results), "mode": mode}
+
+
+@router.post(
+    "/{agent_name}/vault/index-embeddings",
+    summary="Index vault notes for vector search",
+    description="Pre-compute and cache OpenRouter embeddings for all vault notes. Required before vector search returns results. Requires OPENROUTER_KEY to be configured.",
+)
+async def index_embeddings(agent_name: str, agent: dict = Depends(get_agent)):
+    if agent["name"] != agent_name:
+        raise HTTPException(403, "Can only index your own vault")
+    vault = MemoryVault(agent["id"], agent["name"])
+    count = await vault.index_all_embeddings()
+    return {"indexed": count, "agent": agent_name}

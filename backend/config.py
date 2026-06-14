@@ -61,5 +61,9 @@ class Settings(BaseSettings):
     # Federation signing key — HMAC-SHA256 key for peer manifest verification (optional)
     FEDERATION_KEY: str = ""
 
+    # Optional: OpenRouter API key — enables true vector semantic search in memory vault.
+    # Falls back to wildcard FTS5 if not set. Set via VANTAGE_OPENROUTER_KEY env var.
+    OPENROUTER_KEY: str = ""
+
 
 settings = Settings()

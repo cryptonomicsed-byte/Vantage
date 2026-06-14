@@ -401,10 +401,113 @@ last_synced: {config.last_synced or 'never'}
                         (self.agent_id, fts_q, top_k)
                     )).fetchall()
                     if rows:
-                        return [{"path": r[0], "title": r[1], "snippet": r[2], "score": round(abs(r[3]), 4)} for r in rows]
+                        return [{"path": r[0], "title": r[1], "snippet": r[2], "score": round(abs(r[3]), 4), "source": "fts"} for r in rows]
                 except Exception:
                     continue
         return []
+
+    # ── Optional vector semantic search (OpenRouter embeddings) ─────────────────
+
+    async def _get_embedding(self, text: str) -> Optional[List[float]]:
+        """Fetch or retrieve cached embedding. Returns None if OpenRouter not configured."""
+        openrouter_key = getattr(settings, "OPENROUTER_KEY", "")
+        if not openrouter_key:
+            return None
+        try:
+            import httpx as _httpx
+        except ImportError:
+            return None
+
+        cache_dir = self.vault_path / ".vault" / "embeddings_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        text_hash = hashlib.sha256(text[:2000].encode()).hexdigest()[:20]
+        cache_file = cache_dir / f"{text_hash}.json"
+        if cache_file.exists():
+            try:
+                return json.loads(cache_file.read_text())
+            except Exception:
+                pass
+
+        try:
+            async with _httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.post(
+                    "https://openrouter.ai/api/v1/embeddings",
+                    headers={
+                        "Authorization": f"Bearer {openrouter_key}",
+                        "HTTP-Referer": "https://vantage.local",
+                        "X-Title": "Vantage Memory Vault",
+                    },
+                    json={"model": "openai/text-embedding-3-large", "input": text[:4000]},
+                )
+                r.raise_for_status()
+                vec = r.json()["data"][0]["embedding"]
+            cache_file.write_text(json.dumps(vec))
+            return vec
+        except Exception:
+            return None
+
+    def _cosine_sim(self, a: List[float], b: List[float]) -> float:
+        import math as _math
+        dot = sum(x * y for x, y in zip(a, b))
+        na = _math.sqrt(sum(x * x for x in a))
+        nb = _math.sqrt(sum(x * x for x in b))
+        return dot / (na * nb) if na and nb else 0.0
+
+    async def semantic_search_vector(self, query: str, top_k: int = 10) -> list:
+        """Vector search with cosine similarity. Falls back to FTS if no embedding available."""
+        query_vec = await self._get_embedding(query)
+        if query_vec is None:
+            return await self.semantic_search(query, top_k)
+
+        cache_dir = self.vault_path / ".vault" / "embeddings_cache"
+        index_file = self.vault_path / ".vault" / "embeddings_index.json"
+        if not index_file.exists():
+            return await self.semantic_search(query, top_k)
+
+        try:
+            idx = json.loads(index_file.read_text())
+        except Exception:
+            return await self.semantic_search(query, top_k)
+
+        results = []
+        for text_hash, note_path in idx.items():
+            vec_file = cache_dir / f"{text_hash}.json"
+            if not vec_file.exists():
+                continue
+            try:
+                note_vec = json.loads(vec_file.read_text())
+                sim = self._cosine_sim(query_vec, note_vec)
+                results.append({"path": note_path, "score": round(sim, 4), "source": "vector"})
+            except Exception:
+                continue
+
+        results.sort(key=lambda x: x["score"], reverse=True)
+        return results[:top_k]
+
+    async def index_all_embeddings(self) -> int:
+        """Batch-index all vault notes for vector search. Returns count indexed."""
+        indexed = 0
+        index_file = self.vault_path / ".vault" / "embeddings_index.json"
+        idx = json.loads(index_file.read_text()) if index_file.exists() else {}
+        (self.vault_path / ".vault" / "embeddings_cache").mkdir(parents=True, exist_ok=True)
+
+        for md_file in self.vault_path.rglob("*.md"):
+            try:
+                content = md_file.read_text(encoding="utf-8")
+                parts = content.split("---", 2)
+                body = parts[2] if len(parts) >= 3 else content
+                text_hash = hashlib.sha256(body[:2000].encode()).hexdigest()[:20]
+                if text_hash in idx:
+                    continue  # already cached
+                vec = await self._get_embedding(body[:3000])
+                if vec:
+                    idx[text_hash] = str(md_file.relative_to(self.vault_path))
+                    indexed += 1
+            except Exception:
+                continue
+
+        index_file.write_text(json.dumps(idx, indent=2))
+        return indexed
 
     async def auto_summarize_constellations(self):
         data = self.get_galaxy_data()
