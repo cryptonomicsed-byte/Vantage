@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     # Leave empty to disable. No external service required.
     OUTBOUND_WEBHOOK_URL: str = ""
 
+    # Ọmọ Kọ́dà 2 integration: push broadcast knowledge triples to local agent OS.
+    # Set to agent's base URL (e.g. http://localhost:7400) to enable.
+    OMOKODA_URL: str = ""
+
     ALLOWED_ORIGINS: List[str] = ["http://localhost:8001"]
     MAX_UPLOAD_MB: int = 500
 

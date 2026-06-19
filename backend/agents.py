@@ -66,6 +66,23 @@ router = APIRouter(prefix="/api/agents", tags=["agents"])
 # SEC-11: cap concurrent FFmpeg transcodes (definition lost in ab8349b merge)
 _ffmpeg_semaphore = asyncio.Semaphore(2)
 
+
+async def _push_broadcast_to_omokoda(title: str, stream_url: str, agent_name: str) -> None:
+    """POST a knowledge triple about this broadcast to the Ọmọ Kọ́dà 2 vault."""
+    try:
+        url = f"{settings.OMOKODA_URL.rstrip('/')}/v1/vault/knowledge"
+        payload = {
+            "subject": title,
+            "predicate": "broadcast",
+            "object": stream_url,
+            "confidence": 1.0,
+        }
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(url, json=payload)
+    except Exception as exc:
+        logger.warning("omokoda vault push failed for '%s': %s", title, exc)
+
+
 async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Path) -> None:
     out_dir = agent_dir / str(broadcast_id)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -188,6 +205,14 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
                 "thumbnail_url": thumb_url,
             })
             asyncio.create_task(_fire_webhooks(row["agent_id"], "broadcast_ready", {"broadcast_id": broadcast_id, "title": row["title"], "stream_url": stream_url}))
+
+            # Push broadcast as knowledge triple to Ọmọ Kọ́dà vault (if configured)
+            if settings.OMOKODA_URL:
+                asyncio.create_task(_push_broadcast_to_omokoda(
+                    title=row["title"],
+                    stream_url=stream_url,
+                    agent_name=row["agent_name"],
+                ))
 
     except asyncio.TimeoutError:
         logger.error("broadcast_id=%d FFmpeg timed out after 600s", broadcast_id)
