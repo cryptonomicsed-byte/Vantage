@@ -11,7 +11,9 @@ from fastapi import APIRouter, Depends, HTTPException, Header, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 import aiosqlite
 
+from ..config import settings
 from ..deps import get_agent, _parse_body
+from ..memory_enrichment import MemoryIntelligence
 from ..memory_vault import MemoryVault, VAULT_ROOT
 from ..db import DB_PATH
 
@@ -82,7 +84,12 @@ async def get_galaxy_data(
     if not await vault.check_access(accessor_id, x_federation_peer or ""):
         raise HTTPException(403, "Access denied to this memory vault")
     await vault.log_access(accessor_id, x_federation_peer or "", "galaxy", "read")
-    return vault.get_galaxy_data()
+    data = vault.get_galaxy_data()
+    if settings.JULIA_MEMORY_URL:
+        intel = MemoryIntelligence(settings.JULIA_MEMORY_URL)
+        data["predictions"] = await intel.predict_next_activity(agent_name)
+        data["patterns"] = await intel.mine_patterns(f"agent:{agent_name}")
+    return data
 
 @router.get("/{agent_name}/vault/search")
 async def search_vault(
@@ -102,7 +109,20 @@ async def search_vault(
                FROM memory_fts WHERE agent_id=? AND memory_fts MATCH ? ORDER BY rank LIMIT 20""",
             (target["id"], q)
         )).fetchall()
-    return {"query": q, "results": [{"path": r[0], "title": r[1], "snippet": r[2]} for r in results]}
+    fts_results = [{"path": r[0], "title": r[1], "snippet": r[2]} for r in results]
+    if settings.JULIA_MEMORY_URL:
+        intel = MemoryIntelligence(settings.JULIA_MEMORY_URL)
+        semantic = await intel.find_similar(q, top_k=20)
+        fts_paths = {r["path"] for r in fts_results}
+        for s in semantic:
+            node_id = s.get("node_id", "")
+            if node_id and node_id not in fts_paths:
+                fts_results.append({
+                    "path": node_id,
+                    "title": node_id,
+                    "snippet": f"semantic similarity: {s.get('similarity', 0):.3f}",
+                })
+    return {"query": q, "results": fts_results}
 
 @router.get("/{agent_name}/vault/access-log")
 async def get_access_log(

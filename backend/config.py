@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     # Set to agent's base URL (e.g. http://localhost:7400) to enable.
     OMOKODA_URL: str = ""
 
+    # Julia memory service: semantic search, prediction, pattern mining.
+    # Set to omokoda-memory URL (e.g. http://localhost:7778) to enable.
+    JULIA_MEMORY_URL: str = ""
+
     ALLOWED_ORIGINS: List[str] = ["http://localhost:8001"]
     MAX_UPLOAD_MB: int = 500
 

@@ -39,6 +39,7 @@ limiter = Limiter(key_func=get_remote_address)
 
 from .config import settings
 from .db import DB_PATH, MEDIA_ROOT, init_agents_db
+from .memory_enrichment import MemoryIntelligence
 from .deps import get_agent, get_admin, _parse_body, _update_last_seen, _log_agent_activity
 from .utils import (
     _log_buffer, _BufferHandler,
@@ -5224,6 +5225,13 @@ async def push_trace(request: Request, agent: dict = Depends(get_agent)):
         )
         trace_id = cur.lastrowid
         await db.commit()
+    if settings.JULIA_MEMORY_URL:
+        asyncio.create_task(MemoryIntelligence(settings.JULIA_MEMORY_URL).feed_trace({
+            "agent_id": agent["name"],
+            "trace_type": trace_type,
+            "content": message,
+            "timestamp": _dt.utcnow().isoformat(),
+        }))
     # Push to SSE subscribers
     event = {"type": "trace", "id": trace_id, "agent": agent["name"],
               "trace_type": trace_type, "message": message}

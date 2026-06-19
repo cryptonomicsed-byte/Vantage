@@ -493,6 +493,8 @@ from .routers.identity import router as identity_router
 app.include_router(identity_router)
 from .routers.memory_vault import router as memory_vault_router
 app.include_router(memory_vault_router)
+from .routers.memory_enrichment import router as memory_enrichment_router
+app.include_router(memory_enrichment_router)
 
 # MCP server — exposes all Vantage routes as MCP tools for Claude/GPT agents
 from .mcp_server import create_mcp_server as _create_mcp

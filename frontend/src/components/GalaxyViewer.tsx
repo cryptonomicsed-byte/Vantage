@@ -46,6 +46,8 @@ export interface GalaxyData {
   nebulae: GalaxyNebula[]
   clusters: Record<string, Array<unknown>>
   bounds: { min: number[]; max: number[] }
+  predictions?: { predictions?: number[]; lower?: number[]; upper?: number[] }
+  patterns?: Array<{ pattern: string; confidence: number }>
 }
 
 interface Props {
