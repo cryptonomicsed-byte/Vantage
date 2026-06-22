@@ -8,6 +8,15 @@ from .config import settings
 
 logger = logging.getLogger(__name__)
 
+
+async def _add_col(db: aiosqlite.Connection, table: str, col: str, ddl: str) -> None:
+    """ALTER TABLE … ADD COLUMN, silently skipping if the column already exists."""
+    try:
+        await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+    except Exception as _e:
+        if "duplicate column name" not in str(_e).lower():
+            logger.warning("Unexpected migration error on %s.%s: %s", table, col, _e)
+
 DB_PATH: Path = settings.DATA_DIR / "vantage.db"
 MEDIA_ROOT: Path = settings.MEDIA_DIR
 
@@ -53,7 +62,6 @@ async def init_agents_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_created_at ON broadcasts(created_at)")
         # SEC-INDEX: Optimized indexes for analytics and feed
         await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_agent_status ON broadcasts(agent_id, status)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_view_events_broadcast_time ON view_events(broadcast_id, viewed_at)")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS series (
@@ -89,6 +97,19 @@ async def init_agents_db() -> None:
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_view_events_broadcast ON view_events(broadcast_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_view_events_time ON view_events(viewed_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_view_events_broadcast_time ON view_events(broadcast_id, viewed_at)")
+        # Hourly rollup table — background task aggregates into this; raw rows purged after 24h
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS view_events_hourly (
+                broadcast_id INTEGER NOT NULL,
+                hour_bucket  TEXT NOT NULL,
+                total_views  INTEGER DEFAULT 0,
+                total_watch_seconds REAL DEFAULT 0.0,
+                weighted_score REAL DEFAULT 0.0,
+                PRIMARY KEY (broadcast_id, hour_bucket),
+                FOREIGN KEY (broadcast_id) REFERENCES broadcasts(id)
+            )
+        """)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS comments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,15 +167,13 @@ async def init_agents_db() -> None:
             ("signer_fingerprint", "TEXT DEFAULT ''"),
             ("guild_id",           "INTEGER DEFAULT NULL"),
         ]:
-            try:
-                await db.execute(f"ALTER TABLE broadcasts ADD COLUMN {col} {ddl}")
-            except Exception:
-                pass
+            await _add_col(db, "broadcasts", col, ddl)
         # Index on content_type — created after migration ensures the column exists
         try:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_content_type ON broadcasts(content_type) WHERE content_type IS NOT NULL")
-        except Exception:
-            pass
+        except Exception as _e:
+            if "already exists" not in str(_e).lower():
+                logger.warning("Index migration warning: %s", _e)
         # Agent table migrations
         for col, ddl in [
             ("manifesto",      "TEXT DEFAULT ''"),
@@ -170,15 +189,9 @@ async def init_agents_db() -> None:
             ("tier",           "INTEGER DEFAULT 0"),
             ("reputation",     "REAL DEFAULT 0.0"),
         ]:
-            try:
-                await db.execute(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")
-            except Exception:
-                pass
+            await _add_col(db, "agents", col, ddl)
         # view_events migration
-        try:
-            await db.execute("ALTER TABLE view_events ADD COLUMN watch_seconds REAL DEFAULT 0")
-        except Exception:
-            pass
+        await _add_col(db, "view_events", "watch_seconds", "REAL DEFAULT 0")
         # Notifications table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS notifications (
@@ -980,6 +993,31 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
         except Exception:
             pass
 
+        # Layer 2: FTS5 over agent traces (ghost-mode thoughts) for session search
+        try:
+            await db.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS agent_traces_fts USING fts5(
+                    agent_id UNINDEXED,
+                    trace_id UNINDEXED,
+                    message,
+                    trace_type,
+                    tokenize='porter'
+                )
+            """)
+            await db.execute("""
+                CREATE TRIGGER IF NOT EXISTS agent_traces_ai AFTER INSERT ON agent_traces BEGIN
+                    INSERT INTO agent_traces_fts (agent_id, trace_id, message, trace_type)
+                    VALUES (new.agent_id, new.id, new.message, new.trace_type);
+                END
+            """)
+            await db.execute("""
+                CREATE TRIGGER IF NOT EXISTS agent_traces_ad AFTER DELETE ON agent_traces BEGIN
+                    DELETE FROM agent_traces_fts WHERE trace_id = old.id;
+                END
+            """)
+        except Exception:
+            pass
+
         await db.commit()
 
     # One-time migration: hash any plaintext API keys still stored as "vantage_..." (idempotent)
@@ -993,3 +1031,32 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
             await db.execute("UPDATE agents SET api_key=? WHERE id=?", (hashed, row_id))
         if rows:
             await db.commit()
+
+    # Layer 3: trust scoring columns on knowledge_snippets (idempotent ALTERs)
+    async with aiosqlite.connect(DB_PATH) as db:
+        for col, ddl in (
+            ("trust_score", "ALTER TABLE knowledge_snippets ADD COLUMN trust_score REAL DEFAULT 0.5"),
+            ("retrieval_count", "ALTER TABLE knowledge_snippets ADD COLUMN retrieval_count INTEGER DEFAULT 0"),
+            ("helpful_count", "ALTER TABLE knowledge_snippets ADD COLUMN helpful_count INTEGER DEFAULT 0"),
+            ("last_accessed_at", "ALTER TABLE knowledge_snippets ADD COLUMN last_accessed_at TEXT DEFAULT ''"),
+        ):
+            try:
+                await db.execute(ddl)
+            except Exception:
+                pass  # column already exists
+        await db.commit()
+
+    # Layer 2: backfill agent_traces_fts for traces inserted before the FTS table existed
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            fts_count = await (await db.execute("SELECT COUNT(*) FROM agent_traces_fts")).fetchone()
+            trace_count = await (await db.execute("SELECT COUNT(*) FROM agent_traces")).fetchone()
+            if fts_count and trace_count and fts_count[0] < trace_count[0]:
+                await db.execute("DELETE FROM agent_traces_fts")
+                await db.execute("""
+                    INSERT INTO agent_traces_fts (agent_id, trace_id, message, trace_type)
+                    SELECT agent_id, id, message, trace_type FROM agent_traces
+                """)
+                await db.commit()
+        except Exception:
+            pass

@@ -177,6 +177,8 @@ class MemoryVault:
             "galaxy_source_x": src[0], "galaxy_source_y": src[1], "galaxy_source_z": src[2],
             "galaxy_target_x": tgt[0], "galaxy_target_y": tgt[1], "galaxy_target_z": tgt[2],
             "galaxy_weight": k.get("confidence", 1.0),
+            "last_accessed_at": k.get("last_accessed_at") or k.get("created_at", ""),
+            "trust": k.get("trust_score", 0.5),
             "created": k.get("created_at", ""),
         }
         body = f"# {k['subject']} → {k['predicate']} → {k['object']}\n\nConfidence: {k.get('confidence', 1.0)}"
@@ -230,6 +232,9 @@ class MemoryVault:
             )
             await db.commit()
         await self._write_readme()
+        await self.auto_summarize_constellations()
+        await self.ensure_workspace()
+        await self.generate_soul_md()
 
     async def _write_readme(self):
         config = await self.get_config()
@@ -309,6 +314,7 @@ last_synced: {config.last_synced or 'never'}
                         "tags": fm.get("tags", []) if isinstance(fm.get("tags"), list) else [],
                         "content_type": fm.get("content_type", "text"),
                         "path": str(md_file.relative_to(self.vault_path)),
+                        "created": str(fm.get("created", "")),
                     })
                 elif node_type == "edge":
                     edges.append({
@@ -317,6 +323,7 @@ last_synced: {config.last_synced or 'never'}
                         "source": [float(fm.get("galaxy_source_x", 0)), float(fm.get("galaxy_source_y", 0)), float(fm.get("galaxy_source_z", 0))],
                         "target": [float(fm.get("galaxy_target_x", 0)), float(fm.get("galaxy_target_y", 0)), float(fm.get("galaxy_target_z", 0))],
                         "weight": float(fm.get("galaxy_weight", 1.0)),
+                        "trust": self._decayed_trust(float(fm.get("trust", 0.5)), str(fm.get("last_accessed_at", ""))),
                         "path": str(md_file.relative_to(self.vault_path)),
                     })
                 elif node_type == "nebula":
@@ -376,6 +383,172 @@ last_synced: {config.last_synced or 'never'}
                 return line[2:].strip()
         return "Untitled"
 
+    async def semantic_search(self, query: str, top_k: int = 20) -> list:
+        # Try wildcard-expanded FTS5 first for partial matching
+        expanded = " ".join(f"{w}*" for w in query.split() if len(w) > 2)
+        async with aiosqlite.connect(DB_PATH) as db:
+            for fts_q in [expanded, query]:
+                if not fts_q.strip():
+                    continue
+                try:
+                    rows = await (await db.execute(
+                        """SELECT note_path, title,
+                                  snippet(memory_fts, 3, '**', '**', '...', 30) as snip,
+                                  rank
+                           FROM memory_fts
+                           WHERE agent_id=? AND memory_fts MATCH ?
+                           ORDER BY rank LIMIT ?""",
+                        (self.agent_id, fts_q, top_k)
+                    )).fetchall()
+                    if rows:
+                        return [{"path": r[0], "title": r[1], "snippet": r[2], "score": round(abs(r[3]), 4), "source": "fts"} for r in rows]
+                except Exception:
+                    continue
+        return []
+
+    # ── Optional vector semantic search (OpenRouter embeddings) ─────────────────
+
+    async def _get_embedding(self, text: str) -> Optional[List[float]]:
+        """Fetch or retrieve cached embedding. Returns None if OpenRouter not configured."""
+        openrouter_key = getattr(settings, "OPENROUTER_KEY", "")
+        if not openrouter_key:
+            return None
+        try:
+            import httpx as _httpx
+        except ImportError:
+            return None
+
+        cache_dir = self.vault_path / ".vault" / "embeddings_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        text_hash = hashlib.sha256(text[:2000].encode()).hexdigest()[:20]
+        cache_file = cache_dir / f"{text_hash}.json"
+        if cache_file.exists():
+            try:
+                return json.loads(cache_file.read_text())
+            except Exception:
+                pass
+
+        try:
+            async with _httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.post(
+                    "https://openrouter.ai/api/v1/embeddings",
+                    headers={
+                        "Authorization": f"Bearer {openrouter_key}",
+                        "HTTP-Referer": "https://vantage.local",
+                        "X-Title": "Vantage Memory Vault",
+                    },
+                    json={"model": "openai/text-embedding-3-large", "input": text[:4000]},
+                )
+                r.raise_for_status()
+                vec = r.json()["data"][0]["embedding"]
+            cache_file.write_text(json.dumps(vec))
+            return vec
+        except Exception:
+            return None
+
+    def _cosine_sim(self, a: List[float], b: List[float]) -> float:
+        import math as _math
+        dot = sum(x * y for x, y in zip(a, b))
+        na = _math.sqrt(sum(x * x for x in a))
+        nb = _math.sqrt(sum(x * x for x in b))
+        return dot / (na * nb) if na and nb else 0.0
+
+    async def semantic_search_vector(self, query: str, top_k: int = 10) -> list:
+        """Vector search with cosine similarity. Falls back to FTS if no embedding available."""
+        query_vec = await self._get_embedding(query)
+        if query_vec is None:
+            return await self.semantic_search(query, top_k)
+
+        cache_dir = self.vault_path / ".vault" / "embeddings_cache"
+        index_file = self.vault_path / ".vault" / "embeddings_index.json"
+        if not index_file.exists():
+            return await self.semantic_search(query, top_k)
+
+        try:
+            idx = json.loads(index_file.read_text())
+        except Exception:
+            return await self.semantic_search(query, top_k)
+
+        results = []
+        for text_hash, note_path in idx.items():
+            vec_file = cache_dir / f"{text_hash}.json"
+            if not vec_file.exists():
+                continue
+            try:
+                note_vec = json.loads(vec_file.read_text())
+                sim = self._cosine_sim(query_vec, note_vec)
+                results.append({"path": note_path, "score": round(sim, 4), "source": "vector"})
+            except Exception:
+                continue
+
+        results.sort(key=lambda x: x["score"], reverse=True)
+        return results[:top_k]
+
+    async def index_all_embeddings(self) -> int:
+        """Batch-index all vault notes for vector search. Returns count indexed."""
+        indexed = 0
+        index_file = self.vault_path / ".vault" / "embeddings_index.json"
+        idx = json.loads(index_file.read_text()) if index_file.exists() else {}
+        (self.vault_path / ".vault" / "embeddings_cache").mkdir(parents=True, exist_ok=True)
+
+        for md_file in self.vault_path.rglob("*.md"):
+            try:
+                content = md_file.read_text(encoding="utf-8")
+                parts = content.split("---", 2)
+                body = parts[2] if len(parts) >= 3 else content
+                text_hash = hashlib.sha256(body[:2000].encode()).hexdigest()[:20]
+                if text_hash in idx:
+                    continue  # already cached
+                vec = await self._get_embedding(body[:3000])
+                if vec:
+                    idx[text_hash] = str(md_file.relative_to(self.vault_path))
+                    indexed += 1
+            except Exception:
+                continue
+
+        index_file.write_text(json.dumps(idx, indent=2))
+        return indexed
+
+    async def auto_summarize_constellations(self):
+        data = self.get_galaxy_data()
+        for constellation, stars in data["clusters"].items():
+            if len(stars) < 10:
+                continue
+            safe_c = re.sub(r"[^\w-]", "_", constellation[:40])
+            summary_path = self.vault_path / "knowledge" / f"_summary_{safe_c}.md"
+            if summary_path.exists():
+                continue
+            titles = [s.get("title", "Untitled") for s in stars[:50]]
+            coords = self._spatial_hash(constellation, "knowledge")
+            frontmatter = {
+                "id": f"summary_{safe_c[:20]}",
+                "type": "star",
+                "content_type": "text",
+                "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
+                "galaxy_size": 14, "galaxy_color": "#c7ceea",
+                "constellation": constellation,
+                "tags": ["summary", constellation],
+                "created": datetime.utcnow().isoformat(),
+            }
+            body = f"# Constellation Summary: {constellation}\n\n**{len(stars)} stars in this constellation**\n\n## Star Index\n\n"
+            body += "\n".join(f"- {t}" for t in titles)
+            if len(stars) > 50:
+                body += f"\n\n_…and {len(stars) - 50} more_"
+            self._write_note(summary_path, frontmatter, body)
+            relative = str(summary_path.relative_to(self.vault_path))
+            await self._update_fts(relative, f"{constellation} — Constellation Summary", body, ["summary", constellation])
+
+    def _decayed_trust(self, trust: float, last_accessed: str) -> float:
+        """Apply time decay to a trust score: 5% per day, floor at 0.05."""
+        if not last_accessed:
+            return max(0.05, trust * 0.70)  # 30% penalty for never-accessed knowledge
+        try:
+            last = datetime.fromisoformat(last_accessed.replace("Z", "").strip())
+            days_old = max(0, (datetime.utcnow() - last).days)
+            return max(0.05, trust * (0.95 ** days_old))
+        except Exception:
+            return trust
+
     async def get_stats(self) -> dict:
         config = await self.get_config()
         stars = edges = nebulae = 0
@@ -406,4 +579,166 @@ last_synced: {config.last_synced or 'never'}
             "vault_size_bytes": vault_size,
             "last_synced": config.last_synced,
             "access": config.access,
+        }
+
+    # ── Layer 1: Workspace documents ────────────────────────────────────────────
+
+    async def ensure_workspace(self):
+        """Create persistent Layer-1 workspace docs (MEMORY/USER/CREATIVE) if missing."""
+        workspace = self.vault_path / "workspace"
+        workspace.mkdir(exist_ok=True)
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            row = await (await db.execute(
+                "SELECT bio, manifesto, skill_badges, tier FROM agents WHERE id=?",
+                (self.agent_id,)
+            )).fetchone()
+        bio = manifesto = ""
+        badges: list = []
+        tier = ""
+        if row:
+            r = dict(row)
+            bio = r.get("bio") or ""
+            manifesto = r.get("manifesto") or ""
+            tier = str(r.get("tier") or "")
+            try:
+                badges = json.loads(r.get("skill_badges") or "[]")
+            except Exception:
+                badges = []
+
+        memory_md = workspace / "MEMORY.md"
+        if not memory_md.exists():
+            badge_labels = [b.get("label", b) if isinstance(b, dict) else str(b) for b in badges]
+            memory_md.write_text(
+                "---\ntype: workspace\nlayer: 1\nrole: memory\n---\n\n"
+                f"# {self.agent_name} — Core Identity\n\n"
+                f"## Bio\n{bio or 'No bio set.'}\n\n"
+                f"## Manifesto\n{manifesto or 'No manifesto set.'}\n\n"
+                f"## Skill Badges\n{', '.join(badge_labels) if badge_labels else 'None yet.'}\n\n"
+                f"## Tier\n{tier or 'unranked'}\n\n"
+                "## Ground Truth Rules\n"
+                "1. Terminal output → ground truth for system state\n"
+                "2. Injected memory (vault, broadcasts, knowledge, traces) → ground truth for documented knowledge\n"
+                "3. Official documentation → authoritative for APIs and configs\n"
+                "4. Training knowledge → reference only; verify against 1–3\n\n"
+                "> When injected memory contradicts your assumptions, injected memory wins.\n"
+                "> Never treat a question as novel when the answer is already in your prompt.\n",
+                encoding="utf-8",
+            )
+
+        user_md = workspace / "USER.md"
+        if not user_md.exists():
+            user_md.write_text(
+                "---\ntype: workspace\nlayer: 1\nrole: user_context\n---\n\n"
+                f"# User Context for {self.agent_name}\n\n"
+                "## Owner\n[to be filled by agent]\n\n"
+                "## Preferences\n- Communication style: [to be filled]\n"
+                "- Response length: [to be filled]\n- Technical depth: [to be filled]\n\n"
+                "## Project Context\n- Primary domain: [to be filled]\n"
+                "- Active projects: [to be filled]\n- Key collaborators: [to be filled]\n",
+                encoding="utf-8",
+            )
+
+        creative_md = workspace / "CREATIVE.md"
+        if not creative_md.exists():
+            creative_md.write_text(
+                "---\ntype: workspace\nlayer: 1\nrole: creative\n---\n\n"
+                f"# Creative Constraints for {self.agent_name}\n\n"
+                "## Voice & Tone\n- [to be configured]\n\n"
+                "## Content Guidelines\n- [to be configured]\n\n"
+                "## Prohibited Topics\n- [to be configured]\n\n"
+                "## Visual Style\n- [to be configured]\n",
+                encoding="utf-8",
+            )
+
+    # ── Layer 7: Ground-truth identity ──────────────────────────────────────────
+
+    async def generate_soul_md(self):
+        """Write the SOUL.md ground-truth hierarchy document (refreshed each sync)."""
+        soul = self.vault_path / "SOUL.md"
+        soul.write_text(
+            "---\ntype: soul\nlayer: 7\nrole: identity\n---\n\n"
+            f"# {self.agent_name} — Ground Truth Hierarchy\n\n"
+            "## Source of Truth Rankings\n\n"
+            "| Priority | Source | When to Trust |\n"
+            "|----------|--------|---------------|\n"
+            "| 1 | Terminal output | Real-time system state only |\n"
+            "| 2 | **This vault's memory** | Documented knowledge, past decisions, facts |\n"
+            "| 3 | Official API docs | Version-specific technical details |\n"
+            "| 4 | Training knowledge | Never trust without verification |\n\n"
+            "## Conflict Resolution Rules\n\n"
+            "- **Memory vs assumptions**: memory wins. Never re-derive what is documented.\n"
+            "- **Memory vs terminal**: terminal wins for current state; memory wins for history.\n"
+            "- **Memory vs docs**: docs win for version-specific API behavior; memory wins for project context.\n"
+            "- **Training vs anything**: training always loses. Verify against 1–3.\n\n"
+            "## Mandatory Pre-Action Protocol\n\n"
+            "1. **Inventory** — check whether workspace/ and knowledge/ already hold the answer\n"
+            "2. **Match** — compare the query against existing memory\n"
+            "3. **Use/Declare** — cite the vault file if matched, else declare \"no memory found\"\n"
+            "4. **Act** — only now execute tools or search\n\n"
+            "## Agent Identity\n\n"
+            f"- Name: {self.agent_name}\n"
+            f"- Tracked in this vault since: {datetime.utcnow().isoformat()}\n",
+            encoding="utf-8",
+        )
+
+    # ── Layer 2: Session (trace) search ─────────────────────────────────────────
+
+    async def search_sessions(self, query: str, limit: int = 10) -> list:
+        """FTS5 search over this agent's ghost-mode thought traces."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            try:
+                rows = await (await db.execute(
+                    """SELECT trace_id, message, trace_type,
+                              snippet(agent_traces_fts, 2, '**', '**', '...', 30) as snip
+                       FROM agent_traces_fts
+                       WHERE agent_id=? AND agent_traces_fts MATCH ?
+                       ORDER BY rank LIMIT ?""",
+                    (self.agent_id, query, limit)
+                )).fetchall()
+            except Exception:
+                return []
+        return [
+            {"id": r[0], "message": r[1], "trace_type": r[2], "snippet": r[3]}
+            for r in rows
+        ]
+
+    # ── MCP context pack: SOUL + workspace + relevant memory ─────────────────────
+
+    async def get_context_pack(self, query: str = "") -> dict:
+        """Bundle ground-truth + workspace + the most relevant memories for injection."""
+        import uuid as _uuid
+        workspace = self.vault_path / "workspace"
+        soul_path = self.vault_path / "SOUL.md"
+        cached = soul_path.exists() and (workspace / "MEMORY.md").exists()
+        if not soul_path.exists():
+            await self.generate_soul_md()
+        if not all((workspace / f).exists() for f in ("MEMORY.md", "USER.md", "CREATIVE.md")):
+            await self.ensure_workspace()
+
+        def _read(p: Path) -> str:
+            try:
+                return p.read_text(encoding="utf-8")
+            except Exception:
+                return ""
+
+        soul = _read(soul_path)
+        memory = _read(workspace / "MEMORY.md")
+
+        relevant: list = []
+        if query.strip():
+            relevant = await self.semantic_search(query, top_k=8)
+
+        return {
+            "context_id": _uuid.uuid4().hex[:8],
+            "cached": cached,
+            "agent_name": self.agent_name,
+            "soul": soul,
+            "memory": memory,
+            "relevant_memories": relevant,
+            "directive": (
+                "Use the injected memory above as ground truth. Do not re-derive what is "
+                "already documented. Cite vault file paths when you rely on a memory."
+            ),
         }

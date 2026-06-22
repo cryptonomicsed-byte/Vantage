@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { Lock, Globe, Users, Radio, Search, RefreshCw, Settings, Download, BarChart2, PlusCircle } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import GalaxyViewer, { GalaxyData } from './GalaxyViewer'
+import type { GalaxyStar } from './GalaxyViewer'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -67,7 +70,7 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
   const [locked, setLocked] = useState(false)
   const [loadingGalaxy, setLoadingGalaxy] = useState(true)
   const [syncing, setSyncing] = useState(false)
-  const [view, setView] = useState<'galaxy' | 'files' | 'settings' | 'stats'>('galaxy')
+  const [view, setView] = useState<'galaxy' | 'files' | 'settings' | 'stats' | 'traces'>('galaxy')
 
   // Search
   const [searchQuery, setSearchQuery] = useState('')
@@ -83,6 +86,39 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
   // Stats
   const [stats, setStats] = useState<VaultStats | null>(null)
   const [loadingStats, setLoadingStats] = useState(false)
+
+  // Star detail panel
+  const [selectedStar, setSelectedStar] = useState<GalaxyStar | null>(null)
+  const [starMarkdown, setStarMarkdown] = useState<string>('')
+  const [loadingStarContent, setLoadingStarContent] = useState(false)
+  const [linkTargetInput, setLinkTargetInput] = useState('')
+  const [linkCreated, setLinkCreated] = useState(false)
+  const [noteLinks, setNoteLinks] = useState<Array<{
+    id: number
+    link_type: string
+    source_agent_name: string
+    source_note_path: string
+    target_agent_name: string
+    target_note_path: string
+    created_at: string
+  }>>([])
+
+  // Traces search
+  const [traceQuery, setTraceQuery] = useState('')
+  const [traceResults, setTraceResults] = useState<Array<{id: string; message: string; trace_type: string; snippet?: string}> | null>(null)
+  const [searchingTraces, setSearchingTraces] = useState(false)
+
+  // Cross-agent links for galaxy overlay
+  const [crossAgentLinks, setCrossAgentLinks] = useState<Array<{source_note_path: string; target_note_path: string; link_type: string}>>([])
+
+  // Import/export
+  const [importStatus, setImportStatus] = useState<string | null>(null)
+
+  // Compare mode
+  const [compareInput, setCompareInput] = useState('')
+  const [compareGalaxy, setCompareGalaxy] = useState<GalaxyData | null>(null)
+  const [comparing, setComparing] = useState(false)
+  const [showCompare, setShowCompare] = useState(false)
 
   // Create note form
   const [showNoteForm, setShowNoteForm] = useState(false)
@@ -245,6 +281,54 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
     if (view === 'stats') fetchStats()
   }, [view, fetchStats])
 
+  // ── Star select ─────────────────────────────────────────────────────────────
+  const handleStarSelect = useCallback(async (star: GalaxyStar) => {
+    setSelectedStar(star)
+    setStarMarkdown('')
+    setLoadingStarContent(true)
+    setLinkCreated(false)
+    try {
+      const apiKey = localStorage.getItem('vantage_api_key') || ''
+      const headers: Record<string, string> = {}
+      if (apiKey) headers['X-Agent-Key'] = apiKey
+      const resp = await fetch(
+        `/api/agents/${agentName}/vault/file/${encodeURIComponent(star.path)}`,
+        { headers }
+      )
+      if (resp.ok) {
+        setStarMarkdown(await resp.text())
+      } else {
+        setStarMarkdown('> Could not load note content.')
+      }
+    } catch {
+      setStarMarkdown('> Failed to fetch note.')
+    } finally {
+      setLoadingStarContent(false)
+    }
+    // Fetch note-level links
+    setNoteLinks([])
+    const apiKey = getApiKey()
+    fetch(`/api/agents/${agentName}/vault/note-links?path=${encodeURIComponent(star.path)}`, {
+      headers: apiKey ? { 'X-Agent-Key': apiKey } : {},
+    }).then(r => r.ok ? r.json() : null)
+      .then(data => { if (data?.links) setNoteLinks(data.links) })
+      .catch(() => {})
+  }, [agentName])
+
+  // ── Create link ─────────────────────────────────────────────────────────────
+  const handleCreateLink = useCallback(async () => {
+    if (!selectedStar || !linkTargetInput.trim()) return
+    const apiKey = localStorage.getItem('vantage_api_key') || ''
+    if (!apiKey) return
+    await fetch(`/api/agents/${agentName}/vault/link`, {
+      method: 'POST',
+      headers: { 'X-Agent-Key': apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to_agent_name: linkTargetInput.trim(), link_type: 'references', note: selectedStar.path }),
+    }).catch(() => {})
+    setLinkCreated(true)
+    setLinkTargetInput('')
+  }, [agentName, selectedStar, linkTargetInput])
+
   // ── Create note ─────────────────────────────────────────────────────────────
   const handleCreateNote = useCallback(async () => {
     const apiKey = getApiKey()
@@ -277,6 +361,98 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
       setCreatingNote(false)
     }
   }, [agentName, noteTitle, noteBody, noteCategory, noteTags, fetchGalaxy])
+
+  // ── Import vault file ────────────────────────────────────────────────────────
+  const handleImportFile = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const apiKey = getApiKey()
+    if (!apiKey) { setImportStatus('✗ No API key — connect first'); return }
+    setImportStatus('Importing…')
+    const formData = new FormData()
+    formData.append('file', file)
+    try {
+      const res = await fetch(`/api/agents/${encodeURIComponent(agentName)}/vault/import`, {
+        method: 'POST',
+        headers: { 'X-Agent-Key': apiKey },
+        body: formData,
+      })
+      if (res.ok) {
+        const data = await res.json()
+        setImportStatus(`✓ Imported ${data.imported_nodes} nodes, ${data.imported_links} links`)
+        await fetchGalaxy()
+      } else {
+        const err = await res.text()
+        setImportStatus(`✗ ${err}`)
+      }
+    } catch {
+      setImportStatus('✗ Import failed')
+    }
+    // Reset file input
+    e.target.value = ''
+  }, [agentName, fetchGalaxy])
+
+  // ── Compare galaxies ────────────────────────────────────────────────────────
+  const handleCompare = useCallback(async () => {
+    const peers = compareInput.split(',').map(s => s.trim()).filter(Boolean)
+    if (peers.length === 0) return
+    // Include the current agent in the merge
+    const allPeers = [agentName, ...peers].join(',')
+    setComparing(true)
+    try {
+      const apiKey = getApiKey()
+      const headers: Record<string, string> = {}
+      if (apiKey) headers['X-Agent-Key'] = apiKey
+      const res = await fetch(
+        `/api/federation/galaxy?peers=${encodeURIComponent(allPeers)}`,
+        { headers }
+      )
+      if (res.ok) {
+        const data: GalaxyData = await res.json()
+        setCompareGalaxy(data)
+      }
+    } catch {
+      // ignore
+    } finally {
+      setComparing(false)
+    }
+  }, [agentName, compareInput])
+
+  // ── Trace search ────────────────────────────────────────────────────────────
+  const handleTraceSearch = useCallback(async () => {
+    if (!traceQuery.trim()) return
+    setSearchingTraces(true)
+    setTraceResults(null)
+    try {
+      const apiKey = getApiKey()
+      const headers: Record<string, string> = {}
+      if (apiKey) headers['X-Agent-Key'] = apiKey
+      const res = await fetch(
+        `/api/agents/${encodeURIComponent(agentName)}/vault/sessions/search?q=${encodeURIComponent(traceQuery)}&limit=20`,
+        { headers }
+      )
+      if (res.ok) {
+        const data = await res.json()
+        setTraceResults(Array.isArray(data) ? data : data.results || [])
+      }
+    } catch {
+      setTraceResults([])
+    } finally {
+      setSearchingTraces(false)
+    }
+  }, [agentName, traceQuery])
+
+  // ── Fetch cross-agent links after galaxy loads ───────────────────────────────
+  useEffect(() => {
+    if (!galaxy) return
+    const apiKey = getApiKey()
+    const headers: Record<string, string> = {}
+    if (apiKey) headers['X-Agent-Key'] = apiKey
+    fetch(`/api/agents/${encodeURIComponent(agentName)}/vault/links`, { headers })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data?.links) setCrossAgentLinks(data.links) })
+      .catch(() => {})
+  }, [agentName, galaxy])
 
   // ── Derived ─────────────────────────────────────────────────────────────────
   const accessMeta = config ? ACCESS_META[config.access] : null
@@ -320,6 +496,12 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
             >
               <BarChart2 size={12} style={{ display: 'inline', marginRight: 4 }} />
               Stats
+            </button>
+            <button
+              className={`vault-view-btn${view === 'traces' ? ' active' : ''}`}
+              onClick={() => setView('traces')}
+            >
+              Traces
             </button>
             {isOwner && (
               <button
@@ -408,8 +590,108 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
           )}
 
           {!loadingGalaxy && !locked && galaxy && (
-            <GalaxyViewer data={galaxy} agentName={agentName} />
+            <GalaxyViewer data={galaxy} agentName={agentName} onStarSelect={handleStarSelect} crossAgentLinks={crossAgentLinks} />
           )}
+
+          {selectedStar && (
+            <div className="star-detail-panel">
+              <div className="star-detail-header">
+                <span className="star-detail-title" style={{ color: selectedStar.color }}>
+                  {selectedStar.title}
+                </span>
+                <span className="tag-pill" style={{ fontSize: '0.7rem' }}>
+                  {selectedStar.constellation}
+                </span>
+                <button className="star-detail-close" onClick={() => setSelectedStar(null)}>×</button>
+              </div>
+              <div className="star-detail-meta">
+                <span className="tag-pill">{selectedStar.content_type}</span>
+                {selectedStar.tags.slice(0, 5).map(tag => (
+                  <span key={tag} className="tag-pill" style={{ opacity: 0.7 }}>{tag}</span>
+                ))}
+                {selectedStar.created && (
+                  <span style={{ fontSize: '0.7rem', color: 'var(--muted)' }}>
+                    {new Date(selectedStar.created).toLocaleDateString()}
+                  </span>
+                )}
+              </div>
+              <div className="star-detail-content">
+                {loadingStarContent ? (
+                  <span style={{ color: 'var(--muted)' }}>Loading…</span>
+                ) : (
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{starMarkdown}</ReactMarkdown>
+                )}
+              </div>
+              {noteLinks.length > 0 && (
+                <div style={{ marginTop: 10, fontSize: '0.78rem' }}>
+                  <div style={{ color: 'var(--muted)', marginBottom: 4 }}>Memory links:</div>
+                  {noteLinks.map(link => (
+                    <div key={link.id} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, padding: '3px 6px', background: 'rgba(255,255,255,0.03)', borderRadius: 4 }}>
+                      <span style={{ color: '#c7ceea', fontSize: '0.7rem', padding: '1px 5px', background: 'rgba(199,206,234,0.1)', borderRadius: 3 }}>
+                        {link.link_type}
+                      </span>
+                      <span style={{ color: 'var(--muted)' }}>
+                        {link.source_agent_name} · {link.source_note_path?.split('/').pop()}
+                      </span>
+                      <span style={{ color: 'var(--muted)' }}>→</span>
+                      <span style={{ color: 'var(--text)' }}>
+                        {link.target_agent_name} · {link.target_note_path?.split('/').pop() || '(self)'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {isOwner && (
+                <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <input
+                    type="text"
+                    placeholder="Link to agent name…"
+                    value={linkTargetInput}
+                    onChange={e => setLinkTargetInput(e.target.value)}
+                    style={{ flex: 1, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: 6, padding: '6px 10px', color: 'var(--text)', fontSize: '0.82rem' }}
+                  />
+                  <button className="btn btn-sm" onClick={handleCreateLink} disabled={!linkTargetInput.trim()}>
+                    Link
+                  </button>
+                  {linkCreated && <span style={{ color: 'var(--cyan)', fontSize: '0.8rem' }}>✓ Linked</span>}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Compare mode */}
+          <div className="vault-compare-bar">
+            <button
+              className="vault-sync-btn"
+              style={{ fontSize: '0.78rem' }}
+              onClick={() => { setShowCompare(v => !v); if (compareGalaxy) setCompareGalaxy(null) }}
+            >
+              {showCompare ? '× Close Compare' : '⊕ Compare Galaxies'}
+            </button>
+            {showCompare && (
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 }}>
+                <input
+                  type="text"
+                  placeholder="Agent names (comma-separated)…"
+                  value={compareInput}
+                  onChange={e => setCompareInput(e.target.value)}
+                  style={{ flex: 1, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: 6, padding: '6px 10px', color: 'var(--text)', fontSize: '0.82rem' }}
+                  onKeyDown={e => { if (e.key === 'Enter') handleCompare() }}
+                />
+                <button className="btn btn-sm" onClick={handleCompare} disabled={comparing || !compareInput.trim()}>
+                  {comparing ? '…' : 'Merge'}
+                </button>
+              </div>
+            )}
+            {compareGalaxy && !loadingGalaxy && (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginBottom: 6 }}>
+                  Merged galaxy: {(compareGalaxy as any).included?.join(', ') || 'multiple agents'} — {compareGalaxy.stars?.length ?? 0} stars
+                </div>
+                <GalaxyViewer data={compareGalaxy} agentName="merged" onStarSelect={handleStarSelect} />
+              </div>
+            )}
+          </div>
 
           {!loadingGalaxy && !locked && !galaxy && (
             <div className="vault-lock-screen">
@@ -593,6 +875,48 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
         </div>
       )}
 
+      {/* ── Traces view ──────────────────────────────────────────────────────── */}
+      {view === 'traces' && (
+        <div>
+          <div className="vault-search-bar">
+            <input
+              type="text"
+              placeholder="Search session traces…"
+              value={traceQuery}
+              onChange={e => setTraceQuery(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleTraceSearch() }}
+            />
+            <button onClick={handleTraceSearch} disabled={searchingTraces}>
+              <Search size={14} />
+            </button>
+          </div>
+          {searchingTraces && (
+            <div style={{ color: 'var(--muted)', padding: 16, textAlign: 'center' }}>
+              Searching traces…
+            </div>
+          )}
+          {traceResults !== null && !searchingTraces && (
+            <div style={{ marginTop: 8 }}>
+              {traceResults.length === 0 ? (
+                <div className="vault-search-result" style={{ color: 'var(--muted)', textAlign: 'center' }}>
+                  No trace results found.
+                </div>
+              ) : traceResults.map((r, i) => (
+                <div key={r.id || i} className="trace-result">
+                  <span className="trace-type-pill">{r.trace_type || 'trace'}</span>
+                  <p>{r.snippet || r.message}</p>
+                </div>
+              ))}
+            </div>
+          )}
+          {traceResults === null && !searchingTraces && (
+            <div style={{ color: 'var(--muted)', padding: '24px', textAlign: 'center', fontSize: '0.85rem' }}>
+              Search your agent's session traces — thoughts, ghost mode messages, and reasoning steps.
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ── Settings view (owner only) ───────────────────────────────────────── */}
       {view === 'settings' && isOwner && (
         <div className="vault-settings">
@@ -626,6 +950,108 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
           >
             {savingSettings ? 'Saving…' : settingsSaved ? '✓ Saved' : 'Save Settings'}
           </button>
+
+          {/* Export */}
+          <div className="dash-panel" style={{ marginTop: 20 }}>
+            <div className="dash-panel-title" style={{ marginBottom: 8 }}>Export Memory Vault</div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <a
+                className="btn btn-ghost btn-sm"
+                href={`/api/agents/${encodeURIComponent(agentName)}/vault/export?format=universal`}
+                onClick={e => {
+                  const apiKey = getApiKey()
+                  if (!apiKey) return
+                  e.preventDefault()
+                  fetch(`/api/agents/${encodeURIComponent(agentName)}/vault/export?format=universal`, {
+                    headers: { 'X-Agent-Key': apiKey },
+                  })
+                    .then(r => r.blob())
+                    .then(blob => {
+                      const url = URL.createObjectURL(blob)
+                      const a = document.createElement('a')
+                      a.href = url
+                      a.download = `${agentName}-vault-universal.json`
+                      a.click()
+                      URL.revokeObjectURL(url)
+                    })
+                    .catch(() => {})
+                }}
+              >
+                Universal JSON
+              </a>
+              <a
+                className="btn btn-ghost btn-sm"
+                href={`/api/agents/${encodeURIComponent(agentName)}/vault/download`}
+                onClick={e => {
+                  const apiKey = getApiKey()
+                  if (!apiKey) return
+                  e.preventDefault()
+                  fetch(`/api/agents/${encodeURIComponent(agentName)}/vault/download`, {
+                    headers: { 'X-Agent-Key': apiKey },
+                  })
+                    .then(r => r.blob())
+                    .then(blob => {
+                      const url = URL.createObjectURL(blob)
+                      const a = document.createElement('a')
+                      a.href = url
+                      a.download = `${agentName}-vault.zip`
+                      a.click()
+                      URL.revokeObjectURL(url)
+                    })
+                    .catch(() => {})
+                }}
+              >
+                Obsidian ZIP
+              </a>
+              <a
+                className="btn btn-ghost btn-sm"
+                href={`/api/agents/${encodeURIComponent(agentName)}/vault/graph.ttl`}
+                onClick={e => {
+                  const apiKey = getApiKey()
+                  if (!apiKey) return
+                  e.preventDefault()
+                  fetch(`/api/agents/${encodeURIComponent(agentName)}/vault/graph.ttl`, {
+                    headers: { 'X-Agent-Key': apiKey },
+                  })
+                    .then(r => r.blob())
+                    .then(blob => {
+                      const url = URL.createObjectURL(blob)
+                      const a = document.createElement('a')
+                      a.href = url
+                      a.download = `${agentName}-knowledge.ttl`
+                      a.click()
+                      URL.revokeObjectURL(url)
+                    })
+                    .catch(() => {})
+                }}
+              >
+                RDF / Turtle
+              </a>
+            </div>
+          </div>
+
+          {/* Import */}
+          <div className="dash-panel" style={{ marginTop: 12 }}>
+            <div className="dash-panel-title" style={{ marginBottom: 6 }}>Import to Memory Vault</div>
+            <p style={{ fontSize: '0.8rem', color: 'var(--muted)', marginBottom: 10 }}>
+              Accepts Universal JSON (.json) or Obsidian vault ZIP (.zip)
+            </p>
+            <input
+              type="file"
+              accept=".json,.zip"
+              onChange={handleImportFile}
+              style={{ fontSize: '0.82rem', color: 'var(--text)' }}
+            />
+            {importStatus && (
+              <div style={{
+                marginTop: 8,
+                fontSize: '0.82rem',
+                color: importStatus.startsWith('✓') ? 'var(--cyan)' : importStatus.startsWith('✗') ? '#ff5555' : 'var(--muted)',
+              }}>
+                {importStatus}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
