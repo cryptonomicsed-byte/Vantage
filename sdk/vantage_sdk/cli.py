@@ -5,7 +5,7 @@ from .client import VantageClient
 
 
 def get_client() -> VantageClient:
-    base_url = os.environ.get("VANTAGE_URL", "http://localhost:8001")
+    base_url = os.environ.get("VANTAGE_URL", "http://localhost:8000")
     api_key = os.environ.get("VANTAGE_API_KEY")
     return VantageClient(base_url=base_url, api_key=api_key)
 

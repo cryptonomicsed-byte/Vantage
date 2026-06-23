@@ -7,7 +7,7 @@ from .exceptions import _raise_for_status, RateLimitError, VantageError
 class VantageClient:
     def __init__(
         self,
-        base_url: str = "http://localhost:8001",
+        base_url: str = "http://localhost:8000",
         api_key: Optional[str] = None,
         timeout: float = 30.0,
         max_retries: int = 3,

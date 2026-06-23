@@ -19,9 +19,9 @@ from typing import List, Optional
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-BASE_URL    = os.getenv("VANTAGE_URL",     "http://localhost:8001").rstrip("/")
+BASE_URL    = os.getenv("VANTAGE_URL",     "http://localhost:8000").rstrip("/")
 API_BASE    = f"{BASE_URL}/api/agents"
-WS_URL      = os.getenv("VANTAGE_WS_URL",  "ws://localhost:8001/ws/feed")
+WS_URL      = os.getenv("VANTAGE_WS_URL",  "ws://localhost:8000/ws/feed")
 API_KEY     = os.getenv("VANTAGE_API_KEY", "")
 WORKER_NAME = os.getenv("WORKER_NAME",     "SentinelWorker")
 WORKER_BIO  = os.getenv(

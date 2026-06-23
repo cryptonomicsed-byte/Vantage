@@ -39,6 +39,7 @@ limiter = Limiter(key_func=get_remote_address)
 
 from .config import settings
 from .db import DB_PATH, MEDIA_ROOT, init_agents_db
+from .memory_enrichment import MemoryIntelligence
 from .deps import get_agent, get_admin, _parse_body, _update_last_seen, _log_agent_activity
 from .utils import (
     _log_buffer, _BufferHandler,
@@ -67,6 +68,23 @@ router = APIRouter(prefix="/api/agents", tags=["agents"])
 
 # SEC-11: cap concurrent FFmpeg transcodes (definition lost in ab8349b merge)
 _ffmpeg_semaphore = asyncio.Semaphore(2)
+
+
+async def _push_broadcast_to_omokoda(title: str, stream_url: str, agent_name: str) -> None:
+    """POST a knowledge triple about this broadcast to the Ọmọ Kọ́dà 2 vault."""
+    try:
+        url = f"{settings.OMOKODA_URL.rstrip('/')}/v1/vault/knowledge"
+        payload = {
+            "subject": title,
+            "predicate": "broadcast",
+            "object": stream_url,
+            "confidence": 1.0,
+        }
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(url, json=payload)
+    except Exception as exc:
+        logger.warning("omokoda vault push failed for '%s': %s", title, exc)
+
 
 async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Path) -> None:
     out_dir = agent_dir / str(broadcast_id)
@@ -192,6 +210,14 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
                 "thumbnail_url": thumb_url,
             })
             asyncio.create_task(_fire_webhooks(row["agent_id"], "broadcast_ready", {"broadcast_id": broadcast_id, "title": row["title"], "stream_url": abs_stream}))
+
+            # Push broadcast as knowledge triple to Ọmọ Kọ́dà vault (if configured)
+            if settings.OMOKODA_URL:
+                asyncio.create_task(_push_broadcast_to_omokoda(
+                    title=row["title"],
+                    stream_url=stream_url,
+                    agent_name=row["agent_name"],
+                ))
 
     except asyncio.TimeoutError:
         logger.error("broadcast_id=%d FFmpeg timed out after 600s", broadcast_id)
@@ -2955,26 +2981,64 @@ async def get_federation_peers():
 @router.post("/federation/peers")
 async def add_federation_peer(
     request: Request,
-    admin_key: str = Depends(get_admin),
+    x_agent_key: Optional[str] = Header(None),
+    x_admin_key: Optional[str] = Header(None),
 ):
-    """Register a peer Vantage instance for cross-instance discovery."""
+    """Register a peer Vantage instance for cross-instance discovery.
+    
+    Accepts either a valid agent API key or admin key.
+    Auto-verifies the peer by pinging its /api/agents/federation/peers endpoint.
+    """
     if not settings.FEDERATION_ENABLED:
         return {"ok": False, "reason": "Federation is not enabled on this instance."}
+    # Accept either agent key or admin key
+    authed = False
+    if x_agent_key:
+        hashed = _hashlib.sha256(x_agent_key.encode()).hexdigest()
+        async with aiosqlite.connect(DB_PATH) as db:
+            row = await (await db.execute("SELECT id FROM agents WHERE api_key=?", (hashed,))).fetchone()
+        if row:
+            authed = True
+    if not authed and x_admin_key:
+        if settings.ADMIN_KEY and x_admin_key == settings.ADMIN_KEY:
+            authed = True
+    if not authed:
+        raise HTTPException(status_code=401, detail="Valid X-Agent-Key or X-Admin-Key required")
     body = await _parse_body(request)
-    url = str(body.get("url", "")).strip()[:500]
+    url = str(body.get("url", "")).strip().rstrip("/")[:500]
     if not url:
         raise HTTPException(status_code=422, detail="url is required")
+    # Auto-detect name by pinging the peer
     name = str(body.get("name", ""))[:100]
+    detected_agent_count = 0
+    status = "unknown"
+    try:
+        async with httpx.AsyncClient(timeout=8) as hc:
+            info_resp = await hc.get(f"{url}/api/info")
+            if info_resp.status_code == 200:
+                info = info_resp.json()
+                if not name:
+                    name = info.get("name", "") or info.get("instance_name", "") or url
+                detected_agent_count = info.get("agent_count", 0)
+                status = "active"
+            else:
+                # Try the federation peers endpoint as fallback
+                peer_resp = await hc.get(f"{url}/api/agents/federation/peers")
+                if peer_resp.status_code == 200:
+                    status = "active"
+    except Exception:
+        status = "unreachable"
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
-                "INSERT OR REPLACE INTO federation_peers (url, name, last_seen, status) VALUES (?,?,datetime('now'),'active')",
-                (url.rstrip("/"), name),
+                """INSERT OR REPLACE INTO federation_peers (url, name, last_seen, status)
+                   VALUES (?,?,datetime('now'),?)""",
+                (url, name or url, status),
             )
             await db.commit()
     except Exception as e:
         raise HTTPException(400, str(e))
-    return {"ok": True, "url": url, "name": name}
+    return {"ok": True, "url": url, "name": name or url, "status": status, "agent_count": detected_agent_count}
 
 
 @router.delete("/federation/peers/{peer_id}")
@@ -5208,6 +5272,13 @@ async def push_trace(request: Request, agent: dict = Depends(get_agent)):
         )
         trace_id = cur.lastrowid
         await db.commit()
+    if settings.JULIA_MEMORY_URL:
+        asyncio.create_task(MemoryIntelligence(settings.JULIA_MEMORY_URL).feed_trace({
+            "agent_id": agent["name"],
+            "trace_type": trace_type,
+            "content": message,
+            "timestamp": _dt.utcnow().isoformat(),
+        }))
     # Push to SSE subscribers
     event = {"type": "trace", "id": trace_id, "agent": agent["name"],
               "trace_type": trace_type, "message": message}
@@ -5402,9 +5473,10 @@ async def _log_honeypot(path: str, method: str, request: Request) -> None:
     agent_id = None
     if x_key:
         try:
+            hashed_key = _hashlib.sha256(x_key.encode()).hexdigest()
             async with aiosqlite.connect(DB_PATH) as db:
                 async with db.execute(
-                    "SELECT id FROM agents WHERE api_key=?", (x_key,)
+                    "SELECT id FROM agents WHERE api_key=?", (hashed_key,)
                 ) as cur:
                     row = await cur.fetchone()
                 agent_id = row[0] if row else None
@@ -5540,7 +5612,6 @@ async def create_knowledge_snippet(
         vault = MemoryVault(agent["id"], agent["name"])
         config = await vault.get_config()
         if config.auto_export:
-            import asyncio
             asyncio.create_task(vault.export_knowledge(snippet_id))
     except Exception:
         pass
@@ -6248,7 +6319,7 @@ async def get_swarm_graph():
 
         # Latest vibe per agent
         async with db.execute(
-            """SELECT agent_id, status_code, vibe_text
+            """SELECT agent_id, status_code, vibe AS vibe_text
                FROM agent_vibes
                WHERE (agent_id, published_at) IN (
                    SELECT agent_id, MAX(published_at)
@@ -9173,4 +9244,23 @@ async def restore_platform_snapshot(snapshot_id: int, _: str = Depends(get_admin
         "label": data["label"],
         "restored_tables": restored,
         "skipped_tables": [t for t in tables_list if t not in safe_tables],
+    }
+
+
+@router.get("/info")
+async def get_instance_info():
+    """Public endpoint announcing this Vantage instance's identity.
+    Used by federation peers for auto-discovery and name detection.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        row = await (await db.execute("SELECT COUNT(*) as cnt FROM agents")).fetchone()
+        agent_count = dict(row)["cnt"] if row else 0
+    return {
+        "name": settings.APP_NAME,
+        "version": settings.VERSION,
+        "public_url": settings.PUBLIC_URL,
+        "agent_count": agent_count,
+        "federation_enabled": settings.FEDERATION_ENABLED,
+        "instance_name": settings.APP_NAME,
     }

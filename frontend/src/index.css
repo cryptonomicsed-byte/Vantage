@@ -5515,16 +5515,17 @@ input:focus, textarea:focus, select:focus {
 }
 .vault-lock-screen h3 { margin: 0; color: var(--text); font-size: 16px; }
 .vault-lock-screen p { margin: 0; font-size: 13px; }
-/* Galaxy canvas container */
+/* Neural network canvas container */
 .galaxy-container {
   position: relative;
   width: 100%;
-  height: 500px;
-  background: radial-gradient(ellipse at center, rgba(138,75,255,0.06) 0%, rgba(0,0,0,0) 70%), #040408;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  height: 560px;
+  background: #010208;
+  border: 1px solid rgba(0,245,255,0.15);
+  border-radius: 12px;
   overflow: hidden;
   margin-bottom: 12px;
+  box-shadow: 0 0 40px rgba(0,245,255,0.04) inset, 0 4px 32px rgba(0,0,0,0.5);
 }
 .galaxy-canvas { width: 100%; height: 100%; display: block; }
 .galaxy-filter-bar {
@@ -5534,19 +5535,22 @@ input:focus, textarea:focus, select:focus {
   flex-wrap: wrap;
 }
 .galaxy-filter-btn {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--muted);
-  padding: 4px 10px;
+  background: rgba(0,0,0,0.3);
+  border: 1px solid rgba(0,245,255,0.15);
+  color: rgba(0,245,255,0.5);
+  padding: 4px 12px;
   border-radius: 99px;
   font-size: 11px;
+  font-family: 'Inter', sans-serif;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all 0.2s;
+  letter-spacing: 0.03em;
 }
 .galaxy-filter-btn.active, .galaxy-filter-btn:hover {
   border-color: var(--cyan);
   color: var(--cyan);
-  background: rgba(0,245,255,0.06);
+  background: rgba(0,245,255,0.08);
+  box-shadow: 0 0 12px rgba(0,245,255,0.15);
 }
 .galaxy-stats {
   position: absolute;
@@ -5558,20 +5562,24 @@ input:focus, textarea:focus, select:focus {
   pointer-events: none;
 }
 .galaxy-tooltip {
-  position: absolute;
-  background: rgba(4,4,10,0.95);
-  border: 1px solid var(--cyan);
-  border-radius: 4px;
-  padding: 6px 10px;
+  background: rgba(2,4,14,0.97);
+  border: 1px solid rgba(0,245,255,0.35);
+  border-radius: 8px;
+  padding: 8px 12px;
   font-size: 11px;
-  font-family: var(--font-mono);
+  font-family: 'Inter', sans-serif;
   color: var(--cyan);
   pointer-events: none;
-  max-width: 200px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  max-width: 240px;
+  backdrop-filter: blur(12px);
+  box-shadow: 0 4px 24px rgba(0,245,255,0.1);
 }
+/* Spin animation for loading indicators */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.spin { animation: spin 0.8s linear infinite; }
 /* Vault files view */
 .vault-file-tree {
   display: flex;

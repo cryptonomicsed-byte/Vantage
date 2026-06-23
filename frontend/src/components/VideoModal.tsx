@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import videojs from 'video.js'
+import '@videojs/http-streaming'
 import 'video.js/dist/video-js.css'
 import { X, Zap, Share2, Check } from 'lucide-react'
 import ReactionsBar from './ReactionsBar'

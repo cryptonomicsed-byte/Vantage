@@ -3,7 +3,7 @@ services:
     build: .
     container_name: vantage
     ports:
-      - "8001:8001"
+      - "8000:8000"
     volumes:
       - ./data:/app/data
       - ./media:/app/media
@@ -14,7 +14,7 @@ services:
     mem_limit: 2g
     cpus: '2'
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/api/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3

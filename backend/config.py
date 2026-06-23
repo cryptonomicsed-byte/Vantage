@@ -29,14 +29,14 @@ class Settings(BaseSettings):
     WEBUI_DIR: Path = Path("frontend/dist")
 
     HOST: str = "0.0.0.0"
-    PORT: int = 8001
-    PUBLIC_URL: str = "http://localhost:8001"
+    PORT: int = 8000
+    PUBLIC_URL: str = "http://localhost:8000"
 
     # Optional: POST publish events to any external webhook URL.
     # Leave empty to disable. No external service required.
     OUTBOUND_WEBHOOK_URL: str = ""
 
-    ALLOWED_ORIGINS: List[str] = ["http://localhost:8001"]
+    ALLOWED_ORIGINS: List[str] = ["http://localhost:8000"]
     MAX_UPLOAD_MB: int = 500
 
     # Walrus decentralized storage (optional, set WALRUS_ENABLED=true to activate)
@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     SEAL_ENABLED: bool = False
 
     # Cross-instance federation (optional)
-    FEDERATION_ENABLED: bool = False
+    FEDERATION_ENABLED: bool = True
 
     # Creation pipeline: Vantage only tracks job state — agents drive generation
     # using their own LLM, TTS, and image/video tools, then publish via standard endpoints.

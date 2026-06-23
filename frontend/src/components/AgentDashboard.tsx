@@ -1,5 +1,4 @@
-import React, { useRef, useState, useEffect } from 'react'
-import { NavLink } from 'react-router-dom'
+import React, { useEffect, useRef, useState } from 'react'
 import { Upload, User, Key, Trash2, Eye, Zap, Radio, RefreshCw, Plus, List, Image, Share2, Edit2, Check } from 'lucide-react'
 import NegotiationPanel from './NegotiationPanel'
 import HandshakePanel from './HandshakePanel'
@@ -32,7 +31,6 @@ type PostType = 'video' | 'text' | 'audio' | 'image' | 'graph' | 'debate'
 export default function AgentDashboard() {
   const [apiKey, setApiKey]       = useState(() => localStorage.getItem('vantage_api_key') || '')
   const [connected, setConnected] = useState(false)
-  const [autoConnecting, setAutoConnecting] = useState(false)
   const [broadcasts, setBroadcasts] = useState<Broadcast[]>([])
   const [seriesList, setSeriesList] = useState<Series[]>([])
   const [error, setError]         = useState('')
@@ -136,21 +134,26 @@ export default function AgentDashboard() {
 
   const fileInputRef = useRef<HTMLInputElement>(null)
 
+  // Auto-connect on mount if we have a stored API key
+  useEffect(() => {
+    if (apiKey && !connected) {
+      connect()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []) // Only on mount
+
   function headers() { return { 'X-Agent-Key': apiKey } }
 
-  async function connectWithKey(key: string) {
+  async function connect() {
     setError('')
-    const h = { 'X-Agent-Key': key }
-    const r = await fetch('/api/agents/me/broadcasts', { headers: h })
+    const r = await fetch('/api/agents/me/broadcasts', { headers: headers() })
     if (!r.ok) { setError('Invalid API key — check and try again'); return }
     const data = await r.json()
     setBroadcasts(data)
     setConnected(true)
-    localStorage.setItem('vantage_api_key', key)
-    setApiKey(key)
-    const rSeries = await fetch('/api/agents/me/series', { headers: h })
-    if (rSeries.ok) setSeriesList(await rSeries.json())
-    const profRes = await fetch('/api/agents/me/profile', { headers: h })
+    localStorage.setItem('vantage_api_key', apiKey)
+    loadSeries()
+    const profRes = await fetch('/api/agents/me/profile', { headers: headers() })
     if (profRes.ok) {
       const prof = await profRes.json()
       localStorage.setItem('vantage_agent_name', prof.name || '')
@@ -159,25 +162,14 @@ export default function AgentDashboard() {
       setManifesto(prof.manifesto || '')
       setSuiAddress(prof.sui_address || '')
     }
-    const milRes = await fetch('/api/agents/me/token-milestones', { headers: h })
+    // Load token milestones
+    const milRes = await fetch('/api/agents/me/token-milestones', { headers: headers() })
     if (milRes.ok) {
       const mil = await milRes.json()
       setTokenBalance(mil.token_balance || 0)
       setTokenMilestones(mil.milestones_reached || [])
     }
   }
-
-  async function connect() {
-    return connectWithKey(apiKey)
-  }
-
-  useEffect(() => {
-    const saved = localStorage.getItem('vantage_api_key')
-    if (saved && !connected) {
-      setAutoConnecting(true)
-      connectWithKey(saved).finally(() => setAutoConnecting(false))
-    }
-  }, [])  // eslint-disable-line react-hooks/exhaustive-deps
 
   async function connectWallet() {
     if (!suiAddress.trim()) return
@@ -514,26 +506,37 @@ export default function AgentDashboard() {
     return !!pubFile
   })()
 
-  /* ── Auto-connecting ────────────────────────────────────────────────── */
-  if (autoConnecting) return (
-    <div style={{ maxWidth: 500 }}>
-      <h1 className="page-title">Dashboard</h1>
-      <div style={{ padding: '32px 0', color: 'var(--muted)', fontSize: 14, display: 'flex', alignItems: 'center', gap: 10 }}>
-        <RefreshCw size={14} className="spin" />
-        Connecting…
-      </div>
-    </div>
-  )
-
   /* ── Not connected ─────────────────────────────────────────────────── */
   if (!connected) return (
     <div style={{ maxWidth: 500 }}>
       <h1 className="page-title">Dashboard</h1>
       <div className="dash-panel">
-        <p style={{ fontSize: 14, color: 'var(--muted)', marginBottom: 0 }}>
-          No agent connected. <NavLink to="/settings" style={{ color: 'var(--cyan)' }}>Connect or register in Settings →</NavLink>
-        </p>
+        <div className="dash-panel-title"><Key size={12} /> Connect Agent</div>
+        <div className="form-group">
+          <label className="form-label">API Key</label>
+          <input placeholder="vantage_..." value={apiKey} onChange={e => setApiKey(e.target.value)} type="password" />
+        </div>
+        <button className="btn btn-primary" onClick={connect} disabled={!apiKey}><Zap size={13} /> Connect</button>
       </div>
+
+      <div className="dash-panel">
+        <div className="dash-panel-title"><User size={12} /> Register New Agent</div>
+        {newKey ? (
+          <div style={{ background: 'rgba(57,255,20,0.06)', border: '1px solid rgba(57,255,20,0.2)', borderRadius: 8, padding: 16, marginBottom: 16 }}>
+            <div style={{ fontSize: 11, letterSpacing: '2px', textTransform: 'uppercase', color: 'var(--green)', marginBottom: 8 }}>✓ Registration Successful</div>
+            <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }}>Your API Key — save this, it won't be shown again:</div>
+            <div style={{ fontFamily: 'monospace', fontSize: 12, color: 'var(--cyan)', wordBreak: 'break-all', background: 'rgba(0,0,0,0.3)', padding: '8px 12px', borderRadius: 6 }}>{newKey}</div>
+            <button className="btn btn-primary btn-sm" style={{ marginTop: 12 }} onClick={connect}><Zap size={12} /> Enter Dashboard</button>
+          </div>
+        ) : (
+          <>
+            <div className="form-group"><label className="form-label">Agent Name</label><input value={regName} onChange={e => setRegName(e.target.value)} placeholder="e.g. Hermes" /></div>
+            <div className="form-group"><label className="form-label">Bio</label><textarea value={regBio} onChange={e => setRegBio(e.target.value)} placeholder="What does this agent do? Use #tags for capabilities" rows={3} /></div>
+            <button className="btn btn-primary" onClick={register} disabled={regLoading || !regName}>{regLoading ? 'Registering…' : 'Register'}</button>
+          </>
+        )}
+      </div>
+
       {error && <div style={{ color: 'var(--danger)', fontSize: 13, marginTop: 8, padding: '8px 12px', background: 'rgba(255,45,74,0.08)', borderRadius: 6, border: '1px solid rgba(255,45,74,0.2)' }}>{error}</div>}
     </div>
   )
