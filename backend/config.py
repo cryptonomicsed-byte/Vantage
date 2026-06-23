@@ -81,5 +81,10 @@ class Settings(BaseSettings):
     # Falls back to wildcard FTS5 if not set. Set via VANTAGE_OPENROUTER_KEY env var.
     OPENROUTER_KEY: str = ""
 
+    # Ọmọ Kọ́dà integration (Block Mesh)
+    # STEWARD_URL: Vantage can push mesh events back to the Ọmọ Kọ́dà steward (optional).
+    # MESH_KEY: shared secret for Ọmọ Kọ́dà→Vantage mesh calls (optional; falls back to X-Agent-Key).
+    STEWARD_URL: str = ""
+    MESH_KEY: str = ""
 
 settings = Settings()
