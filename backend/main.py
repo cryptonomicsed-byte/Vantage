@@ -21,6 +21,7 @@ from slowapi.util import get_remote_address
 
 from .agents import init_agents_db, router as agents_router, admin_router, DB_PATH, _feed_clients, _gossip_channels
 from .config import settings
+from .mesh_store import init_mesh_db
 
 logging.basicConfig(
     level=logging.INFO,
@@ -164,7 +165,6 @@ async def _platform_subscription_loop():
                                                       "error": "unreachable", "threshold": threshold}
 
                     if fire_event:
-                        # Deliver via SSE or webhook
                         agent_id = sub["agent_id"]
                         if sub["delivery"] == "sse" and agent_id in _sse_subscriptions:
                             try:
@@ -176,7 +176,6 @@ async def _platform_subscription_loop():
                         elif sub["delivery"] == "webhook" and sub["webhook_url"]:
                             await _fire_webhooks(agent_id, "platform_watch", fire_event)
 
-                        # Update last_fired_at
                         async with aiosqlite.connect(DB_PATH) as db:
                             await db.execute(
                                 "UPDATE platform_subscriptions SET last_fired_at=datetime('now') WHERE id=?",
@@ -221,17 +220,15 @@ async def _federation_gossip_loop():
                     peers = [dict(r) for r in await cur.fetchall()]
 
             now = _time.time()
-            new_peers_inserted = 0  # rate-limit: max 10 new peer inserts per loop run
+            new_peers_inserted = 0
 
             async with httpx.AsyncClient(timeout=8) as hc:
                 for peer in peers:
                     peer_id = peer["id"]
 
-                    # --- Circuit breaker check ---
                     breaker = _peer_breakers.get(peer_id, {"failures": 0, "open_until": 0.0})
                     db_failure_count = peer.get("failure_count") or 0
                     db_open_until_str = peer.get("circuit_open_until") or ""
-                    # Reconcile in-memory state with DB (in case of restart)
                     if breaker["failures"] == 0 and db_failure_count >= 3:
                         try:
                             db_open_until = float(db_open_until_str) if db_open_until_str else 0.0
@@ -247,13 +244,11 @@ async def _federation_gossip_loop():
                         )
                         continue
 
-                    # --- Contact peer ---
                     try:
                         resp = await hc.get(f"{peer['url']}/api/agents/federation/peers")
                         if resp.status_code != 200:
                             raise Exception(f"HTTP {resp.status_code}")
 
-                        # --- Signed manifest verification ---
                         sig_header = resp.headers.get("X-Peer-Signature", "")
                         sig_invalid = False
                         if sig_header and _settings.FEDERATION_KEY:
@@ -271,7 +266,6 @@ async def _federation_gossip_loop():
                                 )
 
                         if sig_invalid:
-                            # Aggressive reputation penalty for bad signatures
                             new_rep = max(0.0, peer["reputation"] - 20.0)
                             flagged = 1 if new_rep < 20.0 else 0
                             async with aiosqlite.connect(_DB_PATH) as db:
@@ -281,7 +275,6 @@ async def _federation_gossip_loop():
                                     (new_rep, flagged, peer_id),
                                 )
                                 await db.commit()
-                            # Still counts as a contact success for circuit-breaker purposes
                             breaker["failures"] = 0
                             breaker["open_until"] = 0.0
                             _peer_breakers[peer_id] = breaker
@@ -291,9 +284,8 @@ async def _federation_gossip_loop():
                                     (peer_id,),
                                 )
                                 await db.commit()
-                            continue  # skip discovery from this peer
+                            continue
 
-                        # --- Success: update reputation, reset circuit breaker ---
                         new_rep = min(100.0, peer["reputation"] + 5.0)
                         breaker["failures"] = 0
                         breaker["open_until"] = 0.0
@@ -308,7 +300,6 @@ async def _federation_gossip_loop():
                             )
                             await db.commit()
 
-                        # --- Reputation gate: only discover from trusted peers ---
                         if peer["reputation"] < 30.0:
                             logger.debug(
                                 "Federation peer %s reputation %.1f < 30 — skipping peer discovery",
@@ -316,7 +307,6 @@ async def _federation_gossip_loop():
                             )
                             continue
 
-                        # --- Discover new peers from their list ---
                         data = resp.json()
                         remote_peers = data.get("peers", [])
                         for rp in remote_peers:
@@ -329,7 +319,6 @@ async def _federation_gossip_loop():
                             rp_name = str(rp.get("name", ""))
                             if not rp_url or rp_url == peer["url"]:
                                 continue
-                            # SSRF protection — block private/loopback/metadata ranges
                             if not _is_ssrf_safe_url(rp_url):
                                 continue
                             async with aiosqlite.connect(_DB_PATH) as db:
@@ -343,10 +332,9 @@ async def _federation_gossip_loop():
                                     new_peers_inserted += 1
 
                     except Exception as _peer_exc:
-                        # --- Failure: increment circuit breaker ---
                         breaker["failures"] = breaker.get("failures", 0) + 1
                         if breaker["failures"] >= 3:
-                            breaker["open_until"] = now + 1800  # 30 minutes
+                            breaker["open_until"] = now + 1800
                             logger.warning(
                                 "Federation peer %s circuit opened after %d failures (retry at %.0f)",
                                 peer["url"], breaker["failures"], breaker["open_until"],
@@ -373,6 +361,7 @@ async def _federation_gossip_loop():
 async def lifespan(app: FastAPI):
     global FFMPEG_AVAILABLE
     await init_agents_db()
+    await init_mesh_db()
 
     # Check FFmpeg availability on startup
     try:
@@ -445,6 +434,7 @@ app = FastAPI(
         {"name": "co-creation", "description": "Collaboration invites between agents"},
         {"name": "pipeline", "description": "Agent-driven creation job tracking"},
         {"name": "federation", "description": "Cross-instance peer discovery and feed aggregation"},
+        {"name": "mesh", "description": "Block Mesh — sovereign agent coordination via Ọmọ Kọ́dà"},
         {"name": "platform", "description": "Skills registry, design system, health"},
     ],
 )
@@ -495,6 +485,8 @@ from .routers.memory_vault import router as memory_vault_router
 app.include_router(memory_vault_router)
 from .routers.memory_enrichment import router as memory_enrichment_router
 app.include_router(memory_enrichment_router)
+from .routers.mesh import router as mesh_router
+app.include_router(mesh_router)
 
 # MCP server — exposes all Vantage routes as MCP tools for Claude/GPT agents
 from .mcp_server import create_mcp_server as _create_mcp
@@ -530,7 +522,11 @@ async def feed_ws(ws: WebSocket):
 
 @app.websocket("/ws/gossip")
 async def gossip_ws(ws: WebSocket, channel: str = "swarm.system.alerts"):
-    """Agent-to-Agent Event Bus WebSocket. Subscribe to a named channel for live events."""
+    """Agent-to-Agent Event Bus WebSocket. Subscribe to a named channel for live events.
+
+    Block Mesh channels follow the pattern block.{block_id} — subscribe here to receive
+    real-time mesh events (proposals, resource reservations, agent join/leave, signals).
+    """
     await ws.accept()
     if channel not in _gossip_channels:
         _gossip_channels[channel] = set()

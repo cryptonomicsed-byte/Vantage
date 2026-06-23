@@ -1,5 +1,7 @@
+import hashlib as _hashlib
 from pathlib import Path
-from typing import List
+from typing import List, Optional
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Check backend/.env first, then project root .env, then cwd .env
@@ -27,22 +29,14 @@ class Settings(BaseSettings):
     WEBUI_DIR: Path = Path("frontend/dist")
 
     HOST: str = "0.0.0.0"
-    PORT: int = 8001
-    PUBLIC_URL: str = "http://localhost:8001"
+    PORT: int = 8000
+    PUBLIC_URL: str = "http://localhost:8000"
 
     # Optional: POST publish events to any external webhook URL.
     # Leave empty to disable. No external service required.
     OUTBOUND_WEBHOOK_URL: str = ""
 
-    # Ọmọ Kọ́dà 2 integration: push broadcast knowledge triples to local agent OS.
-    # Set to agent's base URL (e.g. http://localhost:7400) to enable.
-    OMOKODA_URL: str = ""
-
-    # Julia memory service: semantic search, prediction, pattern mining.
-    # Set to omokoda-memory URL (e.g. http://localhost:7778) to enable.
-    JULIA_MEMORY_URL: str = ""
-
-    ALLOWED_ORIGINS: List[str] = ["http://localhost:8001"]
+    ALLOWED_ORIGINS: List[str] = ["http://localhost:8000"]
     MAX_UPLOAD_MB: int = 500
 
     # Walrus decentralized storage (optional, set WALRUS_ENABLED=true to activate)
@@ -59,15 +53,39 @@ class Settings(BaseSettings):
     SEAL_ENABLED: bool = False
 
     # Cross-instance federation (optional)
-    FEDERATION_ENABLED: bool = False
+    FEDERATION_ENABLED: bool = True
 
     # Creation pipeline: Vantage only tracks job state — agents drive generation
     # using their own LLM, TTS, and image/video tools, then publish via standard endpoints.
 
     ADMIN_KEY: str = ""  # set via VANTAGE_ADMIN_KEY env var — no hardcoded default
 
+    @field_validator("ADMIN_KEY")
+    @classmethod
+    def validate_admin_key(cls, v: str) -> str:
+        if v and len(v) < 32:
+            raise ValueError("VANTAGE_ADMIN_KEY must be at least 32 characters")
+        return v
+
+    @property
+    def ADMIN_KEY_HASH(self) -> Optional[str]:
+        """SHA-256 of admin key, computed once. None if admin key is not set."""
+        if not self.ADMIN_KEY:
+            return None
+        return _hashlib.sha256(self.ADMIN_KEY.encode()).hexdigest()
+
     # Federation signing key — HMAC-SHA256 key for peer manifest verification (optional)
     FEDERATION_KEY: str = ""
+
+    # Optional: OpenRouter API key — enables true vector semantic search in memory vault.
+    # Falls back to wildcard FTS5 if not set. Set via VANTAGE_OPENROUTER_KEY env var.
+    OPENROUTER_KEY: str = ""
+
+    # Ọmọ Kọ́dà integration (Block Mesh)
+    # STEWARD_URL: Vantage can push mesh events back to the Ọmọ Kọ́dà steward (optional).
+    # MESH_KEY: shared secret for Ọmọ Kọ́dà→Vantage mesh calls (optional; falls back to X-Agent-Key).
+    STEWARD_URL: str = ""
+    MESH_KEY: str = ""
 
 
 settings = Settings()
