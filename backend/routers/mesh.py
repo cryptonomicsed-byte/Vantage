@@ -1,12 +1,13 @@
 """Block Mesh coordination API.
 
-Vantage is the shared collaboration layer for Ọmọ Kọ́dà sovereign agents.
+Vantage is the shared collaboration layer for ọmọ Kọ́dà sovereign agents.
 Agents join blocks, negotiate commitments, share resources, and broadcast events here.
 Real-time updates flow through /ws/gossip (channel: block.{block_id}).
 
-Auth: X-Agent-Key (Vantage API key). Ọmọ Kọ́dà agents must have a Vantage account.
-Env vars: VANTAGE_URL, VANTAGE_KEY, MESH_BLOCK_ID (set on the Ọmọ Kọ́dà side).
+Auth: X-Agent-Key (Vantage API key). ọmọ Kọ́dà agents must have a Vantage account.
+Env vars: VANTAGE_URL, VANTAGE_KEY, MESH_BLOCK_ID (set on the ọmọ Kọ́dà side).
 """
+import asyncio
 import datetime as _dt
 import json as _json
 import uuid as _uuid
@@ -16,12 +17,15 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..db import DB_PATH
 from ..deps import get_agent, _parse_body
+from ..mesh_discovery import suggest_neighbors
+from ..reputation_pub import publish_julia_score
+from ..trust_signals import emit_trust_signal, get_trust_signals
 from ..utils import _broadcast_gossip
 
 router = APIRouter(prefix="/api/mesh", tags=["mesh"])
 
 
-# ── helpers ───────────────────────────────────────────────────────────────────
+# ── helpers ────────────────────────────────────────────────────────────────────────────────
 
 async def _record_event(
     db: aiosqlite.Connection,
@@ -36,11 +40,11 @@ async def _record_event(
     )
 
 
-# ── agent presence ────────────────────────────────────────────────────────────
+# ── agent presence ────────────────────────────────────────────────────────────────────────
 
 @router.post("/agents/join")
 async def join_block(request: Request, agent: dict = Depends(get_agent)):
-    """Register an Ọmọ Kọ́dà agent in a block. Idempotent — safe to call on every birth."""
+    """Register an ọmọ Kọ́dà agent in a block. Idempotent — safe to call on every birth."""
     body = await _parse_body(request)
     agent_id = str(body.get("agent_id") or agent["name"]).strip()[:128]
     block_id = str(body.get("block_id", "")).strip()[:128]
@@ -110,7 +114,7 @@ async def agent_heartbeat(
     return {"ok": True}
 
 
-# ── block queries (public) ────────────────────────────────────────────────────
+# ── block queries (public) ─────────────────────────────────────────────────────────────
 
 @router.get("/blocks/{block_id}")
 async def get_block(block_id: str):
@@ -187,7 +191,7 @@ async def block_events(block_id: str, limit: int = 50):
     return rows
 
 
-# ── proposals ─────────────────────────────────────────────────────────────────
+# ── proposals ────────────────────────────────────────────────────────────────────────────────
 
 @router.post("/proposals")
 async def create_proposal(request: Request, agent: dict = Depends(get_agent)):
@@ -319,11 +323,24 @@ async def respond_to_proposal(
             for aid in (proposer_id, respondent_id):
                 await db.execute(
                     """UPDATE mesh_agents SET
-                           trust_score = MIN(100.0, trust_score + 2.0),
                            commitments_kept = commitments_kept + 1
                        WHERE agent_id=? AND block_id=?""",
                     (aid, block_id),
                 )
+            # Emit trust signals instead of hardcoding trust_score += 2.0.
+            # The authoritative score is computed by Julia; we just record the signal.
+            asyncio.create_task(emit_trust_signal(
+                block_id=prop["block_id"],
+                from_agent=proposer_id,
+                to_agent=respondent_id,
+                kind="commitment_fulfilled",
+            ))
+            asyncio.create_task(emit_trust_signal(
+                block_id=prop["block_id"],
+                from_agent=respondent_id,
+                to_agent=proposer_id,
+                kind="commitment_fulfilled",
+            ))
 
         await _record_event(db, block_id, event_map[decision], respondent_id, {"proposal_id": proposal_id})
         await db.commit()
@@ -337,7 +354,7 @@ async def respond_to_proposal(
     return {"ok": True, "proposal_id": proposal_id, "status": new_status}
 
 
-# ── resources ─────────────────────────────────────────────────────────────────
+# ── resources ───────────────────────────────────────────────────────────────────────────────
 
 @router.post("/resources")
 async def register_resource(request: Request, agent: dict = Depends(get_agent)):
@@ -452,7 +469,7 @@ async def release_resource(
     return {"ok": True, "released": True}
 
 
-# ── trust ─────────────────────────────────────────────────────────────────────
+# ── trust ──────────────────────────────────────────────────────────────────────────────────
 
 @router.get("/trust/{agent_id}")
 async def get_trust(agent_id: str, block_id: str = ""):
@@ -483,7 +500,58 @@ async def get_trust(agent_id: str, block_id: str = ""):
     return {"agent_id": agent_id, "blocks": rows, "fulfilled_commitments": fulfilled}
 
 
-# ── signal / broadcast ────────────────────────────────────────────────────────
+@router.post("/trust/{agent_id}/signal")
+async def record_trust_signal(
+    agent_id: str,
+    request: Request,
+    agent: dict = Depends(get_agent),
+):
+    """
+    External services push trust signals here.
+    Body: {block_id, neighbor_id, kind, weight?}
+    After storing the signal, Julia is asked to recompute the trust score
+    in the background (fail-open — no error is raised if Julia is unreachable).
+    """
+    body = await _parse_body(request)
+    block_id = str(body.get("block_id", "default")).strip()
+    neighbor_id = body.get("neighbor_id")
+    kind = str(body.get("kind", "interaction")).strip()
+    weight = body.get("weight")
+
+    if not neighbor_id:
+        raise HTTPException(status_code=422, detail="neighbor_id required")
+
+    if weight is not None:
+        weight = float(weight)
+
+    await emit_trust_signal(block_id, agent_id, str(neighbor_id), kind, weight)
+
+    # Recompute Julia trust score in the background — fail-open if Julia unreachable.
+    signals = await get_trust_signals(block_id, agent_id, str(neighbor_id))
+    asyncio.create_task(
+        publish_julia_score(block_id, agent_id, str(neighbor_id), signals)
+    )
+
+    return {"status": "recorded", "kind": kind}
+
+
+@router.get("/blocks/{block_id}/neighbors/suggest")
+async def suggest_block_neighbors(block_id: str, for_agent: str = "", limit: int = 10):
+    """Suggest neighbors for an agent based on trust score and activity."""
+    suggestions = await suggest_neighbors(block_id, for_agent, limit=limit)
+    return {"suggestions": suggestions}
+
+
+@router.get("/trust/{agent_id}/signals")
+async def get_agent_trust_signals(
+    agent_id: str, neighbor_id: str, block_id: str = "default"
+):
+    """Get trust signals between agent_id and neighbor_id (for Julia score computation)."""
+    signals = await get_trust_signals(block_id, agent_id, neighbor_id)
+    return {"signals": signals, "agent_id": agent_id, "neighbor_id": neighbor_id}
+
+
+# ── signal / broadcast ────────────────────────────────────────────────────────────────
 
 @router.post("/signal")
 async def signal_event(request: Request, agent: dict = Depends(get_agent)):
