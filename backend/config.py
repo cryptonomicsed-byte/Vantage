@@ -1,4 +1,5 @@
 import hashlib as _hashlib
+import logging
 from pathlib import Path
 from typing import List, Optional
 from pydantic import field_validator
@@ -21,7 +22,7 @@ class Settings(BaseSettings):
     )
 
     APP_NAME: str = "Vantage"
-    VERSION: str = "0.2.0"
+    VERSION: str = "0.2.1"
     DEBUG: bool = False
 
     DATA_DIR: Path = Path("data")
@@ -89,3 +90,20 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# Runtime guard: warn and override any Phase C feature flags that are not yet implemented.
+# Setting these to True would cause crashes; this guard prevents silent misconfig.
+_logger = logging.getLogger(__name__)
+_UNIMPLEMENTED_FLAGS = {
+    "WALRUS_ENABLED": settings.WALRUS_ENABLED,
+    "SUI_ENABLED": settings.SUI_ENABLED,
+    "SEAL_ENABLED": settings.SEAL_ENABLED,
+    "FEDERATION_ENABLED": settings.FEDERATION_ENABLED,
+}
+for _flag, _val in _UNIMPLEMENTED_FLAGS.items():
+    if _val:
+        _logger.warning(
+            "%s=True but this feature is not yet implemented — setting to False",
+            _flag,
+        )
+        object.__setattr__(settings, _flag, False)
