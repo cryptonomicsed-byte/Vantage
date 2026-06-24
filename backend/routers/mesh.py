@@ -523,6 +523,8 @@ async def record_trust_signal(
         weight = float(weight)
 
     await emit_trust_signal(block_id, agent_id, str(neighbor_id), kind, weight)
+    signals = await get_trust_signals(block_id, agent_id, str(neighbor_id))
+    asyncio.create_task(publish_julia_score(block_id, agent_id, str(neighbor_id), signals))
     return {"status": "recorded", "kind": kind}
 
 
