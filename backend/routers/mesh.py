@@ -509,8 +509,6 @@ async def record_trust_signal(
     """
     External services push trust signals here.
     Body: {block_id, neighbor_id, kind, weight?}
-    After storing the signal, Julia is asked to recompute the trust score
-    in the background (fail-open — no error is raised if Julia is unreachable).
     """
     body = await _parse_body(request)
     block_id = str(body.get("block_id", "default")).strip()
@@ -525,13 +523,8 @@ async def record_trust_signal(
         weight = float(weight)
 
     await emit_trust_signal(block_id, agent_id, str(neighbor_id), kind, weight)
-
-    # Recompute Julia trust score in the background — fail-open if Julia unreachable.
     signals = await get_trust_signals(block_id, agent_id, str(neighbor_id))
-    asyncio.create_task(
-        publish_julia_score(block_id, agent_id, str(neighbor_id), signals)
-    )
-
+    asyncio.create_task(publish_julia_score(block_id, agent_id, str(neighbor_id), signals))
     return {"status": "recorded", "kind": kind}
 
 
