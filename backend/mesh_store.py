@@ -18,10 +18,24 @@ async def init_mesh_db() -> None:
                 last_seen_at TEXT DEFAULT (datetime('now')),
                 joined_at TEXT DEFAULT (datetime('now')),
                 status TEXT DEFAULT 'active',
+                public_key TEXT DEFAULT '',
+                dna_fingerprint TEXT DEFAULT '',
+                odu_index INTEGER DEFAULT NULL,
+                model_fingerprint TEXT DEFAULT '',
+                parent_id TEXT DEFAULT '',
+                identity_verified INTEGER DEFAULT 0,
                 PRIMARY KEY (agent_id, block_id)
             )""",
             "CREATE INDEX IF NOT EXISTS idx_mesh_agents_block ON mesh_agents(block_id)",
             "CREATE INDEX IF NOT EXISTS idx_mesh_agents_active ON mesh_agents(block_id, status)",
+            # Sovereign identity columns — idempotent migrations for DBs created
+            # before typed identity landed (ALTER fails harmlessly if present).
+            "ALTER TABLE mesh_agents ADD COLUMN public_key TEXT DEFAULT ''",
+            "ALTER TABLE mesh_agents ADD COLUMN dna_fingerprint TEXT DEFAULT ''",
+            "ALTER TABLE mesh_agents ADD COLUMN odu_index INTEGER DEFAULT NULL",
+            "ALTER TABLE mesh_agents ADD COLUMN model_fingerprint TEXT DEFAULT ''",
+            "ALTER TABLE mesh_agents ADD COLUMN parent_id TEXT DEFAULT ''",
+            "ALTER TABLE mesh_agents ADD COLUMN identity_verified INTEGER DEFAULT 0",
             """CREATE TABLE IF NOT EXISTS mesh_proposals (
                 id TEXT PRIMARY KEY,
                 block_id TEXT NOT NULL,

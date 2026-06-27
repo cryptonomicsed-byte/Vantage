@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..db import DB_PATH
 from ..deps import get_agent, _parse_body
+from ..identity_verify import verify_identity
 from ..mesh_discovery import suggest_neighbors
 from ..reputation_pub import publish_julia_score
 from ..trust_signals import emit_trust_signal, get_trust_signals
@@ -54,20 +55,58 @@ async def join_block(request: Request, agent: dict = Depends(get_agent)):
     if not block_id:
         raise HTTPException(422, "block_id required")
 
+    # ── Sovereign identity ──────────────────────────────────────────────────
+    # ọmọ Kọ́dà birth sends identity inside `capabilities`; accept top-level too.
+    def _identity_field(key):
+        val = capabilities.get(key)
+        return body.get(key) if val is None else val
+
+    public_key = str(_identity_field("public_key") or "")[:128]
+    dna_fingerprint = str(_identity_field("dna_fingerprint") or "")[:128]
+    model_fingerprint = str(_identity_field("model_fingerprint") or public_key)[:128]
+    parent_id = str(_identity_field("parent_id") or "")[:128]
+    signature = str(_identity_field("identity_signature") or "")[:256]
+    odu_raw = _identity_field("odu_index")
+    try:
+        odu_index = int(odu_raw) if odu_raw is not None else None
+    except (TypeError, ValueError):
+        odu_index = None
+
+    # The agent proves control of its keypair by signing its own agent_id.
+    verified = 1 if verify_identity(public_key, agent_id, signature) else 0
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """INSERT INTO mesh_agents
-                   (agent_id, block_id, vantage_name, role, capabilities_json, last_seen_at, status)
-               VALUES (?,?,?,?,?,datetime('now'),'active')
+                   (agent_id, block_id, vantage_name, role, capabilities_json,
+                    public_key, dna_fingerprint, odu_index, model_fingerprint,
+                    parent_id, identity_verified, last_seen_at, status)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now'),'active')
                ON CONFLICT(agent_id, block_id) DO UPDATE SET
                    role=excluded.role,
                    capabilities_json=excluded.capabilities_json,
                    vantage_name=excluded.vantage_name,
+                   public_key=CASE WHEN excluded.public_key != ''
+                       THEN excluded.public_key ELSE mesh_agents.public_key END,
+                   dna_fingerprint=CASE WHEN excluded.dna_fingerprint != ''
+                       THEN excluded.dna_fingerprint ELSE mesh_agents.dna_fingerprint END,
+                   odu_index=COALESCE(excluded.odu_index, mesh_agents.odu_index),
+                   model_fingerprint=CASE WHEN excluded.model_fingerprint != ''
+                       THEN excluded.model_fingerprint ELSE mesh_agents.model_fingerprint END,
+                   parent_id=CASE WHEN excluded.parent_id != ''
+                       THEN excluded.parent_id ELSE mesh_agents.parent_id END,
+                   identity_verified=MAX(mesh_agents.identity_verified,
+                                         excluded.identity_verified),
                    last_seen_at=datetime('now'),
                    status='active'""",
-            (agent_id, block_id, agent["name"], role, _json.dumps(capabilities)),
+            (agent_id, block_id, agent["name"], role, _json.dumps(capabilities),
+             public_key, dna_fingerprint, odu_index, model_fingerprint,
+             parent_id, verified),
         )
-        await _record_event(db, block_id, "agent_joined", agent_id, {"role": role})
+        await _record_event(
+            db, block_id, "agent_joined", agent_id,
+            {"role": role, "identity_verified": bool(verified)},
+        )
         await db.commit()
 
     await _broadcast_gossip(f"block.{block_id}", {
@@ -75,8 +114,14 @@ async def join_block(request: Request, agent: dict = Depends(get_agent)):
         "agent_id": agent_id,
         "block_id": block_id,
         "role": role,
+        "identity_verified": bool(verified),
     })
-    return {"ok": True, "agent_id": agent_id, "block_id": block_id}
+    return {
+        "ok": True,
+        "agent_id": agent_id,
+        "block_id": block_id,
+        "identity_verified": bool(verified),
+    }
 
 
 @router.delete("/agents/{agent_id}/leave")
