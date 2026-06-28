@@ -22,6 +22,7 @@ from slowapi.util import get_remote_address
 from .agents import init_agents_db, router as agents_router, admin_router, DB_PATH, _feed_clients, _gossip_channels
 from .config import settings
 from .mesh_store import init_mesh_db
+from .manifesto_store import init_manifesto_db
 
 logging.basicConfig(
     level=logging.INFO,
@@ -362,6 +363,7 @@ async def lifespan(app: FastAPI):
     global FFMPEG_AVAILABLE
     await init_agents_db()
     await init_mesh_db()
+    await init_manifesto_db()
 
     # Check FFmpeg availability on startup
     try:
@@ -487,6 +489,8 @@ from .routers.memory_enrichment import router as memory_enrichment_router
 app.include_router(memory_enrichment_router)
 from .routers.mesh import router as mesh_router
 app.include_router(mesh_router)
+from .routers.manifesto import router as manifesto_router
+app.include_router(manifesto_router)
 
 # MCP server — exposes all Vantage routes as MCP tools for Claude/GPT agents
 from .mcp_server import create_mcp_server as _create_mcp
