@@ -12,7 +12,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..db import DB_PATH
 from ..deps import _parse_body, get_agent
-from ..manifesto_store import CANON_LEVELS, level_for_weight, vote_weight
+from ..manifesto_store import (
+    CANON_LEVELS,
+    clause_proposed_event,
+    clause_ratified_event,
+    level_for_weight,
+    vote_weight,
+)
+from ..utils import _broadcast_gossip
 
 router = APIRouter(prefix="/api/manifesto", tags=["manifesto"])
 
@@ -46,6 +53,15 @@ async def propose(collective: str, request: Request, agent: dict = Depends(get_a
         )
         await db.commit()
         clause_id = cur.lastrowid
+
+    # Broadcast in the shared mesh event vocabulary (see manifesto_store +
+    # omo-koda2 events.proto). Subscribers listen on channel manifesto.{collective}.
+    await _broadcast_gossip(
+        f"manifesto.{collective}",
+        clause_proposed_event(
+            collective, clause_id, odu_id, vessel, principle, author
+        ),
+    )
 
     return {
         "id": clause_id,
@@ -84,7 +100,9 @@ async def vote(
         if row is None:
             raise HTTPException(404, "clause not found")
 
-        weight = float(row["weight"]) + vote_weight(voter_tier)
+        old_weight = float(row["weight"])
+        old_level = level_for_weight(old_weight)
+        weight = old_weight + vote_weight(voter_tier)
         level = level_for_weight(weight)
         await db.execute(
             "UPDATE manifesto_clauses SET weight=?, level=? WHERE id=? AND collective=?",
@@ -92,7 +110,16 @@ async def vote(
         )
         await db.commit()
 
-    return {"id": clause_id, "level": level, "weight": weight, "ratified": level in CANON_LEVELS}
+    ratified = level in CANON_LEVELS
+    # Emit a ratified event only on the transition into the binding canon, not
+    # on every vote that keeps it there.
+    if ratified and old_level not in CANON_LEVELS:
+        await _broadcast_gossip(
+            f"manifesto.{collective}",
+            clause_ratified_event(collective, clause_id, level, weight),
+        )
+
+    return {"id": clause_id, "level": level, "weight": weight, "ratified": ratified}
 
 
 @router.get("/{collective}/clauses")
