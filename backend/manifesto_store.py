@@ -34,6 +34,47 @@ def level_for_weight(weight: float) -> str:
     return "individual"
 
 
+# ── Shared event schema ───────────────────────────────────────────────────────
+# These mirror omo-koda2's `shared/proto/events.proto` (ManifestoClauseProposed /
+# ManifestoClauseRatified) and the `{"type": ...}` JSON its `sovereign_event_to_json`
+# emits, so the manifesto flow reads identically on both sides of the mesh.
+
+
+def clause_proposed_event(
+    collective: str,
+    clause_id: int,
+    odu_id: int,
+    vessel: str,
+    principle: str,
+    author: str,
+) -> dict:
+    """Shared-schema event for a newly proposed clause (mirrors
+    omo-koda2 `manifesto_clause_proposed`)."""
+    return {
+        "type": "manifesto_clause_proposed",
+        "collective": collective,
+        "clause_id": clause_id,
+        "odu_id": odu_id,
+        "vessel": vessel,
+        "principle": principle,
+        "author": author,
+    }
+
+
+def clause_ratified_event(
+    collective: str, clause_id: int, level: str, weight: float
+) -> dict:
+    """Shared-schema event for a clause promoted into the binding canon
+    (mirrors omo-koda2 `manifesto_clause_ratified`)."""
+    return {
+        "type": "manifesto_clause_ratified",
+        "collective": collective,
+        "clause_id": clause_id,
+        "level": level,
+        "weight": weight,
+    }
+
+
 async def init_manifesto_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         for stmt in [
