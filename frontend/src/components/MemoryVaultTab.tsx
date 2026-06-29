@@ -2,8 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react'
 import { Lock, Globe, Users, Radio, Search, RefreshCw, Settings, Download, BarChart2, PlusCircle } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import GalaxyViewer, { GalaxyData } from './GalaxyViewer'
-import type { GalaxyStar } from './GalaxyViewer'
+import GalaxyViewer, { GalaxyData, NeuralNode } from './GalaxyViewer'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -88,7 +87,7 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
   const [loadingStats, setLoadingStats] = useState(false)
 
   // Star detail panel
-  const [selectedStar, setSelectedStar] = useState<GalaxyStar | null>(null)
+  const [selectedStar, setSelectedStar] = useState<NeuralNode | null>(null)
   const [starMarkdown, setStarMarkdown] = useState<string>('')
   const [loadingStarContent, setLoadingStarContent] = useState(false)
   const [linkTargetInput, setLinkTargetInput] = useState('')
@@ -282,7 +281,7 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
   }, [view, fetchStats])
 
   // ── Star select ─────────────────────────────────────────────────────────────
-  const handleStarSelect = useCallback(async (star: GalaxyStar) => {
+  const handleStarSelect = useCallback(async (star: NeuralNode) => {
     setSelectedStar(star)
     setStarMarkdown('')
     setLoadingStarContent(true)
@@ -606,7 +605,7 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
               </div>
               <div className="star-detail-meta">
                 <span className="tag-pill">{selectedStar.content_type}</span>
-                {selectedStar.tags.slice(0, 5).map(tag => (
+                {selectedStar.tags.slice(0, 5).map((tag: string) => (
                   <span key={tag} className="tag-pill" style={{ opacity: 0.7 }}>{tag}</span>
                 ))}
                 {selectedStar.created && (

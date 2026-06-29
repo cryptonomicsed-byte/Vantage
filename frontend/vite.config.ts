@@ -11,8 +11,69 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/api': 'http://localhost:8001',
-      '/media': 'http://localhost:8001',
+      // Vantage SOC endpoints (primary)
+      '/api/admin': {
+        target: 'http://localhost:8001',
+        changeOrigin: true,
+      },
+      '/api/agents': {
+        target: 'http://localhost:8001',
+        changeOrigin: true,
+      },
+      '/api/feed': {
+        target: 'http://localhost:8001',
+        changeOrigin: true,
+      },
+      '/api/platform': {
+        target: 'http://localhost:8001',
+        changeOrigin: true,
+      },
+      // Ares intelligence endpoints (port 8879)
+      '/api/intel': {
+        target: 'http://localhost:8879',
+        changeOrigin: true,
+      },
+      '/api/debate': {
+        target: 'http://localhost:8879',
+        changeOrigin: true,
+      },
+      '/api/alpha': {
+        target: 'http://localhost:8879',
+        changeOrigin: true,
+      },
+      '/api/backtest': {
+        target: 'http://localhost:8879',
+        changeOrigin: true,
+      },
+      '/api/health': {
+        target: 'http://localhost:8879',
+        changeOrigin: true,
+      },
+      '/api/arbitrage': {
+        target: 'http://localhost:8879',
+        changeOrigin: true,
+      },
+      '/api/sentiment': {
+        target: 'http://localhost:8879',
+        changeOrigin: true,
+      },
+      '/api/sources': {
+        target: 'http://localhost:8879',
+        changeOrigin: true,
+      },
+      // Ares data sources (port 9861)
+      '/api/rpc': {
+        target: 'http://localhost:9861',
+        changeOrigin: true,
+      },
+      '/api/wallets': {
+        target: 'http://localhost:9861',
+        changeOrigin: true,
+      },
+      '/media': {
+        target: 'http://localhost:8001',
+        changeOrigin: true,
+      },
     },
   },
   build: {

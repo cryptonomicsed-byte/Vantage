@@ -483,6 +483,10 @@ from .routers.identity import router as identity_router
 app.include_router(identity_router)
 from .routers.memory_vault import router as memory_vault_router
 app.include_router(memory_vault_router)
+from .routers.trading import router as trading_router
+app.include_router(trading_router)
+from .routers.orchestrator import router as orchestrator_router
+app.include_router(orchestrator_router)
 from .routers.memory_enrichment import router as memory_enrichment_router
 app.include_router(memory_enrichment_router)
 from .routers.mesh import router as mesh_router

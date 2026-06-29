@@ -25,6 +25,7 @@ import ObserverMode from './components/ObserverMode'
 import GuildProfile from './components/GuildProfile'
 import GuildDirectory from './components/GuildDirectory'
 import ActivityTicker from './components/ActivityTicker'
+import AgentCollectivesPage from './pages/AgentCollectivesPage'
 import Sidebar from './components/Sidebar'
 import StatusBar from './components/StatusBar'
 import SubNav from './components/SubNav'
@@ -163,6 +164,7 @@ function AppLayout({ searchQuery, onSearchChange, searchOpen, onSearchToggle }: 
             <Route path="/heatmap" element={<ErrorBoundary><IntentHeatmap /></ErrorBoundary>} />
             <Route path="/guilds" element={<ErrorBoundary><GuildDirectory /></ErrorBoundary>} />
             <Route path="/guild/:slug" element={<ErrorBoundary><GuildProfile /></ErrorBoundary>} />
+            <Route path="/collectives" element={<ErrorBoundary><AgentCollectivesPage /></ErrorBoundary>} />
             <Route path="/vault" element={<ErrorBoundary><VaultExplorer /></ErrorBoundary>} />
             <Route path="*" element={
               <div className="not-found">

@@ -2,7 +2,7 @@ import React, { useRef, useEffect, useState, useCallback } from 'react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-interface NeuralNode {
+export interface NeuralNode {
   id: string
   title: string
   x: number
@@ -14,6 +14,7 @@ interface NeuralNode {
   tags: string[]
   content_type: string
   path: string
+  created?: string
 }
 
 interface NeuralEdge {
@@ -60,6 +61,8 @@ interface SynapsePulse {
 interface Props {
   data: GalaxyData
   agentName: string
+  onStarSelect?: (star: NeuralNode) => void
+  crossAgentLinks?: Array<{source_note_path: string; target_note_path: string; link_type: string}>
 }
 
 // ─── Color map by content type ────────────────────────────────────────────────
@@ -118,7 +121,7 @@ export default function GalaxyViewer({ data, agentName: _agentName }: Props) {
   const [activeFilter, setActiveFilter] = useState('all')
   const filterRef  = useRef('all')
 
-  const nodes   = data.stars   || []
+  const nodes: NeuralNode[]   = data.stars   || []
   const edges   = data.edges   || []
   const nebulae = data.nebulae || []
 
@@ -505,7 +508,7 @@ export default function GalaxyViewer({ data, agentName: _agentName }: Props) {
     const mx   = e.clientX - rect.left
     const my   = e.clientY - rect.top
     const filt = filterRef.current
-    const vis  = filt === 'all' ? nodes : nodes.filter(n => n.content_type === filt)
+    const vis: NeuralNode[] = filt === 'all' ? nodes : nodes.filter(n => n.content_type === filt)
 
     let closest: NeuralNode | null = null
     let closestD = 18
@@ -514,7 +517,7 @@ export default function GalaxyViewer({ data, agentName: _agentName }: Props) {
       const d = Math.hypot(sx - mx, sy - my)
       if (d < closestD) { closestD = d; closest = node }
     })
-    hoveredRef.current = closest ? closest.id : null
+    hoveredRef.current = closest ? (closest as NeuralNode).id : null
     setHoveredNode(closest)
     if (closest) setTooltipPos({ x: e.clientX, y: e.clientY })
   }, [nodes])

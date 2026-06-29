@@ -984,6 +984,125 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
 
         await db.commit()
 
+    # ── Trading tables ────────────────────────────────────────
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS trading_wallets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL REFERENCES agents(id),
+                label TEXT NOT NULL,
+                chain TEXT NOT NULL,
+                address TEXT NOT NULL,
+                encrypted_private_key TEXT DEFAULT '',
+                exchange TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                last_synced_at TEXT,
+                UNIQUE(agent_id, label)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS trading_balances (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                wallet_id INTEGER NOT NULL REFERENCES trading_wallets(id),
+                token TEXT NOT NULL,
+                token_address TEXT DEFAULT '',
+                balance REAL NOT NULL DEFAULT 0,
+                value_usd REAL DEFAULT 0,
+                updated_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(wallet_id, token)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS trading_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL REFERENCES agents(id),
+                wallet_id INTEGER REFERENCES trading_wallets(id),
+                order_type TEXT NOT NULL DEFAULT 'market',
+                side TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                chain TEXT NOT NULL,
+                quantity REAL,
+                price REAL,
+                filled_quantity REAL DEFAULT 0,
+                avg_fill_price REAL,
+                status TEXT DEFAULT 'pending',
+                trigger_reason TEXT DEFAULT '',
+                signal_id INTEGER,
+                strategy_id INTEGER,
+                tx_hash TEXT DEFAULT '',
+                error TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                executed_at TEXT,
+                settled_at TEXT
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_orders_agent ON trading_orders(agent_id, status)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_orders_strategy ON trading_orders(strategy_id)")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS trading_strategies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL REFERENCES agents(id),
+                name TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                strategy_type TEXT NOT NULL,
+                config TEXT DEFAULT '{}',
+                target_chain TEXT DEFAULT '',
+                target_symbols TEXT DEFAULT '',
+                max_position_size_usd REAL DEFAULT 0,
+                max_concurrent_trades INTEGER DEFAULT 1,
+                risk_per_trade_pct REAL DEFAULT 2.0,
+                stop_loss_pct REAL,
+                take_profit_pct REAL,
+                enabled BOOLEAN DEFAULT 1,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS trading_strategy_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                strategy_id INTEGER NOT NULL REFERENCES trading_strategies(id),
+                started_at TEXT DEFAULT (datetime('now')),
+                ended_at TEXT,
+                total_trades INTEGER DEFAULT 0,
+                winning_trades INTEGER DEFAULT 0,
+                pnl_usd REAL DEFAULT 0,
+                pnl_pct REAL DEFAULT 0,
+                status TEXT DEFAULT 'running',
+                error TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS trading_pnl_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL REFERENCES agents(id),
+                snapshot_date DATE NOT NULL,
+                portfolio_value_usd REAL NOT NULL,
+                daily_pnl_usd REAL NOT NULL,
+                daily_pnl_pct REAL NOT NULL,
+                total_deposits_usd REAL DEFAULT 0,
+                total_withdrawals_usd REAL DEFAULT 0,
+                notes TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(agent_id, snapshot_date)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS trading_trade_journal (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER NOT NULL REFERENCES trading_orders(id),
+                agent_id INTEGER NOT NULL REFERENCES agents(id),
+                entry_reasoning TEXT DEFAULT '',
+                exit_reasoning TEXT DEFAULT '',
+                conviction_score REAL DEFAULT 0,
+                lessons_learned TEXT DEFAULT '',
+                tags TEXT DEFAULT '[]',
+                debate_id INTEGER,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await db.commit()
+
     # One-time migration: hash any plaintext API keys still stored as "vantage_..." (idempotent)
     import hashlib as _hlib_key
     async with aiosqlite.connect(DB_PATH) as db:
