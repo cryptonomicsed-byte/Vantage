@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { TrendingUp, BarChart3, Zap, Brain, Activity, Database, Radio, RefreshCw, Layers, Droplets, Waves } from 'lucide-react'
+import { TrendingUp, BarChart3, Zap, Brain, Activity, Database, Radio, RefreshCw, Layers, Droplets, Waves, CandlestickChart } from 'lucide-react'
+import CandleChart, { PineSeries } from './CandleChart'
+import PineEditor from './PineEditor'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Market Intelligence — public market-data tabs relocated out of the admin (ARES)
@@ -369,7 +371,34 @@ function AresWhales() {
   )
 }
 
+function AresCharts() {
+  const [symbol, setSymbol] = useState('BTC')
+  const [interval, setIv] = useState('1d')
+  const [input, setInput] = useState('BTC')
+  const [pineSeries, setPineSeries] = useState<PineSeries[]>([])
+  const INTERVALS = ['1h', '4h', '1d', '1w']
+  const apply = () => { const s = input.trim().toUpperCase(); if (s) { setSymbol(s); setPineSeries([]) } }
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+        <input className="ares-input" value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && apply()} placeholder="Symbol (BTC, ETH, SOL…)" style={{ maxWidth: 180 }} />
+        <button className="btn btn-primary btn-sm" onClick={apply}>Load</button>
+        <div className="top-nav-tabs" style={{ flex: 'initial' }}>
+          {INTERVALS.map(iv => (
+            <button key={iv} type="button" className={`top-nav-tab ${interval === iv ? 'active' : ''}`} onClick={() => setIv(iv)}>{iv}</button>
+          ))}
+        </div>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 2fr) minmax(280px, 1fr)', gap: 16, alignItems: 'start' }}>
+        <CandleChart symbol={symbol} interval={interval} pineSeries={pineSeries} />
+        <PineEditor symbol={symbol} interval={interval} onResult={setPineSeries} />
+      </div>
+    </div>
+  )
+}
+
 const INTEL_TABS = [
+  { id: 'charts',    label: 'Charts',    icon: CandlestickChart },
   { id: 'overview',  label: 'Overview',  icon: Radio },
   { id: 'arbitrage', label: 'Arbitrage', icon: TrendingUp },
   { id: 'alpha',     label: 'Alpha',     icon: TrendingUp },
@@ -394,6 +423,7 @@ export default function MarketIntel() {
           </button>
         ))}
       </div>
+      {tab === 'charts' && <AresCharts />}
       {tab === 'overview' && <AresOverview />}
       {tab === 'arbitrage' && <AresArbitrage />}
       {tab === 'alpha' && <AresAlpha />}

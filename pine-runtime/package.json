@@ -1,0 +1,12 @@
+{
+  "name": "vantage-pine-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Isolated sandbox that runs agent-authored Pine Script indicators and returns numeric series only.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test.js"
+  },
+  "engines": { "node": ">=18" }
+}

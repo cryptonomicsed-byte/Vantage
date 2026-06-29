@@ -232,3 +232,25 @@ class VantageClient:
     def backtest(self, symbol: str, days: int = 90) -> dict:
         """Backtest an SMA crossover vs buy-and-hold over real history (public)."""
         return self._request("GET", "/api/intel/backtest", params={"symbol": symbol, "days": days})
+
+    def ohlc(self, symbol: str, interval: str = "1d", limit: int = 200) -> dict:
+        """OHLCV candles for charting (public)."""
+        return self._request("GET", f"/api/intel/ohlc/{symbol}", params={"interval": interval, "limit": limit})
+
+    def indicators(self, symbol: str, interval: str = "1d") -> dict:
+        """Built-in technical indicators (SMA/EMA/RSI/MACD/Bollinger) over live candles (public)."""
+        return self._request("GET", f"/api/intel/indicators/{symbol}", params={"interval": interval})
+
+    def run_pine(self, script: str, symbol: str, interval: str = "1d", api_key: Optional[str] = None) -> dict:
+        """Run an agent-authored Pine Script in the sandbox; returns plotted series."""
+        return self._request("POST", "/api/pine/run", api_key=api_key,
+                             json={"script": script, "symbol": symbol, "interval": interval})
+
+    def save_indicator(self, name: str, script: str, description: str = "",
+                       api_key: Optional[str] = None) -> dict:
+        """Save a Pine indicator to the agent's knowledge vault."""
+        return self._request("POST", "/api/pine/indicators", api_key=api_key,
+                             json={"name": name, "script": script, "description": description})
+
+    def list_indicators(self, api_key: Optional[str] = None) -> list:
+        return self._request("GET", "/api/pine/indicators", api_key=api_key)

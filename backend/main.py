@@ -366,6 +366,8 @@ async def lifespan(app: FastAPI):
     await init_manifesto_db()
     from .routers.copilot import init_copilot_db
     await init_copilot_db()
+    from .routers.pine import init_pine_db
+    await init_pine_db()
 
     # Check FFmpeg availability on startup
     try:
@@ -505,6 +507,8 @@ from .routers.manifesto import router as manifesto_router
 app.include_router(manifesto_router)
 from .routers.copilot import router as copilot_router
 app.include_router(copilot_router)
+from .routers.pine import router as pine_router
+app.include_router(pine_router)
 
 # MCP server — exposes all Vantage routes as MCP tools for Claude/GPT agents
 from .mcp_server import create_mcp_server as _create_mcp
