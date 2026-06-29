@@ -1,6 +1,7 @@
 export const SECTION_PATHS: Record<string, string[]> = {
   agents:   ['/agents', '/guilds', '/heatmap', '/workspace', '/vault'],
   settings: ['/settings', '/api-docs'],
+  trading:  ['/trading'],
 }
 
 export const SUB_NAV: Record<string, Array<{ to: string; label: string }>> = {

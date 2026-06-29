@@ -208,6 +208,63 @@ async def cancel_order(order_id: int, agent: dict = Depends(get_agent)):
         await db.commit()
     return {"status": "cancelled", "order_id": order_id}
 
+@router.post("/orders/{order_id}/paper-fill")
+async def paper_fill_order(order_id: int, agent: dict = Depends(get_agent)):
+    """Simulated (paper) fill — explicitly NOT real settlement.
+
+    Marks a pending order 'filled' at the live market quote (falling back to the
+    order's own limit price). The fill is tagged tx_hash='paper:<uuid>' and a
+    journal entry is written tagged 'simulated' so a paper fill is never confused
+    with real execution. Intended for the Portfolio "Simulated (paper)" mode.
+    """
+    import uuid as _uuid
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        row = await (await db.execute(
+            "SELECT * FROM trading_orders WHERE id=? AND agent_id=?", (order_id, agent["id"])
+        )).fetchone()
+        if not row:
+            raise HTTPException(404, "Order not found")
+        order = dict(row)
+        if str(order["status"]).lower() != "pending":
+            raise HTTPException(409, f"Order is '{order['status']}'; only pending orders can be paper-filled")
+
+        # Resolve a fill price: live quote first, then the order's own limit price.
+        fill_price = await _fetch_quote(order["symbol"])
+        if fill_price is None:
+            fill_price = order.get("price")
+        if not fill_price:
+            raise HTTPException(422, "No live quote available and no limit price set; cannot simulate a fill")
+
+        tx_hash = f"paper:{_uuid.uuid4().hex[:16]}"
+        await db.execute(
+            """UPDATE trading_orders SET status='filled', filled_quantity=quantity,
+               avg_fill_price=?, tx_hash=?, executed_at=datetime('now'), settled_at=datetime('now')
+               WHERE id=? AND agent_id=?""",
+            (fill_price, tx_hash, order_id, agent["id"])
+        )
+
+        note = f"[SIMULATED] Paper-filled {order['side']} {order['quantity']} {order['symbol']} @ {fill_price} ({tx_hash})"
+        existing = await (await db.execute(
+            "SELECT id FROM trading_trade_journal WHERE order_id=?", (order_id,)
+        )).fetchone()
+        if existing:
+            await db.execute(
+                "UPDATE trading_trade_journal SET exit_reasoning=?, tags=? WHERE order_id=?",
+                (note, json.dumps(["simulated", "paper-fill"]), order_id)
+            )
+        else:
+            await db.execute(
+                "INSERT INTO trading_trade_journal (order_id, agent_id, entry_reasoning, tags) VALUES (?,?,?,?)",
+                (order_id, agent["id"], note, json.dumps(["simulated", "paper-fill"]))
+            )
+        await db.commit()
+
+        updated = await (await db.execute(
+            "SELECT * FROM trading_orders WHERE id=? AND agent_id=?", (order_id, agent["id"])
+        )).fetchone()
+        return dict(updated)
+
 @router.post("/orders/{order_id}/journal")
 async def add_journal(order_id: int, data: JournalCreate, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -386,19 +443,26 @@ async def list_markets():
     except Exception as e:
         return {"available": ["solana", "hyperliquid", "base", "polygon"], "error": str(e)}
 
-@router.get("/markets/{symbol}/price")
-async def get_price(symbol: str):
-    """Get real-time price for a symbol from available sources."""
+async def _fetch_quote(symbol: str) -> Optional[float]:
+    """Fetch a live USD quote for a symbol via the RPC proxy. Returns None on failure."""
     try:
         import httpx
         async with httpx.AsyncClient(timeout=5) as client:
-            # Try CoinGecko via RPC proxy
             r = await client.post("http://127.0.0.1:9861/api/rpc/coingecko",
                 json={"path": f"/api/v3/simple/price?ids={symbol.lower()}&vs_currencies=usd"})
             data = r.json()
-            return {"symbol": symbol.upper(), "price": data.get(symbol.lower(), {}).get("usd", 0)}
-    except:
+            price = data.get(symbol.lower(), {}).get("usd")
+            return float(price) if price else None
+    except Exception:
+        return None
+
+@router.get("/markets/{symbol}/price")
+async def get_price(symbol: str):
+    """Get real-time price for a symbol from available sources."""
+    price = await _fetch_quote(symbol)
+    if price is None:
         return {"symbol": symbol.upper(), "price": 0, "error": "price fetch failed"}
+    return {"symbol": symbol.upper(), "price": price}
 
 # ── Signals ─────────────────────────────────────────────────
 
