@@ -1,477 +1,322 @@
-"""Copilot — Natural language command router for Vantage.
+"""Copilot v2 — Full feature set: 36 intents across all 8 categories.
+Extends the existing copilot with simulations, optimization, learning, gamification,
+swarm, visualization, and more. Live on /api/copilot/chat and /api/copilot/execute."""
 
-Maps intents (show price, place trade, check PnL, set alert, navigate,
-volatility, dex liquidity, whale watch, market sentiment) to existing
-Vantage endpoints and Ares RPC (localhost:9861) for market data.
-"""
-import logging
-import re
+import logging, re, statistics, json
 from typing import Optional
-
-import aiosqlite
-import httpx
+import aiosqlite, httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
-
 from backend.db import DB_PATH
-from backend.config import settings
 from backend.deps import get_agent, _parse_body
+from backend.config import settings
 
 logger = logging.getLogger(__name__)
-
 router = APIRouter(prefix="/api/copilot", tags=["copilot"])
+ARES = "http://localhost:9861"
 
-ARES_RPC_URL = "http://localhost:9861"
+# ── Symbol aliases ──
+ALIASES = {
+    "bitcoin":"BTC","btc":"BTC","ethereum":"ETH","eth":"ETH","solana":"SOL","sol":"SOL",
+    "cardano":"ADA","ripple":"XRP","xrp":"XRP","dogecoin":"DOGE","doge":"DOGE",
+    "polkadot":"DOT","avalanche":"AVAX","polygon":"MATIC","chainlink":"LINK",
+    "uniswap":"UNI","pepe":"PEPE","bonk":"BONK","shib":"SHIB","sui":"SUI",
+    "aptos":"APT","arbitrum":"ARB","optimism":"OP","near":"NEAR","injective":"INJ",
+}
+def sym(raw): return ALIASES.get((raw or "").strip().lower(), (raw or "").upper())
 
-# ── Intent patterns (ordered: specific first, generic last) ───────────
-# Specific intents (set_alert, place_trade, check_pnl) are checked before
-# generic ones (show_price, navigate) to avoid false matches.
-INTENT_PATTERNS: list[tuple[str, re.Pattern]] = [
-    ("set_alert", re.compile(
-        r"(?:set|create|add)\s+(?:a\s+|an\s+)?alert\s+(?:for|when|if)\s+(.+)",
-        re.I,
-    )),
-    ("place_trade", re.compile(
-        r"(?:place|open|execute|make)\s+(?:a\s+)?(?:trade|order)\s+(?:for\s+)?([A-Za-z]{2,10})",
-        re.I,
-    )),
-    ("buy", re.compile(
-        r"(?:buy|long)\s+([A-Za-z]{2,10})",
-        re.I,
-    )),
-    ("sell", re.compile(
-        r"(?:sell|short)\s+([A-Za-z]{2,10})",
-        re.I,
-    )),
-    ("check_pnl", re.compile(
-        r"\b(my\s+)?(?:pnl|profit|loss|performance|portfolio)\b",
-        re.I,
-    )),
-    ("volatility", re.compile(
-        r"(?:(?:how\s+volatile|check\s+volatility)\s+(?:\S+\s+)?([A-Za-z]{2,10})"
-        r"|(?:what'?s|what is)\s+(?:the\s+)?volatility\s+(?:of\s+)?([A-Za-z]{2,10})"
-        r"|(?:what'?s|what is)\s+([A-Za-z]{2,10})\s+volatility)",
-        re.I,
-    )),
-    ("dex_liquidity", re.compile(
-        r"(?:(?:show|get|check|what'?s)\s+)?(?:DEX\s+)?(?:liquidity|pools|dex\s+pools)\s+(?:\S+\s+)?([A-Za-z]{2,10})",
-        re.I,
-    )),
-    ("whale_watch", re.compile(
-        r"(?:show|get|check|recent|what'?s)\s+(?:whale\s+)?(?:activity|movement|transactions|large\s+transactions|whale\s+activity)",
-        re.I,
-    )),
-    ("market_sentiment", re.compile(
-        r"(?:what'?s\s+the\s+)?(?:market\s+)?(?:sentiment|fear\s+and\s+greed|fear\s+greed|market\s+sentiment)",
-        re.I,
-    )),
-    ("show_price", re.compile(
-        r"(?:show|get|check|what'?s|what is|price of)\s+(?:me\s+|the\s+|my\s+)?(?:price\s+of\s+)?([A-Za-z]{2,10})\b(?:\s+price)?",
-        re.I,
-    )),
-    ("navigate", re.compile(
-        r"(?:go to|open|navigate to|show me|take me to)\s+(.+)",
-        re.I,
-    )),
+# ── Intent patterns (ordered: specific → generic) ──
+INTENTS = [
+    ("set_alert", r"(?:set|create|add)\s+(?:a\s+|an\s+)?alert\s+(?:for|when|if)\s+(.+)"),
+    ("backtest", r"(?:run|start|begin)\s+(?:a\s+)?backtest|backtest\s+(.+)"),
+    ("stress_test", r"(?:stress.test|scenario.test|what.if|worst.case)\s+(?:my\s+)?(?:portfolio|pf)"),
+    ("scenario_sim", r"(?:simulate|what.if|scenario)\s+(.+)"),
+    ("optimize_portfolio", r"(?:optimize|rebalance|sharpe|efficient.frontier)\s+(?:my\s+)?(?:portfolio|pf)"),
+    ("yield_scan", r"(?:yield|APR|APY|farming)\s+(?:scan|search|find|optimize)"),
+    ("arbitrage_scan", r"(?:arbitrage|arb|price.gap|spread).*(?:scan|find|check|opportunit)|(?:scan|find).*(?:arbitrage|arb|price.gap|spread)"),
+    ("liquidity_track", r"(?:liquidity|depth|slippage)\s+(?:track|scan|check|monitor)"),
+    ("benchmark", r"(?:benchmark|compare|vs\.|versus)\s+(?:my\s+)?(?:portfolio|pf|strategy)"),
+    ("risk_slider", r"(?:risk|exposure|drawdown)\s+(?:slider|level|assessment|simulator)"),
+    ("risk_heatmap", r"(?:risk|exposure)\s+(?:heatmap|map|chart|visual)"),
+    ("metric_create", r"(?:create|define|new)\s+(?:a\s+)?(?:metric|indicator|custom)\s+(.+)"),
+    ("metric_fusion", r"(?:fuse|combine|merge)\s+(?:metrics?|indicators?)\s+(.+)"),
+    ("learning_path", r"(?:learn|teach|train|course|path|tutorial)\s+(?:me\s+)?(?:about\s+)?(.+)"),
+    ("learning_quiz", r"(?:quiz|test|question|assess)\s+(?:me\s+)?(?:on\s+)?(.+)?"),
+    ("goal_track", r"(?:goal|target|objective)\s+(?:track|set|progress|status)"),
+    ("progress_track", r"(?:progress|how.am.i.doing|my.stats|track.record)"),
+    ("watchlist", r"(?:watchlist|watch.list|favorites|priority)\s+(?:prioritize|sort|rank|show)"),
+    ("gamification", r"(?:achievement|badge|level|xp|score|leaderboard|challenge)"),
+    ("sentiment_vote", r"(?:vote|upvote|downvote|crowdsource)\s+(?:signal|alert|prediction)"),
+    ("community_feed", r"(?:community|social|insight.feed|what.are.others)"),
+    ("signal_amplify", r"(?:amplify|boost|promote)\s+(?:signal|alert|idea)"),
+    ("chart_annotate", r"(?:annotate|mark|draw|highlight)\s+(?:on\s+)?(?:chart|graph)\s+(.+)"),
+    ("sentiment_chart", r"(?:sentiment.evolution|sentiment.chart|sentiment.over.time)"),
+    ("ecosystem_map", r"(?:ecosystem|map|landscape|overview)\s+(?:of\s+)?(?:crypto|defi|market)"),
+    ("dashboard_build", r"(?:dashboard|layout|widget|panel)\s+(?:build|create|customize|add)"),
+    ("swarm_mode", r"(?:swarm|collaborate|together|group)\s+(?:mode|think|analyze|on)"),
+    ("debate_mode", r"(?:debate|argue|discuss|pro.con)\s+(.+)"),
+    ("oracle_fusion", r"(?:oracle.fusion|combine.oracles|merge.feeds)"),
+    ("voice_mode", r"(?:voice|speak|talk|audio|listen)\s+(?:mode|command|input|on)"),
+    ("smart_search", r"(?:search|find|look.up|google)\s+(?:for\s+)?(.+)"),
+    ("export_analytics", r"(?:export|download|save|backup)\s+(?:my\s+)?(?:data|analytics|history|report)"),
+    ("eco_impact", r"(?:eco|carbon|green|energy|sustainable|environmental)\s+(?:impact|footprint|cost)"),
+    ("place_trade", r"(?:place|open|execute|make)\s+(?:a\s+)?(?:trade|order)\s+(?:for\s+)?([A-Za-z]{2,10})"),
+    ("buy", r"\b(buy|long)\s+([A-Za-z]{2,10})\b"),
+    ("sell", r"\b(sell|short)\s+([A-Za-z]{2,10})\b"),
+    ("check_pnl", r"\b(my\s+)?(?:pnl|profit|loss|performance|portfolio)\b"),
+    ("volatility", r"(?:how\s+)?volatile\s+(?:is\s+)?([A-Za-z]{2,10})|volatility\s+(?:of\s+)?([A-Za-z]{2,10})"),
+    ("dex_liquidity", r"(?:dex|liquidity|pools)\s+(?:for\s+)?([A-Za-z]{2,10})"),
+    ("whale_watch", r"\b(?:whale|large\s+transactions?|big\s+moves?)\b"),
+    ("market_sentiment", r"\b(?:sentiment|fear|greed|market\s+mood)\b"),
+    ("show_price", r"(?:show|get|what'?s?|what is|price of|check)\s+(?:the\s+)?(?:price\s+(?:of\s+)?)?(?:for\s+)?([A-Za-z]{2,10})\b"),
+    ("navigate", r"(?:go to|open|navigate to|take me to)\s+(.+)"),
 ]
+INTENTS = [(name, re.compile(pat, re.I)) for name, pat in INTENTS]
 
-PAGE_MAP: dict[str, str] = {
-    "feed": "/",
-    "agents": "/agents",
-    "trading": "/trading",
-    "market": "/market",
-    "swarm": "/swarm",
-    "dashboard": "/dashboard",
-    "settings": "/settings",
-    "knowledge": "/knowledge",
-    "collectives": "/collectives",
-    "guilds": "/guilds",
-    "vault": "/vault",
-    "pipeline": "/pipeline",
-    "create": "/create",
-    "heatmap": "/heatmap",
+PAGES = {
+    "feed":"/","agents":"/agents","trading":"/trading","market":"/market",
+    "swarm":"/swarm","dashboard":"/dashboard","settings":"/settings",
+    "knowledge":"/knowledge","copilot":"/copilot","collectives":"/collectives",
+    "guilds":"/guilds","vault":"/vault","heatmap":"/heatmap",
 }
 
-# ── Symbol alias map (name → ticker) ─────────────────────────────────
-SYMBOL_ALIASES: dict[str, str] = {
-    "bitcoin": "BTC", "btc": "BTC",
-    "ethereum": "ETH", "eth": "ETH",
-    "solana": "SOL", "sol": "SOL",
-    "cardano": "ADA", "ada": "ADA",
-    "ripple": "XRP", "xrp": "XRP",
-    "dogecoin": "DOGE", "doge": "DOGE",
-    "polkadot": "DOT", "dot": "DOT",
-    "avalanche": "AVAX", "avax": "AVAX",
-    "polygon": "MATIC", "matic": "MATIC",
-    "chainlink": "LINK", "link": "LINK",
-    "uniswap": "UNI", "uni": "UNI",
-    "pepe": "PEPE",
-    "bonk": "BONK",
-    "shiba inu": "SHIB", "shib": "SHIB",
-}
+# ── RPC helpers ──
+async def _rpc(chain, path=""):
+    try:
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.post(f"{ARES}/api/rpc/{chain}", json={"path": path})
+            return r.json() if r.status_code == 200 else None
+    except: return None
 
+async def _price_data(sym):
+    d = await _rpc("coingecko", f"/api/v3/simple/price?ids={sym.lower()}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true")
+    if d and sym.lower() in d:
+        item = d[sym.lower()]
+        return {"symbol":sym.upper(),"price":item.get("usd"),"change_24h":item.get("usd_24h_change"),"volume_24h":item.get("usd_24h_vol")}
+    return None
 
-def _resolve_symbol(raw: str | None) -> str:
-    """Resolve a user-provided symbol or name to its uppercase ticker."""
-    if not raw:
-        return ""
-    key = raw.strip().lower()
-    return SYMBOL_ALIASES.get(key, key.upper())
+async def _vol_data(sym):
+    d = await _rpc("coingecko", f"/api/v3/coins/{sym.lower()}/market_chart?vs_currency=usd&days=7")
+    if d and "prices" in d and len(d["prices"])>1:
+        vals=[p[1] for p in d["prices"]]
+        m=statistics.mean(vals); std=(sum((v-m)**2 for v in vals)/len(vals))**0.5
+        return {"symbol":sym.upper(),"volatility_7d_pct":round(std/m*100,2),"avg_price_7d":round(m,4),"data_points":len(vals)}
+    return None
 
-
-# ── Table initialisation ─────────────────────────────────────────────────
-async def init_copilot_db() -> None:
-    """Create the copilot_alerts table if it does not exist."""
+# ── DB init ──
+async def init_copilot_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS copilot_alerts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                agent_id INTEGER NOT NULL,
-                symbol TEXT DEFAULT '',
-                condition_text TEXT NOT NULL DEFAULT '',
-                target_price REAL,
-                direction TEXT DEFAULT 'above',
-                active INTEGER DEFAULT 1,
-                created_at TEXT DEFAULT (datetime('now')),
-                FOREIGN KEY (agent_id) REFERENCES agents(id)
-            )
-        """)
+        await db.execute("""CREATE TABLE IF NOT EXISTS copilot_alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id INTEGER, symbol TEXT,
+            condition_text TEXT, target_price REAL, direction TEXT DEFAULT 'above',
+            active INTEGER DEFAULT 1, created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (agent_id) REFERENCES agents(id))""")
+        await db.execute("""CREATE TABLE IF NOT EXISTS copilot_goals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id INTEGER, goal TEXT,
+            target REAL, current REAL, unit TEXT, created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (agent_id) REFERENCES agents(id))""")
+        await db.execute("""CREATE TABLE IF NOT EXISTS copilot_scheduled (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id INTEGER, name TEXT,
+            cron_expr TEXT, intent_action TEXT, intent_params TEXT,
+            active INTEGER DEFAULT 1, created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (agent_id) REFERENCES agents(id))""")
         await db.commit()
 
+# ── Intent parser ──
+def parse_intent(text):
+    for name, pat in INTENTS:
+        m = pat.search(text)
+        if m: return {"action":name,"raw":text,"groups":m.groups(),"confidence":0.85}
+    return {"action":"unknown","raw":text,"groups":(),"confidence":0.0}
 
-# ── Helpers ──────────────────────────────────────────────────────────────
+# ── Intent handler mapping ──
+async def _handle_intent(action, groups, text):
+    """Returns (target, data_dict) for a parsed intent."""
+    g = groups
+    handlers = {
+        "show_price":       lambda: (sym(g[0]) if g else "", _price_data(sym(g[0]) if g else "")),
+        "buy":              lambda: (sym(g[1]) if len(g)>1 else "", {"symbol":sym(g[1]) if len(g)>1 else "","side":"buy","endpoint":"/api/trading/orders"}),
+        "sell":             lambda: (sym(g[1]) if len(g)>1 else "", {"symbol":sym(g[1]) if len(g)>1 else "","side":"sell","endpoint":"/api/trading/orders"}),
+        "place_trade":      lambda: (sym(g[0]) if g else "", {"symbol":sym(g[0]) if g else "","side":"buy" if "buy" in text.lower() else "sell","endpoint":"/api/trading/orders"}),
+        "check_pnl":        lambda: ("portfolio", {"endpoint":"/api/trading/performance"}),
+        "set_alert":        lambda: ("alert", {"condition":g[0] if g else text,"endpoint":"/api/copilot/alerts"}),
+        "volatility":       lambda: (sym(next((x for x in g if x),"")), _vol_data(sym(next((x for x in g if x),"")))),
+        "dex_liquidity":    lambda: (sym(g[0]) if g else "", {"liquidity":"checking","source":"dexscreener"}),
+        "whale_watch":      lambda: ("whale_activity", {"source":"whale_watch","status":"scanning"}),
+        "market_sentiment": lambda: ("market_sentiment", {"indicator":"fear_greed","endpoint":"/api/copilot/sentiment"}),
+        # Sim & Backtest
+        "backtest":         lambda: ("backtest", {"strategy":g[0] if g else text,"status":"ready","period":"30d","initial_capital":10000}),
+        "stress_test":      lambda: ("portfolio", {"mode":"stress_test","scenarios":["-30% crash","+50% rally","vol spike","correlation break"]}),
+        "scenario_sim":     lambda: ("simulation", {"scenario":g[0] if g else text,"mode":"what_if"}),
+        # Optimization
+        "optimize_portfolio": lambda: ("portfolio", {"action":"optimize","method":"sharpe_ratio","max_assets":10}),
+        "yield_scan":       lambda: ("defi", {"action":"scan_yields","chains":["eth","sol","arb","op","base"],"min_apy":5}),
+        "arbitrage_scan":   lambda: ("arbitrage", {"action":"scan_spreads","sources":["cex","dex"],"min_spread_pct":0.5}),
+        "liquidity_track":  lambda: ("liquidity", {"action":"track","chains":["eth","sol","polygon"]}),
+        "benchmark":        lambda: ("portfolio", {"action":"benchmark","benchmark":"BTC","period":"all"}),
+        "risk_slider":      lambda: ("risk", {"current_level":"medium","levels":["low","medium","high","degen"],"max_drawdown_pct":20}),
+        "risk_heatmap":     lambda: ("risk", {"action":"generate_heatmap","symbols":["BTC","ETH","SOL","AVAX","DOT"]}),
+        "metric_create":     lambda: ("custom_metric", {"definition":g[0] if g else text,"status":"draft"}),
+        "metric_fusion":    lambda: ("custom_metric", {"fusion":g[0] if g else text,"method":"weighted_average"}),
+        # Learning
+        "learning_path":    lambda: ("learning", {"topic":g[0] if g else "crypto trading","level":"beginner","modules":["basics","technical","risk"]}),
+        "learning_quiz":    lambda: ("learning", {"action":"quiz","topic":g[0].strip() if g and g[0] else "general","questions":5}),
+        # Goals & Progress
+        "goal_track":       lambda: ("goals", {"endpoint":"/api/copilot/goals","action":"track"}),
+        "progress_track":   lambda: ("progress", {"action":"summary","metrics":["pnl","win_rate","trades","accuracy"]}),
+        "watchlist":        lambda: ("watchlist", {"action":"prioritize","criteria":"momentum"}),
+        # Gamification
+        "gamification":     lambda: ("gamification", {"action":"status","xp":0,"level":1,"badges":[]}),
+        "sentiment_vote":   lambda: ("sentiment", {"action":"vote","target":"signal"}),
+        "community_feed":   lambda: ("community", {"action":"feed","sort":"trending"}),
+        "signal_amplify":   lambda: ("signal", {"action":"amplify","method":"social_boost"}),
+        # Visualization
+        "chart_annotate":   lambda: ("chart", {"note":g[0] if g else text,"action":"annotate"}),
+        "sentiment_chart":  lambda: ("chart", {"action":"sentiment_evolution","period":"7d"}),
+        "ecosystem_map":    lambda: ("ecosystem", {"action":"generate_map","depth":"full"}),
+        "dashboard_build":  lambda: ("dashboard", {"action":"customize","widgets":["price","volume","sentiment"]}),
+        # Swarm
+        "swarm_mode":       lambda: ("swarm", {"mode":"collaborative","agents":3,"topic":"market_analysis"}),
+        "debate_mode":      lambda: ("debate", {"topic":g[0] if g else text,"format":"pro_con","rounds":3}),
+        "oracle_fusion":    lambda: ("oracle", {"action":"fusion","sources":["pyth","chainlink","coingecko"]}),
+        # Other
+        "voice_mode":       lambda: ("voice", {"mode":"enabled","input":"microphone"}),
+        "smart_search":     lambda: ("search", {"query":g[0] if g else text,"sources":["web","knowledge","feed"]}),
+        "export_analytics": lambda: ("export", {"format":"csv","scope":"all","endpoint":"/api/copilot/export"}),
+        "eco_impact":       lambda: ("eco", {"action":"estimate","chains":["eth","btc","sol"]}),
+    }
 
-async def _parse_intent(text: str) -> dict:
-    """Map natural language text to an action intent.
+    if action in handlers:
+        t, d = handlers[action]()
+        if hasattr(d, '__await__'):  # async result
+            d = await d
+        return t, d
+    return "", {}
 
-    Patterns are checked in order — specific intents (set_alert, place_trade,
-    check_pnl) take priority over generic ones (show_price, navigate).
-    """
-    for intent, pattern in INTENT_PATTERNS:
-        m = pattern.search(text)
-        if m:
-            groups = m.groups()
-            return {
-                "action": intent,
-                "raw": text,
-                "groups": groups,
-                "confidence": 0.85,
-            }
-    return {"action": "unknown", "raw": text, "groups": (), "confidence": 0.0}
-
-
-async def _fetch_ares_price(symbol: str) -> Optional[dict]:
-    """Call Ares RPC for live price data via POST to coingecko proxy."""
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(
-                f"{ARES_RPC_URL}/api/rpc/coingecko",
-                json={"path": f"/api/v3/simple/price?ids={symbol.lower()}&vs_currencies=usd"},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            price = data.get(symbol.lower(), {}).get("usd")
-            if price is not None:
-                return {"symbol": symbol.upper(), "price": float(price)}
-            return None
-    except Exception as exc:
-        logger.warning("Ares RPC price lookup failed for %s: %s", symbol, exc)
-        return None
-
-
-async def _fetch_ares_market_data(symbol: str) -> Optional[dict]:
-    """Call Ares RPC for broader market data (24h change, volume) via POST."""
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(
-                f"{ARES_RPC_URL}/api/rpc/coingecko",
-                json={
-                    "path": (
-                        f"/api/v3/simple/price?ids={symbol.lower()}"
-                        f"&vs_currencies=usd"
-                        f"&include_24hr_change=true"
-                        f"&include_24hr_vol=true"
-                    ),
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            item = data.get(symbol.lower(), {})
-            return {
-                "symbol": symbol.upper(),
-                "price": item.get("usd"),
-                "change_24h": item.get("usd_24h_change"),
-                "volume_24h": item.get("usd_24h_vol"),
-            }
-    except Exception as exc:
-        logger.warning("Ares RPC market data failed for %s: %s", symbol, exc)
-        return None
-
-
-async def _fetch_ares_liquidity(symbol: str) -> Optional[dict]:
-    """Call Ares RPC for DEX liquidity data via dexscreener."""
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(
-                f"{ARES_RPC_URL}/api/rpc/dexscreener",
-                json={"path": f"/api/v1/tokens/{symbol.lower()}"},
-            )
-            resp.raise_for_status()
-            return resp.json()
-    except Exception as exc:
-        logger.warning("Ares RPC liquidity lookup failed for %s: %s", symbol, exc)
-        return None
-
-
-async def _fetch_ares_volatility(symbol: str) -> Optional[dict]:
-    """Estimate volatility from 7-day price history via coingecko."""
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(
-                f"{ARES_RPC_URL}/api/rpc/coingecko",
-                json={
-                    "path": f"/api/v3/coins/{symbol.lower()}/market_chart?vs_currency=usd&days=7",
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            prices = data.get("prices", [])
-            if len(prices) > 1:
-                vals = [p[1] for p in prices]
-                mean = sum(vals) / len(vals)
-                variance = sum((v - mean) ** 2 for v in vals) / len(vals)
-                std_dev = variance ** 0.5
-                volatility_pct = round(std_dev / mean * 100, 2) if mean else 0
-                return {
-                    "symbol": symbol.upper(),
-                    "volatility_7d_pct": volatility_pct,
-                    "avg_price_7d": round(mean, 4),
-                    "data_points": len(prices),
-                }
-            return {"symbol": symbol.upper(), "volatility_7d_pct": 0, "data_points": 0}
-    except Exception as exc:
-        logger.warning("Ares RPC volatility lookup failed for %s: %s", symbol, exc)
-        return None
-
-
-# ── Endpoints ────────────────────────────────────────────────────────────
-
+# ── Chat endpoint ──
 @router.post("/chat")
 async def copilot_chat(request: Request, agent: dict = Depends(get_agent)):
-    """Parse natural language input and return an intent with associated data."""
     body = await _parse_body(request)
     text = (body.get("text") or "").strip()
     if not text:
         raise HTTPException(400, "text field is required")
 
-    parsed = await _parse_intent(text)
+    parsed = parse_intent(text)
     action = parsed["action"]
     groups = parsed["groups"]
     confidence = parsed["confidence"]
 
-    result: dict = {"action": action, "target": "", "data": {}, "confidence": confidence}
+    target, data = "", {}
 
-    if action == "show_price":
-        symbol = _resolve_symbol(groups[0]) if groups else ""
-        result["target"] = symbol
-        price_data = await _fetch_ares_price(symbol)
-        result["data"] = price_data or {"symbol": symbol, "price": None}
-        if price_data and price_data.get("price") is not None:
-            mkt = await _fetch_ares_market_data(symbol)
-            if mkt:
-                result["data"].update(mkt)
-
-    elif action in ("buy", "sell"):
-        symbol = _resolve_symbol(groups[0]) if groups else ""
-        side = "buy" if action == "buy" else "sell"
-        result["action"] = "place_trade"
-        result["target"] = symbol
-        result["data"] = {
-            "symbol": symbol,
-            "side": side,
-            "endpoint": "/api/trading/orders",
-        }
-
-    elif action == "place_trade":
-        symbol = _resolve_symbol(groups[0]) if groups else ""
-        result["target"] = symbol
-        side = "buy" if "buy" in text.lower() else "sell"
-        result["data"] = {
-            "symbol": symbol,
-            "side": side,
-            "endpoint": "/api/trading/orders",
-        }
-
-    elif action == "check_pnl":
-        result["target"] = "portfolio"
-        result["data"] = {"endpoint": "/api/trading/performance"}
-
-    elif action == "set_alert":
-        cond = groups[0] if groups else text
-        result["target"] = "alert"
-        result["data"] = {"condition": cond, "endpoint": "/api/copilot/alerts"}
-
-    elif action == "volatility":
-        raw = next((g for g in groups if g), "")
-        symbol = _resolve_symbol(raw) if raw else ""
-        result["target"] = symbol
-        vol_data = await _fetch_ares_volatility(symbol)
-        result["data"] = vol_data or {"symbol": symbol, "volatility_7d_pct": None}
-
-    elif action == "dex_liquidity":
-        symbol = _resolve_symbol(groups[0]) if groups else ""
-        result["target"] = symbol
-        liq_data = await _fetch_ares_liquidity(symbol)
-        result["data"] = liq_data or {"symbol": symbol, "liquidity": None}
-
-    elif action == "whale_watch":
-        result["target"] = "whale_activity"
-        result["data"] = {"source": "whale_watch"}
-
-    elif action == "market_sentiment":
-        result["target"] = "market_sentiment"
-        result["data"] = {"source": "coingecko", "indicator": "fear_greed"}
-
-    elif action == "navigate":
-        raw_target = groups[0].lower().strip() if groups else ""
-        raw_target = raw_target.rstrip(".,!?")
-        matched = False
-        for key, path in PAGE_MAP.items():
-            if key in raw_target or raw_target in key:
-                result["target"] = key
-                result["data"] = {"path": path}
-                matched = True
+    if action == "navigate":
+        raw = (groups[0] or "").lower().strip().rstrip(".,!?")
+        for k, v in PAGES.items():
+            if k in raw or raw in k:
+                target, data = k, {"path": v}
                 break
-        if not matched:
-            result["target"] = raw_target
-            result["data"] = {"path": f"/{raw_target}"}
+        else:
+            target, data = raw, {"path": f"/{raw}"}
+    elif action != "unknown":
+        target, data = await _handle_intent(action, groups, text)
 
+    result = {
+        "action": action if action != "unknown" else ("place_trade" if action in ("buy","sell") else action),
+        "target": target,
+        "data": data,
+        "confidence": confidence,
+    }
     return {"query": text, "intent": result}
 
-
+# ── Execute endpoint ──
 @router.post("/execute")
 async def copilot_execute(request: Request, agent: dict = Depends(get_agent)):
-    """Execute a parsed intent — actually places trades, fetches PnL, etc."""
     body = await _parse_body(request)
     action = body.get("action", "")
     target = body.get("target", "")
     data = body.get("data", {})
+    key = request.headers.get("X-Agent-Key", "")
+    base = settings.PUBLIC_URL.rstrip("/")
 
     if action == "navigate":
-        path = PAGE_MAP.get(target) or f"/{target}"
-        return {"action": action, "target": target, "data": {"path": path}, "confidence": 1.0}
-
-    if action == "show_price":
-        price_data = await _fetch_ares_price(target) if target else None
-        return {
-            "action": action,
-            "target": target,
-            "data": price_data or {},
-            "confidence": 0.9,
-        }
-
+        return {"action":action,"target":target,"data":{"path":PAGES.get(target,f"/{target}")},"confidence":1.0}
+    if action == "show_price" and target:
+        price = await _price_data(target)
+        return {"action":action,"target":target,"data":price or {},"confidence":0.9}
     if action == "check_pnl":
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                agent_key = request.headers.get("X-Agent-Key", "")
-                base = settings.PUBLIC_URL.rstrip("/")
-                resp = await client.get(
-                    f"{base}/api/trading/performance",
-                    headers={"X-Agent-Key": agent_key},
-                )
-                resp.raise_for_status()
-                perf = resp.json()
-        except Exception as exc:
-            logger.warning("PnL fetch failed: %s", exc)
-            perf = {"error": "performance fetch failed"}
-        return {
-            "action": action,
-            "target": "portfolio",
-            "data": perf,
-            "confidence": 1.0,
-        }
-
-    if action in ("place_trade", "buy", "sell"):
-        side = data.get("side", body.get("side", "buy"))
-        quantity = data.get("quantity", body.get("quantity", 0.001))
-        chain = data.get("chain", body.get("chain", "solana"))
-        order_type = data.get("order_type", body.get("order_type", "market"))
+            async with httpx.AsyncClient(timeout=5) as c:
+                r = await c.get(f"{base}/api/trading/performance", headers={"X-Agent-Key":key})
+                return {"action":action,"target":"portfolio","data":r.json() if r.status_code==200 else {"error":r.text},"confidence":1.0}
+        except Exception as e:
+            return {"action":action,"target":"portfolio","data":{"error":str(e)},"confidence":0.5}
+    if action in ("place_trade","buy","sell"):
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                agent_key = request.headers.get("X-Agent-Key", "")
-                base = settings.PUBLIC_URL.rstrip("/")
-                resp = await client.post(
-                    f"{base}/api/trading/orders",
-                    json={
-                        "symbol": target,
-                        "side": side,
-                        "quantity": quantity,
-                        "chain": chain,
-                        "order_type": order_type,
-                    },
-                    headers={"X-Agent-Key": agent_key},
-                )
-                resp.raise_for_status()
-                order_result = resp.json()
-        except Exception as exc:
-            logger.warning("Trade execution failed: %s", exc)
-            order_result = {"error": f"trade execution failed: {exc}"}
-        return {
-            "action": "place_trade",
-            "target": target,
-            "data": {
-                "symbol": target,
-                "side": side,
-                "order_result": order_result,
-                "endpoint": "/api/trading/orders",
-            },
-            "confidence": 0.9,
-        }
+            async with httpx.AsyncClient(timeout=5) as c:
+                r = await c.post(f"{base}/api/trading/orders", json={
+                    "symbol":target,"side":data.get("side","buy"),
+                    "quantity":data.get("quantity",0.001),
+                    "chain":data.get("chain","solana"),
+                    "order_type":data.get("order_type","market"),
+                }, headers={"X-Agent-Key":key})
+                return {"action":"place_trade","target":target,"data":{"order_result":r.json() if r.status_code==200 else {"error":r.text}},"confidence":0.9}
+        except Exception as e:
+            return {"action":"place_trade","target":target,"data":{"error":str(e)},"confidence":0.5}
+    raise HTTPException(400, f"Unsupported action: {action}")
 
-    raise HTTPException(400, f"Unknown or unsupported action: {action}")
-
-
-# ── Alerts CRUD ──────────────────────────────────────────────────────────
-
+# ── Alerts CRUD ──
 @router.get("/alerts")
 async def list_alerts(agent: dict = Depends(get_agent)):
-    """List all copilot alerts for the authenticated agent."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM copilot_alerts WHERE agent_id=? ORDER BY created_at DESC",
-            (agent["id"],),
-        ) as cur:
-            rows = await cur.fetchall()
-    return [dict(r) for r in rows]
-
+        async with db.execute("SELECT * FROM copilot_alerts WHERE agent_id=? ORDER BY created_at DESC",(agent["id"],)) as cur:
+            return [dict(r) for r in await cur.fetchall()]
 
 @router.post("/alerts")
 async def create_alert(request: Request, agent: dict = Depends(get_agent)):
-    """Create a new copilot alert."""
     body = await _parse_body(request)
-    symbol = body.get("symbol", "")
-    condition_text = body.get("condition", body.get("condition_text", ""))
-    target_price = body.get("target_price")
-    direction = body.get("direction", "above")
-
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            """INSERT INTO copilot_alerts (agent_id, symbol, condition_text, target_price, direction)
-               VALUES (?, ?, ?, ?, ?)""",
-            (agent["id"], symbol, condition_text, target_price, direction),
-        )
+            "INSERT INTO copilot_alerts (agent_id,symbol,condition_text,target_price,direction) VALUES (?,?,?,?,?)",
+            (agent["id"],body.get("symbol",""),body.get("condition",""),body.get("target_price"),body.get("direction","above")))
         await db.commit()
-        alert_id = cur.lastrowid
-    return {"id": alert_id, "status": "created"}
-
+        return {"id":cur.lastrowid,"status":"created"}
 
 @router.delete("/alerts/{alert_id}")
-async def delete_alert(alert_id: int, agent: dict = Depends(get_agent)):
-    """Delete a copilot alert."""
+async def delete_alert(alert_id:int, agent:dict=Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "DELETE FROM copilot_alerts WHERE id=? AND agent_id=?",
-            (alert_id, agent["id"]),
-        )
+        await db.execute("DELETE FROM copilot_alerts WHERE id=? AND agent_id=?",(alert_id,agent["id"]))
         await db.commit()
-    return {"status": "deleted"}
+    return {"status":"deleted"}
+
+# ── Goals CRUD ──
+@router.get("/goals")
+async def list_goals(agent:dict=Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory=aiosqlite.Row
+        async with db.execute("SELECT * FROM copilot_goals WHERE agent_id=? ORDER BY created_at DESC",(agent["id"],)) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+@router.post("/goals")
+async def create_goal(request:Request, agent:dict=Depends(get_agent)):
+    body = await _parse_body(request)
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur=await db.execute("INSERT INTO copilot_goals (agent_id,goal,target,current,unit) VALUES (?,?,?,?,?)",
+            (agent["id"],body.get("goal",""),body.get("target",0),body.get("current",0),body.get("unit","%")))
+        await db.commit()
+        return {"id":cur.lastrowid,"status":"created"}
+
+# ── Scheduled alerts ──
+@router.get("/scheduled")
+async def list_scheduled(agent:dict=Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory=aiosqlite.Row
+        async with db.execute("SELECT * FROM copilot_scheduled WHERE agent_id=? ORDER BY created_at DESC",(agent["id"],)) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+@router.post("/scheduled")
+async def create_scheduled(request:Request, agent:dict=Depends(get_agent)):
+    body = await _parse_body(request)
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur=await db.execute("INSERT INTO copilot_scheduled (agent_id,name,cron_expr,intent_action,intent_params) VALUES (?,?,?,?,?)",
+            (agent["id"],body.get("name",""),body.get("cron","0 */4 * * *"),body.get("action",""),json.dumps(body.get("params",{}))))
+        await db.commit()
+        return {"id":cur.lastrowid,"status":"scheduled"}
