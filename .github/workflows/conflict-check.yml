@@ -1,0 +1,14 @@
+name: conflict-check
+on: [push, pull_request]
+jobs:
+  markers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject merge-conflict markers
+        run: |
+          if git -P grep -nE '^(<{7}|={7}|>{7})( |$)' -- . ':!*.md' ':!*.lock' ':!Cargo.lock' ':!*.json' 2>/dev/null; then
+            echo "::error::Unresolved merge-conflict markers found"
+            exit 1
+          fi
+          echo "✓ No conflict markers"
