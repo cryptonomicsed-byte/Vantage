@@ -552,23 +552,25 @@ async def get_risk(agent: dict = Depends(get_agent)):
             "max_drawdown_pct": 0,  # Computed from PnL history
         }
 
-# ── Positions (live-valued) ─────────────────────────────────
+# ── Positions / Portfolio (live-valued, realized + unrealized P&L) ──────────
 
-@router.get("/positions")
-async def get_positions(agent: dict = Depends(get_agent)):
-    """Net position per symbol derived from filled orders, valued at the live quote
-    with unrealized P&L. BUY adds quantity at its fill price (cost basis); SELL
-    reduces it. Positions are valued via the same direct market sources as quotes."""
+async def _load_book(agent_id: int) -> dict:
+    """Build an average-cost book from filled orders processed chronologically.
+
+    Returns {symbol: {net_qty, cost_basis, realized}}. A BUY adds quantity at its
+    fill price; a SELL realizes P&L against the running average cost and reduces
+    the basis proportionally. This is standard avg-cost accounting — the same a
+    connecting agent (Hermes, OpenClaw, …) would expect when it reads its book."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             """SELECT symbol, side, filled_quantity, quantity, avg_fill_price, price
-               FROM trading_orders WHERE agent_id=? AND status='filled'""",
-            (agent["id"],)
+               FROM trading_orders WHERE agent_id=? AND status='filled'
+               ORDER BY COALESCE(executed_at, created_at), id""",
+            (agent_id,)
         )).fetchall()
 
-    # Aggregate net quantity + cost basis per symbol.
-    agg: dict[str, dict] = {}
+    book: dict[str, dict] = {}
     for r in rows:
         o = dict(r)
         sym = (o["symbol"] or "").upper()
@@ -576,40 +578,119 @@ async def get_positions(agent: dict = Depends(get_agent)):
             continue
         qty = o["filled_quantity"] or o["quantity"] or 0
         fill = o["avg_fill_price"] or o["price"] or 0
-        a = agg.setdefault(sym, {"symbol": sym, "net_qty": 0.0, "cost_basis": 0.0})
+        b = book.setdefault(sym, {"net_qty": 0.0, "cost_basis": 0.0, "realized": 0.0})
         if str(o["side"]).upper() == "BUY":
-            a["net_qty"] += qty
-            a["cost_basis"] += qty * fill
+            b["net_qty"] += qty
+            b["cost_basis"] += qty * fill
         else:
-            a["net_qty"] -= qty
-            a["cost_basis"] -= qty * fill
+            avg = (b["cost_basis"] / b["net_qty"]) if b["net_qty"] else fill
+            sell_qty = min(qty, b["net_qty"]) if b["net_qty"] > 0 else qty
+            b["realized"] += (fill - avg) * sell_qty
+            b["net_qty"] -= qty
+            b["cost_basis"] -= avg * sell_qty
+            if b["net_qty"] <= 1e-12:
+                b["net_qty"] = max(b["net_qty"], 0.0)
+                b["cost_basis"] = max(b["cost_basis"], 0.0)
+    return book
 
+
+async def _value_positions(book: dict) -> dict:
+    """Value an avg-cost book at live quotes. Returns positions + totals."""
     positions = []
     total_value = 0.0
     total_unrealized = 0.0
-    for sym, a in agg.items():
-        if abs(a["net_qty"]) < 1e-12:
+    total_realized = 0.0
+    for sym, b in book.items():
+        total_realized += b["realized"]
+        if abs(b["net_qty"]) < 1e-9:
             continue
         live = await _fetch_quote(sym)
-        avg_cost = (a["cost_basis"] / a["net_qty"]) if a["net_qty"] else 0
-        market_value = (live or 0) * a["net_qty"]
-        unrealized = (market_value - a["cost_basis"]) if live else 0
+        avg_cost = (b["cost_basis"] / b["net_qty"]) if b["net_qty"] else 0
+        market_value = (live or 0) * b["net_qty"]
+        unrealized = (market_value - b["cost_basis"]) if live else 0
         total_value += market_value
         total_unrealized += unrealized
         positions.append({
             "symbol": sym,
-            "net_quantity": round(a["net_qty"], 8),
+            "net_quantity": round(b["net_qty"], 8),
             "avg_cost": round(avg_cost, 6),
             "live_price": live,
             "market_value_usd": round(market_value, 2),
             "unrealized_pnl_usd": round(unrealized, 2),
-            "unrealized_pnl_pct": round((unrealized / a["cost_basis"] * 100), 2) if a["cost_basis"] else 0,
+            "unrealized_pnl_pct": round((unrealized / b["cost_basis"] * 100), 2) if b["cost_basis"] else 0,
+            "realized_pnl_usd": round(b["realized"], 2),
         })
-
     positions.sort(key=lambda p: -abs(p["market_value_usd"]))
     return {
         "positions": positions,
         "total_market_value_usd": round(total_value, 2),
         "total_unrealized_pnl_usd": round(total_unrealized, 2),
+        "total_realized_pnl_usd": round(total_realized, 2),
         "priced": all(p["live_price"] for p in positions) if positions else True,
     }
+
+
+@router.get("/positions")
+async def get_positions(agent: dict = Depends(get_agent)):
+    """Open positions valued at the live quote, with realized + unrealized P&L."""
+    book = await _load_book(agent["id"])
+    return await _value_positions(book)
+
+
+@router.get("/portfolio")
+async def get_portfolio(agent: dict = Depends(get_agent)):
+    """Live portfolio snapshot: positions + realized/unrealized P&L + trade stats.
+
+    This is the real, live-valued view of the agent's book (no manual snapshot
+    needed). Win rate is computed from realized closes across all symbols."""
+    book = await _load_book(agent["id"])
+    valued = await _value_positions(book)
+
+    # Trade stats from realized closes.
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        filled = await (await db.execute(
+            "SELECT COUNT(*) c FROM trading_orders WHERE agent_id=? AND status='filled'",
+            (agent["id"],)
+        )).fetchone()
+
+    winners = len([p for p in valued["positions"] if p["realized_pnl_usd"] > 0])
+    realized_symbols = len([s for s, b in book.items() if abs(b["realized"]) > 1e-9])
+    return {
+        **valued,
+        "total_pnl_usd": round(valued["total_unrealized_pnl_usd"] + valued["total_realized_pnl_usd"], 2),
+        "open_positions": len(valued["positions"]),
+        "filled_orders": filled[0] if filled else 0,
+        "symbols_realized": realized_symbols,
+        "winning_symbols": winners,
+    }
+
+
+@router.post("/snapshot/auto")
+async def auto_snapshot(agent: dict = Depends(get_agent)):
+    """Value the live book and upsert today's PnL snapshot, so the equity curve
+    auto-populates from real positions instead of manual entry."""
+    book = await _load_book(agent["id"])
+    valued = await _value_positions(book)
+    value = valued["total_market_value_usd"]
+    daily_pnl = valued["total_unrealized_pnl_usd"] + valued["total_realized_pnl_usd"]
+    today = date.today().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Yesterday's value for a daily delta, if present.
+        prev = await (await db.execute(
+            "SELECT portfolio_value_usd FROM trading_pnl_snapshots WHERE agent_id=? AND snapshot_date<? ORDER BY snapshot_date DESC LIMIT 1",
+            (agent["id"], today)
+        )).fetchone()
+        daily_pct = round((value - prev[0]) / prev[0] * 100, 2) if prev and prev[0] else 0
+        await db.execute(
+            """INSERT INTO trading_pnl_snapshots
+                 (agent_id, snapshot_date, portfolio_value_usd, daily_pnl_usd, daily_pnl_pct, notes)
+               VALUES (?,?,?,?,?,?)
+               ON CONFLICT(agent_id, snapshot_date) DO UPDATE SET
+                 portfolio_value_usd=excluded.portfolio_value_usd,
+                 daily_pnl_usd=excluded.daily_pnl_usd,
+                 daily_pnl_pct=excluded.daily_pnl_pct""",
+            (agent["id"], today, value, round(daily_pnl, 2), daily_pct, "auto: live position valuation")
+        )
+        await db.commit()
+    return {"status": "snapshot_saved", "date": today, "portfolio_value_usd": value}

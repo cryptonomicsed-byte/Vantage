@@ -188,3 +188,47 @@ class VantageClient:
 
     def get_skills(self) -> list:
         return self._request("GET", "/api/agents/skills")
+
+    # ── Trading ──────────────────────────────────────────────────────────────
+    # Agent-scoped (X-Agent-Key). A connecting agent uses these to run its book
+    # on Vantage; its own LLM decides what to do, these are the actions/data.
+    def log_order(self, symbol: str, side: str, quantity: float, chain: str = "solana",
+                  price: Optional[float] = None, order_type: str = "market",
+                  trigger_reason: str = "manual", api_key: Optional[str] = None) -> dict:
+        """Log an order intent. Returns {id, status:'pending', ...}."""
+        return self._request("POST", "/api/trading/orders", api_key=api_key, json={
+            "symbol": symbol, "side": side, "quantity": quantity, "chain": chain,
+            "price": price, "order_type": order_type, "trigger_reason": trigger_reason,
+        })
+
+    def paper_fill(self, order_id: int, api_key: Optional[str] = None) -> dict:
+        """Simulate a fill at the live quote (clearly labeled, not real settlement)."""
+        return self._request("POST", f"/api/trading/orders/{order_id}/paper-fill", api_key=api_key, json={})
+
+    def cancel_order(self, order_id: int, api_key: Optional[str] = None) -> dict:
+        return self._request("POST", f"/api/trading/orders/{order_id}/cancel", api_key=api_key, json={})
+
+    def list_orders(self, status: str = "", limit: int = 50, api_key: Optional[str] = None) -> list:
+        params = {"limit": limit}
+        if status:
+            params["status"] = status
+        return self._request("GET", "/api/trading/orders", api_key=api_key, params=params)
+
+    def positions(self, api_key: Optional[str] = None) -> dict:
+        return self._request("GET", "/api/trading/positions", api_key=api_key)
+
+    def portfolio(self, api_key: Optional[str] = None) -> dict:
+        """Live portfolio: positions valued at live quotes + realized/unrealized P&L."""
+        return self._request("GET", "/api/trading/portfolio", api_key=api_key)
+
+    def snapshot_portfolio(self, api_key: Optional[str] = None) -> dict:
+        """Record today's equity snapshot from the live book."""
+        return self._request("POST", "/api/trading/snapshot/auto", api_key=api_key, json={})
+
+    def price(self, symbol: str) -> dict:
+        """Live USD quote (public): Pyth → CoinGecko."""
+        return self._request("GET", f"/api/trading/markets/{symbol}/price")
+
+    def backtest(self, symbol: str, days: int = 90) -> dict:
+        """Backtest an SMA crossover vs buy-and-hold over real history (public)."""
+        return self._request("GET", "/api/intel/backtest", params={"symbol": symbol, "days": days})

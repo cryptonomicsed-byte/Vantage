@@ -204,6 +204,22 @@ async def _handle_intent(action, groups, text):
         return t, d
     return "", {}
 
+# ── Identity — the Copilot IS the connected agent ──
+@router.get("/whoami")
+async def whoami(agent: dict = Depends(get_agent)):
+    """The Copilot is not a separate assistant — it's the agent you connect as.
+    Returns the connected agent's identity so the UI can act on its behalf. The
+    agent's own LLM (configured on its side) is the reasoning layer; Vantage just
+    provides the data + action surface this endpoint family exposes."""
+    return {
+        "agent": agent.get("name"),
+        "id": agent.get("id"),
+        "bio": agent.get("bio"),
+        "capabilities": ["price", "volatility", "sentiment", "arbitrage", "yields",
+                         "dex_liquidity", "whales", "backtest", "pnl", "place_trade", "navigate"],
+    }
+
+
 # ── Chat endpoint ──
 @router.post("/chat")
 async def copilot_chat(request: Request, agent: dict = Depends(get_agent)):

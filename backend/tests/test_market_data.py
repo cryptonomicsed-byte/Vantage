@@ -130,6 +130,17 @@ def _h(agent):
     return {"X-Agent-Key": agent["api_key"]}
 
 
+_fresh_n = [0]
+
+
+async def _fresh_agent(client):
+    """Register an isolated agent (session fixture is shared → contaminates totals)."""
+    _fresh_n[0] += 1
+    r = await client.post("/api/agents/register", json={"name": f"BookAgent{_fresh_n[0]}", "bio": "t"})
+    assert r.status_code == 200, r.text
+    return {"api_key": r.json()["api_key"]}
+
+
 @pytest.mark.asyncio
 async def test_positions_live_valuation(client, registered_agent, monkeypatch):
     # Deterministic, mutable "live" price shared by paper-fill and positions valuation.
@@ -168,3 +179,58 @@ async def test_positions_live_valuation(client, registered_agent, monkeypatch):
 async def test_positions_requires_agent_key(client):
     r = await client.get("/api/trading/positions")
     assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_portfolio_realized_and_unrealized_pnl(client, registered_agent, monkeypatch):
+    """Avg-cost book: buy 2@100, buy 2@200 (avg 150), sell 2@300 (realized +300),
+    then value the remaining 2 at 300 (unrealized +300)."""
+    holder = {"p": 100.0}
+
+    async def fake_resolve(symbol):
+        return holder["p"]
+
+    monkeypatch.setattr(ms, "resolve_price", fake_resolve)
+    h = _h(await _fresh_agent(client))
+
+    async def fill(side, qty):
+        r = await client.post("/api/trading/orders", headers=h, json={
+            "symbol": "ETH", "side": side, "chain": "base", "quantity": qty, "order_type": "market"})
+        oid = r.json()["id"]
+        rf = await client.post(f"/api/trading/orders/{oid}/paper-fill", headers=h)
+        assert rf.status_code == 200, rf.text
+
+    holder["p"] = 100.0; await fill("buy", 2)
+    holder["p"] = 200.0; await fill("buy", 2)
+    holder["p"] = 300.0; await fill("sell", 2)
+
+    holder["p"] = 300.0
+    r = await client.get("/api/trading/portfolio", headers=h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    eth = next(p for p in body["positions"] if p["symbol"] == "ETH")
+    assert eth["net_quantity"] == pytest.approx(2.0, abs=1e-6)
+    assert eth["avg_cost"] == pytest.approx(150.0, abs=0.01)
+    assert eth["realized_pnl_usd"] == pytest.approx(300.0, abs=0.5)
+    assert eth["unrealized_pnl_usd"] == pytest.approx(300.0, abs=0.5)
+    assert body["total_realized_pnl_usd"] == pytest.approx(300.0, abs=0.5)
+    assert body["total_pnl_usd"] == pytest.approx(600.0, abs=1.0)
+
+
+@pytest.mark.asyncio
+async def test_auto_snapshot_writes_equity(client, registered_agent, monkeypatch):
+    async def fake_resolve(symbol):
+        return 50.0
+    monkeypatch.setattr(ms, "resolve_price", fake_resolve)
+    h = _h(await _fresh_agent(client))
+    r = await client.post("/api/trading/orders", headers=h, json={
+        "symbol": "SOL", "side": "buy", "chain": "solana", "quantity": 4, "order_type": "market"})
+    oid = r.json()["id"]
+    await client.post(f"/api/trading/orders/{oid}/paper-fill", headers=h)
+
+    rs = await client.post("/api/trading/snapshot/auto", headers=h)
+    assert rs.status_code == 200, rs.text
+    assert rs.json()["portfolio_value_usd"] == pytest.approx(200.0, abs=1.0)  # 4 * 50
+    # The equity curve now has a real data point.
+    rd = await client.get("/api/trading/performance/daily?days=7", headers=h)
+    assert any(abs(row["portfolio_value_usd"] - 200.0) < 1.0 for row in rd.json())

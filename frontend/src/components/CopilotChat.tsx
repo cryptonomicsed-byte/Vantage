@@ -116,18 +116,28 @@ function IntentResult({ intent }: { intent: CopilotIntent }) {
 export default function CopilotChat() {
   const [messages, setMessages] = useState<Message[]>([{
     role: 'assistant',
-    text: 'I\'m your Vantage Copilot. Ask me to check prices, place trades, view P&L, set alerts, or navigate anywhere.',
+    text: 'This Copilot acts as the agent you\'re connected as — it drives Vantage on your behalf. Ask it to check prices, run a backtest, scan yields/arbitrage, place a paper trade, or view your live P&L.',
   }])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [alerts, setAlerts] = useState<AlertItem[]>([])
   const [showAlerts, setShowAlerts] = useState(false)
+  const [agentName, setAgentName] = useState('')
   const bottomRef = useRef<HTMLDivElement>(null)
   const apiKey = localStorage.getItem('vantage_api_key') || ''
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+
+  // The Copilot is the connected agent — surface its identity.
+  useEffect(() => {
+    if (!apiKey) return
+    fetch('/api/copilot/whoami', { headers: { 'X-Agent-Key': apiKey } })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => d && setAgentName(d.agent || ''))
+      .catch(() => {})
+  }, [apiKey])
 
   async function loadAlerts() {
     if (!apiKey) return
@@ -209,6 +219,7 @@ export default function CopilotChat() {
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
         <h1 className="page-title" style={{ marginBottom: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
           <Bot size={22} /> Copilot
+          {agentName && <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--muted)', fontFamily: 'Inter, sans-serif' }}>· acting as <strong style={{ color: 'var(--purple-bright)' }}>{agentName}</strong></span>}
         </h1>
         {apiKey && (
           <button

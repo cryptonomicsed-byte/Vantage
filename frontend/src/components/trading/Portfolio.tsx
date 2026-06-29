@@ -147,6 +147,16 @@ function Overview() {
     setSaving(false)
   }
 
+  async function autoSnapshot() {
+    setSaving(true); setMsg('')
+    try {
+      const r = await tradingApi('/snapshot/auto', { method: 'POST', body: '{}' })
+      if (r.ok) { const d = await r.json(); setMsg(`Snapshot saved: ${fmtUsd(d.portfolio_value_usd)}`); daily.reload(); perf.reload() }
+      else setMsg('Snapshot failed')
+    } catch { setMsg('Snapshot failed') }
+    setSaving(false)
+  }
+
   const p = perf.data, r = risk.data
   return (
     <div>
@@ -163,7 +173,12 @@ function Overview() {
         <div className="ares-stat-tile"><div className="ares-stat-label">Active Strategies</div><div className="ares-stat-value">{r?.active_strategies ?? 0}</div></div>
       </div>
 
-      <div className="ares-section-title">Equity Curve (30d)</div>
+      <div className="ares-section-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        Equity Curve (30d)
+        <button className="btn btn-ghost btn-sm" onClick={autoSnapshot} disabled={saving} title="Value live positions and record today's equity point">
+          <Plus size={12} /> Snapshot from live book
+        </button>
+      </div>
       <div style={{ marginBottom: 20 }}><PnlChart points={points} /></div>
 
       <div className="ares-section-title">Record PnL Snapshot</div>
