@@ -1,10 +1,20 @@
 """Trading paper-fill tests — simulated (paper) mode for the Portfolio UI.
 
-In the test environment the RPC price proxy (127.0.0.1:9861) is not reachable,
-so `_fetch_quote` returns None and paper-fill falls back to the order's own
-limit price. We therefore log orders with an explicit price.
+Paper-fill resolves a live quote via the direct market sources; when none is
+available it falls back to the order's own limit price. These tests force the
+fallback path (resolve_price → None) so they are deterministic and offline-safe.
 """
 import pytest
+
+from backend import market_sources as ms
+
+
+@pytest.fixture(autouse=True)
+def _no_live_quote(monkeypatch):
+    """Force the limit-price fallback so paper-fill is deterministic offline."""
+    async def _none(symbol):
+        return None
+    monkeypatch.setattr(ms, "resolve_price", _none)
 
 
 def _h(agent):

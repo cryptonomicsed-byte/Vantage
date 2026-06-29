@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { Wallet, ListOrdered, Layers, BookOpen, PieChart, RefreshCw, Plus, XCircle, Zap, ShieldCheck } from 'lucide-react'
+import { Wallet, ListOrdered, Layers, BookOpen, PieChart, RefreshCw, Plus, XCircle, Zap, ShieldCheck, Coins } from 'lucide-react'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Portfolio — the agent-scoped trading workspace built on the existing
@@ -192,6 +192,21 @@ function Orders({ simulated }: { simulated: boolean }) {
   const [form, setForm] = useState({ symbol: '', side: 'buy', chain: 'solana', quantity: '', price: '', trigger_reason: '' })
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
+  const [livePrice, setLivePrice] = useState<number | null>(null)
+
+  // Live quote for the typed symbol (debounced) — Pyth → CoinGecko via the backend.
+  useEffect(() => {
+    const s = form.symbol.trim().toUpperCase()
+    if (!s) { setLivePrice(null); return }
+    let active = true
+    const t = setTimeout(async () => {
+      try {
+        const r = await tradingApi(`/markets/${s}/price`)
+        if (r.ok && active) { const d = await r.json(); setLivePrice(d.price || null) }
+      } catch {}
+    }, 400)
+    return () => { active = false; clearTimeout(t) }
+  }, [form.symbol])
 
   async function logOrder() {
     if (!form.symbol || !form.quantity) { setMsg('Symbol and quantity are required'); return }
@@ -246,8 +261,14 @@ function Orders({ simulated }: { simulated: boolean }) {
           <input className="ares-input" type="number" placeholder="Limit price (optional)" value={form.price} onChange={e => setForm({ ...form, price: e.target.value })} />
           <input className="ares-input" placeholder="Reason / thesis" value={form.trigger_reason} onChange={e => setForm({ ...form, trigger_reason: e.target.value })} />
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <button className="btn btn-primary btn-sm" onClick={logOrder} disabled={busy}><Plus size={12} /> {busy ? 'Working…' : 'Log Order'}</button>
+          {form.symbol && livePrice != null && (
+            <span style={{ fontSize: 12, color: 'var(--green)', fontFamily: 'monospace' }}>
+              live {form.symbol.toUpperCase()}: {fmtUsd(livePrice)}
+              <button className="btn btn-ghost btn-sm" style={{ marginLeft: 6 }} onClick={() => setForm({ ...form, price: String(livePrice) })}>use</button>
+            </span>
+          )}
           {msg && <span style={{ fontSize: 12, color: 'var(--muted)' }}>{msg}</span>}
         </div>
         <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 10 }}>
@@ -438,8 +459,52 @@ function Journal() {
 // PORTFOLIO SHELL — sub-tabs + honest/simulated mode toggle
 // ══════════════════════════════════════════════════════════════════════════════
 
+// ══════════════════════════════════════════════════════════════════════════════
+// POSITIONS — net positions from filled orders, valued at the live quote
+// ══════════════════════════════════════════════════════════════════════════════
+
+function Positions() {
+  const pos = useTrading<any>('/positions')
+  const d = pos.data
+  const rows = d?.positions || []
+  const pnl = d?.total_unrealized_pnl_usd ?? 0
+  return (
+    <div>
+      <div className="ares-section-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <Coins size={15} /> Open Positions ({rows.length})
+        <button className="btn btn-ghost btn-sm" onClick={pos.reload}><RefreshCw size={12} /></button>
+      </div>
+      <div className="ares-stat-grid" style={{ marginBottom: 16 }}>
+        <div className="ares-stat-tile"><div className="ares-stat-label">Market Value</div><div className="ares-stat-value">{fmtUsd(d?.total_market_value_usd)}</div></div>
+        <div className="ares-stat-tile"><div className="ares-stat-label">Unrealized P&L</div><div className="ares-stat-value" style={{ color: pnl >= 0 ? 'var(--green)' : 'var(--danger)' }}>{fmtUsd(pnl)}</div></div>
+        <div className="ares-stat-tile"><div className="ares-stat-label">Symbols</div><div className="ares-stat-value">{rows.length}</div></div>
+      </div>
+      <table className="ares-table">
+        <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Live</th><th>Value</th><th>Unreal. P&L</th></tr></thead>
+        <tbody>
+          {rows.length === 0 && <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No filled positions yet — fill an order (paper mode) to open one.</td></tr>}
+          {rows.map((p: any) => (
+            <tr key={p.symbol}>
+              <td style={{ fontWeight: 600 }}>{p.symbol}</td>
+              <td style={{ fontFamily: 'monospace' }}>{p.net_quantity}</td>
+              <td style={{ fontFamily: 'monospace' }}>{fmtUsd(p.avg_cost)}</td>
+              <td style={{ fontFamily: 'monospace' }}>{p.live_price ? fmtUsd(p.live_price) : '—'}</td>
+              <td style={{ fontFamily: 'monospace' }}>{fmtUsd(p.market_value_usd)}</td>
+              <td style={{ fontFamily: 'monospace', fontWeight: 700, color: (p.unrealized_pnl_usd || 0) >= 0 ? 'var(--green)' : 'var(--danger)' }}>
+                {fmtUsd(p.unrealized_pnl_usd)} ({(p.unrealized_pnl_pct || 0).toFixed(1)}%)
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 10 }}>Positions are derived from filled orders and valued at live quotes (Pyth → CoinGecko). In honest-ledger mode nothing fills, so open a paper fill to populate this.</div>
+    </div>
+  )
+}
+
 const PORTFOLIO_TABS = [
   { id: 'overview',   label: 'Overview',   icon: PieChart },
+  { id: 'positions',  label: 'Positions',  icon: Coins },
   { id: 'orders',     label: 'Orders',     icon: ListOrdered },
   { id: 'wallets',    label: 'Wallets',    icon: Wallet },
   { id: 'strategies', label: 'Strategies', icon: Layers },
@@ -492,6 +557,7 @@ export default function Portfolio() {
       </div>
 
       {tab === 'overview' && <Overview />}
+      {tab === 'positions' && <Positions />}
       {tab === 'orders' && <Orders simulated={simulated} />}
       {tab === 'wallets' && <Wallets />}
       {tab === 'strategies' && <Strategies />}

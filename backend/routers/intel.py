@@ -5,6 +5,8 @@ import logging, asyncio, json
 import httpx
 from fastapi import APIRouter, Query
 
+from backend import market_sources as ms
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/intel", tags=["intel"])
 ARES = "http://localhost:9861"
@@ -193,24 +195,17 @@ async def get_intel():
         except:
             chains[chain] = {"health": "offline", "block_height": "?"}
 
-    # Arbitrage
-    arb = []
-    if sol > 0:
-        arb = [
-            {"route":"Jupiter→Raydium","pair":"SOL/USDC","spread_pct":0.62,"buy_price":sol,"sell_price":sol*1.0062},
-            {"route":"Orca→Meteora","pair":"SOL/USDC","spread_pct":0.34,"buy_price":sol*0.998,"sell_price":sol*1.0014},
-            {"route":"Uniswap→Sushi","pair":"ETH/BTC","spread_pct":1.15,"buy_price":eth,"sell_price":eth*1.0115},
-            {"route":"Raydium→OpenBook","pair":"BONK/SOL","spread_pct":2.81,"buy_price":0.000021,"sell_price":0.000022},
-            {"route":"Meteora→Orca","pair":"JUP/USDC","spread_pct":0.89,"buy_price":0.78,"sell_price":0.787},
-        ]
+    # Real cross-exchange arbitrage + real breadth sentiment (fail-soft).
+    arb = await ms.real_arbitrage()
+    breadth = await ms.market_breadth()
 
     return {
         "health": {"chains": chains},
         "arbitrage": {"opportunities": arb},
         "anomalies": {"anomalies": [], "fusion": {"btc_consensus": btc, "eth": eth, "sol": sol, "sources": 3}},
         "sentiment": {
-            "sentiment": {"overall":"bullish","fear_greed":72,"btc_dominance":52.3,"volume_trend":"increasing","social_score":0.68},
-            "indicators": ["BTC dominance: 52.3% — neutral","Fear & Greed: 72 — greed","24h volume: +18% vs 7d — bullish","Exchange outflows: -$240M — accumulation","Social sentiment: 0.68 — positive"],
+            "sentiment": breadth or {"overall": "neutral", "fear_greed": 50},
+            "indicators": breadth.get("indicators", []) if breadth else [],
         },
         "prices": market.get("tokens", []),
         "market_snapshot": market.get("market_snapshot", {}),
@@ -219,14 +214,9 @@ async def get_intel():
 
 @router.get("/arbitrage")
 async def get_arbitrage():
-    btc, eth, sol = await _majors()
-    return {"opportunities": [
-        {"route":"Jupiter→Raydium","pair":"SOL/USDC","spread_pct":0.62,"buy_price":sol,"sell_price":sol*1.0062},
-        {"route":"Orca→Meteora","pair":"SOL/USDC","spread_pct":0.34,"buy_price":sol*0.998,"sell_price":sol*1.0014},
-        {"route":"Uniswap→Sushi","pair":"ETH/BTC","spread_pct":1.15,"buy_price":eth,"sell_price":eth*1.0115},
-        {"route":"Raydium→OpenBook","pair":"BONK/SOL","spread_pct":2.81,"buy_price":0.000021,"sell_price":0.000022},
-        {"route":"Meteora→Orca","pair":"JUP/USDC","spread_pct":0.89,"buy_price":0.78,"sell_price":0.787},
-    ]}
+    """Real cross-exchange spreads (Binance/OKX/KuCoin/Coinbase/Gemini)."""
+    opps = await ms.real_arbitrage()
+    return {"opportunities": opps, "source": "live_cex_spreads" if opps else "unavailable"}
 
 
 @router.get("/debate")
@@ -243,19 +233,30 @@ async def get_debate():
 
 @router.get("/alpha")
 async def get_alpha():
-    btc, eth, sol = await _majors()
+    """Real alpha: top movers by 24h change/volume from the top-100."""
+    movers = await ms.top_movers(8)
+    lead = movers[0]["symbol"] if movers else "—"
     return {
-        "items": [
-            {"symbol":"SOL","conviction":4.2,"price":sol,"volume_24h":2.3e9,"signal":"whale_accumulation"},
-            {"symbol":"ETH","conviction":3.8,"price":eth,"volume_24h":1.8e9,"signal":"defi_tvl_surge"},
-            {"symbol":"BTC","conviction":3.1,"price":btc,"volume_24h":4.2e9,"signal":"exchange_outflow"},
-            {"symbol":"BONK","conviction":2.5,"price":0.000021,"volume_24h":4.5e8,"signal":"social_hype"},
-            {"symbol":"JUP","conviction":2.1,"price":0.78,"volume_24h":8.9e8,"signal":"airdrop_speculation"},
-            {"symbol":"WIF","conviction":1.8,"price":2.14,"volume_24h":3.2e8,"signal":"memecoin_rotation"},
-            {"symbol":"RNDR","conviction":1.5,"price":7.32,"volume_24h":5.6e8,"signal":"ai_narrative"},
-            {"symbol":"PYTH","conviction":2.8,"price":0.35,"volume_24h":2.1e8,"signal":"oracle_wars"},
-        ],
-        "summary": "8 active alpha signals — SOL leads with whale accumulation"
+        "items": movers,
+        "summary": f"{len(movers)} live momentum signals — {lead} leads by 24h move" if movers else "No live signals",
+    }
+
+
+@router.get("/sentiment")
+async def get_sentiment():
+    """Real sentiment derived from top-100 market breadth + BTC dominance."""
+    b = await ms.market_breadth()
+    return {"sentiment": b, "indicators": b.get("indicators", [])}
+
+
+@router.get("/sources-registry")
+async def get_sources_registry():
+    """Transparency: the full no-auth public source registry and integration status."""
+    integrated = [s for s in ms.SOURCES if s["integrated"]]
+    return {
+        "total": len(ms.SOURCES),
+        "integrated": len(integrated),
+        "sources": ms.SOURCES,
     }
 
 

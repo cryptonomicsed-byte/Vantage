@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from backend.db import DB_PATH
 from backend.deps import get_agent, _parse_body
 from backend.config import settings
+from backend import market_sources as ms
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/copilot", tags=["copilot"])
@@ -88,6 +89,13 @@ async def _rpc(chain, path=""):
     except: return None
 
 async def _price_data(sym):
+    # Direct no-auth sources first (no external engine dependency); proxy fallback.
+    full = await ms.coingecko_price_full(sym)
+    if full:
+        return full
+    p = await ms.resolve_price(sym)
+    if p:
+        return {"symbol": sym.upper(), "price": p, "change_24h": None, "volume_24h": None}
     d = await _rpc("coingecko", f"/api/v3/simple/price?ids={sym.lower()}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true")
     if d and sym.lower() in d:
         item = d[sym.lower()]
@@ -95,6 +103,10 @@ async def _price_data(sym):
     return None
 
 async def _vol_data(sym):
+    v = await ms.coingecko_volatility(sym, 7)
+    if v:
+        return {"symbol": v["symbol"], "volatility_7d_pct": v["volatility_pct"],
+                "avg_price_7d": v["avg_price"], "data_points": v["data_points"]}
     d = await _rpc("coingecko", f"/api/v3/coins/{sym.lower()}/market_chart?vs_currency=usd&days=7")
     if d and "prices" in d and len(d["prices"])>1:
         vals=[p[1] for p in d["prices"]]
@@ -241,6 +253,15 @@ async def copilot_execute(request: Request, agent: dict = Depends(get_agent)):
     if action == "show_price" and target:
         price = await _price_data(target)
         return {"action":action,"target":target,"data":price or {},"confidence":0.9}
+    if action == "volatility" and target:
+        vol = await _vol_data(target)
+        return {"action":action,"target":target,"data":vol or {},"confidence":0.85}
+    if action == "market_sentiment":
+        b = await ms.market_breadth()
+        return {"action":action,"target":"market_sentiment","data":b or {},"confidence":0.9}
+    if action == "arbitrage_scan":
+        opps = await ms.real_arbitrage()
+        return {"action":action,"target":"arbitrage","data":{"opportunities":opps,"count":len(opps)},"confidence":0.9}
     if action == "check_pnl":
         try:
             async with httpx.AsyncClient(timeout=5) as c:

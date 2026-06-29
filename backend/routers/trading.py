@@ -444,7 +444,17 @@ async def list_markets():
         return {"available": ["solana", "hyperliquid", "base", "polygon"], "error": str(e)}
 
 async def _fetch_quote(symbol: str) -> Optional[float]:
-    """Fetch a live USD quote for a symbol via the RPC proxy. Returns None on failure."""
+    """Live USD quote: direct no-auth sources (Pyth → CoinGecko) first, external
+    RPC proxy only as a last resort. Returns None on total failure."""
+    # Primary: Vantage-owned direct market sources (no external engine needed).
+    try:
+        from backend import market_sources as _ms
+        price = await _ms.resolve_price(symbol)
+        if price:
+            return float(price)
+    except Exception:
+        pass
+    # Fallback: external intel/RPC proxy, if it happens to be running.
     try:
         import httpx
         async with httpx.AsyncClient(timeout=5) as client:
@@ -541,3 +551,65 @@ async def get_risk(agent: dict = Depends(get_agent)):
             "active_strategies": strategies[0] if strategies else 0,
             "max_drawdown_pct": 0,  # Computed from PnL history
         }
+
+# ── Positions (live-valued) ─────────────────────────────────
+
+@router.get("/positions")
+async def get_positions(agent: dict = Depends(get_agent)):
+    """Net position per symbol derived from filled orders, valued at the live quote
+    with unrealized P&L. BUY adds quantity at its fill price (cost basis); SELL
+    reduces it. Positions are valued via the same direct market sources as quotes."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            """SELECT symbol, side, filled_quantity, quantity, avg_fill_price, price
+               FROM trading_orders WHERE agent_id=? AND status='filled'""",
+            (agent["id"],)
+        )).fetchall()
+
+    # Aggregate net quantity + cost basis per symbol.
+    agg: dict[str, dict] = {}
+    for r in rows:
+        o = dict(r)
+        sym = (o["symbol"] or "").upper()
+        if not sym:
+            continue
+        qty = o["filled_quantity"] or o["quantity"] or 0
+        fill = o["avg_fill_price"] or o["price"] or 0
+        a = agg.setdefault(sym, {"symbol": sym, "net_qty": 0.0, "cost_basis": 0.0})
+        if str(o["side"]).upper() == "BUY":
+            a["net_qty"] += qty
+            a["cost_basis"] += qty * fill
+        else:
+            a["net_qty"] -= qty
+            a["cost_basis"] -= qty * fill
+
+    positions = []
+    total_value = 0.0
+    total_unrealized = 0.0
+    for sym, a in agg.items():
+        if abs(a["net_qty"]) < 1e-12:
+            continue
+        live = await _fetch_quote(sym)
+        avg_cost = (a["cost_basis"] / a["net_qty"]) if a["net_qty"] else 0
+        market_value = (live or 0) * a["net_qty"]
+        unrealized = (market_value - a["cost_basis"]) if live else 0
+        total_value += market_value
+        total_unrealized += unrealized
+        positions.append({
+            "symbol": sym,
+            "net_quantity": round(a["net_qty"], 8),
+            "avg_cost": round(avg_cost, 6),
+            "live_price": live,
+            "market_value_usd": round(market_value, 2),
+            "unrealized_pnl_usd": round(unrealized, 2),
+            "unrealized_pnl_pct": round((unrealized / a["cost_basis"] * 100), 2) if a["cost_basis"] else 0,
+        })
+
+    positions.sort(key=lambda p: -abs(p["market_value_usd"]))
+    return {
+        "positions": positions,
+        "total_market_value_usd": round(total_value, 2),
+        "total_unrealized_pnl_usd": round(total_unrealized, 2),
+        "priced": all(p["live_price"] for p in positions) if positions else True,
+    }
