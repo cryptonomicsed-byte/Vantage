@@ -12,6 +12,11 @@ ARES = "http://localhost:9861"
 PYTH_BASE = "https://hermes.pyth.network"
 PYTH_PRICE = f"{PYTH_BASE}/v2/updates/price/latest"
 PYTH_FEEDS = f"{PYTH_BASE}/v2/price_feeds"
+PYTH_IDS = {
+    "BTC": "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
+    "ETH": "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace",
+    "SOL": "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
+}
 
 # Cache for feed list (refreshed every 5 min)
 _feed_cache = {"data": None, "ts": 0}
@@ -144,19 +149,33 @@ async def full_market(limit: int = Query(100, ge=1, le=500)):
     }
 
 
+async def _majors():
+    """Direct Pyth fetch for BTC/ETH/SOL — always works regardless of sort order."""
+    btc = eth = sol = 0
+    try:
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.get(f"{PYTH_PRICE}?ids[]={PYTH_IDS['BTC']}&ids[]={PYTH_IDS['ETH']}&ids[]={PYTH_IDS['SOL']}",
+                          headers={"User-Agent": "Vantage/1.0"})
+            if r.status_code == 200:
+                for item in r.json().get("parsed", []):
+                    pid = item.get("id", "")
+                    pr = int(item.get("price", {}).get("price", 0))
+                    expo = int(item.get("price", {}).get("expo", 0))
+                    actual = pr * (10 ** expo)
+                    if PYTH_IDS["BTC"] in pid: btc = actual
+                    elif PYTH_IDS["ETH"] in pid: eth = actual
+                    elif PYTH_IDS["SOL"] in pid: sol = actual
+    except: pass
+    return btc, eth, sol
+
+
 @router.get("")
 async def get_intel():
     """Aggregate overview — BTC/ETH/SOL + chain health + sentiment."""
-    # Get top 20 tokens for overview
-    market = await full_market(limit=20)
-    tokens = market.get("tokens", [])
+    btc, eth, sol = await _majors()
 
-    # Extract major prices
-    btc = eth = sol = 0
-    for t in tokens:
-        if t["symbol"] == "Crypto.BTC/USD": btc = t["price"]
-        elif t["symbol"] == "Crypto.ETH/USD": eth = t["price"]
-        elif t["symbol"] == "Crypto.SOL/USD": sol = t["price"]
+    # Also get token list for the overview
+    market = await full_market(limit=20)
 
     # Chain health
     chains = {}
@@ -193,17 +212,14 @@ async def get_intel():
             "sentiment": {"overall":"bullish","fear_greed":72,"btc_dominance":52.3,"volume_trend":"increasing","social_score":0.68},
             "indicators": ["BTC dominance: 52.3% — neutral","Fear & Greed: 72 — greed","24h volume: +18% vs 7d — bullish","Exchange outflows: -$240M — accumulation","Social sentiment: 0.68 — positive"],
         },
-        "prices": tokens,
+        "prices": market.get("tokens", []),
         "market_snapshot": market.get("market_snapshot", {}),
     }
 
 
 @router.get("/arbitrage")
 async def get_arbitrage():
-    market = await full_market(limit=5)
-    tokens = {t["symbol"]: t["price"] for t in market["tokens"]}
-    sol = tokens.get("Crypto.SOL/USD", 0)
-    eth = tokens.get("Crypto.ETH/USD", 0)
+    btc, eth, sol = await _majors()
     return {"opportunities": [
         {"route":"Jupiter→Raydium","pair":"SOL/USDC","spread_pct":0.62,"buy_price":sol,"sell_price":sol*1.0062},
         {"route":"Orca→Meteora","pair":"SOL/USDC","spread_pct":0.34,"buy_price":sol*0.998,"sell_price":sol*1.0014},
@@ -227,11 +243,7 @@ async def get_debate():
 
 @router.get("/alpha")
 async def get_alpha():
-    market = await full_market(limit=10)
-    tokens = {t["symbol"]: t["price"] for t in market["tokens"]}
-    sol = tokens.get("Crypto.SOL/USD", 0)
-    eth = tokens.get("Crypto.ETH/USD", 0)
-    btc = tokens.get("Crypto.BTC/USD", 0)
+    btc, eth, sol = await _majors()
     return {
         "items": [
             {"symbol":"SOL","conviction":4.2,"price":sol,"volume_24h":2.3e9,"signal":"whale_accumulation"},
