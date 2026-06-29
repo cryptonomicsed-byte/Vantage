@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { Search, RefreshCw, Database, Star, Link2, Layers, ChevronDown } from 'lucide-react'
-import GalaxyViewer, { GalaxyData } from './GalaxyViewer'
-import type { GalaxyStar } from './GalaxyViewer'
+import GalaxyViewer, { GalaxyData, NeuralNode } from './GalaxyViewer'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
@@ -27,7 +26,7 @@ export default function VaultExplorer() {
   const [galaxy, setGalaxy] = useState<GalaxyData | null>(null)
   const [loading, setLoading] = useState(false)
   const [locked, setLocked] = useState(false)
-  const [selectedStar, setSelectedStar] = useState<GalaxyStar | null>(null)
+  const [selectedStar, setSelectedStar] = useState<NeuralNode | null>(null)
   const [starMarkdown, setStarMarkdown] = useState('')
   const [loadingMd, setLoadingMd] = useState(false)
   const [crossAgentLinks, setCrossAgentLinks] = useState<Array<{source_note_path: string; target_note_path: string; link_type: string}>>([])
@@ -66,7 +65,7 @@ export default function VaultExplorer() {
     if (agentName) fetchGalaxy(agentName)
   }, [agentName, fetchGalaxy])
 
-  const handleStarSelect = useCallback(async (star: GalaxyStar) => {
+  const handleStarSelect = useCallback(async (star: NeuralNode) => {
     setSelectedStar(star)
     setLoadingMd(true)
     setStarMarkdown('')
@@ -194,7 +193,7 @@ export default function VaultExplorer() {
 
           {selectedStar.tags?.length > 0 && (
             <div className="star-detail-meta">
-              {selectedStar.tags.map(t => (
+              {selectedStar.tags.map((t: string) => (
                 <span key={t} className="tag-chip">#{t}</span>
               ))}
               {selectedStar.created && (

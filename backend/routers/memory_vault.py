@@ -87,7 +87,7 @@ async def get_galaxy_data(
         raise HTTPException(403, "Access denied to this memory vault")
     await vault.log_access(accessor_id, x_federation_peer or "", "galaxy", "read")
     data = vault.get_galaxy_data()
-    if settings.JULIA_MEMORY_URL:
+    if hasattr(settings, 'JULIA_MEMORY_URL') and settings.JULIA_MEMORY_URL:
         intel = MemoryIntelligence(settings.JULIA_MEMORY_URL)
         data["predictions"] = await intel.predict_next_activity(agent_name)
         data["patterns"] = await intel.mine_patterns(f"agent:{agent_name}")
