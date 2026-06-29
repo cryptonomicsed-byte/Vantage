@@ -4,7 +4,7 @@ import { TrendingUp, BarChart3, Zap, Brain, Activity, Database, Radio, RefreshCw
 // ══════════════════════════════════════════════════════════════════════════════
 // Market Intelligence — public market-data tabs relocated out of the admin (ARES)
 // console into the main-app Trading section. These read public, unauthenticated
-// endpoints (/api/intel, /api/alpha, /api/debate, /api/health, /api/rpc) via plain
+// endpoints (/api/intel, /api/alpha, /api/debate, /api/intel/health, /api/intel/sources) via plain
 // fetch — exactly as they did inside AresSOC, with zero auth.
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -163,7 +163,7 @@ function AresDebate() {
 }
 
 function AresHealth() {
-  const { data, loading } = useAresApi('/api/health', 30000)
+  const { data, loading } = useAresApi('/api/intel/health', 30000)
   const chains = data?.chains || {}
   if (loading && !data) return <div style={{ color: 'var(--muted)', padding: 20 }}>Loading…</div>
   return (
@@ -218,7 +218,7 @@ function AresSentiment() {
 }
 
 function AresSources() {
-  const { data, loading } = useAresApi('/api/rpc', 60000)
+  const { data, loading } = useAresApi('/api/intel/sources', 60000)
   const endpoints = data?.endpoints || {}
   if (loading && !data) return <div style={{ color: 'var(--muted)', padding: 20 }}>Loading…</div>
   const groups: Record<string, [string, any][]> = {

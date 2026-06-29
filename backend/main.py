@@ -559,16 +559,21 @@ async def gossip_ws(ws: WebSocket, channel: str = "swarm.system.alerts"):
 
 
 
-# Market Intel aliases (frontend calls /api/debate and /api/alpha directly)
+# Market Intel aliases — frontend calls these directly
 @app.get("/api/debate")
-async def debate_alias(request: Request):
+async def debate_alias():
     from .routers.intel import get_debate
     return await get_debate()
 
 @app.get("/api/alpha")
-async def alpha_alias(request: Request):
+async def alpha_alias():
     from .routers.intel import get_alpha
     return await get_alpha()
+
+@app.get("/api/rpc")
+async def rpc_alias():
+    from .routers.intel import get_sources
+    return await get_sources()
 
 
 @app.get("/api/health")
