@@ -234,7 +234,7 @@ async def copilot_execute(request: Request, agent: dict = Depends(get_agent)):
     target = body.get("target", "")
     data = body.get("data", {})
     key = request.headers.get("X-Agent-Key", "")
-    base = settings.PUBLIC_URL.rstrip("/")
+    base = "http://localhost:8001"
 
     if action == "navigate":
         return {"action":action,"target":target,"data":{"path":PAGES.get(target,f"/{target}")},"confidence":1.0}
