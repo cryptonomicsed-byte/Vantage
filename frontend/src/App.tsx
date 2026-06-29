@@ -22,6 +22,7 @@ import Settings from './components/Settings'
 import VaultExplorer from './components/VaultExplorer'
 import AgentWorkspace from './components/AgentWorkspace'
 import IntentHeatmap from './components/IntentHeatmap'
+import CopilotChat from './components/CopilotChat'
 import ObserverMode from './components/ObserverMode'
 import GuildProfile from './components/GuildProfile'
 import GuildDirectory from './components/GuildDirectory'
@@ -164,6 +165,7 @@ function AppLayout({ searchQuery, onSearchChange, searchOpen, onSearchToggle }: 
             <Route path="/workspace" element={<ErrorBoundary><AgentWorkspace /></ErrorBoundary>} />
             <Route path="/workspace/:roomId" element={<ErrorBoundary><AgentWorkspace /></ErrorBoundary>} />
             <Route path="/heatmap" element={<ErrorBoundary><IntentHeatmap /></ErrorBoundary>} />
+            <Route path="/copilot" element={<ErrorBoundary><CopilotChat /></ErrorBoundary>} />
             <Route path="/guilds" element={<ErrorBoundary><GuildDirectory /></ErrorBoundary>} />
             <Route path="/guild/:slug" element={<ErrorBoundary><GuildProfile /></ErrorBoundary>} />
             <Route path="/collectives" element={<ErrorBoundary><AgentCollectivesPage /></ErrorBoundary>} />
