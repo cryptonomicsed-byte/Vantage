@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { TrendingUp, BarChart3, Zap, Brain, Activity, Database, Radio, RefreshCw } from 'lucide-react'
+import { TrendingUp, BarChart3, Zap, Brain, Activity, Database, Radio, RefreshCw, Layers, Droplets, Waves } from 'lucide-react'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Market Intelligence — public market-data tabs relocated out of the admin (ARES)
@@ -279,10 +279,103 @@ function AresAlpha() {
 // MARKET INTEL SHELL — internal sub-tab bar over the relocated intel tabs
 // ══════════════════════════════════════════════════════════════════════════════
 
+function AresYields() {
+  const { data, loading } = useAresApi('/api/intel/yields', 120000)
+  const pools = data?.pools || []
+  if (loading && !data) return <div style={{ color: 'var(--muted)', padding: 20 }}>Loading yields…</div>
+  return (
+    <div>
+      <div className="ares-section-title">{pools.length} DeFi Yield Pools <span style={{ fontSize: 11, color: 'var(--muted)' }}>(DefiLlama · TVL ≥ $1M)</span></div>
+      <table className="ares-table">
+        <thead><tr><th>Pool</th><th>Project</th><th>Chain</th><th>APY</th><th>TVL</th></tr></thead>
+        <tbody>
+          {pools.length === 0 && <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No pools loaded.</td></tr>}
+          {pools.map((p: any, i: number) => (
+            <tr key={i}>
+              <td style={{ fontWeight: 600 }}>{p.pool}{p.stablecoin && <span style={{ fontSize: 9, color: 'var(--cyan)', marginLeft: 4 }}>STABLE</span>}</td>
+              <td style={{ fontSize: 11 }}>{p.project}</td>
+              <td style={{ fontSize: 11, color: 'var(--muted)' }}>{p.chain}</td>
+              <td style={{ color: 'var(--green)', fontWeight: 700 }}>{p.apy?.toFixed(1)}%</td>
+              <td style={{ fontFamily: 'monospace' }}>${(p.tvl_usd / 1e6).toFixed(1)}M</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function AresDex() {
+  const [q, setQ] = useState('SOL')
+  const [data, setData] = useState<any>(null)
+  const [loading, setLoading] = useState(false)
+  const load = useCallback(async (query: string) => {
+    setLoading(true)
+    try { const r = await fetch(`/api/intel/dex?q=${encodeURIComponent(query)}`); if (r.ok) setData(await r.json()) } catch {}
+    setLoading(false)
+  }, [])
+  useEffect(() => { load('SOL') }, [load])
+  const pairs = data?.pairs || []
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+        <input className="ares-input" placeholder="Token (e.g. SOL, PEPE, WIF)" value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => e.key === 'Enter' && load(q)} style={{ maxWidth: 240 }} />
+        <button className="btn btn-primary btn-sm" onClick={() => load(q)}>Search</button>
+      </div>
+      <div className="ares-section-title">{pairs.length} DEX Pairs {loading && <span style={{ fontSize: 11, color: 'var(--muted)' }}>loading…</span>}</div>
+      <table className="ares-table">
+        <thead><tr><th>Pair</th><th>DEX</th><th>Chain</th><th>Price</th><th>Liquidity</th><th>Vol 24h</th><th>24h</th></tr></thead>
+        <tbody>
+          {pairs.length === 0 && <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No pairs.</td></tr>}
+          {pairs.map((p: any, i: number) => (
+            <tr key={i}>
+              <td style={{ fontWeight: 600 }}>{p.pair}</td>
+              <td style={{ fontSize: 11 }}>{p.dex}</td>
+              <td style={{ fontSize: 11, color: 'var(--muted)' }}>{p.chain}</td>
+              <td style={{ fontFamily: 'monospace' }}>{p.price_usd != null ? '$' + Number(p.price_usd).toPrecision(4) : '—'}</td>
+              <td style={{ fontFamily: 'monospace' }}>{p.liquidity_usd ? '$' + (p.liquidity_usd / 1e3).toFixed(0) + 'K' : '—'}</td>
+              <td style={{ fontFamily: 'monospace' }}>{p.volume_24h ? '$' + (p.volume_24h / 1e3).toFixed(0) + 'K' : '—'}</td>
+              <td style={{ color: (p.change_24h || 0) >= 0 ? 'var(--green)' : 'var(--danger)', fontWeight: 700 }}>{p.change_24h != null ? p.change_24h.toFixed(1) + '%' : '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function AresWhales() {
+  const { data, loading } = useAresApi('/api/intel/whales', 30000)
+  const txs = data?.transactions || []
+  if (loading && !data) return <div style={{ color: 'var(--muted)', padding: 20 }}>Loading whale activity…</div>
+  return (
+    <div>
+      <div className="ares-section-title">Largest Recent BTC Transactions <span style={{ fontSize: 11, color: 'var(--muted)' }}>(mempool.space)</span></div>
+      <table className="ares-table">
+        <thead><tr><th>Tx</th><th>Value (BTC)</th><th>Fee (sat)</th><th>Size (vB)</th></tr></thead>
+        <tbody>
+          {txs.length === 0 && <tr><td colSpan={4} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No mempool data.</td></tr>}
+          {txs.map((t: any, i: number) => (
+            <tr key={i} className={(t.value_btc || 0) > 10 ? 'threat-high' : ''}>
+              <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{t.txid}</td>
+              <td style={{ fontFamily: 'monospace', fontWeight: 700, color: (t.value_btc || 0) > 10 ? 'var(--warning)' : 'var(--text)' }}>{t.value_btc}</td>
+              <td style={{ fontFamily: 'monospace', color: 'var(--muted)' }}>{t.fee_sat?.toLocaleString()}</td>
+              <td style={{ fontFamily: 'monospace', color: 'var(--muted)' }}>{t.size_vb}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 const INTEL_TABS = [
   { id: 'overview',  label: 'Overview',  icon: Radio },
   { id: 'arbitrage', label: 'Arbitrage', icon: TrendingUp },
   { id: 'alpha',     label: 'Alpha',     icon: TrendingUp },
+  { id: 'yields',    label: 'Yields',    icon: Layers },
+  { id: 'dex',       label: 'DEX',       icon: Droplets },
+  { id: 'whales',    label: 'Whales',    icon: Waves },
   { id: 'sentiment', label: 'Sentiment', icon: Zap },
   { id: 'debate',    label: 'Debate',    icon: Brain },
   { id: 'health',    label: 'Health',    icon: Activity },
@@ -304,6 +397,9 @@ export default function MarketIntel() {
       {tab === 'overview' && <AresOverview />}
       {tab === 'arbitrage' && <AresArbitrage />}
       {tab === 'alpha' && <AresAlpha />}
+      {tab === 'yields' && <AresYields />}
+      {tab === 'dex' && <AresDex />}
+      {tab === 'whales' && <AresWhales />}
       {tab === 'sentiment' && <AresSentiment />}
       {tab === 'debate' && <AresDebate />}
       {tab === 'health' && <AresHealth />}

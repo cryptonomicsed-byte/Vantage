@@ -81,6 +81,49 @@ def _ret(v):
     return _coro(0)
 
 
+@pytest.mark.asyncio
+async def test_backtest_computes_real_returns(monkeypatch):
+    # A clean uptrend: buy-and-hold is strongly positive; the SMA strategy trades.
+    prices = [[i, 100 + i] for i in range(60)]  # 100 → 159
+
+    async def fake_get(url, timeout=8):
+        return {"prices": prices}
+
+    monkeypatch.setattr(ms, "_get_json", fake_get)
+    ms._cache.clear()
+
+    out = await ms.backtest("BTC", days=60, fast=5, slow=15)
+    assert out is not None
+    assert out["buy_hold_return_pct"] == pytest.approx((159 / 100 - 1) * 100, abs=0.1)
+    assert out["strategy"].startswith("SMA")
+    assert out["data_points"] == 60
+    assert isinstance(out["trades"], int)
+
+
+@pytest.mark.asyncio
+async def test_backtest_insufficient_data(monkeypatch):
+    async def fake_get(url, timeout=8):
+        return {"prices": [[0, 100], [1, 101]]}  # too few points
+    monkeypatch.setattr(ms, "_get_json", fake_get)
+    ms._cache.clear()
+    assert await ms.backtest("BTC", days=60, slow=30) is None
+
+
+@pytest.mark.asyncio
+async def test_defillama_yields_filters_and_sorts(monkeypatch):
+    async def fake_get(url, timeout=12):
+        return {"data": [
+            {"symbol": "USDC", "project": "aave", "chain": "Ethereum", "apy": 4.0, "tvlUsd": 5_000_000, "stablecoin": True},
+            {"symbol": "SOL", "project": "marinade", "chain": "Solana", "apy": 9.0, "tvlUsd": 2_000_000},
+            {"symbol": "TINY", "project": "x", "chain": "Base", "apy": 999.0, "tvlUsd": 100},  # below TVL floor
+        ]}
+    monkeypatch.setattr(ms, "_get_json", fake_get)
+    ms._cache.clear()
+    rows = await ms.defillama_yields(limit=10)
+    assert [r["pool"] for r in rows] == ["SOL", "USDC"]  # TVL-floored, APY-sorted
+    assert all(r["tvl_usd"] >= 1_000_000 for r in rows)
+
+
 # ── /api/trading/positions integration (live-valued) ──────────────────────────────
 
 def _h(agent):

@@ -388,6 +388,159 @@ async def top_movers(limit: int = 8) -> list[dict]:
     return out
 
 
+# ── DeFi yields (DefiLlama) ─────────────────────────────────────────────────────────
+async def defillama_yields(limit: int = 25, min_tvl: float = 1_000_000) -> list[dict]:
+    """Top yield pools by APY with a TVL floor, from DefiLlama. Cached 300s."""
+    key = f"yields:{limit}:{int(min_tvl)}"
+    cached = _cache_get(key, 300)
+    if cached is not None:
+        return cached
+    data = await _get_json("https://yields.llama.fi/pools", timeout=12)
+    pools = (data or {}).get("data") or []
+    rows = []
+    for p in pools:
+        tvl = p.get("tvlUsd") or 0
+        apy = p.get("apy")
+        if tvl >= min_tvl and isinstance(apy, (int, float)):
+            rows.append({
+                "pool": p.get("symbol"),
+                "project": p.get("project"),
+                "chain": p.get("chain"),
+                "apy": round(apy, 2),
+                "tvl_usd": round(tvl, 0),
+                "stablecoin": bool(p.get("stablecoin")),
+            })
+    rows.sort(key=lambda r: -(r["apy"] or 0))
+    rows = rows[:limit]
+    if rows:
+        _cache_put(key, rows)
+    return rows
+
+
+# ── DEX pairs / liquidity (DexScreener) ─────────────────────────────────────────────
+async def dexscreener_search(query: str, limit: int = 20) -> list[dict]:
+    """Search DEX pairs by token/symbol; returns price, liquidity, 24h volume. Cached 60s."""
+    q = (query or "").strip()
+    if not q:
+        return []
+    key = f"dex:{q.lower()}:{limit}"
+    cached = _cache_get(key, 60)
+    if cached is not None:
+        return cached
+    data = await _get_json(f"https://api.dexscreener.com/latest/dex/search?q={q}", timeout=10)
+    pairs = (data or {}).get("pairs") or []
+    rows = []
+    for p in pairs[: limit * 2]:
+        rows.append({
+            "pair": f"{(p.get('baseToken') or {}).get('symbol','?')}/{(p.get('quoteToken') or {}).get('symbol','?')}",
+            "dex": p.get("dexId"),
+            "chain": p.get("chainId"),
+            "price_usd": float(p["priceUsd"]) if p.get("priceUsd") else None,
+            "liquidity_usd": (p.get("liquidity") or {}).get("usd"),
+            "volume_24h": (p.get("volume") or {}).get("h24"),
+            "change_24h": (p.get("priceChange") or {}).get("h24"),
+        })
+    rows.sort(key=lambda r: -((r.get("liquidity_usd") or 0)))
+    rows = rows[:limit]
+    if rows:
+        _cache_put(key, rows)
+    return rows
+
+
+# ── FX rates (ExchangeRate-API) ─────────────────────────────────────────────────────
+async def fx_rates(base: str = "USD") -> dict:
+    """Fiat exchange rates for a base currency. Cached 1h."""
+    base = base.upper()
+    key = f"fx:{base}"
+    cached = _cache_get(key, 3600)
+    if cached is not None:
+        return cached
+    data = await _get_json(f"https://open.er-api.com/v6/latest/{base}", timeout=8)
+    rates = (data or {}).get("rates") or {}
+    if rates:
+        out = {"base": base, "rates": rates, "updated": (data or {}).get("time_last_update_utc")}
+        return _cache_put(key, out)
+    return {"base": base, "rates": {}}
+
+
+# ── On-chain whale activity (mempool.space, BTC) ────────────────────────────────────
+async def whale_txs(limit: int = 10) -> list[dict]:
+    """Largest recent BTC mempool transactions by value (whale activity). Cached 30s."""
+    cached = _cache_get("whales", 30)
+    if cached is not None:
+        return cached
+    data = await _get_json("https://mempool.space/api/mempool/recent", timeout=8)
+    txs = data if isinstance(data, list) else []
+    rows = []
+    for t in txs:
+        sats = t.get("value") or 0
+        rows.append({
+            "txid": (t.get("txid") or "")[:16] + "…",
+            "value_btc": round(sats / 1e8, 4),
+            "fee_sat": t.get("fee"),
+            "size_vb": t.get("vsize"),
+        })
+    rows.sort(key=lambda r: -(r["value_btc"] or 0))
+    rows = rows[:limit]
+    if rows:
+        _cache_put("whales", rows)
+    return rows
+
+
+# ── Real backtest (SMA crossover vs buy-and-hold over CoinGecko history) ─────────────
+async def backtest(symbol: str, days: int = 90, fast: int = 10, slow: int = 30) -> Optional[dict]:
+    """Backtest a fast/slow SMA-crossover strategy against buy-and-hold over real
+    daily closes. Returns total returns, trade count, win rate. Cached 600s."""
+    symbol = symbol.upper()
+    key = f"bt:{symbol}:{days}:{fast}:{slow}"
+    cached = _cache_get(key, 600)
+    if cached is not None:
+        return cached
+    cid = CG_IDS.get(symbol, symbol.lower())
+    data = await _get_json(
+        f"https://api.coingecko.com/api/v3/coins/{cid}/market_chart?vs_currency=usd&days={days}&interval=daily",
+        timeout=10,
+    )
+    prices = [p[1] for p in (data or {}).get("prices", []) if len(p) > 1]
+    if len(prices) < slow + 2:
+        return None
+
+    def sma(arr, n, i):
+        return sum(arr[i - n:i]) / n
+
+    position = 0
+    entry = 0.0
+    rets: list[float] = []
+    for i in range(slow, len(prices)):
+        f, s = sma(prices, fast, i), sma(prices, slow, i)
+        if f > s and position == 0:
+            position, entry = 1, prices[i]
+        elif f < s and position == 1:
+            rets.append(prices[i] / entry - 1)
+            position = 0
+    if position == 1:
+        rets.append(prices[-1] / entry - 1)
+
+    strat = 1.0
+    for r in rets:
+        strat *= (1 + r)
+    strat_return = (strat - 1) * 100
+    bh_return = (prices[-1] / prices[0] - 1) * 100
+    wins = len([r for r in rets if r > 0])
+    out = {
+        "symbol": symbol,
+        "days": days,
+        "strategy": f"SMA {fast}/{slow} crossover",
+        "strategy_return_pct": round(strat_return, 2),
+        "buy_hold_return_pct": round(bh_return, 2),
+        "trades": len(rets),
+        "win_rate_pct": round(wins / len(rets) * 100, 1) if rets else 0,
+        "beat_buy_hold": strat_return > bh_return,
+        "data_points": len(prices),
+    }
+    return _cache_put(key, out)
+
+
 # ── Source registry (transparency for /api/intel/sources-registry) ──────────────────
 SOURCES = [
     {"name": "Pyth Network", "category": "oracle", "url": "https://hermes.pyth.network", "integrated": True},
@@ -404,8 +557,8 @@ SOURCES = [
     {"name": "CoinDesk", "category": "market", "url": "https://api.coindesk.com", "integrated": False},
     {"name": "CryptoCompare", "category": "market", "url": "https://min-api.cryptocompare.com", "integrated": False},
     {"name": "Messari", "category": "fundamentals", "url": "https://data.messari.io", "integrated": False},
-    {"name": "DefiLlama", "category": "defi", "url": "https://api.llama.fi", "integrated": False},
-    {"name": "DEX Screener", "category": "dex", "url": "https://api.dexscreener.com", "integrated": False},
+    {"name": "DefiLlama", "category": "defi", "url": "https://yields.llama.fi", "integrated": True},
+    {"name": "DEX Screener", "category": "dex", "url": "https://api.dexscreener.com", "integrated": True},
     {"name": "GeckoTerminal", "category": "dex", "url": "https://api.geckoterminal.com", "integrated": False},
     {"name": "0x", "category": "dex", "url": "https://api.0x.org", "integrated": False},
     {"name": "1inch", "category": "dex", "url": "https://api.1inch.io", "integrated": False},
@@ -414,7 +567,7 @@ SOURCES = [
     {"name": "Bitcambio", "category": "exchange", "url": "https://nova.bitcambio.com.br", "integrated": False},
     {"name": "MercadoBitcoin", "category": "exchange", "url": "https://www.mercadobitcoin.com.br", "integrated": False},
     {"name": "Cryptonator", "category": "fx", "url": "https://www.cryptonator.com", "integrated": False},
-    {"name": "ExchangeRate-API", "category": "fx", "url": "https://open.er-api.com", "integrated": False},
+    {"name": "ExchangeRate-API", "category": "fx", "url": "https://open.er-api.com", "integrated": True},
     {"name": "Currency Rates", "category": "fx", "url": "https://cdn.jsdelivr.net", "integrated": False},
     {"name": "NBP", "category": "fx", "url": "https://api.nbp.pl", "integrated": False},
     {"name": "Solana JSON RPC", "category": "rpc", "url": "https://api.mainnet-beta.solana.com", "integrated": False},

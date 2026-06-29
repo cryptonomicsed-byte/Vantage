@@ -262,6 +262,20 @@ async def copilot_execute(request: Request, agent: dict = Depends(get_agent)):
     if action == "arbitrage_scan":
         opps = await ms.real_arbitrage()
         return {"action":action,"target":"arbitrage","data":{"opportunities":opps,"count":len(opps)},"confidence":0.9}
+    if action == "yield_scan":
+        pools = await ms.defillama_yields(20)
+        return {"action":action,"target":"defi","data":{"pools":pools,"count":len(pools)},"confidence":0.9}
+    if action == "dex_liquidity" and target:
+        pairs = await ms.dexscreener_search(target, 15)
+        return {"action":action,"target":target,"data":{"pairs":pairs,"count":len(pairs)},"confidence":0.9}
+    if action == "whale_watch":
+        txs = await ms.whale_txs(10)
+        return {"action":action,"target":"whale_activity","data":{"transactions":txs,"chain":"bitcoin"},"confidence":0.85}
+    if action == "backtest":
+        cand = (data.get("symbol") or target or "").strip()
+        bt_sym = sym(cand) if cand and cand.isalpha() and len(cand) <= 5 else "BTC"
+        result = await ms.backtest(bt_sym, 90)
+        return {"action":action,"target":bt_sym,"data":result or {"error":"insufficient data"},"confidence":0.85}
     if action == "check_pnl":
         try:
             async with httpx.AsyncClient(timeout=5) as c:

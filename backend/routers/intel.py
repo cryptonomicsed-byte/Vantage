@@ -249,6 +249,42 @@ async def get_sentiment():
     return {"sentiment": b, "indicators": b.get("indicators", [])}
 
 
+@router.get("/yields")
+async def get_yields(limit: int = Query(25, ge=1, le=100)):
+    """Top DeFi yield pools by APY (DefiLlama, TVL ≥ $1M)."""
+    pools = await ms.defillama_yields(limit)
+    return {"pools": pools, "count": len(pools), "source": "DefiLlama"}
+
+
+@router.get("/dex")
+async def get_dex(q: str = Query("SOL"), limit: int = Query(20, ge=1, le=50)):
+    """DEX pairs/liquidity for a token query (DexScreener)."""
+    pairs = await ms.dexscreener_search(q, limit)
+    return {"query": q, "pairs": pairs, "count": len(pairs), "source": "DexScreener"}
+
+
+@router.get("/fx")
+async def get_fx(base: str = Query("USD")):
+    """Fiat exchange rates (ExchangeRate-API)."""
+    return await ms.fx_rates(base)
+
+
+@router.get("/whales")
+async def get_whales(limit: int = Query(10, ge=1, le=25)):
+    """Largest recent BTC mempool transactions (mempool.space)."""
+    txs = await ms.whale_txs(limit)
+    return {"transactions": txs, "count": len(txs), "chain": "bitcoin", "source": "mempool.space"}
+
+
+@router.get("/backtest")
+async def get_backtest(symbol: str = Query("BTC"), days: int = Query(90, ge=14, le=365)):
+    """Backtest an SMA-crossover strategy vs buy-and-hold over real history."""
+    result = await ms.backtest(symbol, days)
+    if result is None:
+        return {"error": "insufficient data", "symbol": symbol.upper()}
+    return result
+
+
 @router.get("/sources-registry")
 async def get_sources_registry():
     """Transparency: the full no-auth public source registry and integration status."""
