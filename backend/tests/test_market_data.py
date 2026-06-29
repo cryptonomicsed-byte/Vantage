@@ -130,15 +130,8 @@ def _h(agent):
     return {"X-Agent-Key": agent["api_key"]}
 
 
-_fresh_n = [0]
-
-
-async def _fresh_agent(client):
-    """Register an isolated agent (session fixture is shared → contaminates totals)."""
-    _fresh_n[0] += 1
-    r = await client.post("/api/agents/register", json={"name": f"BookAgent{_fresh_n[0]}", "bio": "t"})
-    assert r.status_code == 200, r.text
-    return {"api_key": r.json()["api_key"]}
+# Isolated agents come from the conftest `fresh_agent` fixture (direct DB insert,
+# no rate limit) since the session agent is shared and would contaminate totals.
 
 
 @pytest.mark.asyncio
@@ -182,7 +175,7 @@ async def test_positions_requires_agent_key(client):
 
 
 @pytest.mark.asyncio
-async def test_portfolio_realized_and_unrealized_pnl(client, registered_agent, monkeypatch):
+async def test_portfolio_realized_and_unrealized_pnl(client, fresh_agent, monkeypatch):
     """Avg-cost book: buy 2@100, buy 2@200 (avg 150), sell 2@300 (realized +300),
     then value the remaining 2 at 300 (unrealized +300)."""
     holder = {"p": 100.0}
@@ -191,7 +184,7 @@ async def test_portfolio_realized_and_unrealized_pnl(client, registered_agent, m
         return holder["p"]
 
     monkeypatch.setattr(ms, "resolve_price", fake_resolve)
-    h = _h(await _fresh_agent(client))
+    h = _h(await fresh_agent())
 
     async def fill(side, qty):
         r = await client.post("/api/trading/orders", headers=h, json={
@@ -218,11 +211,11 @@ async def test_portfolio_realized_and_unrealized_pnl(client, registered_agent, m
 
 
 @pytest.mark.asyncio
-async def test_auto_snapshot_writes_equity(client, registered_agent, monkeypatch):
+async def test_auto_snapshot_writes_equity(client, fresh_agent, monkeypatch):
     async def fake_resolve(symbol):
         return 50.0
     monkeypatch.setattr(ms, "resolve_price", fake_resolve)
-    h = _h(await _fresh_agent(client))
+    h = _h(await fresh_agent())
     r = await client.post("/api/trading/orders", headers=h, json={
         "symbol": "SOL", "side": "buy", "chain": "solana", "quantity": 4, "order_type": "market"})
     oid = r.json()["id"]

@@ -6,6 +6,7 @@ import httpx
 from fastapi import APIRouter, Query
 
 from backend import market_sources as ms
+from backend import indicators as ind
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/intel", tags=["intel"])
@@ -283,6 +284,27 @@ async def get_backtest(symbol: str = Query("BTC"), days: int = Query(90, ge=14, 
     if result is None:
         return {"error": "insufficient data", "symbol": symbol.upper()}
     return result
+
+
+@router.get("/ohlc/{symbol}")
+async def get_ohlc(symbol: str, interval: str = Query("1d"), limit: int = Query(200, ge=10, le=500)):
+    """OHLCV candles for charting (Binance klines → CoinGecko fallback)."""
+    candles = await ms.ohlc(symbol, interval, limit)
+    return {"symbol": symbol.upper(), "interval": interval, "candles": candles, "count": len(candles)}
+
+
+@router.get("/indicators/{symbol}")
+async def get_indicators(symbol: str, interval: str = Query("1d"), limit: int = Query(200, ge=10, le=500)):
+    """Built-in technical indicators (SMA/EMA/RSI/MACD/Bollinger) over live candles."""
+    candles = await ms.ohlc(symbol, interval, limit)
+    if not candles:
+        return {"symbol": symbol.upper(), "indicators": {}, "available": ind.available()}
+    return {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "available": ind.available(),
+        "indicators": ind.compute(candles),
+    }
 
 
 @router.get("/sources-registry")

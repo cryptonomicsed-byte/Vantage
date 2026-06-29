@@ -79,3 +79,22 @@ async def registered_agent(client):
     assert resp.status_code == 200, resp.text
     data = resp.json()
     return {"name": data["name"], "api_key": data["api_key"]}
+
+
+@pytest_asyncio.fixture
+async def fresh_agent(client):
+    """Factory: create an isolated agent by inserting directly into the DB —
+    bypasses the 5/min rate limit on /api/agents/register so tests needing many
+    isolated agents don't 429. Returns an async maker → {name, api_key}."""
+    import aiosqlite
+    from backend.db import DB_PATH
+
+    async def _make():
+        raw, hashed = make_api_key()
+        name = f"FreshAgent_{hashed[:10]}"
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("INSERT INTO agents (name, api_key, bio) VALUES (?,?,?)", (name, hashed, "test"))
+            await db.commit()
+        return {"name": name, "api_key": raw}
+
+    return _make

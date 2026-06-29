@@ -388,6 +388,65 @@ async def top_movers(limit: int = 8) -> list[dict]:
     return out
 
 
+# ── OHLC candles (Binance klines → CoinGecko OHLC fallback) ─────────────────────────
+# Binance interval → CoinGecko /ohlc `days` (CoinGecko picks granularity from days).
+_CG_OHLC_DAYS = {"1h": 1, "4h": 7, "1d": 30, "1w": 365}
+
+
+async def ohlc(symbol: str, interval: str = "1d", limit: int = 200) -> list[dict]:
+    """OHLCV candles for a symbol. Binance klines (true OHLCV) first, CoinGecko
+    /ohlc fallback (no volume). Returns [{time, open, high, low, close, volume}],
+    time in unix seconds ascending. Cached 60s."""
+    symbol = symbol.upper()
+    interval = interval if interval in ("1m", "5m", "15m", "1h", "4h", "1d", "1w") else "1d"
+    limit = max(10, min(limit, 500))
+    key = f"ohlc:{symbol}:{interval}:{limit}"
+    cached = _cache_get(key, 60)
+    if cached is not None:
+        return cached
+
+    # Binance: [openTime(ms), open, high, low, close, volume, ...]
+    data = await _get_json(
+        f"https://api4.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval}&limit={limit}",
+        timeout=8,
+    )
+    candles: list[dict] = []
+    if isinstance(data, list) and data:
+        for k in data:
+            try:
+                candles.append({
+                    "time": int(k[0]) // 1000,
+                    "open": float(k[1]), "high": float(k[2]),
+                    "low": float(k[3]), "close": float(k[4]),
+                    "volume": float(k[5]),
+                })
+            except (ValueError, IndexError, TypeError):
+                continue
+
+    # Fallback: CoinGecko /ohlc (no volume).
+    if not candles:
+        cid = CG_IDS.get(symbol, symbol.lower())
+        days = _CG_OHLC_DAYS.get(interval, 30)
+        cg = await _get_json(
+            f"https://api.coingecko.com/api/v3/coins/{cid}/ohlc?vs_currency=usd&days={days}", timeout=10,
+        )
+        if isinstance(cg, list):
+            for c in cg[-limit:]:
+                try:
+                    candles.append({
+                        "time": int(c[0]) // 1000,
+                        "open": float(c[1]), "high": float(c[2]),
+                        "low": float(c[3]), "close": float(c[4]),
+                        "volume": 0.0,
+                    })
+                except (ValueError, IndexError, TypeError):
+                    continue
+
+    if candles:
+        _cache_put(key, candles)
+    return candles
+
+
 # ── DeFi yields (DefiLlama) ─────────────────────────────────────────────────────────
 async def defillama_yields(limit: int = 25, min_tvl: float = 1_000_000) -> list[dict]:
     """Top yield pools by APY with a TVL floor, from DefiLlama. Cached 300s."""

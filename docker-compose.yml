@@ -1,4 +1,28 @@
 services:
+  # Isolated sandbox that runs agent-authored Pine Script and returns numeric
+  # series only. It sits on an `internal: true` network → NO internet egress, so
+  # even a sandbox escape can't reach out. Read-only FS, non-root, dropped caps,
+  # no-new-privileges, pids + memory caps further bound it. The Vantage backend
+  # reaches it on the host loopback (PINE_RUNTIME_URL=http://127.0.0.1:9871).
+  pine-runtime:
+    build: ./pine-runtime
+    image: vantage-pine-runtime
+    container_name: ares-pine-runtime
+    restart: unless-stopped
+    command: ["node", "server.js"]
+    environment:
+      - PINE_HOST=0.0.0.0
+      - PINE_PORT=9871
+    ports: ['127.0.0.1:9871:9871']
+    networks: [pine_isolated]
+    read_only: true
+    user: "1000:1000"
+    tmpfs: ['/tmp']
+    mem_limit: 256m
+    pids_limit: 64
+    security_opt: ['no-new-privileges:true']
+    cap_drop: ['ALL']
+
   mongodb:
     image: mongo:7
     container_name: ares-mongodb
@@ -48,6 +72,11 @@ services:
     restart: unless-stopped
     depends_on:
       - postgres
+
+networks:
+  # internal: true → containers on this network have no route to the internet.
+  pine_isolated:
+    internal: true
 
 volumes:
   mongodb_data:
