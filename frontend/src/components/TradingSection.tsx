@@ -1,5 +1,6 @@
+import TradingViewChart from "./trading/TradingViewChart"
 import React, { useState } from 'react'
-import { TrendingUp, Briefcase } from 'lucide-react'
+import { TrendingUp, Briefcase, CandlestickChart } from 'lucide-react'
 import MarketIntel from './trading/MarketIntel'
 import Portfolio from './trading/Portfolio'
 
@@ -14,25 +15,28 @@ import Portfolio from './trading/Portfolio'
 
 const GROUPS = [
   { id: 'intel',     label: 'Market Intel', icon: TrendingUp },
-  { id: 'portfolio', label: 'Portfolio',    icon: Briefcase },
+  { id: "portfolio", label: "Portfolio",    icon: Briefcase },
+  { id: "chart",     label: "Chart",        icon: CandlestickChart },
 ]
 
 export default function TradingSection() {
-  const [group, setGroup] = useState<'intel' | 'portfolio'>('intel')
+  const [group, setGroup] = useState<'intel' | 'portfolio' | 'chart'>('intel')
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, marginBottom: 20 }}>
         <h1 className="page-title" style={{ marginBottom: 0 }}>Trading</h1>
         <div className="top-nav-tabs" style={{ flex: 'initial' }}>
           {GROUPS.map(g => (
-            <button key={g.id} type="button" className={`top-nav-tab ${group === g.id ? 'active' : ''}`} onClick={() => setGroup(g.id as 'intel' | 'portfolio')}>
+            <button key={g.id} type="button" className={`top-nav-tab ${group === g.id ? 'active' : ''}`} onClick={() => setGroup(g.id as 'intel' | 'portfolio' | 'chart')}>
               <g.icon size={15} /> {g.label}
             </button>
           ))}
         </div>
       </div>
 
-      {group === 'intel' ? <MarketIntel /> : <Portfolio />}
+      {group === "intel" && <MarketIntel />}
+      {group === "chart" && <TradingViewChart />}
+      {group === "portfolio" && <Portfolio />}
     </div>
   )
 }
