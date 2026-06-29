@@ -489,6 +489,8 @@ from .routers.memory_vault import router as memory_vault_router
 app.include_router(memory_vault_router)
 from .routers.trading import router as trading_router
 app.include_router(trading_router)
+from .routers.intel import router as intel_router
+app.include_router(intel_router)
 from .routers.orchestrator import router as orchestrator_router
 from .routers.collectives import router as collectives_router
 from .routers.genesis import router as genesis_router
@@ -554,6 +556,19 @@ async def gossip_ws(ws: WebSocket, channel: str = "swarm.system.alerts"):
     except (WebSocketDisconnect, Exception):
         if channel in _gossip_channels:
             _gossip_channels[channel].discard(ws)
+
+
+
+# Market Intel aliases (frontend calls /api/debate and /api/alpha directly)
+@app.get("/api/debate")
+async def debate_alias(request: Request):
+    from .routers.intel import get_debate
+    return await get_debate()
+
+@app.get("/api/alpha")
+async def alpha_alias(request: Request):
+    from .routers.intel import get_alpha
+    return await get_alpha()
 
 
 @app.get("/api/health")
