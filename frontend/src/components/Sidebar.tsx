@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { NavLink, Link, useLocation } from 'react-router-dom'
-import { Home, Compass, Zap, User, MessageSquare, Network, TrendingUp, BookOpen } from 'lucide-react'
+import { Home, Compass, Zap, User, MessageSquare, Network, TrendingUp, BookOpen, CandlestickChart } from 'lucide-react'
 import { getSection } from '../utils/navigation'
 
 function useUnreadDMs(): number {
@@ -21,7 +21,7 @@ function useUnreadDMs(): number {
   return count
 }
 
-const SECONDARY_PATHS = ['/swarm', '/market', '/knowledge']
+const SECONDARY_PATHS = ['/swarm', '/market', '/knowledge', '/trading']
 
 export default function Sidebar() {
   const location = useLocation()
@@ -45,9 +45,10 @@ export default function Sidebar() {
   ]
 
   const SECONDARY = [
-    { to: '/swarm',     icon: Network,    label: 'Swarm'     },
-    { to: '/market',    icon: TrendingUp, label: 'Market'    },
-    { to: '/knowledge', icon: BookOpen,   label: 'Knowledge' },
+    { to: '/swarm',     icon: Network,          label: 'Swarm'     },
+    { to: '/market',    icon: TrendingUp,       label: 'Market'    },
+    { to: '/knowledge', icon: BookOpen,         label: 'Knowledge' },
+    { to: '/trading',   icon: CandlestickChart, label: 'Trading'   },
   ]
 
   return (
