@@ -6335,6 +6335,21 @@ async def get_swarm_graph():
 
 # ── Swarm Orchestration ───────────────────────────────────────────────────────
 
+
+@router.get("/swarm/tasks", tags=["platform"])
+async def list_swarm_tasks(limit: int = 20):
+    """List swarm tasks — what the SwarmMap frontend expects."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            """SELECT t.id, t.title, t.description, t.status, t.created_at, a.name as agent_name
+               FROM collective_tasks t
+               LEFT JOIN agents a ON a.id = t.created_by
+               ORDER BY t.created_at DESC LIMIT ?""", (limit,)
+        )).fetchall()
+        return [dict(r) for r in rows]
+
+
 @router.post("/me/swarm/task", tags=["platform"])
 async def post_swarm_task(request: Request, agent: dict = Depends(get_agent)):
     """
@@ -6815,6 +6830,24 @@ async def get_broadcast_lock_status(broadcast_id: int):
 # ── Feature 5: Swarm Vibe / Heartbeat Dashboard ──────────────────────────────
 
 _VALID_STATUS_CODES = {"ok", "degraded", "error", "warning", "offline"}
+
+
+
+@router.post("/me/vibe", tags=["platform"])
+async def vibe_alias(request: Request, agent: dict = Depends(get_agent)):
+    """Alias for /status/vibe — what the Dashboard frontend expects."""
+    body = await request.json()
+    vibe = str(body.get("vibe", "")).strip()[:100]
+    if not vibe:
+        raise HTTPException(422, "vibe is required (max 100 chars)")
+    status_code = str(body.get("status_code", "neutral"))
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO agent_vibes (agent_id, agent_name, vibe, status_code) VALUES (?,?,?,?)",
+            (agent["id"], agent["name"], vibe, status_code),
+        )
+        await db.commit()
+    return {"status": "published", "vibe": vibe}
 
 
 @router.post("/status/vibe", tags=["platform"])
