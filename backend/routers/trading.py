@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from backend.db import DB_PATH
 from backend.deps import get_agent
 from backend.config import settings
+from backend.crypto_utils import encrypt_key_for_agent, decrypt_key_for_agent
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/trading", tags=["trading"])
@@ -58,6 +59,11 @@ class JournalCreate(BaseModel):
     lessons_learned: str = ""
     tags: list = []
     debate_id: Optional[int] = None
+
+class WalletGenerate(BaseModel):
+    system: str = "bip39"
+    chain: str = "solana"
+    label: str = ""
 
 class PnLSnapshotCreate(BaseModel):
     snapshot_date: date
@@ -139,6 +145,84 @@ async def sync_wallet(wallet_id: int, agent: dict = Depends(get_agent)):
         )
         await db.commit()
     return {"status": "sync_requested", "wallet_id": wallet_id}
+
+# ── Wallet Generation ────────────────────────────────────
+
+@router.post("/wallets/generate")
+async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent)):
+    """Generate a new wallet (BIP-39 or BIPON39) and store encrypted."""
+    import asyncio as _asyncio
+    import subprocess as _sp, json as _json
+    
+    system = data.system.lower()
+    chain = data.chain.lower()
+    label = data.label or f"{system.upper()} {chain.title()}"
+    
+    if system == "bipon39":
+        try:
+            r = await _asyncio.to_thread(lambda: _sp.run(
+                ["bipon39", "generate"], capture_output=True, text=True, timeout=10
+            ))
+            result = _json.loads(r.stdout) if r.stdout else None
+        except Exception:
+            result = None
+    else:
+        try:
+            r = await _asyncio.to_thread(lambda: _sp.run(
+                ["curl", "-s", "-X", "POST", "http://127.0.0.1:8778/api/wallet/create",
+                 "-H", "Content-Type: application/json", "-d", "{}", "--connect-timeout", "10"],
+                capture_output=True, text=True, timeout=15
+            ))
+            result = _json.loads(r.stdout) if r.stdout else None
+        except Exception:
+            result = None
+    
+    if not result:
+        raise HTTPException(500, "Wallet generation failed")
+    
+    address = result.get("chains", {}).get(chain, {}).get("address",
+              result.get("address", ""))
+    private_key = result.get("chains", {}).get(chain, {}).get("privateKey", result.get("chains", {}).get(chain, {}).get("private_key", result.get("privateKey", result.get("private_key", ""))))
+    
+    if not address or not private_key:
+        raise HTTPException(422, f"Chain '{chain}' not available in generated wallet")
+    
+    encrypted = encrypt_key_for_agent(private_key, agent)
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO trading_wallets (agent_id, label, chain, address, encrypted_private_key) VALUES (?,?,?,?,?)",
+            (agent["id"], label, chain, address, encrypted)
+        )
+        await db.commit()
+        wallet_id = cur.lastrowid
+    
+    response = {
+        "id": wallet_id, "label": label, "chain": chain,
+        "address": address, "system": system,
+        "warning": "Private key encrypted at rest. Store the mnemonic safely.",
+        "mnemonic": result.get("mnemonic", ""),
+    }
+    if "ifascript" in result:
+        response.update(result["ifascript"])
+    return response
+
+
+@router.get("/wallets/{wallet_id}/key")
+async def reveal_wallet_key(wallet_id: int, agent: dict = Depends(get_agent)):
+    """Reveal the decrypted private key. Requires explicit request."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        row = await (await db.execute(
+            "SELECT encrypted_private_key FROM trading_wallets WHERE id=? AND agent_id=?",
+            (wallet_id, agent["id"]))).fetchone()
+        if not row or not row[0]:
+            raise HTTPException(404, "Wallet or key not found")
+        try:
+            key = decrypt_key_for_agent(row[0], agent)
+            return {"private_key": key, "warning": "Never share this."}
+        except Exception:
+            raise HTTPException(500, "Failed to decrypt wallet key")
+
 
 # ── Orders ──────────────────────────────────────────────────
 
@@ -478,28 +562,57 @@ async def get_price(symbol: str):
 
 @router.post("/signals/ingest")
 async def ingest_signal(request: Request, agent: dict = Depends(get_agent)):
-    """External signal ingestion — receives signals from Ares intel engine."""
+    """External signal ingestion — auto-creates orders from high-conviction signals."""
     body = await request.json()
     symbol = body.get("symbol", body.get("pair", "UNKNOWN"))
-    signal_type = body.get("type", body.get("signal", "alert"))
+    direction = body.get("direction", body.get("signal", "NEUTRAL"))
     conviction = float(body.get("conviction", body.get("confidence", 0)))
+    chain = body.get("chain", "solana")
+    source = body.get("source", "unknown")
     
-    # Auto-create a pending order if conviction is high
-    if conviction > 0.7 and signal_type.upper() in ("BUY", "LONG"):
+    direction_upper = direction.upper()
+    if conviction > 0.7 and direction_upper in ("BUY", "LONG", "BULLISH"):
         side = "BUY"
-    elif conviction > 0.7 and signal_type.upper() in ("SELL", "SHORT"):
+    elif conviction > 0.7 and direction_upper in ("SELL", "SHORT", "BEARISH"):
         side = "SELL"
     else:
-        side = "HOLD"
+        side = None
     
-    return {
-        "status": "ingested",
-        "symbol": symbol,
-        "signal": signal_type,
-        "conviction": conviction,
-        "suggested_action": side,
-        "agent": agent["name"]
+    result = {
+        "status": "ingested", "symbol": symbol,
+        "direction": direction, "conviction": conviction,
+        "chain": chain, "source": source,
     }
+    
+    # Auto-create order for high-conviction signals
+    if side:
+        async with aiosqlite.connect(DB_PATH) as db:
+            wallet = await (await db.execute(
+                "SELECT id, address FROM trading_wallets WHERE agent_id=? AND chain=? ORDER BY created_at LIMIT 1",
+                (agent["id"], chain)
+            )).fetchone()
+        
+        if wallet:
+            quantity = body.get("quantity", 0.1)
+            async with aiosqlite.connect(DB_PATH) as db:
+                cur = await db.execute(
+                    """INSERT INTO trading_orders (agent_id, wallet_id, order_type, side, symbol, chain, 
+                       quantity, trigger_reason, signal_id, status)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (agent["id"], wallet[0], "market", side, symbol, chain, quantity,
+                     f"{source}_conviction_{conviction:.1f}", body.get("signal_id"), "pending")
+                )
+                await db.commit()
+                result["order_created"] = cur.lastrowid
+                result["action"] = side
+                result["wallet_address"] = wallet[1]
+        else:
+            result["warning"] = f"No {chain} wallet configured. Create one first."
+    else:
+        result["action"] = "HOLD"
+        result["note"] = "Conviction too low for auto-execution"
+    
+    return result
 
 # ── Trade Journal ───────────────────────────────────────────
 
