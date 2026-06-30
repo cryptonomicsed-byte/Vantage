@@ -298,6 +298,8 @@ async def render_with_engine(engine: str, project: dict, scenes: list) -> str:
         return await render_rendervid(project, scenes, output_path)
     elif engine == "remotion":
         return await render_remotion(project, scenes, output_path)
+    elif engine == "vimax":
+        return await render_vimax(project, scenes, output_path)
     else:
         return await render_hyperframes(project, scenes, output_path)  # default
 
@@ -307,7 +309,9 @@ async def render_hyperframes(project: dict, scenes: list, output_path: str) -> s
     
     # Build HTML composition
     html = build_html_composition(project, scenes)
-    html_path = f"{ENGINE_DIR}/composition_{project['id']}.html"
+    project_dir = f"{ENGINE_DIR}/projects/{project['id']}"
+    os.makedirs(project_dir, exist_ok=True)
+    html_path = f"{project_dir}/index.html"
     with open(html_path, "w") as f:
         f.write(html)
     
@@ -378,6 +382,89 @@ async def render_rendervid(project: dict, scenes: list, output_path: str) -> str
         raise RuntimeError(f"Rendervid render failed: {result.stderr[:500]}")
     
     return output_path
+
+
+async def render_vimax(project: dict, scenes: list, output_path: str) -> str:
+    """ViMax: Director -> Screenwriter -> Producer -> HyperFrames render.
+    Uses the agent's configured LLM (encrypted at rest)."""
+    from backend.crypto_utils import decrypt_key_for_agent
+    import urllib.request as _urlreq
+
+    # Load agent with LLM config
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        agent_row = await (await db.execute(
+            "SELECT * FROM agents WHERE id=?", (project["agent_id"],)
+        )).fetchone()
+    agent = dict(agent_row)
+
+    if not agent.get("llm_api_key_encrypted"):
+        raise RuntimeError("No LLM key. PATCH /api/agents/me/llm first.")
+
+    try:
+        llm_key = decrypt_key_for_agent(agent["llm_api_key_encrypted"], agent)
+        provider = agent.get("llm_provider", "deepseek")
+        model = agent.get("llm_model", "deepseek-v4-flash")
+    except Exception:
+        raise RuntimeError("Failed to decrypt LLM key. Re-configure.")
+
+    # Build director prompt
+    title = project.get("title", "Untitled")
+    desc = project.get("description", "")
+    scene_names = [s.get("description", s.get("title", "")) for s in scenes]
+    total_dur = project.get("duration_sec", 15)
+
+    prompt = f"""Direct a video: Title={title}. Description={desc}. Content={scene_names}. Total={total_dur}s.
+Return JSON array of scenes: [{{"title":"...","visual_direction":"...","duration_sec":3,"transition":"fade"}}].
+Use dark background, glowing cyan text (#00ffcc), cinematic pacing."""
+
+    base_urls = {"deepseek": "https://api.deepseek.com/v1"}
+    base = base_urls.get(provider, f"https://api.{provider}.com/v1")
+
+    req = _urlreq.Request(
+        f"{base}/chat/completions",
+        data=json.dumps({"model": model, "messages": [{"role":"user","content":prompt}], "temperature":0.7}).encode(),
+        headers={"Authorization": f"Bearer {llm_key}", "Content-Type": "application/json"},
+        method="POST"
+    )
+
+    try:
+        resp = json.loads(_urlreq.urlopen(req, timeout=30).read())
+        raw = resp["choices"][0]["message"]["content"]
+    except Exception as e:
+        raise RuntimeError(f"ViMax LLM failed: {e}")
+
+    # Parse JSON from LLM response
+    raw = raw.strip()
+    for delim in ("```json", "```"):
+        if delim in raw:
+            raw = raw.split(delim)[1].split("```")[0]
+            break
+    plan = json.loads(raw)
+
+    # Handle both array and object response formats
+    if isinstance(plan, list):
+        scene_list = plan
+    elif isinstance(plan, dict):
+        scene_list = plan.get("scenes", [plan])
+    else:
+        scene_list = []
+
+    vimax_scenes = []
+    for s in scene_list:
+        if isinstance(s, dict):
+            vimax_scenes.append({
+                "title": s.get("title", "Scene"),
+                "description": s.get("visual_direction", s.get("description", "")),
+                "html_content": s.get("html", ""),
+                "duration_sec": s.get("duration_sec", 3),
+                "transition": s.get("transition", "fade"),
+            })
+
+    if vimax_scenes:
+        return await render_hyperframes(project, vimax_scenes, output_path)
+    return await render_hyperframes(project, scenes, output_path)
+
 
 async def render_remotion(project: dict, scenes: list, output_path: str) -> str:
     """Render using Remotion React engine."""
