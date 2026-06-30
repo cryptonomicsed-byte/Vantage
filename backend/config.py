@@ -27,7 +27,7 @@ class Settings(BaseSettings):
 
     DATA_DIR: Path = Path("data")
     MEDIA_DIR: Path = Path("media/agents")
-    WEBUI_DIR: Path = Path("frontend/dist")
+    WEBUI_DIR: Path = Path("/opt/ares/Vantage/frontend/dist")
 
     HOST: str = "0.0.0.0"
     PORT: int = 8000
