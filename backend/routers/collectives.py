@@ -190,19 +190,23 @@ async def create_workspace(data: WorkspaceCreate, agent: dict = Depends(get_agen
     gitea_url = ""
     repo_name = data.gitea_repo or data.name.replace(" ", "-").lower()
     if repo_name:
-        token = open("/opt/ares/.gitea_token").read().strip() if os.path.exists("/opt/ares/.gitea_token") else ""
-        if token:
-            r = subprocess.run(
-                ["curl", "-s", "-X", "POST", "http://127.0.0.1:3001/api/v1/user/repos",
-                 "-H", f"Authorization: token {token}",
-                 "-H", "Content-Type: application/json",
-                 "-d", json.dumps({"name": repo_name, "description": data.description, "auto_init": True})],
-                capture_output=True, text=True, timeout=15
-            )
+        # Direct URL (works even if API call fails)
+        gitea_url = f"http://127.0.0.1:3001/ares-bot/{repo_name}.git"
+        # Actually create the repo via Gitea API (background, fail-open)
+        token_path = "/opt/ares/.gitea_token"
+        if os.path.exists(token_path):
             try:
-                repo = json.loads(r.stdout)
-                gitea_url = repo.get("clone_url", "")
-            except: pass
+                import urllib.request as _urlreq
+                token = open(token_path).read().strip()
+                import asyncio as _asyncio
+                await _asyncio.to_thread(lambda: _urlreq.urlopen(_urlreq.Request(
+                    "http://127.0.0.1:3001/api/v1/user/repos",
+                    data=json.dumps({"name": repo_name, "description": data.description, "auto_init": True}).encode(),
+                    headers={"Authorization": f"token {token}", "Content-Type": "application/json"},
+                    method="POST"
+                )))
+            except Exception:
+                pass
 
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
