@@ -481,6 +481,7 @@ async def request_middleware(request: Request, call_next):
 
 
 app.include_router(agents_router)
+app.include_router(video_router)
 app.include_router(admin_router)
 from .routers.guilds import router as guilds_router
 app.include_router(guilds_router)
