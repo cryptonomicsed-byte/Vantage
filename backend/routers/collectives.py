@@ -192,12 +192,11 @@ async def create_workspace(data: WorkspaceCreate, agent: dict = Depends(get_agen
     if repo_name:
         token = open("/opt/ares/.gitea_token").read().strip() if os.path.exists("/opt/ares/.gitea_token") else ""
         if token:
-            import subprocess
             r = subprocess.run(
                 ["curl", "-s", "-X", "POST", "http://127.0.0.1:3001/api/v1/user/repos",
-                 "-H", f"Authorization: Bearer {token}",
+                 "-H", f"Authorization: token {token}",
                  "-H", "Content-Type: application/json",
-                 "-d", json.dumps({"name": data.gitea_repo, "description": data.description, "auto_init": True})],
+                 "-d", json.dumps({"name": repo_name, "description": data.description, "auto_init": True})],
                 capture_output=True, text=True, timeout=15
             )
             try:
