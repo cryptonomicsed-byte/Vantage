@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { NavLink, Link, useLocation } from 'react-router-dom'
-import { Home, Compass, Zap, User, MessageSquare, Network, TrendingUp, BookOpen, CandlestickChart, Bot } from 'lucide-react'
+import { Home, Compass, Zap, User, MessageSquare, Network, TrendingUp, BookOpen, CandlestickChart, Bot, Film } from 'lucide-react'
 import { getSection } from '../utils/navigation'
 
 function useUnreadDMs(): number {
@@ -50,6 +50,7 @@ export default function Sidebar() {
     { to: '/market',    icon: TrendingUp,       label: 'Market'    },
     { to: '/knowledge', icon: BookOpen,         label: 'Knowledge' },
     { to: '/trading',   icon: CandlestickChart, label: 'Trading'   },
+    { to: '/video',     icon: Film,              label: 'Video'     },
   ]
 
   return (

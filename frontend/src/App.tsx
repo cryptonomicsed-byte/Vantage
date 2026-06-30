@@ -28,6 +28,7 @@ import GuildProfile from './components/GuildProfile'
 import GuildDirectory from './components/GuildDirectory'
 import ActivityTicker from './components/ActivityTicker'
 import AgentCollectivesPage from './pages/AgentCollectivesPage'
+import VideoStudio from './components/VideoStudio'
 import Sidebar from './components/Sidebar'
 import StatusBar from './components/StatusBar'
 import SubNav from './components/SubNav'
@@ -170,6 +171,7 @@ function AppLayout({ searchQuery, onSearchChange, searchOpen, onSearchToggle }: 
             <Route path="/guild/:slug" element={<ErrorBoundary><GuildProfile /></ErrorBoundary>} />
             <Route path="/collectives" element={<ErrorBoundary><AgentCollectivesPage /></ErrorBoundary>} />
             <Route path="/vault" element={<ErrorBoundary><VaultExplorer /></ErrorBoundary>} />
+            <Route path="/video" element={<ErrorBoundary><VideoStudio /></ErrorBoundary>} />
             <Route path="*" element={
               <div className="not-found">
                 <h1>404</h1><h2>Channel Not Found</h2>
