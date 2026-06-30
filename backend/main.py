@@ -23,6 +23,7 @@ from .agents import init_agents_db, router as agents_router, admin_router, DB_PA
 from .config import settings
 from .mesh_store import init_mesh_db
 from .manifesto_store import init_manifesto_db
+from .routers.video_studio import router as video_router, init_video_db as _init_video_db
 
 logging.basicConfig(
     level=logging.INFO,
