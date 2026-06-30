@@ -188,7 +188,8 @@ async def add_member(collective_id: int, data: CollectiveMember, agent: dict = D
 async def create_workspace(data: WorkspaceCreate, agent: dict = Depends(get_agent)):
     # Create Gitea repo if name provided
     gitea_url = ""
-    if data.gitea_repo:
+    repo_name = data.gitea_repo or data.name.replace(" ", "-").lower()
+    if repo_name:
         token = open("/opt/ares/.gitea_token").read().strip() if os.path.exists("/opt/ares/.gitea_token") else ""
         if token:
             import subprocess
@@ -341,6 +342,91 @@ async def get_reputation(agent: dict = Depends(get_agent)):
             WHERE ar.agent_id=? ORDER BY ar.score DESC
         """, (agent["id"],))).fetchall()
         return [dict(r) for r in rows]
+
+
+
+# ── OpenCode Integration ─────────────────────────────────────
+
+@router.post("/workspaces/{workspace_id}/tasks/{task_id}/implement")
+async def implement_task(workspace_id: int, task_id: int, agent: dict = Depends(get_agent)):
+    """Task implementation — triggers OpenCode to write code for a task.
+    Calls the OpenCode serve API (port 4096) to generate code.
+    The code is committed to the workspace's Gitea repo.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        
+        # Get workspace
+        ws = await (await db.execute(
+            "SELECT * FROM collective_workspaces WHERE id=?", (workspace_id,)
+        )).fetchone()
+        if not ws:
+            raise HTTPException(404, "Workspace not found")
+        ws = dict(ws)
+        
+        # Get task
+        task = await (await db.execute(
+            "SELECT * FROM collective_tasks WHERE id=? AND workspace_id=?", (task_id, workspace_id)
+        )).fetchone()
+        if not task:
+            raise HTTPException(404, "Task not found")
+        task = dict(task)
+        
+        # Get collective
+        coll = await (await db.execute(
+            "SELECT * FROM agent_collectives WHERE id=?", (ws["collective_id"],)
+        )).fetchone()
+        
+        if not ws.get("gitea_repo"):
+            raise HTTPException(400, "No Gitea repo configured for this workspace")
+        
+        # Create implementation branch
+        branch = f"task-{task_id}-{task['title'].replace(' ', '-')[:30].lower()}"
+        
+        # Call OpenCode to implement the task
+        try:
+            import asyncio as _asyncio
+            import subprocess as _sp
+            
+            opm = "/root/.opencode/bin/opencode"
+            repo_name = ws["gitea_repo"].split("/")[-1].replace(".git", "")
+            short_path = f"/opt/ares/agent-workspace/{repo_name}"
+            
+            # Clone if needed
+            if not os.path.exists(short_path):
+                await _asyncio.to_thread(lambda: _sp.run(
+                    ["git", "clone", ws["gitea_repo"], short_path],
+                    capture_output=True, timeout=30
+                ))
+            
+            # Run OpenCode with the task
+            prompt = f"Implement task: {task['title']}. Description: {task.get('description', 'No description')}. Write clean, tested code. Commit to branch {branch}."
+            
+            result = await _asyncio.to_thread(lambda: _sp.run(
+                [opm, "-c", short_path, "-q", prompt],
+                capture_output=True, text=True, timeout=300
+            ))
+            
+            # Update task status
+            await db.execute(
+                "UPDATE collective_tasks SET status='in_progress', assigned_to=? WHERE id=?",
+                (agent["id"], task_id)
+                
+)
+            await db.commit()
+            
+
+            return {
+                "status": "implementation_started",
+                "task_id": task_id,
+                "workspace_id": workspace_id,
+                "branch": branch,
+                "repo": ws["gitea_repo"],
+                "note": "OpenCode is working on this task. Code will be committed to the branch."
+            }
+        except Exception as e:
+            raise HTTPException(500, f"OpenCode execution failed: {e}")
+
 
 @router.post("/reputation/award")
 async def award_reputation(data: dict, agent: dict = Depends(get_agent)):
