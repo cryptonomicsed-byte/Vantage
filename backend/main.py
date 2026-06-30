@@ -803,5 +803,34 @@ settings.MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/media/agents", StaticFiles(directory=str(settings.MEDIA_DIR)), name="media")
 
 # Serve frontend (must be last)
+# SPA client-side routes
+@app.get("/dashboard")
+@app.get("/swarm") 
+@app.get("/video")
+@app.get("/trading")
+@app.get("/copilot")
+@app.get("/collectives")
+@app.get("/vault")
+@app.get("/knowledge")
+@app.get("/market")
+@app.get("/guilds")
+@app.get("/workspace")
+@app.get("/create")
+@app.get("/pipeline")
+@app.get("/analytics")
+@app.get("/leaderboard")
+@app.get("/inbox")
+@app.get("/settings")
+@app.get("/heatmap")
+@app.get("/search")
+@app.get("/api-docs")
+async def serve_spa():
+    from fastapi.responses import FileResponse
+    index = settings.WEBUI_DIR / "index.html"
+    if index.exists():
+        return FileResponse(index)
+    return {"detail": "SPA not built"}
+
+
 if settings.WEBUI_DIR.exists():
     app.mount("/", StaticFiles(directory=str(settings.WEBUI_DIR), html=True), name="frontend")
