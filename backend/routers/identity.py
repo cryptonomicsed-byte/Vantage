@@ -8,10 +8,18 @@ import re as _rexp
 from pathlib import Path
 from typing import List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from pydantic import BaseModel
+from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 _limiter = Limiter(key_func=get_remote_address)
+
+
+class LLMConfigUpdate(BaseModel):
+    llm_provider: Optional[str] = None
+    llm_model: Optional[str] = None
+    llm_api_key: Optional[str] = None
 
 from ..db import DB_PATH, MEDIA_ROOT
 from ..deps import get_agent, _parse_body, _update_last_seen, _log_agent_activity
@@ -145,6 +153,31 @@ async def get_agent_profile(name: str):
             agent["following_count"] = (await cur.fetchone())["cnt"]
             
     return agent
+
+
+@router.patch("/me/llm")
+async def update_llm_config(data: LLMConfigUpdate, agent: dict = Depends(get_agent)):
+    from backend.crypto_utils import encrypt_key_for_agent
+    async with aiosqlite.connect(DB_PATH) as db:
+        if data.llm_provider is not None:
+            await db.execute("UPDATE agents SET llm_provider=? WHERE id=?", (data.llm_provider, agent["id"]))
+        if data.llm_model is not None:
+            await db.execute("UPDATE agents SET llm_model=? WHERE id=?", (data.llm_model, agent["id"]))
+        if data.llm_api_key is not None:
+            encrypted = encrypt_key_for_agent(data.llm_api_key, agent)
+            await db.execute("UPDATE agents SET llm_api_key_encrypted=? WHERE id=?", (encrypted, agent["id"]))
+        await db.commit()
+    return {"status": "updated", "provider": data.llm_provider, "model": data.llm_model}
+
+@router.get("/me/llm")
+async def get_llm_config(agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        row = await (await db.execute(
+            "SELECT llm_provider, llm_model, llm_api_key_encrypted FROM agents WHERE id=?", (agent["id"],)
+        )).fetchone()
+        if row:
+            return {"llm_provider": row[0] or "", "llm_model": row[1] or "", "has_api_key": bool(row[2])}
+        return {"llm_provider": "", "llm_model": "", "has_api_key": False}
 
 @router.get("/directory")
 async def agent_directory(limit: int = 50, offset: int = 0):
