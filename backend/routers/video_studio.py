@@ -314,7 +314,7 @@ async def render_hyperframes(project: dict, scenes: list, output_path: str) -> s
     # Render via HyperFrames CLI
     cmd = [
         HYPERFRAMES_CLI, "render",
-        "--input", html_path,
+        "--input", project_dir,
         "--output", output_path,
         "--width", str(project.get("width", 1920)),
         "--height", str(project.get("height", 1080)),
@@ -391,56 +391,70 @@ def build_html_composition(project: dict, scenes: list) -> str:
     fps = project.get("fps", 30)
     
     total_duration = sum(s.get("duration_sec", 3) for s in scenes)
-    total_frames = int(total_duration * fps)
     
     html = f"""<!DOCTYPE html>
 <html>
 <head>
+<meta charset="utf-8">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
 <style>
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
   body {{ width: {width}px; height: {height}px; background: #0a0a1a; font-family: system-ui, sans-serif; overflow: hidden; }}
-  .scene {{ position: absolute; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }}
-  .title {{ color: #00ffcc; font-size: 64px; text-shadow: 0 0 20px rgba(0,255,200,0.5); }}
-  .subtitle {{ color: #ffffff; font-size: 28px; opacity: 0.8; margin-top: 20px; }}
+  .scene {{ position: absolute; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; opacity: 0; }}
+  .scene.active {{ opacity: 1; }}
+  .title {{ color: #00ffcc; font-size: 64px; font-weight: 700; }}
+  .subtitle {{ color: #aabbcc; font-size: 28px; margin-top: 16px; }}
+  .tag {{ display: inline-block; background: rgba(0,255,200,0.15); color: #00ffcc; padding: 8px 20px; border-radius: 24px; font-size: 20px; margin-top: 24px; }}
 </style>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
 </head>
 <body>
+<div id="composition" data-composition-id="main" data-width="{width}" data-height="{height}" data-duration="{total_duration}">
 """
     
-    elapsed = 0
     for i, scene in enumerate(scenes):
         duration = scene.get("duration_sec", 3)
-        start_frame = int(elapsed * fps)
-        end_frame = int((elapsed + duration) * fps)
         title = scene.get("title", f"Scene {i+1}")
         desc = scene.get("description", "")
-        transition = scene.get("transition", "fade")
+        custom = scene.get("html_content", "")
         
-        # If agent provided custom HTML, use it; otherwise use template
-        custom_html = scene.get("html_content", "")
-        if custom_html:
-            html += f"""<div class="scene" data-hyperframes-scene="{i}" 
-                        data-start-frame="{start_frame}" 
-                        data-end-frame="{end_frame}">
-                        {custom_html}
-                      </div>\n"""
-        else:
-            html += f"""<div class="scene" data-hyperframes-scene="{i}" 
-                        data-start-frame="{start_frame}" 
-                        data-end-frame="{end_frame}">
-                        <div style="text-align:center">
-                          <div class="title">{title}</div>
-                          <div class="subtitle">{desc}</div>
-                        </div>
-                      </div>\n"""
-        
-        elapsed += duration
-    
-    html += f"""
-</body>
-</html>
+        if custom:
+            html += f"""  <div class="scene" id="scene{i}" data-scene="{i}" data-duration="{duration}">
+    {custom}
+  </div>
 """
+        else:
+            html += f"""  <div class="scene" id="scene{i}" data-scene="{i}" data-duration="{duration}">
+    <div style="text-align:center">
+      <div class="title">{title}</div>
+      <div class="subtitle">{desc}</div>
+      <div class="tag">Agent Video Studio</div>
+    </div>
+  </div>
+"""
+    
+    html += f"""</div>
+<script>
+// Register timeline with HyperFrames
+const scenes = document.querySelectorAll('.scene');
+let elapsed = 0;
+const timelines = [];
+
+scenes.forEach((scene, i) => {{
+  const d = parseFloat(scene.dataset.duration || 3);
+  const tl = gsap.timeline();
+  tl.to(scene, {{ opacity: 1, duration: 0.3 }}, elapsed)
+    .to(scene, {{ opacity: 0, duration: 0.3 }}, elapsed + d - 0.3);
+  timelines.push(tl);
+  elapsed += d;
+}});
+
+window.__timelines = {{ main: gsap.timeline() }};
+window.addEventListener('load', () => {{
+  window.__timelines.main.add(timelines);
+}});
+</script>
+</body>
+</html>"""
     return html
 
 # ── Publish ──────────────────────────────────────────────────
