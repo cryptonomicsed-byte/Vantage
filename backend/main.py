@@ -800,6 +800,7 @@ async def platform_capacity():
 
 # Serve media files
 settings.MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/media/videos", StaticFiles(directory="/opt/ares/media/videos"), name="media_videos")
 app.mount("/media/agents", StaticFiles(directory=str(settings.MEDIA_DIR)), name="media")
 
 # Serve frontend (must be last)
