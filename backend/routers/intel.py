@@ -878,6 +878,9 @@ async def memory_graph(agent_name: str = None, limit: int = 80):
         n["conviction"] = round(float(conv), 3)
         n["confidence"] = round(min(1.0, 0.4 + strength * 0.6), 3)
         n["glow_intensity"] = round(min(1.0, 0.3 + strength * 0.6 + recency * 0.1), 3)
+        # Render hints (honored by NeuralVault): brighter/fresher nodes pulse faster.
+        n["pulse_rate"] = round(0.05 + strength * 0.4 + recency * 0.1, 3)
+        n["size"] = n.get("val", 4)
         n["source_daemon"] = n.get("source") or DAEMON_OF.get(orig, "vantage")
         n["last_updated"] = _now_iso
 
