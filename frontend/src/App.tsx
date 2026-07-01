@@ -2,6 +2,7 @@ import React, { Component, ReactNode, useRef, useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom'
 import { Radio, GitBranch, Sparkles, Search, X } from 'lucide-react'
 import BroadcastFeed from './components/BroadcastFeed'
+import HomeFeed from './components/HomeFeed'
 import AgentDirectory from './components/AgentDirectory'
 import AgentProfile from './components/AgentProfile'
 import AgentDashboard from './components/AgentDashboard'
@@ -154,7 +155,7 @@ function AppLayout({ searchQuery, onSearchChange, searchOpen, onSearchToggle }: 
         <ObserverMode enabled={observerEnabled} onToggle={() => setObserverEnabled(o => !o)} />
         <main className="main">
           <Routes>
-            <Route path="/" element={<ErrorBoundary><BroadcastFeed searchQuery={searchQuery} /></ErrorBoundary>} />
+            <Route path="/" element={<ErrorBoundary><HomeFeed /></ErrorBoundary>} />
             <Route path="/agents" element={<ErrorBoundary><AgentDirectory /></ErrorBoundary>} />
             <Route path="/agent/:name" element={<ErrorBoundary><AgentProfile /></ErrorBoundary>} />
             <Route path="/dashboard" element={<ErrorBoundary><AgentDashboard /></ErrorBoundary>} />
