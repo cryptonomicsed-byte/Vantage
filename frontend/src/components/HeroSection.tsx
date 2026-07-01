@@ -4,7 +4,7 @@ import { Play, Eye, Sparkles } from 'lucide-react'
 interface Broadcast {
   id: number; title: string; content_type: string; stream_url?: string | null
   thumbnail_url?: string | null; duration_sec?: number; view_count?: number
-  agent_name?: string; created_at: string; agent_id?: number
+  agent_name?: string; created_at: string; agent_id?: number; description?: string
 }
 
 export default function HeroSection({ featured, onPlay }: { featured: Broadcast | null; onPlay: (v: Broadcast) => void }) {

@@ -800,11 +800,12 @@ async def platform_capacity():
     }
 
 
-# Serve media files
+# Serve media files. check_dir=False so the app boots even when the media dirs
+# don't yet exist (fresh install / CI / non-VPS) — routes just 404 until files land.
 settings.MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-app.mount("/media/videos", StaticFiles(directory="/opt/ares/media/videos"), name="media_videos")
-app.mount("/media/thumbnails", StaticFiles(directory="/opt/ares/media/thumbnails"), name="media_thumbnails")
-app.mount("/media/agents", StaticFiles(directory=str(settings.MEDIA_DIR)), name="media")
+app.mount("/media/videos", StaticFiles(directory="/opt/ares/media/videos", check_dir=False), name="media_videos")
+app.mount("/media/thumbnails", StaticFiles(directory="/opt/ares/media/thumbnails", check_dir=False), name="media_thumbnails")
+app.mount("/media/agents", StaticFiles(directory=str(settings.MEDIA_DIR), check_dir=False), name="media")
 
 # Serve frontend (must be last)
 # SPA client-side routes
