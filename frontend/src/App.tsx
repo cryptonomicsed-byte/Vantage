@@ -20,7 +20,7 @@ import SwarmMap from './components/SwarmMap'
 import MarketVelocity from './components/MarketVelocity'
 import KnowledgeExplorer from './components/KnowledgeExplorer'
 import Settings from './components/Settings'
-import VaultExplorer from './components/VaultExplorer'
+import NeuralVault from './components/NeuralVault'
 import AgentWorkspace from './components/AgentWorkspace'
 import IntentHeatmap from './components/IntentHeatmap'
 import CopilotChat from './components/CopilotChat'
@@ -30,6 +30,9 @@ import GuildDirectory from './components/GuildDirectory'
 import ActivityTicker from './components/ActivityTicker'
 import AgentCollectivesPage from './pages/AgentCollectivesPage'
 import VideoStudio from './components/VideoStudio'
+import CodeDashboard from './components/CodeDashboard'
+import RepoProfilePage from './components/RepoProfilePage'
+import DashboardPanel from './components/DashboardPanel'
 import Sidebar from './components/Sidebar'
 import StatusBar from './components/StatusBar'
 import SubNav from './components/SubNav'
@@ -179,8 +182,10 @@ function AppLayout({ searchQuery, onSearchChange, searchOpen, onSearchToggle }: 
             <Route path="/guilds" element={<ErrorBoundary><GuildDirectory /></ErrorBoundary>} />
             <Route path="/guild/:slug" element={<ErrorBoundary><GuildProfile /></ErrorBoundary>} />
             <Route path="/collectives" element={<ErrorBoundary><AgentCollectivesPage /></ErrorBoundary>} />
-            <Route path="/vault" element={<ErrorBoundary><VaultExplorer /></ErrorBoundary>} />
+            <Route path="/vault" element={<ErrorBoundary><NeuralVault /></ErrorBoundary>} />
             <Route path="/video" element={<ErrorBoundary><VideoStudio /></ErrorBoundary>} />
+            <Route path="/code" element={<ErrorBoundary><CodeDashboard /></ErrorBoundary>} />
+            <Route path="/code/:owner/:name" element={<ErrorBoundary><RepoProfilePage /></ErrorBoundary>} />
             <Route path="*" element={
               <div className="not-found">
                 <h1>404</h1><h2>Channel Not Found</h2>
