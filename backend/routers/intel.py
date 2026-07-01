@@ -831,8 +831,92 @@ async def memory_graph(agent_name: str = None, limit: int = 80):
                 edges.append({"source": f"agent:{agent_id}", "target": nid, "value": 0.2, "reason": "aware_of"})
         except: pass
     
+    # ─────────────────────────────────────────────────────────────────────
+    # Enrich into the live Memory-Galaxy schema. Keeps every native render key
+    # (id/label/type/color/val/ts/detail) and layers on the galaxy metadata the
+    # NeuralVault renderer consumes (strength, glow_intensity, conviction,
+    # source_daemon, confidence, last_updated for nodes; type/strength/last_seen
+    # for edges), plus a galaxy taxonomy + live insights.
+    # ─────────────────────────────────────────────────────────────────────
+    import datetime as _dtm
+    from collections import Counter as _Counter
+    _now_iso = _dtm.datetime.now(_dtm.timezone.utc).isoformat()
+
+    # Original build-time group → named galaxy the force layout clusters around.
+    GALAXY_OF = {
+        "agent": "Agent Constellation", "agents": "Agent Constellation",
+        "collective": "Agent Constellation",
+        "memory": "Memory Nebula", "broadcasts": "Memory Nebula",
+        "conversations": "Memory Nebula",
+        "code": "Code Nebula", "signals": "Trading Nebula",
+    }
+    GALAXY_DESC = {
+        "Agent Constellation": "Agents, guilds and swarms and the bonds between them",
+        "Memory Nebula": "Vault, thoughts and conversations — long-term experience",
+        "Code Nebula": "Repositories and code artifacts under STIX watch",
+        "Trading Nebula": "Live signals, markets and predictions in orbit",
+        "Security Cluster": "STIX findings and threats",
+        "External Intel Cloud": "News, on-chain and world-monitor intel",
+    }
+    DAEMON_OF = {
+        "signals": "signal_aggregator", "broadcasts": "vantage_feed",
+        "conversations": "agent_rooms", "code": "stix_webhook",
+        "memory": "memory_vault", "agent": "identity", "agents": "identity",
+        "collective": "collectives",
+    }
+
+    for n in nodes:
+        orig = n.get("group", "memory")
+        val = n.get("val", 4) or 4
+        strength = round(max(0.05, min(1.0, val / 14.0)), 3)
+        conv = n.get("conviction")
+        conv = strength if conv is None else conv
+        recency = 1.0 if n.get("ts") else 0.0  # fresh signals glow brighter
+        n["subgroup"] = orig
+        n["group"] = GALAXY_OF.get(orig, "Memory Nebula")
+        n["strength"] = strength
+        n["conviction"] = round(float(conv), 3)
+        n["confidence"] = round(min(1.0, 0.4 + strength * 0.6), 3)
+        n["glow_intensity"] = round(min(1.0, 0.3 + strength * 0.6 + recency * 0.1), 3)
+        n["source_daemon"] = n.get("source") or DAEMON_OF.get(orig, "vantage")
+        n["last_updated"] = _now_iso
+
+    for e in edges:
+        e["type"] = e.get("reason", "linked")
+        e["strength"] = e.get("value", 0.3)
+        e["last_seen"] = _now_iso
+
     nodes = sorted(nodes, key=lambda n: n.get("val", 0), reverse=True)[:limit]
     nids = {n["id"] for n in nodes}
     edges = [e for e in edges if e["source"] in nids and e["target"] in nids][:limit * 3]
-    
-    return {"nodes": nodes, "edges": edges, "node_count": len(nodes), "edge_count": len(edges), "agent": agent_display, "groups": list(set(n.get("group", "?") for n in nodes)), "timestamp": int(_time.time())}
+
+    gcount = _Counter(n["group"] for n in nodes)
+    galaxies = {
+        name: {"name": name, "node_count": c,
+               "description": GALAXY_DESC.get(name, ""), "key_insight": ""}
+        for name, c in gcount.items()
+    }
+
+    insights = []
+    if nodes:
+        top = max(nodes, key=lambda n: n.get("strength", 0))
+        insights.append(f"Brightest memory: {top['label']} ({int(top['strength']*100)}% strength)")
+    if gcount:
+        biggest, bn = gcount.most_common(1)[0]
+        insights.append(f"Densest cluster: {biggest} · {bn} nodes")
+    sig_n = [n for n in nodes if n.get("subgroup") == "signals"]
+    if sig_n:
+        insights.append(f"{len(sig_n)} live signals in orbit around {agent_display}")
+
+    return {
+        "galaxy": {"total_nodes": len(nodes), "total_edges": len(edges)},
+        "nodes": nodes,
+        "edges": edges,
+        "galaxies": galaxies,
+        "high_value_insights_current": insights,
+        # legacy/compat fields (existing consumers keep working)
+        "node_count": len(nodes), "edge_count": len(edges),
+        "agent": agent_display,
+        "groups": list(galaxies.keys()),
+        "timestamp": int(_time.time()),
+    }

@@ -8,7 +8,7 @@ interface GalaxyData { galaxy: { total_nodes: number; total_edges: number }; nod
 function simulate(nodes: GalaxyNode[], edges: GalaxyEdge[], w: number, h: number) {
   const simNodes = nodes.map(n => ({ ...n, x: Math.random() * w, y: Math.random() * h, vx: 0, vy: 0 }))
   const nodeMap = new Map(simNodes.map(n => [n.id, n]))
-  const galaxyCenters: Record<string, {x:number,y:number}> = { 'Trading Nebula': {x:w*0.3,y:h*0.4}, 'Security Cluster': {x:w*0.7,y:h*0.3}, 'Code Nebula': {x:w*0.7,y:h*0.7}, 'Agent Constellation': {x:w*0.3,y:h*0.6}, 'External Intel Cloud': {x:w*0.5,y:h*0.2} }
+  const galaxyCenters: Record<string, {x:number,y:number}> = { 'Trading Nebula': {x:w*0.28,y:h*0.35}, 'Security Cluster': {x:w*0.72,y:h*0.28}, 'Code Nebula': {x:w*0.72,y:h*0.7}, 'Agent Constellation': {x:w*0.28,y:h*0.7}, 'Memory Nebula': {x:w*0.5,y:h*0.5}, 'External Intel Cloud': {x:w*0.5,y:h*0.15} }
   for (let iter = 0; iter < 60; iter++) {
     for (let i = 0; i < simNodes.length; i++) { for (let j = i + 1; j < simNodes.length; j++) { const dx = simNodes[j].x - simNodes[i].x; const dy = simNodes[j].y - simNodes[i].y; const dist = Math.sqrt(dx * dx + dy * dy) || 1; const force = 300 / (dist * dist); simNodes[i].vx -= dx / dist * force; simNodes[i].vy -= dy / dist * force; simNodes[j].vx += dx / dist * force; simNodes[j].vy += dy / dist * force } }
     for (const e of edges) { const src = nodeMap.get(e.source); const tgt = nodeMap.get(e.target); if (!src || !tgt) continue; const dx = tgt.x - src.x; const dy = tgt.y - src.y; const dist = Math.sqrt(dx * dx + dy * dy) || 1; const force = (dist - 80) * 0.004 * e.strength; src.vx += dx / dist * force; src.vy += dy / dist * force; tgt.vx -= dx / dist * force; tgt.vy -= dy / dist * force }
@@ -31,9 +31,14 @@ export default function NeuralVault() {
   }, [])
 
   const load = () => {
-    fetch('/data/memory_galaxy.json')
-      .then(r => r.json()).then(d => { setData(d); setLoading(false); setError('') })
-      .catch(e => { setLoading(false); setError(e.message) })
+    // Live Memory Galaxy from the vault endpoint; fall back to the static
+    // snapshot if the API is unreachable (offline / first boot).
+    fetch('/api/intel/memory/graph?limit=120')
+      .then(r => { if (!r.ok) throw new Error('api ' + r.status); return r.json() })
+      .then(d => { setData(d); setLoading(false); setError('') })
+      .catch(() => fetch('/data/memory_galaxy.json')
+        .then(r => r.json()).then(d => { setData(d); setLoading(false); setError('') })
+        .catch(e => { setLoading(false); setError(e.message) }))
   }
 
   useEffect(() => { load(); const t = setInterval(load, 60000); return () => clearInterval(t) }, [])
@@ -101,7 +106,7 @@ export default function NeuralVault() {
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginTop: 8, justifyContent: 'center' }}>
         {Object.entries(galaxies).map(([name, g]: [string, any]) => (
           <div key={name} style={{ fontSize: 9, color: 'var(--muted)', cursor: 'pointer' }} onClick={() => setSelectedGalaxy(name)}>
-            <span style={{ fontWeight: 600, color: name.includes('Trading') ? '#f59e0b' : name.includes('Security') ? '#ef4444' : name.includes('Code') ? '#22c55e' : name.includes('Agent') ? '#a855f7' : '#06b6d4' }}>{name.replace(' Nebula','').replace(' Cluster','').replace(' Constellation','').replace(' Cloud','')}</span>
+            <span style={{ fontWeight: 600, color: name.includes('Trading') ? '#f59e0b' : name.includes('Security') ? '#ef4444' : name.includes('Code') ? '#22c55e' : name.includes('Agent') ? '#a855f7' : name.includes('Memory') ? '#f97316' : '#06b6d4' }}>{name.replace(' Nebula','').replace(' Cluster','').replace(' Constellation','').replace(' Cloud','')}</span>
             <span> {g.node_count} nodes</span>
           </div>
         ))}
