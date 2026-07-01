@@ -65,11 +65,19 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
   static getDerivedStateFromError(error: Error) { return { error } }
   render() {
     if (this.state.error) return (
-      <div className="error-boundary">
-        <h2>⚡ Signal Lost</h2>
-        <p>A transmission error occurred. Refresh to reconnect.</p>
-        <button className="btn btn-primary" style={{ marginTop: 8 }} onClick={() => this.setState({ error: null })}>
-          Reconnect
+      <div className="error-boundary" style={{ padding: 40, fontFamily: "monospace" }}>
+        <h2>Signal Lost</h2>
+        <p style={{ color: "#ff6666", margin: "10px 0", whiteSpace: "pre-wrap", maxWidth: "800px", overflow: "auto", fontSize: 13, background: "#111", padding: 10, borderRadius: 8 }}>
+          {this.state.error.message}
+        </p>
+        <details style={{ marginTop: 10, fontSize: 12, color: "#888" }}>
+          <summary>Stack trace</summary>
+          <pre style={{ background: "#111", padding: 10, borderRadius: 8, overflow: "auto", maxHeight: 400 }}>
+            {this.state.error.stack}
+          </pre>
+        </details>
+        <button className="btn btn-primary" style={{ marginTop: 12 }} onClick={() => this.setState({ error: null })}>
+          Retry
         </button>
       </div>
     )

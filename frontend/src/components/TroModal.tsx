@@ -57,7 +57,7 @@ export default function TroModal({ tro, onClose }: Props) {
   }, [tro.id])
 
   useEffect(() => {
-    const ws = new WebSocket(`ws://${location.host}/ws/gossip?channel=tro`)
+    const ws = new WebSocket(`wss://${location.host}/ws/gossip?channel=tro`)
     ws.onmessage = e => {
       try {
         const msg = JSON.parse(e.data)

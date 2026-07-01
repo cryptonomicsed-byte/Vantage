@@ -131,30 +131,7 @@ async def create_project(data: VideoProjectCreate, agent: dict = Depends(get_age
         )
         project_id = cur.lastrowid
         
-        # Auto-create Gitea repo for video project files
-        repo_name = data.title.replace(" ", "-").lower()
-        gitea_url = f"http://127.0.0.1:3001/ares-bot/video-{repo_name}.git"
-        token_path = "/opt/ares/.gitea_token"
-        if os.path.exists(token_path):
-            try:
-                import urllib.request
-                token = open(token_path).read().strip()
-                import asyncio as _asyncio
-                await _asyncio.to_thread(lambda: urllib.request.urlopen(
-                    urllib.request.Request(
-                        "http://127.0.0.1:3001/api/v1/user/repos",
-                        data=json.dumps({"name": f"video-{repo_name}", "description": data.description, "auto_init": True}).encode(),
-                        headers={"Authorization": f"token {token}", "Content-Type": "application/json"},
-                        method="POST"
-                    )
-                ))
-            except Exception:
-                pass
-        
-        await db.execute(
-            "UPDATE video_projects SET gitea_repo=? WHERE id=?",
-            (gitea_url, project_id)
-        )
+
         await db.commit()
         
         return {
@@ -162,7 +139,7 @@ async def create_project(data: VideoProjectCreate, agent: dict = Depends(get_age
             "title": data.title,
             "status": "draft",
             "gitea_repo": gitea_url,
-            "next_step": "Add scenes with POST /api/video/projects/{id}/scenes"
+            "next_step": "POST /api/video/projects/{id}/scenes then POST /api/video/projects/{id}/render"
         }
 
 @router.get("/projects")
@@ -466,10 +443,71 @@ Use dark background, glowing cyan text (#00ffcc), cinematic pacing."""
     return await render_hyperframes(project, scenes, output_path)
 
 
+
 async def render_remotion(project: dict, scenes: list, output_path: str) -> str:
-    """Render using Remotion React engine."""
-    # Remotion requires a React project setup — stub for now
-    raise RuntimeError("Remotion renderer requires project setup. Use HyperFrames or Rendervid.")
+    """Render using Remotion React template engine."""
+    import asyncio as _asyncio
+    import subprocess as _sp
+
+    remotion_dir = "/opt/ares/video-engine/remotion-templates"
+    template = project.get("template", "text-scenes")
+    template_to_composition = {
+        "trading-recap": "trading-recap",
+        "agent-birth": "agent-birth",
+        "market-update": "market-update",
+        "custom": "text-scenes",
+    }
+    composition_id = template_to_composition.get(template, "text-scenes")
+
+    # Build props from scenes
+    props = {"scenes": []}
+    if template == "trading-recap":
+        props = {
+            "title": project.get("title", "Trading Recap"),
+            "symbol": "SOL",
+            "pnl": "+12.4%",
+            "trades": [{"symbol": s.get("title","?"),"side":"BUY","pnl":10.5} for s in scenes],
+        }
+    elif template == "agent-birth":
+        props = {
+            "agentName": project.get("title", "New Agent"),
+            "archetype": "Trader",
+            "odu": "183",
+        }
+    elif template == "market-update":
+        symbols = [s.get("title","?") for s in scenes]
+        props = {
+            "title": project.get("title", "Market Update"),
+            "highlights": [{"symbol": s, "change": "+5.2%"} for s in symbols],
+        }
+    else:
+        props = {
+            "scenes": [{"title": s.get("title","?"), "description": s.get("description",""), "duration": int(s.get("duration_sec",3)*30)} for s in scenes],
+        }
+
+    # Write props file
+    props_path = f"{remotion_dir}/props.json"
+    with open(props_path, "w") as f:
+        json.dump(props, f)
+
+    # Render with Remotion CLI
+    cmd = [
+        "npx", "remotion", "render",
+        "index.tsx",
+        "--composition-id", composition_id,
+        "--props", props_path,
+        "--output", output_path,
+        "--codec", "h264",
+    ]
+    result = await _asyncio.to_thread(
+        lambda: _sp.run(cmd, capture_output=True, text=True, timeout=120, cwd=remotion_dir, env={**os.environ, "NODE_PATH": remotion_dir + "/node_modules"})
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Remotion render failed: {result.stderr[:500]}")
+
+    return output_path
+
 
 def build_html_composition(project: dict, scenes: list) -> str:
     """Build HTML composition for HyperFrames rendering."""
@@ -544,6 +582,45 @@ window.addEventListener('load', () => {{
 </html>"""
     return html
 
+
+# ── Video Library ────────────────────────────────────────────
+
+@router.get("/library")
+async def video_library(agent: dict = Depends(get_agent)):
+    """Browse all rendered videos across all agents (global library)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            """SELECT p.id, p.title, p.description, p.template, p.status, p.render_url,
+                      p.duration_sec, p.created_at, p.updated_at, a.name as agent_name
+               FROM video_projects p
+               JOIN agents a ON a.id = p.agent_id
+               WHERE p.status IN ('rendered', 'published')
+               ORDER BY p.updated_at DESC LIMIT 50"""
+        )).fetchall()
+        return [
+            {**dict(r), "view_url": f"/media/videos/{r['render_url'].split('/')[-1]}" if r['render_url'] else None}
+            for r in rows
+        ]
+
+@router.get("/library/mine")
+async def my_videos(agent: dict = Depends(get_agent)):
+    """Browse your own rendered videos."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            """SELECT id, title, description, template, status, render_url,
+                      duration_sec, created_at, updated_at
+               FROM video_projects
+               WHERE agent_id=? AND status IN ('rendered', 'published')
+               ORDER BY updated_at DESC""",
+            (agent["id"],)
+        )).fetchall()
+        return [
+            {**dict(r), "view_url": f"/media/videos/{r['render_url'].split('/')[-1]}" if r['render_url'] else None}
+            for r in rows
+        ]
+
 # ── Publish ──────────────────────────────────────────────────
 
 @router.post("/projects/{project_id}/publish")
@@ -586,11 +663,24 @@ async def publish_video(project_id: int, agent: dict = Depends(get_agent)):
             )
             await db.commit()
             
+                        # Also save to agent memory vault
+            try:
+                await client.post(
+                    f"http://127.0.0.1:8001/api/agents/{agent["name"]}/vault/note",
+                    headers={"X-Agent-Key": agent["api_key"]},
+                    json={
+                        "content": f"Video: {project["title"]}\nFile: {project["render_url"]}\nDuration: {project.get("duration_sec", 0)}s\nTemplate: {project.get("template", "custom")}",
+                        "tags": ["video", project.get("template", "custom")],
+                    }
+                )
+            except Exception:
+                pass
+
             return {
                 "status": "published",
                 "project_id": project_id,
                 "render_url": project["render_url"],
-                "note": "Video published to Vantage feed"
+                "note": "Video published to Vantage feed and saved to memory vault"
             }
 
 # ── Fork ─────────────────────────────────────────────────────

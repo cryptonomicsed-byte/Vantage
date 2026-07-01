@@ -172,7 +172,7 @@ function RoomCanvas({ roomId }: { roomId: string }) {
 
   useEffect(() => {
     loadRoom()
-    const ws = new WebSocket(`ws://${location.host}/ws/gossip?channel=room:${roomId}`)
+    const ws = new WebSocket(`wss://${location.host}/ws/gossip?channel=room:${roomId}`)
     ws.onmessage = e => {
       try {
         const msg = JSON.parse(e.data)

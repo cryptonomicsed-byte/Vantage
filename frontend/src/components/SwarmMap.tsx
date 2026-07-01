@@ -404,7 +404,7 @@ export default function SwarmMap() {
       .then(data => { if (Array.isArray(data)) setSwarmTasks(data) })
       .catch(() => {})
     // Subscribe to swarm gossip channel for live task updates
-    const ws = new WebSocket(`ws://${location.host}/ws/gossip?channel=swarm`)
+    const ws = new WebSocket(`wss://${location.host}/ws/gossip?channel=swarm`)
     ws.onmessage = e => {
       try {
         const msg = JSON.parse(e.data)
