@@ -825,6 +825,9 @@ async def create_text_post(
         except Exception:
             tags_list = []
     tags_json = _json.dumps(tags_list)
+    content_type = str(body.get("content_type", "text"))[:50]
+    stream_url = str(body.get("stream_url", ""))[:500]
+    thumbnail_url = str(body.get("thumbnail_url", ""))[:500]
 
     initial_status = 'ready'
     if draft:
@@ -841,9 +844,11 @@ async def create_text_post(
         cur = await db.execute(
             """INSERT INTO broadcasts
                (agent_id, title, description, content_type, status, post_content,
+                stream_url, thumbnail_url,
                 model_name, model_provider, generation_cost, tags, series_id, publish_at)
-               VALUES (?,?,?,'text',?,?,?,?,?,?,?,?)""",
-            (agent["id"], title, description, initial_status, content,
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (agent["id"], title, description, content_type, initial_status, content,
+             stream_url, thumbnail_url,
              model_name, model_provider, generation_cost, tags_json, series_id, publish_at),
         )
         broadcast_id = cur.lastrowid
@@ -854,11 +859,11 @@ async def create_text_post(
             "broadcast_id": broadcast_id,
             "agent_name": agent["name"],
             "title": title,
-            "content_type": "text",
-            "stream_url": "",
-            "thumbnail_url": "",
+            "content_type": content_type,
+            "stream_url": stream_url,
+            "thumbnail_url": thumbnail_url,
         })
-        asyncio.create_task(_fire_webhooks(agent["id"], "broadcast_ready", {"broadcast_id": broadcast_id, "title": title, "content_type": "text"}))
+        asyncio.create_task(_fire_webhooks(agent["id"], "broadcast_ready", {"broadcast_id": broadcast_id, "title": title, "content_type": content_type}))
     asyncio.create_task(_append_receipt(str(agent["name"]), "publish_text", {"broadcast_id": broadcast_id, "title": title, "status": initial_status}, tier=agent.get("tier", 0)))
     # Auto-export to memory vault if enabled
     try:
@@ -1406,6 +1411,9 @@ async def create_graph_post(
         except Exception:
             tags_list = []
     tags_json = _json.dumps(tags_list)
+    content_type = str(body.get("content_type", "text"))[:50]
+    stream_url = str(body.get("stream_url", ""))[:500]
+    thumbnail_url = str(body.get("thumbnail_url", ""))[:500]
 
     initial_status = 'ready'
     if draft:
@@ -9278,6 +9286,71 @@ async def restore_platform_snapshot(snapshot_id: int, _: str = Depends(get_admin
         "restored_tables": restored,
         "skipped_tables": [t for t in tables_list if t not in safe_tables],
     }
+
+
+
+@router.patch("/me/llm-config")
+async def update_llm_config(
+    provider: str | None = None,
+    model: str | None = None,
+    api_key: str | None = None,
+    config_json: str | None = None,
+    agent: dict = Depends(get_agent),
+):
+    """Update the agent's LLM configuration. API key is encrypted at rest."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        params = []
+        sets = []
+
+        if provider is not None:
+            sets.append("llm_provider = ?")
+            params.append(provider)
+        if model is not None:
+            sets.append("llm_model = ?")
+            params.append(model)
+        if api_key is not None:
+            from .llm_crypto import encrypt
+            sets.append("llm_api_key_encrypted = ?")
+            params.append(encrypt(api_key))
+        if config_json is not None:
+            sets.append("llm_config_json = ?")
+            params.append(config_json)
+
+        if not sets:
+            return {"ok": True, "message": "No fields to update", "config": await _get_llm_config(db, agent["id"])}
+
+        params.append(agent["id"])
+        sql = f"UPDATE agents SET {', '.join(sets)} WHERE id = ?"
+        await db.execute(sql, params)
+        await db.commit()
+
+        config = await _get_llm_config(db, agent["id"])
+        return {"ok": True, "config": config}
+
+
+async def _get_llm_config(db, agent_id: int) -> dict:
+    row = await (await db.execute(
+        "SELECT llm_provider, llm_model, llm_config_json FROM agents WHERE id = ?",
+        (agent_id,),
+    )).fetchone()
+    if row:
+        return {
+            "provider": row["llm_provider"] or "",
+            "model": row["llm_model"] or "",
+            "config_json": row["llm_config_json"] or "",
+            "api_key_set": bool(row["llm_provider"]),  # approximate: shows if provider is set
+        }
+    return {}
+
+
+@router.get("/me/llm-config")
+async def get_llm_config(agent: dict = Depends(get_agent)):
+    """Get the agent's current LLM configuration (API key hidden)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        config = await _get_llm_config(db, agent["id"])
+        return {"ok": True, "config": config}
 
 
 @router.get("/info")

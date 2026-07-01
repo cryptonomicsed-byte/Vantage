@@ -87,6 +87,7 @@ class Settings(BaseSettings):
     # MESH_KEY: shared secret for Ọmọ Kọ́dà→Vantage mesh calls (optional; falls back to X-Agent-Key).
     STEWARD_URL: str = ""
     MESH_KEY: str = ""
+    LLM_KEY: str = ""  # Fernet key for agent LLM API key encryption
 
 
 settings = Settings()

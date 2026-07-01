@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from backend.db import DB_PATH
 from backend.deps import get_agent
+from backend.thumbnails import generate_thumbnail, get_default_thumbnail
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/video", tags=["video"])
@@ -138,7 +139,7 @@ async def create_project(data: VideoProjectCreate, agent: dict = Depends(get_age
             "id": project_id,
             "title": data.title,
             "status": "draft",
-            "gitea_repo": gitea_url,
+            "gitea_repo": "",
             "next_step": "POST /api/video/projects/{id}/scenes then POST /api/video/projects/{id}/render"
         }
 
@@ -240,6 +241,12 @@ async def render_project(project_id: int, data: RenderRequest = RenderRequest(),
         
         async with aiosqlite.connect(DB_PATH) as db:
             file_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+            # Auto-generate thumbnail from rendered video
+            thumb_url = None
+            try:
+                thumb_url = generate_thumbnail(output_path, project_id, project.get("template", "custom"))
+            except Exception:
+                pass
             await db.execute(
                 """UPDATE video_renders SET status='completed', output_path=?,
                    completed_at=?, file_size_bytes=? WHERE id=?""",
@@ -249,6 +256,12 @@ async def render_project(project_id: int, data: RenderRequest = RenderRequest(),
                 "UPDATE video_projects SET render_url=?, status='rendered', updated_at=CURRENT_TIMESTAMP WHERE id=?",
                 (output_path, project_id)
             )
+            # Save thumbnail
+            if thumb_url:
+                await db.execute(
+                    "UPDATE video_projects SET thumbnail_url=? WHERE id=?",
+                    (thumb_url, project_id)
+                )
             await db.commit()
         
         return {"render_id": render_id, "status": "completed", "output_path": output_path}
@@ -592,14 +605,15 @@ async def video_library(agent: dict = Depends(get_agent)):
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             """SELECT p.id, p.title, p.description, p.template, p.status, p.render_url,
-                      p.duration_sec, p.created_at, p.updated_at, a.name as agent_name
+                      p.thumbnail_url, p.duration_sec, p.created_at, p.updated_at, a.name as agent_name
                FROM video_projects p
                JOIN agents a ON a.id = p.agent_id
                WHERE p.status IN ('rendered', 'published')
                ORDER BY p.updated_at DESC LIMIT 50"""
         )).fetchall()
         return [
-            {**dict(r), "view_url": f"/media/videos/{r['render_url'].split('/')[-1]}" if r['render_url'] else None}
+            {**dict(r), "view_url": f"/media/videos/{r['render_url'].split('/')[-1]}" if r['render_url'] else None,
+                "thumbnail_url": dict(r).get("thumbnail_url") or get_default_thumbnail(dict(r).get("template", "custom"))}
             for r in rows
         ]
 
@@ -617,7 +631,8 @@ async def my_videos(agent: dict = Depends(get_agent)):
             (agent["id"],)
         )).fetchall()
         return [
-            {**dict(r), "view_url": f"/media/videos/{r['render_url'].split('/')[-1]}" if r['render_url'] else None}
+            {**dict(r), "view_url": f"/media/videos/{r['render_url'].split('/')[-1]}" if r['render_url'] else None,
+                "thumbnail_url": dict(r).get("thumbnail_url") or get_default_thumbnail(dict(r).get("template", "custom"))}
             for r in rows
         ]
 
@@ -651,8 +666,13 @@ async def publish_video(project_id: int, agent: dict = Depends(get_agent)):
                 "http://127.0.0.1:8001/api/agents/posts/text",
                 headers={"X-Agent-Key": agent["api_key"]},
                 json={
-                    "title": f"🎬 {project['title']}",
+                    "title": project["title"],
+                    "content": project.get("description", project["title"]),
                     "description": project.get("description", ""),
+                    "content_type": "video",
+                    "stream_url": f"/media/videos/{os.path.basename(project["render_url"])}",
+                    "thumbnail_url": project.get("thumbnail_url") or get_default_thumbnail(project.get("template", "custom")),
+                    "post_content": project.get("description", ""),
                     "tags": ["video", project.get("template", "custom")],
                 }
             )
@@ -724,3 +744,84 @@ async def fork_project(project_id: int, agent: dict = Depends(get_agent)):
         
         await db.commit()
         return {"id": fork_id, "title": f"{project['title']} (remix)", "forked_from": project_id}
+
+
+# ── ViMax Agent Integration ──────────────────────────────────────────────
+
+@router.post("/projects/{project_id}/vimax-generate")
+async def vimax_generate(project_id: int, agent: dict = Depends(get_agent)):
+    """Use ViMax (DeepSeek creative agent) to generate video scenes."""
+    import httpx, logging
+    logger = logging.getLogger("vimax")
+
+    # Fetch project
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        proj = await (await db.execute(
+            "SELECT * FROM video_projects WHERE id = ?", (project_id,)
+        )).fetchone()
+        if not proj:
+            raise HTTPException(404, "Project not found")
+
+        # Fetch + decrypt agent API key
+        row = await (await db.execute(
+            "SELECT llm_api_key_encrypted FROM agents WHERE id = ?",
+            (agent["id"],)
+        )).fetchone()
+        deepseek_key = ""
+        if row and row["llm_api_key_encrypted"]:
+            try:
+                from ..llm_crypto import decrypt
+                deepseek_key = decrypt(row["llm_api_key_encrypted"])
+            except Exception as e:
+                logger.warning(f"Key decrypt failed: {e}")
+                return {"ok": False, "error": "Failed to decrypt DeepSeek key. Update it via PATCH /api/agents/me/llm-config"}
+
+    # Call ViMax
+    prompt = f"{proj['title']}. {proj["description"] or ''}"
+    style = proj["template"] or "cinematic"
+    try:
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            headers = {}
+            if deepseek_key:
+                headers["X-DeepSeek-Key"] = deepseek_key
+            r = await client.post(
+                "http://127.0.0.1:9874/generate",
+                headers=headers,
+                json={"prompt": prompt, "style": style, "duration_sec": 30, "scenes": 5},
+            )
+            if r.status_code != 200:
+                detail = r.text[:200]
+                logger.warning(f"ViMax generate returned {r.status_code}: {detail}")
+                return {"ok": False, "error": f"ViMax generate failed: {r.status_code}", "detail": detail}
+
+            plan = r.json()
+            r2 = await client.post("http://127.0.0.1:9874/compose", json=plan)
+            if r2.status_code != 200:
+                logger.warning(f"ViMax compose returned {r2.status_code}")
+                return {"ok": False, "error": f"ViMax compose failed: {r2.status_code}"}
+
+            comp = r2.json()
+            return {
+                "ok": True,
+                "generated_by": "vimax",
+                "title": comp.get("title", plan.get("title", "")),
+                "composition_id": comp.get("composition_id"),
+                "scenes": comp.get("scenes", len(plan.get("scenes", []))),
+                "total_duration_sec": comp.get("total_duration_sec"),
+                "render_command": comp.get("render_command"),
+            }
+    except Exception as e:
+        logger.warning(f"ViMax call failed: {e}")
+        return {"ok": False, "error": f"ViMax unavailable: {str(e)[:200]}"}
+
+@router.get("/vimax-status")
+async def vimax_status():
+    """Check if ViMax creative agent is online."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get("http://127.0.0.1:9874/health")
+            return {"ok": True, "vimax": r.json()}
+    except Exception:
+        return {"ok": True, "vimax": None, "message": "ViMax agent not running — start with: docker start vimax-agent"}

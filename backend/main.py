@@ -494,6 +494,8 @@ app.include_router(memory_vault_router)
 from .routers.trading import router as trading_router
 app.include_router(trading_router)
 from .routers.intel import router as intel_router
+from .routers.code import router as code_router
+app.include_router(code_router)
 app.include_router(intel_router)
 from .routers.orchestrator import router as orchestrator_router
 from .routers.collectives import router as collectives_router
@@ -801,6 +803,7 @@ async def platform_capacity():
 # Serve media files
 settings.MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/media/videos", StaticFiles(directory="/opt/ares/media/videos"), name="media_videos")
+app.mount("/media/thumbnails", StaticFiles(directory="/opt/ares/media/thumbnails"), name="media_thumbnails")
 app.mount("/media/agents", StaticFiles(directory=str(settings.MEDIA_DIR)), name="media")
 
 # Serve frontend (must be last)
@@ -808,6 +811,8 @@ app.mount("/media/agents", StaticFiles(directory=str(settings.MEDIA_DIR)), name=
 @app.get("/dashboard")
 @app.get("/swarm") 
 @app.get("/video")
+@app.get("/code")
+@app.get("/code/{path:path}")
 @app.get("/trading")
 @app.get("/copilot")
 @app.get("/collectives")
@@ -831,6 +836,7 @@ async def serve_spa():
     if index.exists():
         return FileResponse(index)
     return {"detail": "SPA not built"}
+
 
 
 if settings.WEBUI_DIR.exists():
