@@ -63,8 +63,19 @@ async def update_profile(request: Request, agent: dict = Depends(get_agent)):
     bio = str(body.get("bio", agent.get("bio", "")))[:500]
     manifesto = str(body.get("manifesto", agent.get("manifesto", "")))[:5000]
     soul_manifest = body.get("soul_manifest")
-    
-    soul_manifest_str = _json.dumps(soul_manifest) if soul_manifest is not None else None
+
+    # soul_manifest may arrive as a JSON object/array, or as a JSON-encoded
+    # string. Normalise to structured data before storing so it round-trips
+    # correctly — double-encoding a string would read back as a str and break
+    # capability-schema parsing. Reject strings that aren't valid JSON.
+    soul_manifest_str = None
+    if soul_manifest is not None:
+        if isinstance(soul_manifest, str):
+            try:
+                soul_manifest = _json.loads(soul_manifest)
+            except (ValueError, TypeError):
+                raise HTTPException(422, "soul_manifest must be valid JSON")
+        soul_manifest_str = _json.dumps(soul_manifest)
 
     async with aiosqlite.connect(DB_PATH) as db:
         if soul_manifest_str is not None:
