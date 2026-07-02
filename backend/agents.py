@@ -5283,7 +5283,7 @@ async def push_trace(request: Request, agent: dict = Depends(get_agent)):
         )
         trace_id = cur.lastrowid
         await db.commit()
-    if settings.JULIA_MEMORY_URL:
+    if getattr(settings, "JULIA_MEMORY_URL", ""):
         asyncio.create_task(MemoryIntelligence(settings.JULIA_MEMORY_URL).feed_trace({
             "agent_id": agent["name"],
             "trace_type": trace_type,

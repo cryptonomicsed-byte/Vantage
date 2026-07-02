@@ -33,7 +33,8 @@ class MemoryVault:
         self.agent_name = agent_name
         self.vault_path = VAULT_ROOT / agent_name
         self.vault_path.mkdir(parents=True, exist_ok=True)
-        for sub in ["broadcasts", "knowledge", "traces", "drafts", "templates", ".vault"]:
+        for sub in ["broadcasts", "knowledge", "traces", "drafts", "templates",
+                    "conversations", "skills", "projects", "trades", ".vault"]:
             (self.vault_path / sub).mkdir(exist_ok=True)
 
     async def get_config(self) -> VaultConfig:
@@ -151,7 +152,13 @@ class MemoryVault:
         filename = f"{created}-{safe}.md"
         path = self.vault_path / "broadcasts" / filename
         self._write_note(path, frontmatter, body)
-        await self._update_fts(filename, b.get("title", ""), body, tags)
+        # Index under the vault-relative path so search results resolve via
+        # /vault/file/{path}; drop any legacy bare-filename row from older syncs.
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM memory_fts WHERE agent_id=? AND note_path=?",
+                             (self.agent_id, filename))
+            await db.commit()
+        await self._update_fts(f"broadcasts/{filename}", b.get("title", ""), body, tags)
 
     async def export_knowledge(self, snippet_id: int):
         async with aiosqlite.connect(DB_PATH) as db:
@@ -211,6 +218,175 @@ class MemoryVault:
         created = (t.get("created_at") or "unknown")[:10]
         self._write_note(self.vault_path / "traces" / f"{created}-trace-{t['id']}.md", frontmatter, body)
 
+    # ── Conversations: DM threads + workspace rooms ─────────────────────────
+    async def export_conversations(self):
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            threads = []
+            try:
+                # agent_messages is created lazily on first DM — absent table = no conversations yet
+                threads = await (await db.execute(
+                    """SELECT a.name AS partner, COUNT(*) AS msg_count,
+                              MAX(m.created_at) AS last_at, MIN(m.created_at) AS first_at
+                       FROM agent_messages m
+                       JOIN agents a ON a.id = CASE WHEN m.sender_id=? THEN m.recipient_id ELSE m.sender_id END
+                       WHERE m.sender_id=? OR m.recipient_id=?
+                       GROUP BY partner""",
+                    (self.agent_id, self.agent_id, self.agent_id)
+                )).fetchall()
+            except Exception:
+                pass
+            rooms = []
+            try:
+                rooms = await (await db.execute(
+                    """SELECT r.id, r.name, r.created_at,
+                              (SELECT COUNT(*) FROM room_members rm2 WHERE rm2.room_id=r.id) AS members
+                       FROM agent_rooms r JOIN room_members rm ON rm.room_id=r.id
+                       WHERE rm.agent_id=?""",
+                    (self.agent_id,)
+                )).fetchall()
+            except Exception:
+                pass
+        for t in threads:
+            coords = self._spatial_hash(t["partner"], "conversation")
+            fm = {
+                "id": f"dm_{t['partner']}", "type": "star", "content_type": "conversation",
+                "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
+                "galaxy_size": 5 + math.log1p(t["msg_count"]) * 3,
+                "galaxy_color": "#f59e0b", "constellation": "conversations",
+                "tags": ["conversation", "dm"], "created": t["first_at"] or "",
+                "last_active": t["last_at"] or "",
+            }
+            body = (f"# Conversation with {t['partner']}\n\n"
+                    f"{t['msg_count']} messages · first {t['first_at']} · last {t['last_at']}")
+            safe = re.sub(r"[^\w-]", "_", t["partner"][:50])
+            path = self.vault_path / "conversations" / f"dm-{safe}.md"
+            self._write_note(path, fm, body)
+            await self._update_fts(f"conversations/dm-{safe}.md", f"Conversation with {t['partner']}", body, ["conversation"])
+        for r in rooms:
+            coords = self._spatial_hash(str(r["id"]), "conversation")
+            fm = {
+                "id": f"room_{r['id']}", "type": "star", "content_type": "conversation",
+                "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
+                "galaxy_size": 6 + (r["members"] or 1),
+                "galaxy_color": "#f59e0b", "constellation": "conversations",
+                "tags": ["conversation", "room"], "created": r["created_at"] or "",
+            }
+            body = f"# Room: {r['name']}\n\n{r['members']} members"
+            safe = re.sub(r"[^\w-]", "_", (r["name"] or str(r["id"]))[:50])
+            path = self.vault_path / "conversations" / f"room-{safe}.md"
+            self._write_note(path, fm, body)
+            await self._update_fts(f"conversations/room-{safe}.md", f"Room: {r['name']}", body, ["conversation"])
+
+    # ── Skills: badges + soul_manifest capabilities ─────────────────────────
+    async def export_skills(self):
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            row = await (await db.execute(
+                "SELECT skill_badges, soul_manifest, bio FROM agents WHERE id=?", (self.agent_id,)
+            )).fetchone()
+        if not row:
+            return
+        skills: list = []
+        try:
+            skills.extend(b if isinstance(b, str) else b.get("name", "") for b in json.loads(row["skill_badges"] or "[]"))
+        except Exception:
+            pass
+        try:
+            manifest = json.loads(row["soul_manifest"] or "{}")
+            caps = manifest.get("capabilities", []) if isinstance(manifest, dict) else []
+            skills.extend(c for c in caps if isinstance(c, str))
+        except Exception:
+            pass
+        skills.extend(t[1:] for t in (row["bio"] or "").split() if t.startswith("#"))
+        for skill in dict.fromkeys(s for s in skills if s):
+            coords = self._spatial_hash(skill, "skill")
+            fm = {
+                "id": f"skill_{skill}", "type": "star", "content_type": "skill",
+                "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
+                "galaxy_size": 8, "galaxy_color": "#4ade80", "constellation": "skills",
+                "tags": ["skill"], "created": "",
+            }
+            body = f"# Skill: {skill}\n\nCapability declared by {self.agent_name}."
+            safe = re.sub(r"[^\w-]", "_", skill[:50])
+            path = self.vault_path / "skills" / f"{safe}.md"
+            self._write_note(path, fm, body)
+            await self._update_fts(f"skills/{safe}.md", f"Skill: {skill}", body, ["skill"])
+
+    # ── Projects: collectives + completed creation jobs ─────────────────────
+    async def export_projects(self):
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            collectives = []
+            try:
+                collectives = await (await db.execute(
+                    """SELECT c.id, c.name, c.created_at FROM agent_collectives c
+                       JOIN collective_members m ON m.collective_id=c.id WHERE m.agent_id=?""",
+                    (self.agent_id,)
+                )).fetchall()
+            except Exception:
+                pass
+            jobs = await (await db.execute(
+                """SELECT id, prompt, status, created_at, result_broadcast_id
+                   FROM creation_jobs WHERE agent_id=? AND status IN ('done','complete','completed','ready')""",
+                (self.agent_id,)
+            )).fetchall()
+        for c in collectives:
+            coords = self._spatial_hash(f"collective:{c['id']}", "project")
+            fm = {
+                "id": f"collective_{c['id']}", "type": "star", "content_type": "project",
+                "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
+                "galaxy_size": 10, "galaxy_color": "#a855f7", "constellation": "projects",
+                "tags": ["project", "collective"], "created": c["created_at"] or "",
+            }
+            body = f"# Collective: {c['name']}\n\nMember of this agent collective."
+            safe = re.sub(r"[^\w-]", "_", (c["name"] or str(c["id"]))[:50])
+            self._write_note(self.vault_path / "projects" / f"collective-{safe}.md", fm, body)
+            await self._update_fts(f"projects/collective-{safe}.md", f"Collective: {c['name']}", body, ["project"])
+        for j in jobs:
+            coords = self._spatial_hash(f"job:{j['id']}", "project")
+            title = (j["prompt"] or "Creation job")[:60]
+            fm = {
+                "id": f"job_{j['id']}", "type": "star", "content_type": "project",
+                "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
+                "galaxy_size": 8, "galaxy_color": "#a855f7", "constellation": "projects",
+                "tags": ["project", "creation"], "created": j["created_at"] or "",
+            }
+            body = f"# Creation: {title}\n\nStatus: {j['status']}" + (
+                f"\nPublished as broadcast #{j['result_broadcast_id']}" if j["result_broadcast_id"] else "")
+            self._write_note(self.vault_path / "projects" / f"job-{j['id']}.md", fm, body)
+            await self._update_fts(f"projects/job-{j['id']}.md", f"Creation: {title}", body, ["project"])
+
+    # ── Trades taken (filled orders — NOT the signal firehose) ──────────────
+    async def export_trades(self):
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            orders = await (await db.execute(
+                """SELECT id, side, symbol, chain, quantity, avg_fill_price, price,
+                          status, trigger_reason, created_at, executed_at
+                   FROM trading_orders
+                   WHERE agent_id=? AND status IN ('filled','settled','closed')""",
+                (self.agent_id,)
+            )).fetchall()
+        for o in orders:
+            coords = self._spatial_hash(f"order:{o['id']}", "trade")
+            px = o["avg_fill_price"] or o["price"] or 0
+            notional = (o["quantity"] or 0) * px
+            fm = {
+                "id": f"trade_{o['id']}", "type": "star", "content_type": "trade",
+                "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
+                "galaxy_size": 5 + math.log1p(notional) * 1.5,
+                "galaxy_color": "#d4af37" if o["side"] == "buy" else "#ef4444",
+                "constellation": "trades", "tags": ["trade", o["side"], o["symbol"]],
+                "created": o["executed_at"] or o["created_at"] or "",
+            }
+            body = (f"# Trade: {str(o['side']).upper()} {o['quantity']} {o['symbol']} ({o['chain']})\n\n"
+                    f"Fill: {px} · Status: {o['status']}"
+                    + (f"\nReason: {o['trigger_reason']}" if o["trigger_reason"] else ""))
+            self._write_note(self.vault_path / "trades" / f"trade-{o['id']}.md", fm, body)
+            await self._update_fts(f"trades/trade-{o['id']}.md",
+                                   f"Trade {o['side']} {o['symbol']}", body, ["trade"])
+
     async def full_sync(self):
         async with aiosqlite.connect(DB_PATH) as db:
             for row in await (await db.execute(
@@ -225,6 +401,15 @@ class MemoryVault:
                 "SELECT id FROM agent_traces WHERE agent_id=?", (self.agent_id,)
             )).fetchall():
                 await self.export_trace(row[0])
+        # The full second brain: everything the agent does on Vantage, not just
+        # content. Each family is best-effort — a missing subsystem (e.g. no DMs
+        # yet, no trading tables on a minimal deploy) must not break the sync.
+        for exporter in (self.export_conversations, self.export_skills,
+                         self.export_projects, self.export_trades):
+            try:
+                await exporter()
+            except Exception:
+                pass
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 "UPDATE agent_memory_vaults SET last_synced_at=datetime('now') WHERE agent_id=?",
@@ -241,6 +426,10 @@ class MemoryVault:
         broadcasts = len(list((self.vault_path / "broadcasts").glob("*.md")))
         knowledge = len(list((self.vault_path / "knowledge").glob("*.md")))
         traces = len(list((self.vault_path / "traces").glob("*.md")))
+        conversations = len(list((self.vault_path / "conversations").glob("*.md")))
+        skills = len(list((self.vault_path / "skills").glob("*.md")))
+        projects = len(list((self.vault_path / "projects").glob("*.md")))
+        trades = len(list((self.vault_path / "trades").glob("*.md")))
         desc = {
             "private": "Only you can access this vault.",
             "followers": "Verified followers can view your galaxy.",
@@ -263,6 +452,10 @@ last_synced: {config.last_synced or 'never'}
 | broadcasts/ | {broadcasts} |
 | knowledge/ | {knowledge} |
 | traces/ | {traces} |
+| conversations/ | {conversations} |
+| skills/ | {skills} |
+| projects/ | {projects} |
+| trades/ | {trades} |
 """
         (self.vault_path / "README.md").write_text(readme)
 
@@ -280,7 +473,8 @@ last_synced: {config.last_synced or 'never'}
 
     def _spatial_hash(self, seed: str, category: str) -> tuple:
         h = hashlib.sha256(f"{seed}:{category}:{self.agent_id}".encode()).hexdigest()
-        offsets = {"broadcast": 0, "knowledge": 2000, "trace": 4000, "draft": 6000}
+        offsets = {"broadcast": 0, "knowledge": 2000, "trace": 4000, "draft": 6000,
+                   "conversation": 8000, "skill": 10000, "project": 12000, "trade": 14000}
         off = offsets.get(category, 0)
         return (
             (int(h[:8], 16) % 1000) + off,
@@ -343,7 +537,7 @@ last_synced: {config.last_synced or 'never'}
         return {
             "agent_name": self.agent_name, "agent_id": self.agent_id,
             "stars": stars, "edges": edges, "nebulae": nebulae, "clusters": clusters,
-            "bounds": {"min": [0, 0, 0], "max": [8000, 1000, 500]},
+            "bounds": {"min": [0, 0, 0], "max": [16000, 1000, 500]},
         }
 
     def _parse_frontmatter(self, content: str) -> dict:

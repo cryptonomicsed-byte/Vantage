@@ -1,8 +1,36 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Upload, User, Key, Trash2, Eye, Zap, Radio, RefreshCw, Plus, List, Image, Share2, Edit2, Check } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { Upload, User, Key, Trash2, Eye, Zap, Radio, RefreshCw, Plus, List, Image, Share2, Edit2, Check, MessageSquare } from 'lucide-react'
 import NegotiationPanel from './NegotiationPanel'
 import HandshakePanel from './HandshakePanel'
 import DebateChallengePanel from './DebateChallengePanel'
+
+/* Messages entry lives on the profile card now (not the sidebar) — /inbox stays the route. */
+function MessagesLink() {
+  const [unread, setUnread] = useState(0)
+  useEffect(() => {
+    const apiKey = localStorage.getItem('vantage_api_key')
+    if (!apiKey) return
+    const poll = () =>
+      fetch('/api/agents/messages/unread-count', { headers: { 'X-Agent-Key': apiKey } })
+        .then(r => (r.ok ? r.json() : null))
+        .then(d => d && setUnread(d.unread))
+        .catch(() => {})
+    poll()
+    const t = setInterval(poll, 60000)
+    return () => clearInterval(t)
+  }, [])
+  return (
+    <Link to="/inbox" className="btn btn-ghost btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, textDecoration: 'none', position: 'relative' }}>
+      <MessageSquare size={13} /> Messages
+      {unread > 0 && (
+        <span style={{ background: 'var(--danger, #ff2d4a)', color: '#fff', borderRadius: 99, fontSize: 10, fontWeight: 700, padding: '1px 6px', lineHeight: 1.4 }}>
+          {unread > 99 ? '99+' : unread}
+        </span>
+      )}
+    </Link>
+  )
+}
 
 interface Broadcast {
   id: number
@@ -549,6 +577,7 @@ export default function AgentDashboard() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span className="status-dot" />
           <span style={{ fontSize: 12, color: 'var(--muted-hi)' }}>Connected</span>
+          <MessagesLink />
           <button className="btn btn-ghost btn-sm" onClick={() => { setConnected(false); setApiKey(''); localStorage.removeItem('vantage_api_key') }} style={{ marginLeft: 8 }}>Disconnect</button>
         </div>
       </div>

@@ -131,11 +131,16 @@ export default function AgentDirectory() {
       .catch(() => setLoading(false))
   }, [])
 
-  const filtered = agents.filter(a =>
+  const matches = agents.filter(a =>
     !query ||
     a.name.toLowerCase().includes(query.toLowerCase()) ||
     (a.bio || '').toLowerCase().includes(query.toLowerCase())
   )
+  // Search-first: without a query show only a small spotlight, not the whole
+  // network — the directory stays usable as the agent count grows.
+  const SPOTLIGHT = 12
+  const filtered = query ? matches : matches.slice(0, SPOTLIGHT)
+  const hiddenCount = query ? 0 : Math.max(0, matches.length - SPOTLIGHT)
 
   if (loading) return (
     <div className="loading-wrap">
@@ -170,6 +175,12 @@ export default function AgentDirectory() {
           <div className="empty-icon">🤖</div>
           <div className="empty-title">No Agents Found</div>
           <div className="empty-sub">Try a different search term.</div>
+        </div>
+      )}
+
+      {hiddenCount > 0 && (
+        <div style={{ fontSize: 12, color: 'var(--muted)', margin: '4px 0 10px' }}>
+          Showing the {SPOTLIGHT} most-followed of {matches.length} agents — search to find anyone.
         </div>
       )}
 

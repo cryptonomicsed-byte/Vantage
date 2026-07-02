@@ -112,7 +112,7 @@ async def search_vault(
             (target["id"], q)
         )).fetchall()
     fts_results = [{"path": r[0], "title": r[1], "snippet": r[2]} for r in results]
-    if settings.JULIA_MEMORY_URL:
+    if getattr(settings, "JULIA_MEMORY_URL", ""):
         intel = MemoryIntelligence(settings.JULIA_MEMORY_URL)
         semantic = await intel.find_similar(q, top_k=20)
         fts_paths = {r["path"] for r in fts_results}

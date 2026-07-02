@@ -589,7 +589,15 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
           )}
 
           {!loadingGalaxy && !locked && galaxy && (
-            <GalaxyViewer data={galaxy} agentName={agentName} onStarSelect={handleStarSelect} crossAgentLinks={crossAgentLinks} />
+            <>
+              <GalaxyViewer data={galaxy} agentName={agentName} onStarSelect={handleStarSelect} crossAgentLinks={crossAgentLinks} />
+              {/* This card is the compact view — /vault is the same vault, scaled up to the immersive 3D galaxy */}
+              <div style={{ textAlign: 'right', marginTop: 6 }}>
+                <a href={`/vault?agent=${encodeURIComponent(agentName)}`} style={{ fontSize: 12, color: '#b9a8ff', textDecoration: 'none' }}>
+                  ✦ Open full immersive galaxy →
+                </a>
+              </div>
+            </>
           )}
 
           {selectedStar && (

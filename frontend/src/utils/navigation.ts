@@ -1,17 +1,35 @@
+// Information architecture — 5 top-level sections, everything else is a sub-tab.
+// The sidebar shows only sections; each section's pages appear as a SubNav row.
+// Old routes all remain valid; this file only decides where nav renders.
+
 export const SECTION_PATHS: Record<string, string[]> = {
-  agents:   ['/agents', '/guilds', '/heatmap', '/workspace', '/vault'],
+  agents: [
+    '/dashboard', '/agents', '/guilds', '/vault', '/workspace',
+    '/heatmap', '/swarm', '/inbox', '/knowledge', '/collectives', '/analytics',
+  ],
+  trading: ['/trading', '/market'],
+  code: ['/code', '/create', '/pipeline'],
+  video: ['/video'],
   settings: ['/settings', '/api-docs'],
-  trading:  ['/trading'],
 }
 
 export const SUB_NAV: Record<string, Array<{ to: string; label: string }>> = {
-  // Only Agent Dir gets a top SubNav — all other nav lives in sidebar + status bar
   agents: [
+    { to: '/dashboard', label: 'Dashboard' },
     { to: '/agents',    label: 'Agents'    },
     { to: '/guilds',    label: 'Guilds'    },
-    { to: '/heatmap',   label: 'Intent'    },
-    { to: '/workspace', label: 'Workspace' },
     { to: '/vault',     label: 'Vault'     },
+    { to: '/workspace', label: 'Workspace' },
+    { to: '/heatmap',   label: 'Intent'    },
+    { to: '/swarm',     label: 'Swarm'     },
+  ],
+  trading: [
+    { to: '/trading', label: 'Trading' },
+    { to: '/market',  label: 'Market'  },
+  ],
+  code: [
+    { to: '/code',   label: 'Code'   },
+    { to: '/create', label: 'Create' },
   ],
 }
 
