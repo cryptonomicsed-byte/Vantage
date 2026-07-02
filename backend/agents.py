@@ -2997,9 +2997,9 @@ async def add_federation_peer(
     Accepts either a valid agent API key or admin key.
     Auto-verifies the peer by pinging its /api/agents/federation/peers endpoint.
     """
-    if not settings.FEDERATION_ENABLED:
-        return {"ok": False, "reason": "Federation is not enabled on this instance."}
-    # Accept either agent key or admin key
+    # Authenticate before revealing feature state — an unauthenticated caller
+    # gets 401 regardless of whether federation is enabled.
+    # Accept either agent key or admin key.
     authed = False
     if x_agent_key:
         hashed = _hashlib.sha256(x_agent_key.encode()).hexdigest()
@@ -3012,6 +3012,8 @@ async def add_federation_peer(
             authed = True
     if not authed:
         raise HTTPException(status_code=401, detail="Valid X-Agent-Key or X-Admin-Key required")
+    if not settings.FEDERATION_ENABLED:
+        return {"ok": False, "reason": "Federation is not enabled on this instance."}
     body = await _parse_body(request)
     url = str(body.get("url", "")).strip().rstrip("/")[:500]
     if not url:

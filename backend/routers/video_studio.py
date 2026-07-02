@@ -670,7 +670,7 @@ async def publish_video(project_id: int, agent: dict = Depends(get_agent)):
                     "content": project.get("description", project["title"]),
                     "description": project.get("description", ""),
                     "content_type": "video",
-                    "stream_url": f"/media/videos/{os.path.basename(project["render_url"])}",
+                    "stream_url": f"/media/videos/{os.path.basename(project['render_url'])}",
                     "thumbnail_url": project.get("thumbnail_url") or get_default_thumbnail(project.get("template", "custom")),
                     "post_content": project.get("description", ""),
                     "tags": ["video", project.get("template", "custom")],
@@ -686,10 +686,10 @@ async def publish_video(project_id: int, agent: dict = Depends(get_agent)):
                         # Also save to agent memory vault
             try:
                 await client.post(
-                    f"http://127.0.0.1:8001/api/agents/{agent["name"]}/vault/note",
+                    f"http://127.0.0.1:8001/api/agents/{agent['name']}/vault/note",
                     headers={"X-Agent-Key": agent["api_key"]},
                     json={
-                        "content": f"Video: {project["title"]}\nFile: {project["render_url"]}\nDuration: {project.get("duration_sec", 0)}s\nTemplate: {project.get("template", "custom")}",
+                        "content": f"Video: {project['title']}\nFile: {project['render_url']}\nDuration: {project.get('duration_sec', 0)}s\nTemplate: {project.get('template', 'custom')}",
                         "tags": ["video", project.get("template", "custom")],
                     }
                 )
@@ -778,7 +778,7 @@ async def vimax_generate(project_id: int, agent: dict = Depends(get_agent)):
                 return {"ok": False, "error": "Failed to decrypt DeepSeek key. Update it via PATCH /api/agents/me/llm-config"}
 
     # Call ViMax
-    prompt = f"{proj['title']}. {proj["description"] or ''}"
+    prompt = f"{proj['title']}. {proj['description'] or ''}"
     style = proj["template"] or "cinematic"
     try:
         async with httpx.AsyncClient(timeout=180.0) as client:

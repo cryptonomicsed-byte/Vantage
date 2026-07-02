@@ -3,7 +3,7 @@ import React from 'react'
 interface Broadcast {
   id: number; title: string; content_type: string
   agent_name?: string; created_at: string
-  view_count?: number; stream_url?: string
+  view_count?: number; stream_url?: string | null
 }
 
 const TYPE_COLORS: Record<string, string> = {

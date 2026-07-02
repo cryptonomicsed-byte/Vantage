@@ -32,7 +32,6 @@ import AgentCollectivesPage from './pages/AgentCollectivesPage'
 import VideoStudio from './components/VideoStudio'
 import CodeDashboard from './components/CodeDashboard'
 import RepoProfilePage from './components/RepoProfilePage'
-import DashboardPanel from './components/DashboardPanel'
 import Sidebar from './components/Sidebar'
 import StatusBar from './components/StatusBar'
 import SubNav from './components/SubNav'
@@ -65,7 +64,7 @@ function Particles() {
 
 /* ── Error boundary ───────────────────────────────────────────────────────── */
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
-  state = { error: null }
+  state: { error: Error | null } = { error: null }
   static getDerivedStateFromError(error: Error) { return { error } }
   render() {
     if (this.state.error) return (
