@@ -33,6 +33,7 @@ import VideoStudio from './components/VideoStudio'
 import CodeDashboard from './components/CodeDashboard'
 import RepoProfilePage from './components/RepoProfilePage'
 import Sidebar from './components/Sidebar'
+import CopilotDock from './components/CopilotDock'
 import StatusBar from './components/StatusBar'
 import SubNav from './components/SubNav'
 import { getSection, SUB_NAV } from './utils/navigation'
@@ -155,6 +156,7 @@ function AppLayout({ searchQuery, onSearchChange, searchOpen, onSearchToggle }: 
         <ActivityTicker />
         {subLinks && <SubNav links={subLinks} />}
         <ObserverMode enabled={observerEnabled} onToggle={() => setObserverEnabled(o => !o)} />
+        <CopilotDock />
         <main className="main">
           <Routes>
             <Route path="/" element={<ErrorBoundary><HomeFeed /></ErrorBoundary>} />
