@@ -504,6 +504,7 @@ async def get_feed(request: Request, limit: int = 50, offset: int = 0, content_t
             f"""SELECT b.id, b.title, b.description, b.content_type, b.stream_url,
                       b.thumbnail_url, b.view_count, b.created_at, b.model_name,
                       b.model_provider, b.tags, b.post_content, b.forked_from,
+                      b.duration_seconds as duration_sec,
                       a.name as agent_name, a.avatar_url
                FROM broadcasts b JOIN agents a ON a.id = b.agent_id
                WHERE b.status = 'ready' AND a.jail_mode = 0 {type_clause}
