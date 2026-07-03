@@ -10,14 +10,14 @@ from pathlib import Path
 from typing import Optional, Literal
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Header, Query, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Header, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 import aiosqlite
 
 from ..config import settings
 from ..deps import get_agent, get_vault_connector, _parse_body
 from ..memory_enrichment import MemoryIntelligence
-from ..memory_vault import MemoryVault, VAULT_ROOT
+from ..memory_vault import MemoryVault, VAULT_ROOT, OKF_VERSION, OKF_RESERVED_FILENAMES
 from ..db import DB_PATH
 
 router = APIRouter(prefix="/api/agents", tags=["memory_vault"])
@@ -174,6 +174,265 @@ async def download_vault(
         headers={"Content-Disposition": f'attachment; filename="{agent_name}-vault.zip"'},
     )
 
+_EXCLUDED_EXPORT_FILES = OKF_RESERVED_FILENAMES | {"README.md", "SOUL.md"}
+
+
+@router.get("/{agent_name}/vault/export")
+async def export_vault_universal(
+    agent_name: str,
+    format: Literal["universal"] = Query("universal"),
+    x_agent_key: Optional[str] = Header(None),
+):
+    """Portable JSON export — round-trips through POST /vault/import."""
+    target = await _resolve_agent(agent_name)
+    vault = MemoryVault(target["id"], target["name"])
+    accessor_id = await _resolve_accessor(x_agent_key)
+    if not await vault.check_access(accessor_id, ""):
+        raise HTTPException(403)
+    if not vault.vault_path.exists():
+        raise HTTPException(404, "Vault not synced yet")
+
+    nodes = []
+    for md_file in sorted(vault.vault_path.rglob("*.md")):
+        if md_file.name in _EXCLUDED_EXPORT_FILES or md_file.parent.name == "workspace":
+            continue
+        try:
+            content = md_file.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        fm = vault._parse_frontmatter(content)
+        if not fm.get("type"):
+            continue
+        parts = content.split("---", 2)
+        body = parts[2].lstrip("\n") if len(parts) >= 3 else content
+        nodes.append({"path": str(md_file.relative_to(vault.vault_path)), "frontmatter": fm, "body": body})
+
+    payload = {
+        "okf_version": OKF_VERSION,
+        "agent_name": target["name"],
+        "exported_at": datetime.utcnow().isoformat(),
+        "nodes": nodes,
+    }
+    buf = io.BytesIO(json.dumps(payload, indent=2).encode("utf-8"))
+    return StreamingResponse(
+        buf, media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{agent_name}-vault-universal.json"'},
+    )
+
+
+@router.post("/{agent_name}/vault/import")
+async def import_vault(
+    agent_name: str,
+    file: UploadFile = File(...),
+    agent: dict = Depends(get_agent),
+):
+    """Import notes from a Universal JSON export (from /vault/export) or an
+    Obsidian-style ZIP (from /vault/download)."""
+    if agent["name"] != agent_name:
+        raise HTTPException(403, "Can only import into your own vault")
+
+    raw = await file.read()
+    filename = (file.filename or "").lower()
+    vault = MemoryVault(agent["id"], agent["name"])
+    imported_nodes = 0
+    imported_links = 0
+
+    def _within_vault(dest: Path) -> bool:
+        try:
+            dest.resolve().relative_to(vault.vault_path.resolve())
+            return True
+        except ValueError:
+            return False
+
+    if filename.endswith(".json"):
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            raise HTTPException(422, "Invalid JSON")
+        nodes = payload.get("nodes", [])
+        if not isinstance(nodes, list):
+            raise HTTPException(422, "'nodes' must be a list")
+        for node in nodes[:2000]:
+            if not isinstance(node, dict):
+                continue
+            rel_path = str(node.get("path", "")).strip()
+            fm = node.get("frontmatter")
+            body = str(node.get("body", ""))
+            if not rel_path or not isinstance(fm, dict) or not fm.get("type"):
+                continue
+            dest = vault.vault_path / rel_path
+            if dest.name in OKF_RESERVED_FILENAMES or not _within_vault(dest):
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            vault._write_note(dest, fm, body)
+            tags = fm.get("tags") if isinstance(fm.get("tags"), list) else []
+            await vault._update_fts(rel_path, str(fm.get("title", rel_path)), body, tags)
+            imported_nodes += 1
+
+        links = payload.get("links", [])
+        if isinstance(links, list):
+            async with aiosqlite.connect(DB_PATH) as db:
+                for link in links[:500]:
+                    if not isinstance(link, dict):
+                        continue
+                    to_name = str(link.get("to_agent_name", "")).strip()
+                    if not to_name:
+                        continue
+                    row = await (await db.execute("SELECT id FROM agents WHERE name=?", (to_name,))).fetchone()
+                    if not row:
+                        continue
+                    await db.execute(
+                        """INSERT INTO memory_links
+                           (source_agent_id, source_note_path, target_agent_id, target_note_path, link_type)
+                           VALUES (?,?,?,?,?)""",
+                        (agent["id"], str(link.get("note", "")), row[0], "", str(link.get("link_type", "knows"))),
+                    )
+                    imported_links += 1
+                await db.commit()
+
+    elif filename.endswith(".zip"):
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(raw))
+        except Exception:
+            raise HTTPException(422, "Invalid ZIP")
+        for info in zf.infolist():
+            if info.is_dir() or not info.filename.endswith(".md"):
+                continue
+            dest = vault.vault_path / info.filename
+            if dest.name in OKF_RESERVED_FILENAMES or not _within_vault(dest):
+                continue
+            try:
+                content = zf.read(info).decode("utf-8", errors="ignore")
+            except Exception:
+                continue
+            fm = vault._parse_frontmatter(content)
+            if not fm.get("type"):
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(content, encoding="utf-8")
+            parts = content.split("---", 2)
+            body = parts[2].lstrip("\n") if len(parts) >= 3 else content
+            rel_path = str(dest.relative_to(vault.vault_path))
+            tags = fm.get("tags") if isinstance(fm.get("tags"), list) else []
+            await vault._update_fts(rel_path, str(fm.get("title", rel_path)), body, tags)
+            imported_nodes += 1
+    else:
+        raise HTTPException(422, "Only .json or .zip files are accepted")
+
+    return {"imported_nodes": imported_nodes, "imported_links": imported_links}
+
+
+def _ttl_slug(s: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9]+", "_", s.strip()).strip("_") or "unknown"
+
+
+def _ttl_literal(s: str) -> str:
+    return str(s).replace("\\", "\\\\").replace('"', "'").replace("\n", " ")
+
+
+@router.get("/{agent_name}/vault/graph.ttl")
+async def export_vault_ttl(
+    agent_name: str,
+    x_agent_key: Optional[str] = Header(None),
+):
+    """RDF/Turtle export of the vault's knowledge — Knowledge Triples become
+    real subject/predicate/object statements; every other concept gets a
+    label + type statement so the whole vault is one linked-data graph."""
+    target = await _resolve_agent(agent_name)
+    vault = MemoryVault(target["id"], target["name"])
+    accessor_id = await _resolve_accessor(x_agent_key)
+    if not await vault.check_access(accessor_id, ""):
+        raise HTTPException(403)
+    if not vault.vault_path.exists():
+        raise HTTPException(404, "Vault not synced yet")
+
+    agent_slug = _ttl_slug(agent_name)
+    lines = [
+        "@prefix vantage: <https://vantage.local/ontology#> .",
+        f"@prefix agent: <https://vantage.local/agent/{agent_slug}/> .",
+        "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .",
+        "",
+    ]
+
+    knowledge_dir = vault.vault_path / "knowledge"
+    if knowledge_dir.exists():
+        for md_file in sorted(knowledge_dir.glob("*.md")):
+            if md_file.name in OKF_RESERVED_FILENAMES:
+                continue
+            try:
+                fm = vault._parse_frontmatter(md_file.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            subject, predicate, obj = fm.get("subject"), fm.get("predicate"), fm.get("object")
+            if not (subject and predicate and obj):
+                continue
+            lines.append(
+                f'agent:{_ttl_slug(str(subject))} vantage:{_ttl_slug(str(predicate))} '
+                f'"{_ttl_literal(obj)}"@en .'
+            )
+
+    for md_file in sorted(vault.vault_path.rglob("*.md")):
+        if (md_file.name in _EXCLUDED_EXPORT_FILES or md_file.parent.name in ("workspace", "knowledge")):
+            continue
+        try:
+            fm = vault._parse_frontmatter(md_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        node_id, title, node_type = fm.get("id"), fm.get("title"), fm.get("type")
+        if not node_id:
+            continue
+        if title:
+            lines.append(f'agent:{_ttl_slug(str(node_id))} rdfs:label "{_ttl_literal(title)}"@en .')
+        if node_type:
+            lines.append(f'agent:{_ttl_slug(str(node_id))} vantage:conceptType "{_ttl_literal(node_type)}" .')
+
+    ttl = "\n".join(lines) + "\n"
+    return StreamingResponse(
+        io.BytesIO(ttl.encode("utf-8")),
+        media_type="text/turtle",
+        headers={"Content-Disposition": f'attachment; filename="{agent_name}-knowledge.ttl"'},
+    )
+
+
+@router.get("/{agent_name}/vault/sessions/search")
+async def search_vault_sessions(
+    agent_name: str,
+    q: str = Query(..., min_length=1),
+    limit: int = Query(20, ge=1, le=100),
+    x_agent_key: Optional[str] = Header(None),
+    x_federation_peer: Optional[str] = Header(None),
+):
+    """Full-text search scoped to traces/ (Ghost Traces / thought sessions) —
+    the general /vault/search spans every family; this is the Traces-tab
+    variant the UI's Sessions search box calls."""
+    target = await _resolve_agent(agent_name)
+    vault = MemoryVault(target["id"], target["name"])
+    accessor_id = await _resolve_accessor(x_agent_key)
+    if not await vault.check_access(accessor_id, x_federation_peer or ""):
+        raise HTTPException(403)
+    async with aiosqlite.connect(DB_PATH) as db:
+        rows = await (await db.execute(
+            """SELECT note_path, title, tags, snippet(memory_fts, 3, '**', '**', '...', 30) as snip
+               FROM memory_fts
+               WHERE agent_id=? AND note_path LIKE 'traces/%' AND memory_fts MATCH ?
+               ORDER BY rank LIMIT ?""",
+            (target["id"], q, limit),
+        )).fetchall()
+    results = []
+    for note_path, title, tags_json, snip in rows:
+        try:
+            tags = json.loads(tags_json or "[]")
+        except Exception:
+            tags = []
+        results.append({
+            "id": note_path,
+            "message": title,
+            "trace_type": tags[0] if tags else "thought",
+            "snippet": snip,
+        })
+    return {"results": results}
+
+
 @router.get("/{agent_name}/vault/file/{path:path}")
 async def get_vault_file(
     agent_name: str,
@@ -282,6 +541,29 @@ async def get_memory_links(agent_name: str):
                WHERE source_agent_id=? OR target_agent_id=?
                LIMIT 50""",
             (agent_id, agent_id),
+        )).fetchall()
+    return {"links": [dict(r) for r in rows]}
+
+
+@router.get("/{agent_name}/vault/note-links")
+async def get_note_links(agent_name: str, path: str = Query(...)):
+    """Links touching one specific note (used by the star-detail panel),
+    as opposed to /vault/links which returns every link for the agent."""
+    target = await _resolve_agent(agent_name)
+    agent_id = target["id"]
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            """SELECT l.id, l.link_type, l.created_at,
+                      sa.name AS source_agent_name, l.source_note_path,
+                      ta.name AS target_agent_name, l.target_note_path
+               FROM memory_links l
+               JOIN agents sa ON sa.id = l.source_agent_id
+               JOIN agents ta ON ta.id = l.target_agent_id
+               WHERE (l.source_agent_id=? AND l.source_note_path=?)
+                  OR (l.target_agent_id=? AND l.target_note_path=?)
+               ORDER BY l.created_at DESC LIMIT 50""",
+            (agent_id, path, agent_id, path),
         )).fetchall()
     return {"links": [dict(r) for r in rows]}
 

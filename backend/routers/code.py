@@ -16,8 +16,10 @@ Every action an agent needs:
 import logging, httpx, json, os, time, base64, subprocess, shutil, re
 from datetime import datetime, timezone
 from typing import Optional
-from fastapi import APIRouter, Query, Body, HTTPException
+from fastapi import APIRouter, Query, Body, Depends, HTTPException
 from pydantic import BaseModel
+
+from ..deps import get_agent
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/code", tags=["code"])
@@ -297,7 +299,7 @@ async def repo_detail_full(owner: str, name: str):
 
 
 @router.post("/repo/create")
-async def create_repo(req: CreateRepoRequest):
+async def create_repo(req: CreateRepoRequest, agent: dict = Depends(get_agent)):
     """Create a new Git repo. Agent-friendly endpoint."""
     payload = {
         "name": req.name,
@@ -310,7 +312,7 @@ async def create_repo(req: CreateRepoRequest):
             r = await cl.post(f"{GITEA_API}/user/repos", json=payload, headers=_headers)
             if r.status_code in (200, 201):
                 data = r.json()
-                _log_activity("repo_created", f"ares-bot/{req.name}", req.description or "")
+                _log_activity("repo_created", f"ares-bot/{req.name}", req.description or "", agent=agent["name"])
                 # Auto-register STIX webhook
                 webhook_payload = {
                     "type": "gitea",
@@ -327,7 +329,7 @@ async def create_repo(req: CreateRepoRequest):
 
 
 @router.post("/repo/{owner}/{name}/push")
-async def push_file(owner: str, name: str, req: PushFileRequest):
+async def push_file(owner: str, name: str, req: PushFileRequest, agent: dict = Depends(get_agent)):
     """Push a file to a repo. Agent can write code directly."""
     full_name = f"{owner}/{name}"
     target = os.path.join(SCAN_DIR, f"push_{name}_{int(time.time())}")
@@ -351,7 +353,7 @@ async def push_file(owner: str, name: str, req: PushFileRequest):
         subprocess.run(["git", "-C", target, "commit", "-m", req.message], capture_output=True)
         result = subprocess.run(["git", "-C", target, "push", "origin", req.branch], capture_output=True, timeout=30)
 
-        _log_activity("push", full_name, f"{req.path}: {req.message[:50]}")
+        _log_activity("push", full_name, f"{req.path}: {req.message[:50]}", agent=agent["name"])
 
         return {
             "status": "pushed",
@@ -368,7 +370,7 @@ async def push_file(owner: str, name: str, req: PushFileRequest):
 
 
 @router.post("/repo/{owner}/{name}/scan")
-async def trigger_scan(owner: str, name: str):
+async def trigger_scan(owner: str, name: str, agent: dict = Depends(get_agent)):
     """Trigger a STIX security scan on a repo."""
     full_name = f"{owner}/{name}"
     clone_url = f"{GITEA_URL}/{full_name}.git".replace("http://", f"http://{GITEA_TOKEN}@")
@@ -413,7 +415,7 @@ async def trigger_scan(owner: str, name: str):
                                 "snippet": line.strip()[:60],
                             })
 
-        _log_activity("scan", full_name, f"{files_scanned} files, {len(findings)} findings")
+        _log_activity("scan", full_name, f"{files_scanned} files, {len(findings)} findings", agent=agent["name"])
 
         result = {
             "repo": full_name,
@@ -457,7 +459,7 @@ async def scan_results(owner: str, name: str):
 
 
 @router.post("/repo/{owner}/{name}/pr")
-async def create_pr(owner: str, name: str, req: CreatePRRequest):
+async def create_pr(owner: str, name: str, req: CreatePRRequest, agent: dict = Depends(get_agent)):
     """Open a pull request."""
     full_name = f"{owner}/{name}"
     payload = {"title": req.title, "body": req.body, "head": req.head, "base": req.base}
@@ -466,7 +468,7 @@ async def create_pr(owner: str, name: str, req: CreatePRRequest):
             r = await cl.post(f"{GITEA_API}/repos/{full_name}/pulls", json=payload, headers=_headers)
             if r.status_code in (200, 201):
                 data = r.json()
-                _log_activity("pr_opened", full_name, req.title)
+                _log_activity("pr_opened", full_name, req.title, agent=agent["name"])
                 return {"status": "created", "number": data.get("number"), "url": data.get("html_url")}
         except Exception as e:
             raise HTTPException(500, str(e))

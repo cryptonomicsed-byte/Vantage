@@ -10,7 +10,7 @@ export default function RepoProfilePage() {
   const [scanResult, setScanResult] = useState<any>(null)
 
   useEffect(() => { if (!owner || !name) return; fetch('/api/code/repo/' + owner + '/' + name + '/detail').then(r=>r.json()).then(d=>{setRepo(d);setLoading(false)}).catch(()=>setLoading(false)) }, [owner, name])
-  const triggerScan = () => { setScanning(true); fetch('/api/code/repo/' + owner + '/' + name + '/scan',{method:'POST'}).then(r=>r.json()).then(d=>{setScanResult(d);setScanning(false)}).catch(()=>setScanning(false)) }
+  const triggerScan = () => { setScanning(true); fetch('/api/code/repo/' + owner + '/' + name + '/scan',{method:'POST', headers:{'X-Agent-Key': localStorage.getItem('vantage_api_key') || ''}}).then(r=>r.json()).then(d=>{setScanResult(d);setScanning(false)}).catch(()=>setScanning(false)) }
 
   if (loading) return <div style={{padding:40,textAlign:'center'}}><div className="vf-spinner"/></div>
   if (!repo) return <div style={{padding:40,color:'var(--muted)'}}>Repo not found</div>

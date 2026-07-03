@@ -31,16 +31,18 @@ export default function CodeDashboard() {
 
   useEffect(() => { loadAll(); const t = setInterval(loadAll, 30000); return () => clearInterval(t) }, [])
 
+  const apiKey = () => localStorage.getItem('vantage_api_key') || ''
+
   const triggerScan = (repo: RepoInfo) => {
     setScanning(repo.full_name)
-    fetch('REPO_SCAN_URL'.replace('REPO_SCAN_URL', '/api/code/repo/' + repo.full_name + '/scan'), { method: 'POST' })
+    fetch('/api/code/repo/' + repo.full_name + '/scan', { method: 'POST', headers: { 'X-Agent-Key': apiKey() } })
       .then(r => r.json()).then(() => { loadAll() })
       .finally(() => setScanning(null))
   }
 
   const createRepo = () => {
     if (!newRepoName) return
-    fetch('/api/code/repo/create', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({name: newRepoName, description: 'Created via Vantage'}) })
+    fetch('/api/code/repo/create', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Agent-Key': apiKey()}, body: JSON.stringify({name: newRepoName, description: 'Created via Vantage'}) })
       .then(r => r.json()).then(() => { setShowCreate(false); setNewRepoName(''); loadAll() })
   }
 

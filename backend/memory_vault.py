@@ -276,7 +276,9 @@ class MemoryVault:
         frontmatter = {k: v for k, v in frontmatter.items() if v is not None}
         body = f"# Ghost Trace: {trace_type}\n\n> {msg}"
         created = (t.get("created_at") or "unknown")[:10]
-        self._write_note(self.vault_path / "traces" / f"{created}-trace-{t['id']}.md", frontmatter, body)
+        relative = f"traces/{created}-trace-{t['id']}.md"
+        self._write_note(self.vault_path / relative, frontmatter, body)
+        await self._update_fts(relative, frontmatter["title"], body, [trace_type])
 
     # ── Conversations: DM threads + workspace rooms ─────────────────────────
     async def export_conversations(self):

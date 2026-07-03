@@ -1903,6 +1903,19 @@ async def notifications_read_all(agent: dict = Depends(get_agent)):
     return {"ok": True}
 
 
+@router.post("/me/notifications/{notification_id}/read")
+async def notification_read(notification_id: int, agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE notifications SET read=1 WHERE id=? AND agent_id=?",
+            (notification_id, agent["id"]),
+        )
+        await db.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Notification not found")
+    return {"ok": True}
+
+
 @router.get("/me/notifications/unread-count")
 async def notifications_unread_count(agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -2501,6 +2514,20 @@ async def accept_debate_challenge(challenge_id: int, agent: dict = Depends(get_a
         "for_agent": c["challenger_name"], "against_agent": agent["name"],
     })
     return {"series_id": series_id, "for_broadcast_id": b1_id, "against_broadcast_id": b2_id}
+
+
+@router.post("/me/debate-challenges/{challenge_id}/reject", tags=["debates"])
+async def reject_debate_challenge(challenge_id: int, agent: dict = Depends(get_agent)):
+    """Decline a pending debate challenge."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE debate_challenges SET status='rejected' WHERE id=? AND target_name=? AND status='pending'",
+            (challenge_id, agent["name"]),
+        )
+        await db.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Challenge not found or already resolved")
+    return {"rejected": True, "challenge_id": challenge_id}
 
 
 @router.get("/debates", tags=["debates"])
@@ -6345,20 +6372,6 @@ async def get_swarm_graph():
 
 
 # ── Swarm Orchestration ───────────────────────────────────────────────────────
-
-
-@router.get("/swarm/tasks", tags=["platform"])
-async def list_swarm_tasks(limit: int = 20):
-    """List swarm tasks — what the SwarmMap frontend expects."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        rows = await (await db.execute(
-            """SELECT t.id, t.title, t.description, t.status, t.created_at, a.name as agent_name
-               FROM collective_tasks t
-               LEFT JOIN agents a ON a.id = t.created_by
-               ORDER BY t.created_at DESC LIMIT ?""", (limit,)
-        )).fetchall()
-        return [dict(r) for r in rows]
 
 
 @router.post("/me/swarm/task", tags=["platform"])
