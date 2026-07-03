@@ -1,13 +1,12 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { TrendingUp, BarChart3, Zap, Brain, Activity, Database, Radio, RefreshCw, Layers, Droplets, Waves, CandlestickChart } from 'lucide-react'
-import CandleChart, { PineSeries } from './CandleChart'
-import PineEditor from './PineEditor'
+import { TrendingUp, BarChart3, Zap, Brain, Activity, Database, Radio, RefreshCw, Layers, Droplets, Waves } from 'lucide-react'
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Market Intelligence — public market-data tabs relocated out of the admin (ARES)
-// console into the main-app Trading section. These read public, unauthenticated
-// endpoints (/api/intel, /api/alpha, /api/debate, /api/intel/health, /api/intel/sources) via plain
-// fetch — exactly as they did inside AresSOC, with zero auth.
+// Analytics — the deep-dive lenses behind Trading's default Dashboard tab. These
+// read public, unauthenticated endpoints (/api/intel, /api/alpha, /api/debate,
+// /api/intel/health, /api/intel/sources) via plain fetch — exactly as they did
+// inside AresSOC, with zero auth. The chart + Pine editor live on the Dashboard
+// tab now (see trading/TradingDashboard.tsx), not here.
 // ══════════════════════════════════════════════════════════════════════════════
 
 // ── Shared helpers (self-contained copy; SOC console keeps its own) ────────────
@@ -371,34 +370,11 @@ function AresWhales() {
   )
 }
 
-function AresCharts() {
-  const [symbol, setSymbol] = useState('BTC')
-  const [interval, setIv] = useState('1d')
-  const [input, setInput] = useState('BTC')
-  const [pineSeries, setPineSeries] = useState<PineSeries[]>([])
-  const INTERVALS = ['1h', '4h', '1d', '1w']
-  const apply = () => { const s = input.trim().toUpperCase(); if (s) { setSymbol(s); setPineSeries([]) } }
-  return (
-    <div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
-        <input className="ares-input" value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && apply()} placeholder="Symbol (BTC, ETH, SOL…)" style={{ maxWidth: 180 }} />
-        <button className="btn btn-primary btn-sm" onClick={apply}>Load</button>
-        <div className="top-nav-tabs" style={{ flex: 'initial' }}>
-          {INTERVALS.map(iv => (
-            <button key={iv} type="button" className={`top-nav-tab ${interval === iv ? 'active' : ''}`} onClick={() => setIv(iv)}>{iv}</button>
-          ))}
-        </div>
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 2fr) minmax(280px, 1fr)', gap: 16, alignItems: 'start' }}>
-        <CandleChart symbol={symbol} interval={interval} pineSeries={pineSeries} />
-        <PineEditor symbol={symbol} interval={interval} onResult={setPineSeries} />
-      </div>
-    </div>
-  )
-}
+// AresCharts (native OHLC + Pine editor) moved to TradingDashboard.tsx, which
+// is now the default Trading tab — kept out of this file to avoid two
+// disconnected chart surfaces existing side by side.
 
 const INTEL_TABS = [
-  { id: 'charts',    label: 'Charts',    icon: CandlestickChart },
   { id: 'overview',  label: 'Overview',  icon: Radio },
   { id: 'arbitrage', label: 'Arbitrage', icon: TrendingUp },
   { id: 'alpha',     label: 'Alpha',     icon: TrendingUp },
@@ -423,7 +399,6 @@ export default function MarketIntel() {
           </button>
         ))}
       </div>
-      {tab === 'charts' && <AresCharts />}
       {tab === 'overview' && <AresOverview />}
       {tab === 'arbitrage' && <AresArbitrage />}
       {tab === 'alpha' && <AresAlpha />}
