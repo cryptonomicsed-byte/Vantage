@@ -57,7 +57,7 @@ class MemoryVault:
         self.vault_path = VAULT_ROOT / agent_name
         self.vault_path.mkdir(parents=True, exist_ok=True)
         for sub in ["broadcasts", "knowledge", "traces", "drafts", "templates",
-                    "conversations", "skills", "projects", "trades", ".vault"]:
+                    "conversations", "skills", "projects", "trades", "external", ".vault"]:
             (self.vault_path / sub).mkdir(exist_ok=True)
 
     async def get_config(self) -> VaultConfig:
@@ -351,6 +351,111 @@ class MemoryVault:
             self._write_note(path, fm, body)
             await self._update_fts(f"conversations/room-{safe}.md", title, body, ["conversation"])
 
+    # ── External memory: conversations pushed in by a linked connector ──────
+    async def render_connector(self, connector: dict) -> str:
+        """(Re)write a connector's own vault node — the hub the conversations
+        pushed through it cluster around in the galaxy."""
+        coords = self._spatial_hash(f"connector:{connector['id']}", "external")
+        title = f"Connector: {connector['name']}"
+        fm = {
+            "id": f"connector_{connector['id']}",
+            "type": "External Memory Connector",
+            "title": title,
+            "description": f"{connector['source']} · {connector.get('turn_count', 0)} messages captured",
+            "timestamp": connector.get("created_at", ""),
+            "tags": ["connector", connector["source"]],
+            "node_kind": "star",
+            "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
+            "galaxy_size": 12, "galaxy_color": "#38bdf8", "constellation": "external-memory",
+        }
+        body = f"# {title}\n\nSource: {connector['source']}\nLinked: {connector.get('created_at', '')}"
+        safe = re.sub(r"[^\w-]", "_", connector["name"][:50])
+        path = self.vault_path / "external" / f"connector-{connector['id']}-{safe}.md"
+        self._write_note(path, fm, body)
+        rel = str(path.relative_to(self.vault_path))
+        await self._update_fts(rel, title, body, ["connector", connector["source"]])
+        return rel
+
+    async def render_external_conversation(self, conv: dict, connector: dict) -> str:
+        """(Re)write one externally-ingested conversation as an OKF concept,
+        plus a Knowledge Triple edge linking it back to its connector."""
+        messages = json.loads(conv.get("messages_json") or "[]")
+        title = conv.get("title") or f"{connector['source']} conversation"
+        coords = self._spatial_hash(f"extconv:{conv['id']}", "external")
+        conn_coords = self._spatial_hash(f"connector:{connector['id']}", "external")
+        fm = {
+            "id": f"extconv_{conv['id']}",
+            "type": f"Conversation · External · {connector['source'].title()}",
+            "title": title,
+            "description": f"{conv.get('turn_count', len(messages))} messages via {connector['name']}",
+            **({"resource": conv["resource"]} if conv.get("resource") else {}),
+            "content_type": "conversation",
+            "timestamp": conv.get("first_at", ""),
+            "last_active": conv.get("last_at", ""),
+            "tags": ["conversation", "external", connector["source"]],
+            "node_kind": "star",
+            "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
+            "galaxy_size": 5 + math.log1p(max(len(messages), 1)) * 3,
+            "galaxy_color": "#38bdf8", "constellation": "external-memory",
+        }
+        # Cap the rendered transcript so one very long-running chat can't blow
+        # up the vault file — keep the most recent turns, note what's omitted.
+        MAX_TURNS = 400
+        shown = messages[-MAX_TURNS:]
+        lines = [f"**{m.get('role', 'user')}:** {m.get('content', '')}" for m in shown]
+        omitted = len(messages) - len(shown)
+        body = (f"# {title}\n\n"
+                + (f"_…{omitted} earlier messages omitted…_\n\n" if omitted > 0 else "")
+                + "\n\n".join(lines))
+        safe = re.sub(r"[^\w-]", "_", str(conv["conversation_id"])[:60])
+        path = self.vault_path / "external" / f"conv-{connector['id']}-{safe}.md"
+        self._write_note(path, fm, body)
+        rel = str(path.relative_to(self.vault_path))
+        await self._update_fts(rel, title, body, ["conversation", "external", connector["source"]])
+
+        # Edge: connector --captured--> conversation
+        edge_fm = {
+            "id": f"extlink_{conv['id']}",
+            "type": "Knowledge Triple",
+            "title": f"{connector['name']} → captured → {title}",
+            "subject": connector["name"], "predicate": "captured", "object": title,
+            "confidence": 1.0,
+            "tags": ["external", "link"],
+            "timestamp": conv.get("last_at", ""),
+            "node_kind": "edge",
+            "galaxy_source_x": conn_coords[0], "galaxy_source_y": conn_coords[1], "galaxy_source_z": conn_coords[2],
+            "galaxy_target_x": coords[0], "galaxy_target_y": coords[1], "galaxy_target_z": coords[2],
+            "galaxy_weight": 1.0,
+            "last_accessed_at": conv.get("last_at", ""),
+            "trust": 1.0,
+        }
+        edge_body = f"# {connector['name']} → captured → {title}"
+        edge_safe = re.sub(r"[^\w-]", "_", f"{connector['id']}_{conv['conversation_id']}"[:80])
+        self._write_note(self.vault_path / "external" / f"link-{edge_safe}.md", edge_fm, edge_body)
+        return rel
+
+    async def export_external(self):
+        """Batch re-render of every externally-ingested conversation from the
+        DB (source of truth) — lets a rebuilt/fresh vault recover this family
+        via full_sync(), same pattern as export_conversations()."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            connectors = await (await db.execute(
+                "SELECT * FROM vault_connectors WHERE agent_id=? AND revoked=0", (self.agent_id,)
+            )).fetchall()
+            connectors_by_id = {c["id"]: dict(c) for c in connectors}
+            conversations = await (await db.execute(
+                "SELECT * FROM external_conversations WHERE agent_id=?", (self.agent_id,)
+            )).fetchall()
+        for c in connectors_by_id.values():
+            await self.render_connector(c)
+        for row in conversations:
+            conv = dict(row)
+            connector = connectors_by_id.get(conv["connector_id"])
+            if not connector:
+                continue  # connector revoked/deleted — leave its existing notes as-is
+            await self.render_external_conversation(conv, connector)
+
     # ── Skills: badges + soul_manifest capabilities ─────────────────────────
     async def export_skills(self):
         async with aiosqlite.connect(DB_PATH) as db:
@@ -504,7 +609,7 @@ class MemoryVault:
         # content. Each family is best-effort — a missing subsystem (e.g. no DMs
         # yet, no trading tables on a minimal deploy) must not break the sync.
         for exporter in (self.export_conversations, self.export_skills,
-                         self.export_projects, self.export_trades):
+                         self.export_projects, self.export_trades, self.export_external):
             try:
                 await exporter()
             except Exception:
@@ -534,6 +639,7 @@ class MemoryVault:
             ("skills", "Skills"),
             ("projects", "Projects"),
             ("trades", "Trades"),
+            ("external", "External Memory"),
         ]
         counts = {subdir: self._write_dir_index(subdir, title) for subdir, title in families}
         self._write_root_index(config, families, counts)
@@ -920,6 +1026,7 @@ class MemoryVault:
             "broadcasts": _count("broadcasts"),
             "knowledge": _count("knowledge"),
             "traces": _count("traces"),
+            "external": _count("external"),
             "vault_size_bytes": vault_size,
             "last_synced": config.last_synced,
             "access": config.access,

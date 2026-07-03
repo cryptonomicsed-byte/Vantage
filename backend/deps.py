@@ -92,6 +92,45 @@ async def get_agent(request: Request, x_agent_key: Optional[str] = Header(None))
     return agent
 
 
+# ── Vault connector tokens (scoped, ingest-only — never an agent's real key) ──
+_CONNECTOR_RATE_WINDOW: float = 60.0
+_CONNECTOR_RATE_LIMIT: int = 60
+_connector_rate_buckets: dict[int, list[float]] = {}
+
+
+def _check_connector_rate(connector_id: int) -> None:
+    now = _time.monotonic()
+    times = [t for t in _connector_rate_buckets.get(connector_id, []) if now - t < _CONNECTOR_RATE_WINDOW]
+    times.append(now)
+    _connector_rate_buckets[connector_id] = times
+    if len(times) > _CONNECTOR_RATE_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded — {_CONNECTOR_RATE_LIMIT} ingests per {int(_CONNECTOR_RATE_WINDOW)}s per connector",
+            headers={"Retry-After": "60"},
+        )
+
+
+async def get_vault_connector(x_vault_connector_key: Optional[str] = Header(None)) -> dict:
+    """Auth for the external-memory ingest endpoint. Deliberately separate from
+    get_agent(): a connector token can only write conversation turns into one
+    agent's vault — it can't read the vault, act as the agent, or do anything
+    else X-Agent-Key can."""
+    if not x_vault_connector_key:
+        raise HTTPException(status_code=401, detail="X-Vault-Connector-Key header required")
+    hashed = _hlib.sha256(x_vault_connector_key.encode()).hexdigest()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        row = await (await db.execute(
+            "SELECT * FROM vault_connectors WHERE token_hash = ?", (hashed,)
+        )).fetchone()
+    if not row or row["revoked"]:
+        raise HTTPException(status_code=401, detail="Invalid or revoked connector key")
+    connector = dict(row)
+    _check_connector_rate(connector["id"])
+    return connector
+
+
 async def get_admin(x_admin_key: Optional[str] = Header(None)) -> str:
     key_hash = settings.ADMIN_KEY_HASH
     if not key_hash:

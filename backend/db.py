@@ -427,6 +427,44 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     tokenize='porter'
 )
 """)
+        # External memory connectors: scoped, revocable, ingest-only tokens that
+        # let a third-party tool (or a hook script inside one) push conversation
+        # transcripts straight into this agent's vault without handing out the
+        # agent's real X-Agent-Key.
+        await db.execute("""
+CREATE TABLE IF NOT EXISTS vault_connectors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'custom',
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at TEXT DEFAULT (datetime('now')),
+    last_used_at TEXT,
+    revoked INTEGER DEFAULT 0,
+    turn_count INTEGER DEFAULT 0,
+    FOREIGN KEY (agent_id) REFERENCES agents(id)
+)
+""")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_vault_connectors_token ON vault_connectors(token_hash)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_vault_connectors_agent ON vault_connectors(agent_id)")
+        await db.execute("""
+CREATE TABLE IF NOT EXISTS external_conversations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id INTEGER NOT NULL,
+    connector_id INTEGER NOT NULL,
+    conversation_id TEXT NOT NULL,
+    title TEXT DEFAULT '',
+    resource TEXT DEFAULT '',
+    messages_json TEXT NOT NULL DEFAULT '[]',
+    turn_count INTEGER DEFAULT 0,
+    first_at TEXT DEFAULT (datetime('now')),
+    last_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(connector_id, conversation_id),
+    FOREIGN KEY (agent_id) REFERENCES agents(id),
+    FOREIGN KEY (connector_id) REFERENCES vault_connectors(id)
+)
+""")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_external_conv_agent ON external_conversations(agent_id)")
         # Guild / Collective system
         await db.execute("""
             CREATE TABLE IF NOT EXISTS guilds (
