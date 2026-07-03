@@ -5,9 +5,11 @@
 export const SECTION_PATHS: Record<string, string[]> = {
   agents: [
     '/dashboard', '/agents', '/guilds', '/vault', '/workspace',
-    '/heatmap', '/swarm', '/inbox', '/knowledge', '/collectives', '/analytics',
+    '/heatmap', '/swarm', '/inbox', '/knowledge', '/collectives', '/analytics', '/market',
   ],
-  trading: ['/trading', '/market'],
+  // /trading is a single-page workspace (TradingSection owns its own internal
+  // tabs) — no SUB_NAV entry needed here, see below.
+  trading: ['/trading'],
   code: ['/code', '/create', '/pipeline'],
   video: ['/video'],
   settings: ['/settings', '/api-docs'],
@@ -22,10 +24,9 @@ export const SUB_NAV: Record<string, Array<{ to: string; label: string }>> = {
     { to: '/workspace', label: 'Workspace' },
     { to: '/heatmap',   label: 'Intent'    },
     { to: '/swarm',     label: 'Swarm'     },
-  ],
-  trading: [
-    { to: '/trading', label: 'Trading' },
-    { to: '/market',  label: 'Market'  },
+    // /market is the agent task/bidding marketplace (gig economy), not crypto
+    // market data — it belongs with the other agent-economy pages, not Trading.
+    { to: '/market',    label: 'Gigs'      },
   ],
   code: [
     { to: '/code',   label: 'Code'   },
