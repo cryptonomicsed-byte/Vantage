@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { Lock, Globe, Users, Radio, Search, RefreshCw, Settings, Download, BarChart2, PlusCircle } from 'lucide-react'
+import { Lock, Globe, Users, Radio, Search, RefreshCw, Settings, Download, BarChart2, PlusCircle, Link2, Trash2, Copy } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import GalaxyViewer, { GalaxyData, NeuralNode } from './GalaxyViewer'
@@ -32,6 +32,16 @@ interface VaultStats {
   vault_size_bytes: number
   last_synced: string | null
   access: string
+}
+
+interface VaultConnector {
+  id: number
+  name: string
+  source: string
+  created_at: string
+  last_used_at: string | null
+  revoked: number
+  turn_count: number
 }
 
 interface Props {
@@ -69,7 +79,7 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
   const [locked, setLocked] = useState(false)
   const [loadingGalaxy, setLoadingGalaxy] = useState(true)
   const [syncing, setSyncing] = useState(false)
-  const [view, setView] = useState<'galaxy' | 'files' | 'settings' | 'stats' | 'traces'>('galaxy')
+  const [view, setView] = useState<'galaxy' | 'files' | 'settings' | 'stats' | 'traces' | 'connectors'>('galaxy')
 
   // Search
   const [searchQuery, setSearchQuery] = useState('')
@@ -279,6 +289,79 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
   useEffect(() => {
     if (view === 'stats') fetchStats()
   }, [view, fetchStats])
+
+  // ── External memory connectors ──────────────────────────────────────────────
+  const [connectors, setConnectors] = useState<VaultConnector[]>([])
+  const [loadingConnectors, setLoadingConnectors] = useState(false)
+  const [newConnectorName, setNewConnectorName] = useState('')
+  const [newConnectorSource, setNewConnectorSource] = useState('custom')
+  const [creatingConnector, setCreatingConnector] = useState(false)
+  const [freshToken, setFreshToken] = useState<{ token: string; name: string } | null>(null)
+  const [connectorError, setConnectorError] = useState('')
+  const [copied, setCopied] = useState(false)
+
+  const fetchConnectors = useCallback(async () => {
+    const apiKey = getApiKey()
+    if (!apiKey) return
+    setLoadingConnectors(true)
+    try {
+      const res = await fetch(`/api/agents/${encodeURIComponent(agentName)}/vault/external/connectors`, {
+        headers: { 'X-Agent-Key': apiKey },
+      })
+      if (res.ok) {
+        const data = await res.json()
+        setConnectors(data.connectors || [])
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoadingConnectors(false)
+    }
+  }, [agentName])
+
+  useEffect(() => {
+    if (view === 'connectors') fetchConnectors()
+  }, [view, fetchConnectors])
+
+  const handleCreateConnector = async () => {
+    const apiKey = getApiKey()
+    if (!apiKey || !newConnectorName.trim()) return
+    setCreatingConnector(true)
+    setConnectorError('')
+    try {
+      const res = await fetch(`/api/agents/${encodeURIComponent(agentName)}/vault/external/connectors`, {
+        method: 'POST',
+        headers: { 'X-Agent-Key': apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newConnectorName.trim(), source: newConnectorSource.trim() || 'custom' }),
+      })
+      const data = await res.json()
+      if (res.ok) {
+        setFreshToken({ token: data.token, name: data.name })
+        setNewConnectorName('')
+        await fetchConnectors()
+      } else {
+        setConnectorError(data.detail || 'Failed to create connector')
+      }
+    } catch {
+      setConnectorError('Failed to create connector')
+    } finally {
+      setCreatingConnector(false)
+    }
+  }
+
+  const handleRevokeConnector = async (id: number) => {
+    const apiKey = getApiKey()
+    if (!apiKey) return
+    try {
+      await fetch(`/api/agents/${encodeURIComponent(agentName)}/vault/external/connectors/${id}`, {
+        method: 'DELETE',
+        headers: { 'X-Agent-Key': apiKey },
+      })
+      await fetchConnectors()
+    } catch {
+      // ignore
+    }
+  }
 
   // ── Star select ─────────────────────────────────────────────────────────────
   const handleStarSelect = useCallback(async (star: NeuralNode) => {
@@ -502,6 +585,15 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
             >
               Traces
             </button>
+            {isOwner && (
+              <button
+                className={`vault-view-btn${view === 'connectors' ? ' active' : ''}`}
+                onClick={() => setView('connectors')}
+              >
+                <Link2 size={12} style={{ display: 'inline', marginRight: 4 }} />
+                Connectors
+              </button>
+            )}
             {isOwner && (
               <button
                 className={`vault-view-btn${view === 'settings' ? ' active' : ''}`}
@@ -925,6 +1017,128 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
       )}
 
       {/* ── Settings view (owner only) ───────────────────────────────────────── */}
+      {view === 'connectors' && isOwner && (
+        <div className="vault-settings">
+          <p style={{ fontSize: '0.82rem', color: 'var(--muted)', marginBottom: 16 }}>
+            Link an external LLM, agent, or tool (a CLI hook, a custom bot, another
+            assistant with API access) so it can stream conversation transcripts
+            straight into this vault. Each connector gets its own scoped token that
+            can only push conversations here — it can't read the vault or act as
+            this agent anywhere else.
+          </p>
+
+          <div className="dash-panel" style={{ marginBottom: 16 }}>
+            <div className="dash-panel-title" style={{ marginBottom: 8 }}>New Connector</div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <input
+                type="text"
+                placeholder="Name (e.g. Claude Code — laptop)"
+                value={newConnectorName}
+                onChange={e => setNewConnectorName(e.target.value)}
+                style={{ flex: '1 1 220px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: 6, padding: '6px 10px', color: 'var(--text)', fontSize: '0.82rem' }}
+              />
+              <input
+                type="text"
+                placeholder="Source (e.g. claude-code, hermes-cli, custom)"
+                value={newConnectorSource}
+                onChange={e => setNewConnectorSource(e.target.value)}
+                style={{ flex: '1 1 200px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: 6, padding: '6px 10px', color: 'var(--text)', fontSize: '0.82rem' }}
+              />
+              <button
+                className="btn btn-sm"
+                onClick={handleCreateConnector}
+                disabled={creatingConnector || !newConnectorName.trim()}
+              >
+                {creatingConnector ? 'Creating…' : 'Create Connector'}
+              </button>
+            </div>
+            {connectorError && (
+              <div style={{ marginTop: 8, fontSize: '0.8rem', color: '#ff5555' }}>{connectorError}</div>
+            )}
+          </div>
+
+          {freshToken && (
+            <div className="dash-panel" style={{ marginBottom: 16, border: '1px solid var(--cyan)' }}>
+              <div className="dash-panel-title" style={{ marginBottom: 8 }}>
+                Token for "{freshToken.name}" — save it now
+              </div>
+              <p style={{ fontSize: '0.8rem', color: 'var(--muted)', marginBottom: 8 }}>
+                This is shown once and cannot be retrieved again. Give it to the
+                external tool as the <code>X-Vault-Connector-Key</code> header when
+                POSTing to <code>/api/vault/external/ingest</code>.
+              </p>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <code style={{
+                  flex: 1, background: 'rgba(0,0,0,0.35)', border: '1px solid rgba(255,255,255,0.15)',
+                  borderRadius: 6, padding: '8px 10px', fontSize: '0.78rem', wordBreak: 'break-all',
+                }}>
+                  {freshToken.token}
+                </code>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => {
+                    navigator.clipboard.writeText(freshToken.token).catch(() => {})
+                    setCopied(true)
+                    setTimeout(() => setCopied(false), 1500)
+                  }}
+                >
+                  <Copy size={12} style={{ display: 'inline', marginRight: 4 }} />
+                  {copied ? 'Copied' : 'Copy'}
+                </button>
+              </div>
+              <button
+                className="btn btn-ghost btn-sm"
+                style={{ marginTop: 8 }}
+                onClick={() => setFreshToken(null)}
+              >
+                Done
+              </button>
+            </div>
+          )}
+
+          <div className="dash-panel">
+            <div className="dash-panel-title" style={{ marginBottom: 8 }}>Linked Connectors</div>
+            {loadingConnectors ? (
+              <div style={{ color: 'var(--muted)', fontSize: '0.82rem' }}>Loading…</div>
+            ) : connectors.length === 0 ? (
+              <div style={{ color: 'var(--muted)', fontSize: '0.82rem' }}>No connectors linked yet.</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {connectors.map(c => (
+                  <div
+                    key={c.id}
+                    style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      padding: '8px 10px', borderRadius: 6, background: 'rgba(255,255,255,0.03)',
+                      border: '1px solid rgba(255,255,255,0.08)', opacity: c.revoked ? 0.5 : 1,
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontSize: '0.85rem', fontWeight: 600 }}>
+                        {c.name}{c.revoked ? ' (revoked)' : ''}
+                      </div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--muted)' }}>
+                        {c.source} · {c.turn_count} messages · linked {c.created_at}
+                        {c.last_used_at ? ` · last used ${c.last_used_at}` : ''}
+                      </div>
+                    </div>
+                    {!c.revoked && (
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => handleRevokeConnector(c.id)}
+                        title="Revoke this connector"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {view === 'settings' && isOwner && (
         <div className="vault-settings">
           <div className="vault-setting-group">

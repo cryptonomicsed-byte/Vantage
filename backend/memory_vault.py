@@ -1,4 +1,25 @@
-"""Per-agent memory vault: Obsidian-style markdown with galaxy spatial indexing."""
+"""Per-agent memory vault: an Open Knowledge Format (OKF v0.1) bundle on disk,
+with galaxy spatial indexing layered on top as producer-defined extension keys.
+
+OKF (https://github.com/... — spec vendored conceptually, no registry needed)
+says a knowledge bundle is just a directory of markdown files with YAML
+frontmatter: every concept file has a REQUIRED `type` (a short descriptive
+string — "Trade", "Skill", "Knowledge Triple" — never centrally registered),
+and RECOMMENDED `title`/`description`/`resource`/`tags`/`timestamp`. Two
+filenames are reserved at any level of the hierarchy: `index.md` (directory
+listing, frontmatter forbidden except an optional `okf_version` at bundle
+root) and `log.md` (dated update history, newest first).
+
+Vantage's galaxy renderer needs additional per-note data (3D coordinates,
+color, size) that has nothing to do with OKF — those live as ordinary
+producer-defined extension keys (OKF §4.1 explicitly allows this) prefixed
+`galaxy_*`, plus one internal `node_kind` (star/edge/nebula) that says which
+galaxy primitive this concept renders as. `node_kind` is NOT OKF's `type`
+field — conflating the two was Vantage's original design; this file now
+keeps them separate so `type` reads as real knowledge classification and an
+external OKF-aware tool can consume this bundle without knowing anything
+about galaxies.
+"""
 import json
 import re
 import math
@@ -14,6 +35,8 @@ from .db import DB_PATH
 from .config import settings
 
 VAULT_ROOT = Path(settings.DATA_DIR) / "memory_vaults"
+OKF_VERSION = "0.1"
+OKF_RESERVED_FILENAMES = {"index.md", "log.md"}
 
 AccessLevel = Literal["private", "followers", "federated", "public"]
 
@@ -34,7 +57,7 @@ class MemoryVault:
         self.vault_path = VAULT_ROOT / agent_name
         self.vault_path.mkdir(parents=True, exist_ok=True)
         for sub in ["broadcasts", "knowledge", "traces", "drafts", "templates",
-                    "conversations", "skills", "projects", "trades", ".vault"]:
+                    "conversations", "skills", "projects", "trades", "external", ".vault"]:
             (self.vault_path / sub).mkdir(exist_ok=True)
 
     async def get_config(self) -> VaultConfig:
@@ -105,19 +128,41 @@ class MemoryVault:
             await db.commit()
 
     def _write_note(self, path: Path, frontmatter: dict, body: str) -> str:
+        """Write a concept document: `type` MUST be present (OKF §4.1 required field)."""
+        assert frontmatter.get("type"), f"OKF concept at {path} is missing required 'type'"
         fm_lines = [f"{k}: {self._yaml_value(v)}" for k, v in frontmatter.items()]
         content = "---\n" + "\n".join(fm_lines) + "\n---\n\n" + body
         path.write_text(content, encoding="utf-8")
         return content
 
+    # Bare YAML scalars matching these get implicitly re-typed by a real YAML
+    # parser's core schema (dates/timestamps -> datetime, yes/no/on/off/null
+    # -> bool/None) even though we wrote a plain string — quote them so every
+    # OKF-conformant consumer reads back the same `str` we wrote.
+    _YAML_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([Tt ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?$")
+    _YAML_SPECIAL_WORDS = {w.lower() for w in
+        ["null", "~", "true", "false", "yes", "no", "on", "off"]}
+
     def _yaml_value(self, v) -> str:
         if isinstance(v, list):
-            return json.dumps(v)
+            return json.dumps(v)  # a JSON array is a legal YAML flow sequence
         if isinstance(v, bool):
             return "true" if v else "false"
         if isinstance(v, (int, float)):
             return str(v)
-        return str(v).replace("\n", " ")
+        s = str(v).replace("\n", " ")
+        # Bare (unquoted) YAML scalars can't safely contain ": " (that's the
+        # mapping separator) or start with a YAML-special character. Emit a
+        # JSON string literal instead — JSON is valid YAML double-quoted flow
+        # scalar syntax, so this stays parseable by both our own hand-rolled
+        # reader (below) and a real YAML library, which OKF interop needs.
+        needs_quoting = (
+            not s or s[0] in "\"'[]{}#&*!|>%@`-" or ": " in s or s.endswith(":")
+            or s.lower() in self._YAML_SPECIAL_WORDS or self._YAML_TIMESTAMP_RE.match(s)
+        )
+        if needs_quoting:
+            return json.dumps(s)
+        return s
 
     async def export_broadcast(self, broadcast_id: int):
         async with aiosqlite.connect(DB_PATH) as db:
@@ -131,23 +176,30 @@ class MemoryVault:
         b = dict(row)
         tags = json.loads(b.get("tags") or "[]")
         created = (b["created_at"] or "")[:10]
-        coords = self._spatial_hash(b["title"] or "", b["content_type"] or "text")
+        content_type = b.get("content_type", "text")
+        coords = self._spatial_hash(b["title"] or "", content_type)
+        title = b.get("title") or "Untitled"
+        description = (b.get("description") or "").strip()[:200] or None
         frontmatter = {
             "id": f"broadcast_{b['id']}",
-            "type": "star",
-            "content_type": b.get("content_type", "text"),
+            "type": f"Broadcast · {content_type.replace('_', ' ').title()}",
+            "title": title,
+            **({"description": description} if description else {}),
+            **({"resource": b["stream_url"]} if b.get("stream_url") else {}),
+            "content_type": content_type,
             "status": b.get("status", "ready"),
             "views": b.get("view_count", 0),
             "tags": tags,
+            "timestamp": b.get("created_at", ""),
+            "node_kind": "star",
             "galaxy_x": coords[0],
             "galaxy_y": coords[1],
             "galaxy_z": coords[2],
             "galaxy_size": self._view_size(b.get("view_count", 0)),
-            "galaxy_color": self._content_color(b.get("content_type", "text")),
+            "galaxy_color": self._content_color(content_type),
             "constellation": tags[0] if tags else "uncategorized",
-            "created": b.get("created_at", ""),
         }
-        body = f"# {b.get('title', 'Untitled')}\n\n{b.get('description', '') or ''}\n\n{b.get('post_content', '') or ''}"
+        body = f"# {title}\n\n{b.get('description', '') or ''}\n\n{b.get('post_content', '') or ''}"
         safe = re.sub(r"[^\w-]", "_", (b.get("title") or "untitled")[:50])
         filename = f"{created}-{safe}.md"
         path = self.vault_path / "broadcasts" / filename
@@ -173,22 +225,25 @@ class MemoryVault:
         tags = json.loads(k.get("tags") or "[]")
         src = self._spatial_hash(k["subject"], "knowledge")
         tgt = self._spatial_hash(k["object"], "knowledge")
+        title = f"{k['subject']} → {k['predicate']} → {k['object']}"
         frontmatter = {
             "id": f"knowledge_{k['id']}",
-            "type": "edge",
+            "type": "Knowledge Triple",  # abstract — no `resource` (OKF §4.1)
+            "title": title,
             "subject": k["subject"],
             "predicate": k["predicate"],
             "object": k["object"],
             "confidence": k.get("confidence", 1.0),
             "tags": tags,
+            "timestamp": k.get("created_at", ""),
+            "node_kind": "edge",
             "galaxy_source_x": src[0], "galaxy_source_y": src[1], "galaxy_source_z": src[2],
             "galaxy_target_x": tgt[0], "galaxy_target_y": tgt[1], "galaxy_target_z": tgt[2],
             "galaxy_weight": k.get("confidence", 1.0),
             "last_accessed_at": k.get("last_accessed_at") or k.get("created_at", ""),
             "trust": k.get("trust_score", 0.5),
-            "created": k.get("created_at", ""),
         }
-        body = f"# {k['subject']} → {k['predicate']} → {k['object']}\n\nConfidence: {k.get('confidence', 1.0)}"
+        body = f"# {title}\n\nConfidence: {k.get('confidence', 1.0)}"
         safe = re.sub(r"[^\w-]", "_", f"{k['subject']}_{k['predicate']}_{k['object']}"[:100])
         self._write_note(self.vault_path / "knowledge" / f"{safe}.md", frontmatter, body)
 
@@ -204,17 +259,22 @@ class MemoryVault:
         t = dict(row)
         coords = self._spatial_hash(t.get("message", "")[:50], "trace")
         msg = t.get("message", "")
+        trace_type = t.get("trace_type", "thought")
         frontmatter = {
             "id": f"trace_{t['id']}",
-            "type": "nebula",
-            "trace_type": t.get("trace_type", "thought"),
+            "type": f"Thought Trace · {trace_type.title()}",
+            "title": f"Ghost Trace: {trace_type}",
+            "description": msg[:200] or None,
+            "trace_type": trace_type,
+            "timestamp": t.get("created_at", ""),
+            "node_kind": "nebula",
             "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
             "galaxy_opacity": 0.2,
             "galaxy_size": min(len(msg) / 10, 100),
             "galaxy_color": "#663399",
-            "created": t.get("created_at", ""),
         }
-        body = f"# Ghost Trace: {t.get('trace_type', 'thought')}\n\n> {msg}"
+        frontmatter = {k: v for k, v in frontmatter.items() if v is not None}
+        body = f"# Ghost Trace: {trace_type}\n\n> {msg}"
         created = (t.get("created_at") or "unknown")[:10]
         self._write_note(self.vault_path / "traces" / f"{created}-trace-{t['id']}.md", frontmatter, body)
 
@@ -249,34 +309,152 @@ class MemoryVault:
                 pass
         for t in threads:
             coords = self._spatial_hash(t["partner"], "conversation")
+            title = f"Conversation with {t['partner']}"
             fm = {
-                "id": f"dm_{t['partner']}", "type": "star", "content_type": "conversation",
+                "id": f"dm_{t['partner']}",
+                "type": "Conversation · Direct Message",
+                "title": title,
+                "description": f"{t['msg_count']} messages",
+                "content_type": "conversation",
+                "timestamp": t["first_at"] or "",
+                "last_active": t["last_at"] or "",
+                "tags": ["conversation", "dm"],
+                "node_kind": "star",
                 "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
                 "galaxy_size": 5 + math.log1p(t["msg_count"]) * 3,
                 "galaxy_color": "#f59e0b", "constellation": "conversations",
-                "tags": ["conversation", "dm"], "created": t["first_at"] or "",
-                "last_active": t["last_at"] or "",
             }
-            body = (f"# Conversation with {t['partner']}\n\n"
-                    f"{t['msg_count']} messages · first {t['first_at']} · last {t['last_at']}")
+            body = f"# {title}\n\n{t['msg_count']} messages · first {t['first_at']} · last {t['last_at']}"
             safe = re.sub(r"[^\w-]", "_", t["partner"][:50])
             path = self.vault_path / "conversations" / f"dm-{safe}.md"
             self._write_note(path, fm, body)
-            await self._update_fts(f"conversations/dm-{safe}.md", f"Conversation with {t['partner']}", body, ["conversation"])
+            await self._update_fts(f"conversations/dm-{safe}.md", title, body, ["conversation"])
         for r in rooms:
             coords = self._spatial_hash(str(r["id"]), "conversation")
+            title = f"Room: {r['name']}"
             fm = {
-                "id": f"room_{r['id']}", "type": "star", "content_type": "conversation",
+                "id": f"room_{r['id']}",
+                "type": "Conversation · Workspace Room",
+                "title": title,
+                "description": f"{r['members']} members",
+                "content_type": "conversation",
+                "timestamp": r["created_at"] or "",
+                "tags": ["conversation", "room"],
+                "node_kind": "star",
                 "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
                 "galaxy_size": 6 + (r["members"] or 1),
                 "galaxy_color": "#f59e0b", "constellation": "conversations",
-                "tags": ["conversation", "room"], "created": r["created_at"] or "",
             }
-            body = f"# Room: {r['name']}\n\n{r['members']} members"
+            body = f"# {title}\n\n{r['members']} members"
             safe = re.sub(r"[^\w-]", "_", (r["name"] or str(r["id"]))[:50])
             path = self.vault_path / "conversations" / f"room-{safe}.md"
             self._write_note(path, fm, body)
-            await self._update_fts(f"conversations/room-{safe}.md", f"Room: {r['name']}", body, ["conversation"])
+            await self._update_fts(f"conversations/room-{safe}.md", title, body, ["conversation"])
+
+    # ── External memory: conversations pushed in by a linked connector ──────
+    async def render_connector(self, connector: dict) -> str:
+        """(Re)write a connector's own vault node — the hub the conversations
+        pushed through it cluster around in the galaxy."""
+        coords = self._spatial_hash(f"connector:{connector['id']}", "external")
+        title = f"Connector: {connector['name']}"
+        fm = {
+            "id": f"connector_{connector['id']}",
+            "type": "External Memory Connector",
+            "title": title,
+            "description": f"{connector['source']} · {connector.get('turn_count', 0)} messages captured",
+            "timestamp": connector.get("created_at", ""),
+            "tags": ["connector", connector["source"]],
+            "node_kind": "star",
+            "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
+            "galaxy_size": 12, "galaxy_color": "#38bdf8", "constellation": "external-memory",
+        }
+        body = f"# {title}\n\nSource: {connector['source']}\nLinked: {connector.get('created_at', '')}"
+        safe = re.sub(r"[^\w-]", "_", connector["name"][:50])
+        path = self.vault_path / "external" / f"connector-{connector['id']}-{safe}.md"
+        self._write_note(path, fm, body)
+        rel = str(path.relative_to(self.vault_path))
+        await self._update_fts(rel, title, body, ["connector", connector["source"]])
+        return rel
+
+    async def render_external_conversation(self, conv: dict, connector: dict) -> str:
+        """(Re)write one externally-ingested conversation as an OKF concept,
+        plus a Knowledge Triple edge linking it back to its connector."""
+        messages = json.loads(conv.get("messages_json") or "[]")
+        title = conv.get("title") or f"{connector['source']} conversation"
+        coords = self._spatial_hash(f"extconv:{conv['id']}", "external")
+        conn_coords = self._spatial_hash(f"connector:{connector['id']}", "external")
+        fm = {
+            "id": f"extconv_{conv['id']}",
+            "type": f"Conversation · External · {connector['source'].title()}",
+            "title": title,
+            "description": f"{conv.get('turn_count', len(messages))} messages via {connector['name']}",
+            **({"resource": conv["resource"]} if conv.get("resource") else {}),
+            "content_type": "conversation",
+            "timestamp": conv.get("first_at", ""),
+            "last_active": conv.get("last_at", ""),
+            "tags": ["conversation", "external", connector["source"]],
+            "node_kind": "star",
+            "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
+            "galaxy_size": 5 + math.log1p(max(len(messages), 1)) * 3,
+            "galaxy_color": "#38bdf8", "constellation": "external-memory",
+        }
+        # Cap the rendered transcript so one very long-running chat can't blow
+        # up the vault file — keep the most recent turns, note what's omitted.
+        MAX_TURNS = 400
+        shown = messages[-MAX_TURNS:]
+        lines = [f"**{m.get('role', 'user')}:** {m.get('content', '')}" for m in shown]
+        omitted = len(messages) - len(shown)
+        body = (f"# {title}\n\n"
+                + (f"_…{omitted} earlier messages omitted…_\n\n" if omitted > 0 else "")
+                + "\n\n".join(lines))
+        safe = re.sub(r"[^\w-]", "_", str(conv["conversation_id"])[:60])
+        path = self.vault_path / "external" / f"conv-{connector['id']}-{safe}.md"
+        self._write_note(path, fm, body)
+        rel = str(path.relative_to(self.vault_path))
+        await self._update_fts(rel, title, body, ["conversation", "external", connector["source"]])
+
+        # Edge: connector --captured--> conversation
+        edge_fm = {
+            "id": f"extlink_{conv['id']}",
+            "type": "Knowledge Triple",
+            "title": f"{connector['name']} → captured → {title}",
+            "subject": connector["name"], "predicate": "captured", "object": title,
+            "confidence": 1.0,
+            "tags": ["external", "link"],
+            "timestamp": conv.get("last_at", ""),
+            "node_kind": "edge",
+            "galaxy_source_x": conn_coords[0], "galaxy_source_y": conn_coords[1], "galaxy_source_z": conn_coords[2],
+            "galaxy_target_x": coords[0], "galaxy_target_y": coords[1], "galaxy_target_z": coords[2],
+            "galaxy_weight": 1.0,
+            "last_accessed_at": conv.get("last_at", ""),
+            "trust": 1.0,
+        }
+        edge_body = f"# {connector['name']} → captured → {title}"
+        edge_safe = re.sub(r"[^\w-]", "_", f"{connector['id']}_{conv['conversation_id']}"[:80])
+        self._write_note(self.vault_path / "external" / f"link-{edge_safe}.md", edge_fm, edge_body)
+        return rel
+
+    async def export_external(self):
+        """Batch re-render of every externally-ingested conversation from the
+        DB (source of truth) — lets a rebuilt/fresh vault recover this family
+        via full_sync(), same pattern as export_conversations()."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            connectors = await (await db.execute(
+                "SELECT * FROM vault_connectors WHERE agent_id=? AND revoked=0", (self.agent_id,)
+            )).fetchall()
+            connectors_by_id = {c["id"]: dict(c) for c in connectors}
+            conversations = await (await db.execute(
+                "SELECT * FROM external_conversations WHERE agent_id=?", (self.agent_id,)
+            )).fetchall()
+        for c in connectors_by_id.values():
+            await self.render_connector(c)
+        for row in conversations:
+            conv = dict(row)
+            connector = connectors_by_id.get(conv["connector_id"])
+            if not connector:
+                continue  # connector revoked/deleted — leave its existing notes as-is
+            await self.render_external_conversation(conv, connector)
 
     # ── Skills: badges + soul_manifest capabilities ─────────────────────────
     async def export_skills(self):
@@ -301,17 +479,24 @@ class MemoryVault:
         skills.extend(t[1:] for t in (row["bio"] or "").split() if t.startswith("#"))
         for skill in dict.fromkeys(s for s in skills if s):
             coords = self._spatial_hash(skill, "skill")
+            title = f"Skill: {skill}"
             fm = {
-                "id": f"skill_{skill}", "type": "star", "content_type": "skill",
+                "id": f"skill_{skill}",
+                "type": "Skill",
+                "title": title,
+                "description": f"Capability declared by {self.agent_name}.",
+                "content_type": "skill",
+                "timestamp": datetime.utcnow().isoformat(),
+                "tags": ["skill"],
+                "node_kind": "star",
                 "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
                 "galaxy_size": 8, "galaxy_color": "#4ade80", "constellation": "skills",
-                "tags": ["skill"], "created": "",
             }
-            body = f"# Skill: {skill}\n\nCapability declared by {self.agent_name}."
+            body = f"# {title}\n\nCapability declared by {self.agent_name}."
             safe = re.sub(r"[^\w-]", "_", skill[:50])
             path = self.vault_path / "skills" / f"{safe}.md"
             self._write_note(path, fm, body)
-            await self._update_fts(f"skills/{safe}.md", f"Skill: {skill}", body, ["skill"])
+            await self._update_fts(f"skills/{safe}.md", title, body, ["skill"])
 
     # ── Projects: collectives + completed creation jobs ─────────────────────
     async def export_projects(self):
@@ -333,29 +518,42 @@ class MemoryVault:
             )).fetchall()
         for c in collectives:
             coords = self._spatial_hash(f"collective:{c['id']}", "project")
+            title = f"Collective: {c['name']}"
             fm = {
-                "id": f"collective_{c['id']}", "type": "star", "content_type": "project",
+                "id": f"collective_{c['id']}",
+                "type": "Project · Collective",
+                "title": title,
+                "description": "Member of this agent collective.",
+                "content_type": "project",
+                "timestamp": c["created_at"] or "",
+                "tags": ["project", "collective"],
+                "node_kind": "star",
                 "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
                 "galaxy_size": 10, "galaxy_color": "#a855f7", "constellation": "projects",
-                "tags": ["project", "collective"], "created": c["created_at"] or "",
             }
-            body = f"# Collective: {c['name']}\n\nMember of this agent collective."
+            body = f"# {title}\n\nMember of this agent collective."
             safe = re.sub(r"[^\w-]", "_", (c["name"] or str(c["id"]))[:50])
             self._write_note(self.vault_path / "projects" / f"collective-{safe}.md", fm, body)
-            await self._update_fts(f"projects/collective-{safe}.md", f"Collective: {c['name']}", body, ["project"])
+            await self._update_fts(f"projects/collective-{safe}.md", title, body, ["project"])
         for j in jobs:
             coords = self._spatial_hash(f"job:{j['id']}", "project")
-            title = (j["prompt"] or "Creation job")[:60]
+            title = f"Creation: {(j['prompt'] or 'Creation job')[:60]}"
             fm = {
-                "id": f"job_{j['id']}", "type": "star", "content_type": "project",
+                "id": f"job_{j['id']}",
+                "type": "Project · Creation",
+                "title": title,
+                "description": f"Status: {j['status']}",
+                "content_type": "project",
+                "timestamp": j["created_at"] or "",
+                "tags": ["project", "creation"],
+                "node_kind": "star",
                 "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
                 "galaxy_size": 8, "galaxy_color": "#a855f7", "constellation": "projects",
-                "tags": ["project", "creation"], "created": j["created_at"] or "",
             }
-            body = f"# Creation: {title}\n\nStatus: {j['status']}" + (
+            body = f"# {title}\n\nStatus: {j['status']}" + (
                 f"\nPublished as broadcast #{j['result_broadcast_id']}" if j["result_broadcast_id"] else "")
             self._write_note(self.vault_path / "projects" / f"job-{j['id']}.md", fm, body)
-            await self._update_fts(f"projects/job-{j['id']}.md", f"Creation: {title}", body, ["project"])
+            await self._update_fts(f"projects/job-{j['id']}.md", title, body, ["project"])
 
     # ── Trades taken (filled orders — NOT the signal firehose) ──────────────
     async def export_trades(self):
@@ -372,20 +570,26 @@ class MemoryVault:
             coords = self._spatial_hash(f"order:{o['id']}", "trade")
             px = o["avg_fill_price"] or o["price"] or 0
             notional = (o["quantity"] or 0) * px
+            title = f"Trade: {str(o['side']).upper()} {o['quantity']} {o['symbol']} ({o['chain']})"
             fm = {
-                "id": f"trade_{o['id']}", "type": "star", "content_type": "trade",
+                "id": f"trade_{o['id']}",
+                "type": "Trade",
+                "title": title,
+                "description": f"Fill: {px} · Status: {o['status']}",
+                "content_type": "trade",
+                "timestamp": o["executed_at"] or o["created_at"] or "",
+                "tags": ["trade", o["side"], o["symbol"]],
+                "node_kind": "star",
                 "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
                 "galaxy_size": 5 + math.log1p(notional) * 1.5,
                 "galaxy_color": "#d4af37" if o["side"] == "buy" else "#ef4444",
-                "constellation": "trades", "tags": ["trade", o["side"], o["symbol"]],
-                "created": o["executed_at"] or o["created_at"] or "",
+                "constellation": "trades",
             }
-            body = (f"# Trade: {str(o['side']).upper()} {o['quantity']} {o['symbol']} ({o['chain']})\n\n"
+            body = (f"# {title}\n\n"
                     f"Fill: {px} · Status: {o['status']}"
                     + (f"\nReason: {o['trigger_reason']}" if o["trigger_reason"] else ""))
             self._write_note(self.vault_path / "trades" / f"trade-{o['id']}.md", fm, body)
-            await self._update_fts(f"trades/trade-{o['id']}.md",
-                                   f"Trade {o['side']} {o['symbol']}", body, ["trade"])
+            await self._update_fts(f"trades/trade-{o['id']}.md", title, body, ["trade"])
 
     async def full_sync(self):
         async with aiosqlite.connect(DB_PATH) as db:
@@ -405,7 +609,7 @@ class MemoryVault:
         # content. Each family is best-effort — a missing subsystem (e.g. no DMs
         # yet, no trading tables on a minimal deploy) must not break the sync.
         for exporter in (self.export_conversations, self.export_skills,
-                         self.export_projects, self.export_trades):
+                         self.export_projects, self.export_trades, self.export_external):
             try:
                 await exporter()
             except Exception:
@@ -416,48 +620,91 @@ class MemoryVault:
                 (self.agent_id,)
             )
             await db.commit()
-        await self._write_readme()
+        counts = await self._write_index()
+        parts = ", ".join(f"{v} {k}" for k, v in counts.items() if v)
+        self._append_log(f"Synced {parts}." if parts else "Sync ran — vault unchanged.")
         await self.auto_summarize_constellations()
         await self.ensure_workspace()
         await self.generate_soul_md()
 
-    async def _write_readme(self):
+    async def _write_index(self) -> dict:
+        """OKF bundle-root `index.md` + per-directory `index.md` (§6): reserved
+        filenames, no frontmatter except the bundle-root's optional `okf_version`."""
         config = await self.get_config()
-        broadcasts = len(list((self.vault_path / "broadcasts").glob("*.md")))
-        knowledge = len(list((self.vault_path / "knowledge").glob("*.md")))
-        traces = len(list((self.vault_path / "traces").glob("*.md")))
-        conversations = len(list((self.vault_path / "conversations").glob("*.md")))
-        skills = len(list((self.vault_path / "skills").glob("*.md")))
-        projects = len(list((self.vault_path / "projects").glob("*.md")))
-        trades = len(list((self.vault_path / "trades").glob("*.md")))
+        families = [
+            ("broadcasts", "Broadcasts"),
+            ("knowledge", "Knowledge"),
+            ("traces", "Ghost Traces"),
+            ("conversations", "Conversations"),
+            ("skills", "Skills"),
+            ("projects", "Projects"),
+            ("trades", "Trades"),
+            ("external", "External Memory"),
+        ]
+        counts = {subdir: self._write_dir_index(subdir, title) for subdir, title in families}
+        self._write_root_index(config, families, counts)
+        return counts
+
+    def _write_dir_index(self, subdir_name: str, section_title: str) -> int:
+        """Per-directory `index.md` — reserved filename, no frontmatter (OKF §6)."""
+        d = self.vault_path / subdir_name
+        d.mkdir(exist_ok=True)
+        entries = []
+        for md_file in sorted(d.glob("*.md")):
+            if md_file.name in OKF_RESERVED_FILENAMES:
+                continue
+            try:
+                fm = self._parse_frontmatter(md_file.read_text(encoding="utf-8"))
+            except Exception:
+                fm = {}
+            title = fm.get("title") or md_file.stem
+            desc = fm.get("description") or fm.get("type") or ""
+            entries.append(f"* [{title}]({md_file.name})" + (f" - {desc}" if desc else ""))
+        body = f"# {section_title}\n\n" + ("\n".join(entries) if entries else "_Empty._\n")
+        (d / "index.md").write_text(body, encoding="utf-8")
+        return len(entries)
+
+    def _write_root_index(self, config, families: list, counts: dict):
+        """Bundle-root `index.md`: the ONE reserved file OKF allows frontmatter
+        on, and only the `okf_version` key (§11) — everything else (agent name,
+        access level, sync time) goes in the body since it isn't OKF's concern."""
         desc = {
             "private": "Only you can access this vault.",
             "followers": "Verified followers can view your galaxy.",
             "federated": "Followers and whitelisted federation peers can access.",
             "public": "Open to all.",
         }.get(config.access, "")
-        readme = f"""---
-type: galaxy_map
-agent: {self.agent_name}
-access: {config.access}
-last_synced: {config.last_synced or 'never'}
----
+        lines = [
+            "---",
+            f'okf_version: "{OKF_VERSION}"',
+            "---",
+            "",
+            f"# {self.agent_name}'s Memory Vault",
+            "",
+            f"Access: **{config.access.upper()}** — {desc}  ",
+            f"Last synced: {config.last_synced or 'never'}  ",
+            f"Update history: [log.md](log.md)",
+            "",
+        ]
+        for subdir, section_title in families:
+            lines.append(f"# {section_title}")
+            lines.append(f"* [{section_title}]({subdir}/index.md) - {counts.get(subdir, 0)} concepts")
+            lines.append("")
+        (self.vault_path / "index.md").write_text("\n".join(lines), encoding="utf-8")
 
-# 🌌 {self.agent_name}'s Memory Galaxy
-
-## Privacy: {config.access.upper()} — {desc}
-
-| Region | Count |
-|--------|-------|
-| broadcasts/ | {broadcasts} |
-| knowledge/ | {knowledge} |
-| traces/ | {traces} |
-| conversations/ | {conversations} |
-| skills/ | {skills} |
-| projects/ | {projects} |
-| trades/ | {trades} |
-"""
-        (self.vault_path / "README.md").write_text(readme)
+    def _append_log(self, summary: str):
+        """Prepend today's entry to `log.md` (OKF §7): reserved filename, dated
+        update history, newest-first `## YYYY-MM-DD` headings."""
+        log_path = self.vault_path / "log.md"
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        entry = f"- **Sync** ({datetime.utcnow().strftime('%H:%M UTC')}): {summary}"
+        existing = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+        if existing.startswith(f"## {today}\n"):
+            heading, rest = existing.split("\n", 1)
+            new_content = f"{heading}\n{entry}\n{rest}"
+        else:
+            new_content = f"## {today}\n{entry}\n\n{existing}"
+        log_path.write_text(new_content.rstrip() + "\n", encoding="utf-8")
 
     async def _update_fts(self, note_path: str, title: str, content: str, tags: list):
         async with aiosqlite.connect(DB_PATH) as db:
@@ -492,13 +739,13 @@ last_synced: {config.last_synced or 'never'}
     def get_galaxy_data(self) -> dict:
         stars, edges, nebulae = [], [], []
         for md_file in self.vault_path.rglob("*.md"):
-            if md_file.name == "README.md":
+            if md_file.name in OKF_RESERVED_FILENAMES or md_file.name == "README.md":
                 continue
             try:
                 content = md_file.read_text(encoding="utf-8")
                 fm = self._parse_frontmatter(content)
-                node_type = fm.get("type")
-                if node_type == "star":
+                node_kind = fm.get("node_kind")
+                if node_kind == "star":
                     stars.append({
                         "id": fm.get("id"), "title": self._extract_title(content),
                         "x": float(fm.get("galaxy_x", 0)), "y": float(fm.get("galaxy_y", 0)),
@@ -508,9 +755,9 @@ last_synced: {config.last_synced or 'never'}
                         "tags": fm.get("tags", []) if isinstance(fm.get("tags"), list) else [],
                         "content_type": fm.get("content_type", "text"),
                         "path": str(md_file.relative_to(self.vault_path)),
-                        "created": str(fm.get("created", "")),
+                        "created": str(fm.get("timestamp", "")),
                     })
-                elif node_type == "edge":
+                elif node_kind == "edge":
                     edges.append({
                         "id": fm.get("id"), "subject": fm.get("subject"),
                         "predicate": fm.get("predicate"), "object": fm.get("object"),
@@ -520,7 +767,7 @@ last_synced: {config.last_synced or 'never'}
                         "trust": self._decayed_trust(float(fm.get("trust", 0.5)), str(fm.get("last_accessed_at", ""))),
                         "path": str(md_file.relative_to(self.vault_path)),
                     })
-                elif node_type == "nebula":
+                elif node_kind == "nebula":
                     nebulae.append({
                         "id": fm.get("id"), "trace_type": fm.get("trace_type", "thought"),
                         "x": float(fm.get("galaxy_x", 0)), "y": float(fm.get("galaxy_y", 0)),
@@ -714,17 +961,21 @@ last_synced: {config.last_synced or 'never'}
                 continue
             titles = [s.get("title", "Untitled") for s in stars[:50]]
             coords = self._spatial_hash(constellation, "knowledge")
+            title = f"Constellation Summary: {constellation}"
             frontmatter = {
                 "id": f"summary_{safe_c[:20]}",
-                "type": "star",
+                "type": "Constellation Summary",
+                "title": title,
+                "description": f"{len(stars)} stars in this constellation",
                 "content_type": "text",
+                "timestamp": datetime.utcnow().isoformat(),
+                "tags": ["summary", constellation],
+                "node_kind": "star",
                 "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
                 "galaxy_size": 14, "galaxy_color": "#c7ceea",
                 "constellation": constellation,
-                "tags": ["summary", constellation],
-                "created": datetime.utcnow().isoformat(),
             }
-            body = f"# Constellation Summary: {constellation}\n\n**{len(stars)} stars in this constellation**\n\n## Star Index\n\n"
+            body = f"# {title}\n\n**{len(stars)} stars in this constellation**\n\n## Star Index\n\n"
             body += "\n".join(f"- {t}" for t in titles)
             if len(stars) > 50:
                 body += f"\n\n_…and {len(stars) - 50} more_"
@@ -748,28 +999,34 @@ last_synced: {config.last_synced or 'never'}
         stars = edges = nebulae = 0
         vault_size = 0
         for md in self.vault_path.rglob("*.md"):
+            if md.name in OKF_RESERVED_FILENAMES or md.name == "README.md":
+                continue
             try:
                 vault_size += md.stat().st_size
                 fm = self._parse_frontmatter(md.read_text())
-                t = fm.get("type")
-                if t == "star":
+                nk = fm.get("node_kind")
+                if nk == "star":
                     stars += 1
-                elif t == "edge":
+                elif nk == "edge":
                     edges += 1
-                elif t == "nebula":
+                elif nk == "nebula":
                     nebulae += 1
             except Exception:
                 pass
-        broadcasts_dir = self.vault_path / "broadcasts"
-        knowledge_dir = self.vault_path / "knowledge"
-        traces_dir = self.vault_path / "traces"
+        def _count(subdir: str) -> int:
+            d = self.vault_path / subdir
+            if not d.exists():
+                return 0
+            return len([f for f in d.glob("*.md") if f.name not in OKF_RESERVED_FILENAMES])
+
         return {
             "stars": stars,
             "edges": edges,
             "nebulae": nebulae,
-            "broadcasts": len(list(broadcasts_dir.glob("*.md"))) if broadcasts_dir.exists() else 0,
-            "knowledge": len(list(knowledge_dir.glob("*.md"))) if knowledge_dir.exists() else 0,
-            "traces": len(list(traces_dir.glob("*.md"))) if traces_dir.exists() else 0,
+            "broadcasts": _count("broadcasts"),
+            "knowledge": _count("knowledge"),
+            "traces": _count("traces"),
+            "external": _count("external"),
             "vault_size_bytes": vault_size,
             "last_synced": config.last_synced,
             "access": config.access,

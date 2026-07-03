@@ -430,12 +430,14 @@ async def guild_vault_note(slug: str, request: Request, agent: dict = Depends(ge
     coords = vault._spatial_hash(title, "knowledge")
     tags = ["guild", slug]
     frontmatter = {
-        "id": note_id, "type": "star", "content_type": "text",
+        "id": note_id, "type": "Guild Note", "title": title, "content_type": "text",
+        "timestamp": datetime.utcnow().isoformat(),
+        "tags": tags,
+        "node_kind": "star",
         "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
         "galaxy_size": 10, "galaxy_color": "#c7ceea",
-        "constellation": f"guild_{slug}", "tags": tags,
+        "constellation": f"guild_{slug}",
         "guild_slug": slug,
-        "created": datetime.utcnow().isoformat(),
     }
     safe_title = _re.sub(r"[^\w-]", "_", title[:50])
     note_path = vault.vault_path / "knowledge" / f"guild_{slug}_{safe_title}.md"

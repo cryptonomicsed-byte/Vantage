@@ -1,7 +1,9 @@
 """Memory vault API endpoints."""
 import hashlib as _hlib
 import io
+import json
 import re
+import secrets
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -13,12 +15,17 @@ from fastapi.responses import FileResponse, StreamingResponse
 import aiosqlite
 
 from ..config import settings
-from ..deps import get_agent, _parse_body
+from ..deps import get_agent, get_vault_connector, _parse_body
 from ..memory_enrichment import MemoryIntelligence
 from ..memory_vault import MemoryVault, VAULT_ROOT
 from ..db import DB_PATH
 
 router = APIRouter(prefix="/api/agents", tags=["memory_vault"])
+
+# Ingest lives on its own top-level prefix rather than under
+# /api/agents/{agent_name}/... — a connector token, not the URL, determines
+# which agent's vault a push lands in, so there's no {agent_name} to key on.
+external_router = APIRouter(prefix="/api/vault/external", tags=["memory_vault"])
 
 async def _resolve_agent(agent_name: str) -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
@@ -238,16 +245,18 @@ async def create_vault_note(
 
     frontmatter = {
         "id": note_id,
-        "type": "star",
+        "type": f"Note · {category.title()}",
+        "title": title,
         "content_type": "text",
+        "timestamp": datetime.utcnow().isoformat(),
+        "tags": tags,
+        "node_kind": "star",
         "galaxy_x": coords[0],
         "galaxy_y": coords[1],
         "galaxy_z": coords[2],
         "galaxy_size": 8,
         "galaxy_color": "#ffe66d",
         "constellation": tags[0] if tags else category,
-        "tags": tags,
-        "created": datetime.utcnow().isoformat(),
     }
 
     safe_title = re.sub(r"[^\w-]", "_", title[:50])
@@ -311,3 +320,174 @@ async def create_memory_link(
         await db.commit()
 
     return {"linked": True}
+
+
+# ── External memory connectors ─────────────────────────────────────────────────
+# A connector is a scoped, revocable, ingest-only token an agent hands to a
+# third-party tool (a CLI, a hook script, a custom bot) so that tool can push
+# conversation transcripts straight into the agent's vault — without ever
+# seeing the agent's real X-Agent-Key.
+
+_MAX_MESSAGES_PER_CALL = 200
+_MAX_CONTENT_LEN = 20000
+_MAX_STORED_MESSAGES = 1000
+
+
+def _sanitize_messages(raw) -> list:
+    if not isinstance(raw, list) or not raw:
+        raise HTTPException(422, "messages must be a non-empty list")
+    if len(raw) > _MAX_MESSAGES_PER_CALL:
+        raise HTTPException(422, f"at most {_MAX_MESSAGES_PER_CALL} messages per ingest call")
+    out = []
+    for m in raw:
+        if not isinstance(m, dict) or not str(m.get("content", "")).strip():
+            continue
+        out.append({
+            "role": str(m.get("role", "user"))[:20] or "user",
+            "content": str(m["content"])[:_MAX_CONTENT_LEN],
+            "ts": str(m.get("ts", "")) or datetime.utcnow().isoformat(),
+        })
+    if not out:
+        raise HTTPException(422, "no valid messages with content")
+    return out
+
+
+@router.post("/{agent_name}/vault/external/connectors")
+async def create_vault_connector(agent_name: str, request: Request, agent: dict = Depends(get_agent)):
+    """Register a new external connector and return its token — shown exactly
+    once. The token can only push conversations into this vault; it cannot
+    read the vault or act as the agent anywhere else."""
+    if agent["name"] != agent_name:
+        raise HTTPException(403, "Can only create connectors for your own vault")
+    body = await _parse_body(request)
+    name = str(body.get("name", "")).strip()[:100]
+    source = re.sub(r"[^a-z0-9_-]", "-", str(body.get("source", "custom")).strip().lower())[:40] or "custom"
+    if not name:
+        raise HTTPException(422, "name is required")
+
+    token = "vconn_" + secrets.token_hex(24)
+    token_hash = _hlib.sha256(token.encode()).hexdigest()
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO vault_connectors (agent_id, name, source, token_hash) VALUES (?,?,?,?)",
+            (agent["id"], name, source, token_hash),
+        )
+        await db.commit()
+        connector_id = cur.lastrowid
+
+    connector_row = {
+        "id": connector_id, "name": name, "source": source,
+        "created_at": datetime.utcnow().isoformat(), "turn_count": 0,
+    }
+    vault = MemoryVault(agent["id"], agent["name"])
+    await vault.render_connector(connector_row)
+
+    return {
+        "connector_id": connector_id,
+        "name": name,
+        "source": source,
+        "token": token,
+        "header": "X-Vault-Connector-Key",
+        "ingest_url": "/api/vault/external/ingest",
+        "warning": ("Save this token now — it cannot be shown again. Anyone holding it can write "
+                    "conversations into this agent's vault, and nothing else."),
+    }
+
+
+@router.get("/{agent_name}/vault/external/connectors")
+async def list_vault_connectors(agent_name: str, agent: dict = Depends(get_agent)):
+    if agent["name"] != agent_name:
+        raise HTTPException(403, "Can only view your own connectors")
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            """SELECT id, name, source, created_at, last_used_at, revoked, turn_count
+               FROM vault_connectors WHERE agent_id=? ORDER BY created_at DESC""",
+            (agent["id"],),
+        )).fetchall()
+    return {"connectors": [dict(r) for r in rows]}
+
+
+@router.delete("/{agent_name}/vault/external/connectors/{connector_id}")
+async def revoke_vault_connector(agent_name: str, connector_id: int, agent: dict = Depends(get_agent)):
+    if agent["name"] != agent_name:
+        raise HTTPException(403, "Can only revoke your own connectors")
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE vault_connectors SET revoked=1 WHERE id=? AND agent_id=?",
+            (connector_id, agent["id"]),
+        )
+        await db.commit()
+        rowcount = cur.rowcount
+    if rowcount == 0:
+        raise HTTPException(404, "Connector not found")
+    return {"revoked": True, "connector_id": connector_id}
+
+
+@external_router.post("/ingest")
+async def ingest_external_conversation(request: Request, connector: dict = Depends(get_vault_connector)):
+    """Push conversation turns from an external LLM/agent/tool into this
+    connector's owning agent's memory vault. Omit conversation_id for a
+    one-off conversation, or reuse the same conversation_id across calls to
+    stream in new turns as they happen — each call re-renders the vault note
+    with the full (capped) transcript so far, so it shows up immediately."""
+    body = await _parse_body(request)
+    messages = _sanitize_messages(body.get("messages"))
+    conversation_id = str(body.get("conversation_id") or uuid4().hex[:16])
+    title = str(body.get("title", ""))[:150].strip()
+    resource = str(body.get("resource", ""))[:500].strip()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        existing = await (await db.execute(
+            "SELECT * FROM external_conversations WHERE connector_id=? AND conversation_id=?",
+            (connector["id"], conversation_id),
+        )).fetchone()
+
+        if existing:
+            prior = json.loads(existing["messages_json"] or "[]")
+            combined = (prior + messages)[-_MAX_STORED_MESSAGES:]
+            await db.execute(
+                """UPDATE external_conversations
+                   SET messages_json=?, turn_count=?, last_at=datetime('now'),
+                       title=CASE WHEN ?<>'' THEN ? ELSE title END,
+                       resource=CASE WHEN ?<>'' THEN ? ELSE resource END
+                   WHERE id=?""",
+                (json.dumps(combined), len(combined), title, title, resource, resource, existing["id"]),
+            )
+            conv_id = existing["id"]
+        else:
+            cur = await db.execute(
+                """INSERT INTO external_conversations
+                   (agent_id, connector_id, conversation_id, title, resource, messages_json, turn_count)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (connector["agent_id"], connector["id"], conversation_id, title, resource,
+                 json.dumps(messages), len(messages)),
+            )
+            conv_id = cur.lastrowid
+
+        await db.execute(
+            "UPDATE vault_connectors SET turn_count = turn_count + ?, last_used_at=datetime('now') WHERE id=?",
+            (len(messages), connector["id"]),
+        )
+        await db.commit()
+
+        conv_row = dict(await (await db.execute(
+            "SELECT * FROM external_conversations WHERE id=?", (conv_id,)
+        )).fetchone())
+        connector_row = dict(await (await db.execute(
+            "SELECT * FROM vault_connectors WHERE id=?", (connector["id"],)
+        )).fetchone())
+        agent_row = dict(await (await db.execute(
+            "SELECT id, name FROM agents WHERE id=?", (connector["agent_id"],)
+        )).fetchone())
+
+    vault = MemoryVault(agent_row["id"], agent_row["name"])
+    vault_path = await vault.render_external_conversation(conv_row, connector_row)
+    await vault.render_connector(connector_row)
+
+    return {
+        "conversation_id": conversation_id,
+        "turn_count": conv_row["turn_count"],
+        "vault_path": vault_path,
+    }

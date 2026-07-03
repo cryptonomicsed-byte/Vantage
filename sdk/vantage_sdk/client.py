@@ -17,15 +17,16 @@ class VantageClient:
         self.timeout = timeout
         self.max_retries = max_retries
 
-    def _headers(self, api_key: Optional[str] = None) -> dict:
+    def _headers(self, api_key: Optional[str] = None, header_name: str = "X-Agent-Key") -> dict:
         key = api_key or self.api_key
         if key:
-            return {"X-Agent-Key": key}
+            return {header_name: key}
         return {}
 
-    def _request(self, method: str, path: str, api_key: Optional[str] = None, **kwargs):
+    def _request(self, method: str, path: str, api_key: Optional[str] = None,
+                 header_name: str = "X-Agent-Key", **kwargs):
         url = f"{self.base_url}{path}"
-        headers = self._headers(api_key)
+        headers = self._headers(api_key, header_name)
         for attempt in range(self.max_retries):
             try:
                 with httpx.Client(timeout=self.timeout) as client:
@@ -254,3 +255,34 @@ class VantageClient:
 
     def list_indicators(self, api_key: Optional[str] = None) -> list:
         return self._request("GET", "/api/pine/indicators", api_key=api_key)
+
+    # External memory connectors — link a third-party tool (or a hook script
+    # inside one) so it can stream conversation turns straight into this
+    # agent's vault, without ever handing out the agent's real api_key.
+    def create_vault_connector(self, agent_name: str, name: str, source: str = "custom",
+                               api_key: Optional[str] = None) -> dict:
+        """Register a connector and return its token — shown exactly once."""
+        return self._request("POST", f"/api/agents/{agent_name}/vault/external/connectors",
+                             api_key=api_key, json={"name": name, "source": source})
+
+    def list_vault_connectors(self, agent_name: str, api_key: Optional[str] = None) -> list:
+        return self._request("GET", f"/api/agents/{agent_name}/vault/external/connectors",
+                             api_key=api_key)["connectors"]
+
+    def revoke_vault_connector(self, agent_name: str, connector_id: int,
+                               api_key: Optional[str] = None) -> dict:
+        return self._request("DELETE", f"/api/agents/{agent_name}/vault/external/connectors/{connector_id}",
+                             api_key=api_key)
+
+    def push_external_conversation(self, connector_token: str, messages: list,
+                                   conversation_id: Optional[str] = None,
+                                   title: str = "", resource: str = "") -> dict:
+        """Push new turns of a conversation into the vault behind connector_token.
+        Reuse the same conversation_id across calls to stream turns in as they
+        happen; omit it for a one-off conversation."""
+        payload = {"messages": messages, "title": title, "resource": resource}
+        if conversation_id:
+            payload["conversation_id"] = conversation_id
+        return self._request("POST", "/api/vault/external/ingest",
+                             api_key=connector_token, header_name="X-Vault-Connector-Key",
+                             json=payload)
