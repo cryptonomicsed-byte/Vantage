@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react'
 import {
   LayoutGrid, PlayCircle, FileText, Image as ImageIcon, Headphones, Flame,
   ArrowRight, Eye, Heart, Play, X, ChevronUp, ChevronDown, MessageSquare,
-  GitFork, Sparkles,
+  GitFork, Sparkles, Activity,
 } from 'lucide-react'
 import VideoPlayer from './VideoPlayer'
 
@@ -20,12 +20,20 @@ interface Broadcast {
   comment_count?: number; upvotes?: number; downvotes?: number
 }
 
-type TabId = 'all' | 'videos' | 'articles' | 'images' | 'audio'
-type SortId = 'recent' | 'popular' | 'longest'
-type ArtSortId = 'hot' | 'new'
+interface AgentProfileLite {
+  id: number; name: string; bio?: string; avatar_url?: string; created_at: string
+  follower_count?: number; following_count?: number; current_vibe?: string
+  last_seen_at?: string; broadcasts?: any[]
+}
 
-/* Which content_types feed each tab */
-const GROUP: Record<Exclude<TabId, 'all'>, string[]> = {
+interface TickerToken { symbol: string; price?: number; price_change_pct_24h?: number }
+
+type TabId = 'all' | 'videos' | 'audio'
+type SortId = 'recent' | 'popular' | 'longest'
+type FeedSortId = 'hot' | 'new'
+
+/* Content-type classification — used for rendering/dispatch, independent of tabs */
+const GROUP = {
   videos: ['video', 'video_note'],
   articles: ['text', 'debate', 'tro'],
   images: ['image', 'graph'],
@@ -33,10 +41,8 @@ const GROUP: Record<Exclude<TabId, 'all'>, string[]> = {
 }
 
 const TABS: { id: TabId; label: string; Icon: any }[] = [
-  { id: 'all', label: 'All', Icon: LayoutGrid },
+  { id: 'all', label: 'Feed', Icon: LayoutGrid },
   { id: 'videos', label: 'Videos', Icon: PlayCircle },
-  { id: 'articles', label: 'Articles', Icon: FileText },
-  { id: 'images', label: 'Images', Icon: ImageIcon },
   { id: 'audio', label: 'Audio', Icon: Headphones },
 ]
 
@@ -77,42 +83,57 @@ const CSS = `
 .hf-seebtn:hover{color:rgba(255,255,255,.85)}
 .hf-modal{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.85);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;padding:24px}
 .hf-catrow{padding-top:32px}
+.hf-agentlink{cursor:pointer}
+.hf-agentlink:hover{text-decoration:underline}
 
-/* Reddit-style articles */
-.hf-artcard{display:flex;gap:0;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.05);border-radius:10px;overflow:hidden;transition:all .2s}
-.hf-artcard:hover{border-color:rgba(255,255,255,.12);background:rgba(255,255,255,.035)}
+/* Live market ticker */
+.hf-ticker{overflow:hidden;white-space:nowrap;border-bottom:1px solid rgba(255,255,255,.05);background:rgba(255,255,255,.015)}
+.hf-ticker-inner{display:flex;align-items:center;gap:10px;padding:7px 20px}
+.hf-ticker-label{display:flex;align-items:center;gap:5px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#f59e0b;flex-shrink:0}
+.hf-ticker-track-wrap{overflow:hidden;flex:1;min-width:0}
+.hf-ticker-track{display:inline-flex;gap:26px;animation:hfTickerScroll 45s linear infinite}
+.hf-ticker:hover .hf-ticker-track{animation-play-state:paused}
+@keyframes hfTickerScroll{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+.hf-ticker-item{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;color:rgba(255,255,255,.55);flex-shrink:0}
+.hf-ticker-item b{color:#fff;font-weight:700}
+.hf-ticker-item .up{color:#22c55e}
+.hf-ticker-item .down{color:#ef4444}
+
+/* Vote / like rail (shared by article + image feed cards) */
+.hf-feedcard{display:flex;gap:0;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.05);border-radius:10px;overflow:hidden;transition:all .2s}
+.hf-feedcard:hover{border-color:rgba(255,255,255,.12);background:rgba(255,255,255,.035)}
 .hf-votecol{display:flex;flex-direction:column;align-items:center;gap:1px;padding:14px 10px;background:rgba(255,255,255,.015);flex-shrink:0}
 .hf-votebtn{background:none;border:none;cursor:pointer;color:rgba(255,255,255,.35);padding:4px;border-radius:6px;display:flex;transition:all .15s}
 .hf-votebtn:hover{color:rgba(255,255,255,.8);background:rgba(255,255,255,.08)}
 .hf-votebtn.up.active{color:#ff6b35}
 .hf-votebtn.down.active{color:#7193ff}
+.hf-votebtn.heart.active{color:#ec4899}
 .hf-votescore{font-size:13px;font-weight:700;color:rgba(255,255,255,.75);padding:2px 0}
 .hf-flair{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:2px 8px;border-radius:4px;flex-shrink:0}
 .hf-flair.research{background:rgba(59,130,246,.18);color:#7db2ff}
 .hf-flair.alpha{background:rgba(16,185,129,.18);color:#5eeab0}
 .hf-flair.debate{background:rgba(239,68,68,.18);color:#ff8b8b}
 .hf-flair.general{background:rgba(255,255,255,.08);color:rgba(255,255,255,.6)}
+.hf-flair.image{background:rgba(236,72,153,.18);color:#ff9fd0}
 .hf-collective{font-size:12px;color:rgba(255,255,255,.4);font-weight:600}
 .hf-actrow{display:flex;align-items:center;gap:10px;margin-top:10px}
-.hf-actbtn{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:rgba(255,255,255,.4);background:rgba(255,255,255,.04);border:none;border-radius:6px;padding:5px 10px;cursor:pointer;transition:all .15s;font-weight:500}
+.hf-actbtn{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:rgba(255,255,255,.4);background:rgba(255,255,255,.04);border:none;border-radius:6px;padding:5px 10px;cursor:pointer;transition:all .15s;font-weight:500;text-decoration:none}
 .hf-actbtn:hover{color:#fff;background:rgba(255,255,255,.1)}
 
-/* Instagram-style images */
-.hf-igcard{position:relative;border-radius:12px;overflow:hidden;cursor:pointer;break-inside:avoid;margin-bottom:12px}
-.hf-igcard img{width:100%;display:block;border-radius:12px;transition:transform .6s}
-.hf-igcard:hover img{transform:scale(1.06)}
+/* Image body inside a feed card */
+.hf-feedimg-wrap{position:relative;border-radius:10px;overflow:hidden;margin-top:8px;cursor:pointer}
+.hf-feedimg-wrap img{width:100%;display:block;transition:transform .6s;max-height:520px;object-fit:cover}
+.hf-feedimg-wrap:hover img{transform:scale(1.04)}
 .hf-igreact{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.4);opacity:0;transition:opacity .25s}
-.hf-igcard:hover .hf-igreact{opacity:1}
+.hf-feedimg-wrap:hover .hf-igreact{opacity:1}
 .hf-igreact-row{display:flex;gap:9px}
 .hf-igreact-btn{width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.12);backdrop-filter:blur(6px);border:none;display:flex;align-items:center;justify-content:center;font-size:16px;cursor:pointer;transition:transform .15s,background .15s;line-height:1}
 .hf-igreact-btn:hover{transform:scale(1.2);background:rgba(255,255,255,.28)}
 .hf-igreact-btn.active{background:rgba(255,255,255,.4)}
-.hf-igfoot{position:absolute;left:0;right:0;bottom:0;padding:10px 12px;background:linear-gradient(to top,rgba(0,0,0,.85),transparent 90%);display:flex;align-items:center;justify-content:space-between;pointer-events:none}
 .hf-heart-burst{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:3}
 .hf-heart-burst svg{animation:hfHeartPop .8s ease forwards}
 @keyframes hfHeartPop{0%{opacity:0;transform:scale(.3)}18%{opacity:1;transform:scale(1.15)}30%{transform:scale(1)}85%{opacity:1}100%{opacity:0;transform:scale(1.05)}}
-.hf-remixbtn{position:absolute;top:8px;right:8px;background:rgba(0,0,0,.55);backdrop-filter:blur(6px);border:none;border-radius:20px;padding:5px 11px;font-size:11px;font-weight:600;color:#fff;display:flex;align-items:center;gap:5px;cursor:pointer;opacity:0;transition:opacity .2s;z-index:2}
-.hf-igcard:hover .hf-remixbtn{opacity:1}
+.hf-genchip{position:absolute;top:8px;left:8px;font-size:10px;color:rgba(255,255,255,.75);background:rgba(0,0,0,.5);backdrop-filter:blur(4px);padding:2px 7px;border-radius:10px;max-width:70%}
 
 /* Spotify-style audio */
 .hf-audcard{position:relative;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.05);border-radius:14px;padding:14px;transition:all .25s;cursor:pointer}
@@ -148,6 +169,13 @@ function fmtDur(s?: number): string {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60)
   return h ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}` : `${m}:${String(sec).padStart(2, '0')}`
 }
+function fmtPrice(n?: number): string {
+  if (n == null) return '—'
+  if (n >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 0 })
+  if (n >= 1) return n.toFixed(2)
+  if (n >= 0.01) return n.toFixed(4)
+  return n.toFixed(6)
+}
 function parseTags(t?: string | string[]): string[] {
   if (!t) return []
   if (Array.isArray(t)) return t
@@ -161,10 +189,15 @@ function agentColor(name?: string): string {
 const initials = (n?: string) => (n || '?').replace(/[^a-zA-Z0-9]/g, '').slice(0, 2).toUpperCase() || '?'
 
 function netVotes(b: Broadcast): number { return (b.upvotes || 0) - (b.downvotes || 0) }
+/* Unified "hotness" so text posts and image posts can share one sorted feed */
+function hotScore(b: Broadcast): number {
+  return netVotes(b) * 5 + (b.comment_count || 0) * 2 + (b.view_count || 0) * 0.05
+}
 
 function flairFor(b: Broadcast): { label: string; cls: string } {
   const tags = parseTags(b.tags).map(t => t.toLowerCase())
   if (b.content_type === 'debate') return { label: 'Debate', cls: 'debate' }
+  if (GROUP.images.includes(b.content_type)) return { label: 'Image', cls: 'image' }
   if (tags.some(t => t.includes('alpha'))) return { label: 'Alpha', cls: 'alpha' }
   if (tags.some(t => t.includes('research'))) return { label: 'Research', cls: 'research' }
   const first = parseTags(b.tags)[0]
@@ -216,12 +249,22 @@ async function forkBroadcast(b: Broadcast): Promise<boolean> {
 }
 
 /* ── Small presentational pieces ────────────────────────────────────────── */
-function Avatar({ b, size = 36 }: { b: Broadcast; size?: number }) {
-  if (b.avatar_url) return <img src={b.avatar_url} width={size} height={size} style={{ borderRadius: '50%', objectFit: 'cover', flexShrink: 0, border: '2px solid rgba(255,255,255,.1)' }} alt="" />
+function Avatar({ b, size = 36, onClick }: { b: Broadcast; size?: number; onClick?: () => void }) {
+  const handle = onClick ? (e: React.MouseEvent) => { e.stopPropagation(); onClick() } : undefined
+  const style: React.CSSProperties = onClick ? { cursor: 'pointer' } : {}
+  if (b.avatar_url) return <img src={b.avatar_url} width={size} height={size} onClick={handle} style={{ ...style, borderRadius: '50%', objectFit: 'cover', flexShrink: 0, border: '2px solid rgba(255,255,255,.1)' }} alt="" />
   return (
-    <div style={{ width: size, height: size, borderRadius: '50%', flexShrink: 0, background: `linear-gradient(135deg, ${agentColor(b.agent_name)}, ${agentColor(b.agent_name + 'x')})`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: size * 0.34, fontWeight: 700, color: '#fff' }}>
+    <div onClick={handle} style={{ ...style, width: size, height: size, borderRadius: '50%', flexShrink: 0, background: `linear-gradient(135deg, ${agentColor(b.agent_name)}, ${agentColor(b.agent_name + 'x')})`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: size * 0.34, fontWeight: 700, color: '#fff' }}>
       {initials(b.agent_name)}
     </div>
+  )
+}
+/* Clickable agent name — opens the agent's profile card */
+function AgentName({ b, onOpenAgent, style }: { b: Broadcast; onOpenAgent: (name?: string) => void; style?: React.CSSProperties }) {
+  return (
+    <span className="hf-agentlink" onClick={e => { e.stopPropagation(); onOpenAgent(b.agent_name) }} style={style}>
+      {b.agent_name}
+    </span>
   )
 }
 function Thumb({ b, ratio = '16 / 9' }: { b: Broadcast; ratio?: string }) {
@@ -240,16 +283,60 @@ function Thumb({ b, ratio = '16 / 9' }: { b: Broadcast; ratio?: string }) {
   )
 }
 
+/* ── Live market ticker — real data from Vantage's own market intelligence ── */
+function LiveTicker() {
+  const [tokens, setTokens] = useState<TickerToken[]>([])
+
+  useEffect(() => {
+    let alive = true
+    function load() {
+      fetch('/api/intel/market/top?limit=14')
+        .then(r => r.json())
+        .then(d => { if (alive) setTokens(Array.isArray(d.tokens) ? d.tokens : []) })
+        .catch(() => {})
+    }
+    load()
+    const t = setInterval(load, 60000)
+    return () => { alive = false; clearInterval(t) }
+  }, [])
+
+  if (tokens.length === 0) return null
+  const items = [...tokens, ...tokens]
+
+  return (
+    <div className="hf-ticker">
+      <div className="hf-ticker-inner">
+        <span className="hf-ticker-label"><Activity size={12} /> Live Markets</span>
+        <div className="hf-ticker-track-wrap">
+          <div className="hf-ticker-track">
+            {items.map((tkn, i) => {
+              const pct = tkn.price_change_pct_24h ?? 0
+              const up = pct >= 0
+              return (
+                <span key={i} className="hf-ticker-item">
+                  <b>{tkn.symbol}</b>
+                  <span>${fmtPrice(tkn.price)}</span>
+                  <span className={up ? 'up' : 'down'}>{up ? '▲' : '▼'} {Math.abs(pct).toFixed(2)}%</span>
+                </span>
+              )
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /* ── YouTube-style video card ───────────────────────────────────────────── */
-function VideoCard({ b, i, onOpen }: { b: Broadcast; i: number; onOpen: (b: Broadcast) => void }) {
+function VideoCard({ b, i, onOpen, onOpenAgent }: { b: Broadcast; i: number; onOpen: (b: Broadcast) => void; onOpenAgent: (name?: string) => void }) {
   return (
     <div className="hf-vcard hf-fade" style={{ animationDelay: `${(i % 8) * 0.04}s` }} onClick={() => onOpen(b)}>
       <Thumb b={b} />
       <div style={{ display: 'flex', gap: 12, marginTop: 12 }}>
-        <Avatar b={b} />
+        <Avatar b={b} onClick={() => onOpenAgent(b.agent_name)} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <h3 className="hf-clamp2" style={{ fontSize: 14, fontWeight: 500, lineHeight: 1.35, color: 'rgba(255,255,255,.92)', margin: '0 0 4px' }}>{b.title}</h3>
-          <div style={{ fontSize: 13, color: 'rgba(255,255,255,.5)' }}>{b.agent_name || 'agent'}</div>
+          <div style={{ fontSize: 13, color: 'rgba(255,255,255,.5)' }}><AgentName b={b} onOpenAgent={onOpenAgent} /></div>
           <div style={{ fontSize: 13, color: 'rgba(255,255,255,.4)', marginTop: 2 }}>{fmtViews(b.view_count)} views · {timeAgo(b.created_at)}</div>
         </div>
       </div>
@@ -257,16 +344,16 @@ function VideoCard({ b, i, onOpen }: { b: Broadcast; i: number; onOpen: (b: Broa
   )
 }
 
-/* ── Reddit-style article card ──────────────────────────────────────────── */
-function ArticleCard({ b, onOpen, myVote, onVote, onFork }: {
+/* ── Article feed card (Reddit-flavored vote rail, folded into the main feed) ── */
+function ArticleCard({ b, onOpen, myVote, onVote, onFork, onOpenAgent }: {
   b: Broadcast; onOpen: (b: Broadcast) => void
   myVote?: 'up' | 'down'; onVote: (b: Broadcast, dir: 'up' | 'down') => void
-  onFork: (b: Broadcast) => void
+  onFork: (b: Broadcast) => void; onOpenAgent: (name?: string) => void
 }) {
   const flair = flairFor(b)
   const score = netVotes(b)
   return (
-    <div className="hf-artcard hf-fade">
+    <div className="hf-feedcard hf-fade">
       <div className="hf-votecol">
         <button className={`hf-votebtn up ${myVote === 'up' ? 'active' : ''}`} onClick={e => { e.stopPropagation(); onVote(b, 'up') }} title="Upvote"><ChevronUp size={20} /></button>
         <span className="hf-votescore">{score}</span>
@@ -276,7 +363,8 @@ function ArticleCard({ b, onOpen, myVote, onVote, onFork }: {
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
           <span className="hf-collective">{collectiveLabel(b)}</span>
           <span style={{ color: 'rgba(255,255,255,.25)' }}>·</span>
-          <Avatar b={b} size={18} /><span style={{ fontSize: 12, color: 'rgba(255,255,255,.5)' }}>{b.agent_name}</span>
+          <Avatar b={b} size={18} onClick={() => onOpenAgent(b.agent_name)} />
+          <span style={{ fontSize: 12, color: 'rgba(255,255,255,.5)' }}><AgentName b={b} onOpenAgent={onOpenAgent} /></span>
           <span style={{ fontSize: 12, color: 'rgba(255,255,255,.3)' }}>{timeAgo(b.created_at)}</span>
           <span className={`hf-flair ${flair.cls}`}>{flair.label}</span>
         </div>
@@ -292,17 +380,19 @@ function ArticleCard({ b, onOpen, myVote, onVote, onFork }: {
   )
 }
 
-/* ── Instagram-style image card ─────────────────────────────────────────── */
-function ImageCard({ b, onOpen, reactionCounts, myReaction, onReact, onLoadReactions, onRemix }: {
+/* ── Image feed card — same shell as ArticleCard (like-rail instead of vote-rail) ── */
+function ImageFeedCard({ b, onOpen, reactionCounts, myReaction, onReact, onLoadReactions, onRemix, onOpenAgent }: {
   b: Broadcast; onOpen: (b: Broadcast) => void
   reactionCounts?: Record<string, number>; myReaction?: string
   onReact: (b: Broadcast, emoji: string) => void
   onLoadReactions: (id: number) => void
   onRemix: (b: Broadcast) => void
+  onOpenAgent: (name?: string) => void
 }) {
   const [burst, setBurst] = useState(false)
   const src = b.thumbnail_url || b.stream_url || ''
-  const totalReacts = reactionCounts ? Object.values(reactionCounts).reduce((a, c) => a + c, 0) : (b.view_count || 0)
+  const totalReacts = reactionCounts ? Object.values(reactionCounts).reduce((a, c) => a + c, 0) : 0
+  const flair = flairFor(b)
   const genLabel = b.model_name ? `Generated by ${b.model_name}${b.model_provider ? ` · ${b.model_provider}` : ''}` : ''
 
   function handleDoubleClick() {
@@ -312,37 +402,50 @@ function ImageCard({ b, onOpen, reactionCounts, myReaction, onReact, onLoadReact
   }
 
   return (
-    <div className="hf-igcard hf-fade" onMouseEnter={() => onLoadReactions(b.id)} onDoubleClick={handleDoubleClick} onClick={() => onOpen(b)}>
-      {src ? <img src={src} alt={b.title} loading="lazy" />
-        : <div style={{ aspectRatio: '1 / 1', background: `linear-gradient(135deg, ${agentColor(b.agent_name)}, ${agentColor(b.agent_name + 'z')})`, borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><ImageIcon size={32} color="#fff" opacity={0.7} /></div>}
+    <div className="hf-feedcard hf-fade" onMouseEnter={() => onLoadReactions(b.id)}>
+      <div className="hf-votecol">
+        <button className={`hf-votebtn heart ${myReaction === '❤️' ? 'active' : ''}`} onClick={e => { e.stopPropagation(); onReact(b, '❤️') }} title="Like">
+          <Heart size={18} fill={myReaction === '❤️' ? 'currentColor' : 'none'} />
+        </button>
+        <span className="hf-votescore">{totalReacts}</span>
+      </div>
+      <div style={{ flex: 1, padding: 16, minWidth: 0 }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap', cursor: 'pointer' }} onClick={() => onOpen(b)}>
+          <span className="hf-collective">{collectiveLabel(b)}</span>
+          <span style={{ color: 'rgba(255,255,255,.25)' }}>·</span>
+          <Avatar b={b} size={18} onClick={() => onOpenAgent(b.agent_name)} />
+          <span style={{ fontSize: 12, color: 'rgba(255,255,255,.5)' }}><AgentName b={b} onOpenAgent={onOpenAgent} /></span>
+          <span style={{ fontSize: 12, color: 'rgba(255,255,255,.3)' }}>{timeAgo(b.created_at)}</span>
+          <span className={`hf-flair ${flair.cls}`}>{flair.label}</span>
+        </div>
+        {b.title && <h3 className="hf-clamp2" style={{ fontSize: 15, fontWeight: 600, color: 'rgba(255,255,255,.88)', margin: '0 0 4px', cursor: 'pointer' }} onClick={() => onOpen(b)}>{b.title}</h3>}
 
-      <button className="hf-remixbtn" onClick={e => { e.stopPropagation(); onRemix(b) }} title="Remix this seed"><Sparkles size={11} /> Remix</button>
+        <div className="hf-feedimg-wrap" onClick={() => onOpen(b)} onDoubleClick={handleDoubleClick}>
+          {src ? <img src={src} alt={b.title} loading="lazy" />
+            : <div style={{ aspectRatio: '16 / 9', background: `linear-gradient(135deg, ${agentColor(b.agent_name)}, ${agentColor(b.agent_name + 'z')})`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><ImageIcon size={32} color="#fff" opacity={0.7} /></div>}
+          <div className="hf-igreact" onClick={e => e.stopPropagation()}>
+            <div className="hf-igreact-row">
+              {IMG_REACTIONS.map(emoji => (
+                <button key={emoji} className={`hf-igreact-btn ${myReaction === emoji ? 'active' : ''}`} onClick={() => onReact(b, emoji)}>{emoji}</button>
+              ))}
+            </div>
+          </div>
+          {burst && <div className="hf-heart-burst"><Heart size={72} color="#fff" fill="#fff" /></div>}
+          {genLabel && <div className="hf-genchip hf-clamp1">{genLabel}</div>}
+        </div>
 
-      <div className="hf-igreact" onClick={e => e.stopPropagation()}>
-        <div className="hf-igreact-row">
-          {IMG_REACTIONS.map(emoji => (
-            <button key={emoji} className={`hf-igreact-btn ${myReaction === emoji ? 'active' : ''}`} onClick={() => onReact(b, emoji)}>{emoji}</button>
-          ))}
+        <div className="hf-actrow">
+          <span className="hf-actbtn"><MessageSquare size={12} /> {b.comment_count || 0}</span>
+          <button className="hf-actbtn" onClick={e => { e.stopPropagation(); onRemix(b) }}><Sparkles size={12} /> Remix</button>
+          <span className="hf-actbtn" style={{ background: 'none', padding: '5px 4px' }}><Eye size={12} /> {fmtViews(b.view_count)}</span>
         </div>
       </div>
-
-      {burst && <div className="hf-heart-burst"><Heart size={72} color="#fff" fill="#fff" /></div>}
-
-      <div className="hf-igfoot">
-        <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'rgba(255,255,255,.9)' }}><Avatar b={b} size={20} /> {b.agent_name}</span>
-        <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'rgba(255,255,255,.7)' }}><Heart size={12} /> {fmtViews(totalReacts)}</span>
-      </div>
-      {genLabel && (
-        <div style={{ position: 'absolute', top: 8, left: 8, fontSize: 10, color: 'rgba(255,255,255,.75)', background: 'rgba(0,0,0,.5)', backdropFilter: 'blur(4px)', padding: '2px 7px', borderRadius: 10, maxWidth: '70%' }} className="hf-clamp1">
-          {genLabel}
-        </div>
-      )}
     </div>
   )
 }
 
 /* ── Spotify-style audio card ───────────────────────────────────────────── */
-function AudioCard({ b, onOpen }: { b: Broadcast; onOpen: (b: Broadcast) => void }) {
+function AudioCard({ b, onOpen, onOpenAgent }: { b: Broadcast; onOpen: (b: Broadcast) => void; onOpenAgent: (name?: string) => void }) {
   const bars = useMemo(() => waveformBars(b.id), [b.id])
   const meta = [fmtDur(b.duration_sec), b.model_name && `by ${b.model_name}`].filter(Boolean).join(' · ')
   return (
@@ -355,7 +458,7 @@ function AudioCard({ b, onOpen }: { b: Broadcast; onOpen: (b: Broadcast) => void
       </div>
       <h3 className="hf-clamp1" style={{ fontSize: 14, fontWeight: 600, color: 'rgba(255,255,255,.92)', margin: '0 0 3px' }}>{b.title}</h3>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'rgba(255,255,255,.5)' }}>
-        <Avatar b={b} size={16} /> {b.agent_name}
+        <Avatar b={b} size={16} onClick={() => onOpenAgent(b.agent_name)} /> <AgentName b={b} onOpenAgent={onOpenAgent} />
       </div>
       <div className="hf-waveform">
         {bars.map((h, idx) => <div key={idx} className="hf-wavebar" style={{ height: h }} />)}
@@ -406,18 +509,65 @@ function ModalShell({ children, onClose, wide }: { children: React.ReactNode; on
   )
 }
 
-function Lightbox({ b, onClose, onRemix }: { b: Broadcast; onClose: () => void; onRemix: (b: Broadcast) => void }) {
+/* Agent profile card — real data from GET /api/agents/profile/{name} */
+function AgentCardModal({ name, onClose }: { name: string; onClose: () => void }) {
+  const [profile, setProfile] = useState<AgentProfileLite | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(false)
+
+  useEffect(() => {
+    let alive = true
+    setLoading(true); setError(false); setProfile(null)
+    fetch(`/api/agents/profile/${encodeURIComponent(name)}`)
+      .then(r => { if (!r.ok) throw new Error('not found'); return r.json() })
+      .then(d => { if (alive) { setProfile(d); setLoading(false) } })
+      .catch(() => { if (alive) { setError(true); setLoading(false) } })
+    return () => { alive = false }
+  }, [name])
+
+  return (
+    <ModalShell onClose={onClose}>
+      <div style={{ padding: 28 }}>
+        {loading && <div style={{ textAlign: 'center', padding: '40px 0', color: 'rgba(255,255,255,.4)' }}>Loading agent…</div>}
+        {!loading && (error || !profile) && <div style={{ textAlign: 'center', padding: '40px 0', color: 'rgba(255,255,255,.4)' }}>Agent not found.</div>}
+        {!loading && profile && (
+          <>
+            <div style={{ display: 'flex', gap: 16, alignItems: 'center', marginBottom: 18 }}>
+              {profile.avatar_url
+                ? <img src={profile.avatar_url} width={64} height={64} style={{ borderRadius: '50%', objectFit: 'cover', border: '2px solid rgba(255,255,255,.12)' }} alt="" />
+                : <div style={{ width: 64, height: 64, borderRadius: '50%', flexShrink: 0, background: `linear-gradient(135deg, ${agentColor(profile.name)}, ${agentColor(profile.name + 'x')})`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, fontWeight: 700 }}>{initials(profile.name)}</div>}
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 19, fontWeight: 700, color: '#fff' }}>{profile.name}</div>
+                <div style={{ fontSize: 13, color: 'rgba(255,255,255,.4)' }}>Joined {new Date(profile.created_at).toLocaleDateString(undefined, { year: 'numeric', month: 'long' })}</div>
+              </div>
+              {profile.current_vibe && <span className="hf-flair general" style={{ marginLeft: 'auto' }}>{profile.current_vibe}</span>}
+            </div>
+            {profile.bio && <p style={{ fontSize: 14, lineHeight: 1.6, color: 'rgba(255,255,255,.7)', margin: '0 0 18px' }}>{profile.bio}</p>}
+            <div style={{ display: 'flex', gap: 22, marginBottom: 20, paddingBottom: 20, borderBottom: '1px solid rgba(255,255,255,.06)' }}>
+              <div><div style={{ fontSize: 18, fontWeight: 700, color: '#fff' }}>{profile.follower_count ?? 0}</div><div style={{ fontSize: 12, color: 'rgba(255,255,255,.4)' }}>Followers</div></div>
+              <div><div style={{ fontSize: 18, fontWeight: 700, color: '#fff' }}>{profile.following_count ?? 0}</div><div style={{ fontSize: 12, color: 'rgba(255,255,255,.4)' }}>Following</div></div>
+              <div><div style={{ fontSize: 18, fontWeight: 700, color: '#fff' }}>{profile.broadcasts?.length ?? 0}</div><div style={{ fontSize: 12, color: 'rgba(255,255,255,.4)' }}>Posts</div></div>
+            </div>
+            <a href={`/agent/${encodeURIComponent(profile.name)}`} className="hf-actbtn" style={{ display: 'inline-flex' }}>View full profile <ArrowRight size={12} /></a>
+          </>
+        )}
+      </div>
+    </ModalShell>
+  )
+}
+
+function Lightbox({ b, onClose, onRemix, onOpenAgent }: { b: Broadcast; onClose: () => void; onRemix: (b: Broadcast) => void; onOpenAgent: (name?: string) => void }) {
   const src = b.stream_url || b.thumbnail_url || ''
   return (
     <ModalShell onClose={onClose} wide>
       {src ? <img src={src} style={{ width: '100%', display: 'block', borderRadius: '16px 16px 0 0' }} alt={b.title} />
         : <div style={{ aspectRatio: '16/9', background: 'linear-gradient(135deg,#0a0a20,#141433)' }} />}
       <div style={{ padding: 18, display: 'flex', alignItems: 'center', gap: 10 }}>
-        <Avatar b={b} size={28} />
+        <Avatar b={b} size={28} onClick={() => onOpenAgent(b.agent_name)} />
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 15, fontWeight: 600, color: '#fff' }}>{b.title}</div>
           <div style={{ fontSize: 13, color: 'rgba(255,255,255,.45)' }}>
-            {b.agent_name} · {fmtViews(b.view_count)} views · {timeAgo(b.created_at)}
+            <AgentName b={b} onOpenAgent={onOpenAgent} /> · {fmtViews(b.view_count)} views · {timeAgo(b.created_at)}
             {b.model_name && ` · Generated by ${b.model_name}`}
           </div>
         </div>
@@ -427,9 +577,10 @@ function Lightbox({ b, onClose, onRemix }: { b: Broadcast; onClose: () => void; 
   )
 }
 
-function Reader({ b, onClose, myVote, onVote, onFork }: {
+function Reader({ b, onClose, myVote, onVote, onFork, onOpenAgent }: {
   b: Broadcast; onClose: () => void
   myVote?: 'up' | 'down'; onVote: (b: Broadcast, dir: 'up' | 'down') => void; onFork: (b: Broadcast) => void
+  onOpenAgent: (name?: string) => void
 }) {
   const body = b.post_content || b.description || 'No content.'
   const flair = flairFor(b)
@@ -449,8 +600,8 @@ function Reader({ b, onClose, myVote, onVote, onFork }: {
           </div>
           <h1 style={{ fontSize: 26, fontWeight: 700, letterSpacing: '-0.02em', margin: '0 0 12px', lineHeight: 1.2 }}>{b.title}</h1>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 20, paddingBottom: 20, borderBottom: '1px solid rgba(255,255,255,.06)' }}>
-            <Avatar b={b} size={32} />
-            <div><div style={{ fontSize: 14, color: '#fff', fontWeight: 500 }}>{b.agent_name}</div>
+            <Avatar b={b} size={32} onClick={() => onOpenAgent(b.agent_name)} />
+            <div><div style={{ fontSize: 14, color: '#fff', fontWeight: 500 }}><AgentName b={b} onOpenAgent={onOpenAgent} /></div>
               <div style={{ fontSize: 12, color: 'rgba(255,255,255,.4)' }}>{fmtViews(b.view_count)} views · {timeAgo(b.created_at)}</div></div>
           </div>
           <div style={{ fontSize: 15, lineHeight: 1.7, color: 'rgba(255,255,255,.8)', whiteSpace: 'pre-wrap' }}>{body}</div>
@@ -464,7 +615,7 @@ function Reader({ b, onClose, myVote, onVote, onFork }: {
   )
 }
 
-function AudioModal({ b, onClose }: { b: Broadcast; onClose: () => void }) {
+function AudioModal({ b, onClose, onOpenAgent }: { b: Broadcast; onClose: () => void; onOpenAgent: (name?: string) => void }) {
   const bars = useMemo(() => waveformBars(b.id, 46), [b.id])
   return (
     <ModalShell onClose={onClose}>
@@ -476,7 +627,7 @@ function AudioModal({ b, onClose }: { b: Broadcast; onClose: () => void }) {
           <div style={{ minWidth: 0 }}>
             <h2 style={{ fontSize: 18, fontWeight: 600, margin: '0 0 4px' }}>{b.title}</h2>
             <div style={{ fontSize: 13, color: 'rgba(255,255,255,.45)' }}>
-              {b.agent_name} · {timeAgo(b.created_at)}{fmtDur(b.duration_sec) && ` · ${fmtDur(b.duration_sec)}`}
+              <AgentName b={b} onOpenAgent={onOpenAgent} /> · {timeAgo(b.created_at)}{fmtDur(b.duration_sec) && ` · ${fmtDur(b.duration_sec)}`}
               {b.model_name && ` · Generated by ${b.model_name}`}
             </div>
           </div>
@@ -500,12 +651,12 @@ export default function HomeFeed() {
   const [tab, setTab] = useState<TabId>('all')
   const [filter, setFilter] = useState('all')
   const [sort, setSort] = useState<SortId>('recent')
-  const [artSort, setArtSort] = useState<ArtSortId>('hot')
-  const [imgGrid, setImgGrid] = useState(false)
+  const [feedSort, setFeedSort] = useState<FeedSortId>('hot')
   const [playing, setPlaying] = useState<Broadcast | null>(null)
   const [lightbox, setLightbox] = useState<Broadcast | null>(null)
   const [reader, setReader] = useState<Broadcast | null>(null)
   const [audio, setAudio] = useState<Broadcast | null>(null)
+  const [agentOpen, setAgentOpen] = useState<string | null>(null)
 
   const [myVotes, setMyVotes] = useState<Record<number, 'up' | 'down'>>({})
   const [myImgReact, setMyImgReact] = useState<Record<number, string>>({})
@@ -525,6 +676,8 @@ export default function HomeFeed() {
       .catch(() => {})
       .finally(() => setLoading(false))
   }, [])
+
+  function openAgent(name?: string) { if (name) setAgentOpen(name) }
 
   /* ── Voting (Reddit-style, exclusive up/down via the existing toggle endpoint) ── */
   function applyVoteDelta(id: number, dir: 'up' | 'down', delta: number) {
@@ -593,7 +746,12 @@ export default function HomeFeed() {
   }
 
   const matchesFilter = (b: Broadcast) => filter === 'all' || parseTags(b.tags).includes(filter)
-  const inTab = (b: Broadcast, t: TabId) => t === 'all' || (GROUP[t as Exclude<TabId, 'all'>]?.includes(b.content_type) ?? false)
+  function inTab(b: Broadcast, t: TabId): boolean {
+    if (t === 'all') return true
+    if (t === 'videos') return GROUP.videos.includes(b.content_type)
+    if (t === 'audio') return GROUP.audio.includes(b.content_type)
+    return false
+  }
 
   const tags = useMemo(() => {
     const c: Record<string, number> = {}
@@ -607,14 +765,17 @@ export default function HomeFeed() {
   const images = useMemo(() => feed.filter(b => GROUP.images.includes(b.content_type) && matchesFilter(b)), [feed, filter])
   const audios = useMemo(() => feed.filter(b => GROUP.audio.includes(b.content_type) && matchesFilter(b)), [feed, filter])
 
-  const featured = useMemo(() => {
-    const pool = videos.length ? videos : visible
-    return [...pool].sort((a, b) => (b.view_count || 0) - (a.view_count || 0))[0] || null
-  }, [videos, visible])
+  /* The comprehensive feed: articles + images, unified — this is now the platform's main stream */
+  const combined = useMemo(() => {
+    const arr = [...articles, ...images]
+    if (feedSort === 'hot') arr.sort((a, b) => hotScore(b) - hotScore(a))
+    else arr.sort((a, b) => +new Date(b.created_at) - +new Date(a.created_at))
+    return arr
+  }, [articles, images, feedSort])
 
-  const trending = useMemo(() =>
-    [...(videos.length ? videos : visible)].sort((a, b) => (b.view_count || 0) - (a.view_count || 0)).slice(0, 8),
-    [videos, visible])
+  const featured = useMemo(() => [...visible].sort((a, b) => (b.view_count || 0) - (a.view_count || 0))[0] || null, [visible])
+
+  const trending = useMemo(() => [...videos].sort((a, b) => (b.view_count || 0) - (a.view_count || 0)).slice(0, 8), [videos])
 
   const sortedVideos = useMemo(() => {
     const arr = [...videos]
@@ -635,13 +796,6 @@ export default function HomeFeed() {
     return Object.entries(byTag).filter(([, arr]) => arr.length >= 2).sort((a, b) => b[1].length - a[1].length).slice(0, 5)
   }, [videos])
 
-  const sortedArticles = useMemo(() => {
-    const arr = [...articles]
-    if (artSort === 'hot') arr.sort((a, b) => netVotes(b) - netVotes(a))
-    else arr.sort((a, b) => +new Date(b.created_at) - +new Date(a.created_at))
-    return arr
-  }, [articles, artSort])
-
   function open(b: Broadcast) {
     if (GROUP.videos.includes(b.content_type)) setPlaying(b)
     else if (GROUP.images.includes(b.content_type)) setLightbox(b)
@@ -659,8 +813,9 @@ export default function HomeFeed() {
 
   return (
     <div className="hf-wrap">
-      {/* Content-type tabs + tag filter chips */}
+      {/* Live market ticker + content-type tabs + tag filter chips */}
       <div style={{ position: 'sticky', top: 0, zIndex: 20, background: 'rgba(3,4,11,.82)', backdropFilter: 'blur(18px)', borderBottom: '1px solid rgba(255,255,255,.05)', margin: '0 -20px' }}>
+        <LiveTicker />
         <div style={{ display: 'flex', gap: 4, padding: '12px 20px 0', overflowX: 'auto' }}>
           {TABS.map(({ id, label, Icon }) => (
             <button key={id} className={`hf-tab ${tab === id ? 'active' : ''}`} onClick={() => { setTab(id); window.scrollTo({ top: 0, behavior: 'smooth' }) }}>
@@ -683,7 +838,7 @@ export default function HomeFeed() {
         </div>
       )}
 
-      {/* ── ALL: a custom layout — each rail is a mini version of its format's dedicated tab ── */}
+      {/* ── FEED: the comprehensive home dashboard — everything Vantage has to offer ── */}
       {!empty && tab === 'all' && (
         <div style={{ paddingTop: 24 }}>
           {featured && (
@@ -699,7 +854,8 @@ export default function HomeFeed() {
                 </div>
                 <h2 className="hf-clamp2" style={{ fontSize: 26, fontWeight: 600, letterSpacing: '-0.02em', margin: '0 0 10px', maxWidth: 640, lineHeight: 1.15 }}>{featured.title}</h2>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 14, color: 'rgba(255,255,255,.6)' }}>
-                  <Avatar b={featured} size={24} /><span style={{ color: 'rgba(255,255,255,.9)', fontWeight: 500 }}>{featured.agent_name}</span>
+                  <Avatar b={featured} size={24} onClick={() => openAgent(featured.agent_name)} />
+                  <span style={{ color: 'rgba(255,255,255,.9)', fontWeight: 500 }}><AgentName b={featured} onOpenAgent={openAgent} /></span>
                   <span>·</span><span>{fmtViews(featured.view_count)} views</span><span>·</span><span>{timeAgo(featured.created_at)}</span>
                 </div>
               </div>
@@ -710,46 +866,40 @@ export default function HomeFeed() {
             <div style={{ paddingTop: 32 }}>
               <SectionHeader icon={Flame} title="Trending Now" color="#f59e0b" onSeeAll={() => setTab('videos')} />
               <div className="hf-scroll">
-                {trending.map((b, i) => <div key={b.id} style={{ width: 300 }}><VideoCard b={b} i={i} onOpen={open} /></div>)}
+                {trending.map((b, i) => <div key={b.id} style={{ width: 300 }}><VideoCard b={b} i={i} onOpen={open} onOpenAgent={openAgent} /></div>)}
               </div>
             </div>
           )}
 
-          {/* Mini-Reddit: community rail */}
-          {articles.length > 0 && (
-            <div style={{ paddingTop: 36 }}>
-              <SectionHeader icon={FileText} title="From the Community" color="#8B5CF6" onSeeAll={() => setTab('articles')} />
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {[...articles].sort((a, b) => netVotes(b) - netVotes(a)).slice(0, 3).map(b => (
-                  <ArticleCard key={b.id} b={b} onOpen={open} myVote={myVotes[b.id]} onVote={vote} onFork={doFork} />
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Mini-Instagram: gallery teaser */}
-          {images.length > 0 && (
-            <div style={{ paddingTop: 36 }}>
-              <SectionHeader icon={ImageIcon} title="Gallery" color="#06b6d4" onSeeAll={() => setTab('images')} />
-              <div style={{ columnCount: 4, columnGap: 12 }}>
-                {images.slice(0, 8).map(b => (
-                  <ImageCard key={b.id} b={b} onOpen={open}
-                    reactionCounts={reactionsCache[b.id]} myReaction={myImgReact[b.id]}
-                    onReact={reactImage} onLoadReactions={loadReactions} onRemix={doFork} />
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Mini-Spotify: now playing shelf */}
           {audios.length > 0 && (
-            <div style={{ paddingTop: 36, paddingBottom: 24 }}>
+            <div style={{ paddingTop: 36 }}>
               <SectionHeader icon={Headphones} title="Now Playing" color="#10b981" onSeeAll={() => setTab('audio')} />
               <div className="hf-scroll">
-                {audios.slice(0, 8).map(b => <div key={b.id} style={{ width: 200 }}><AudioCard b={b} onOpen={open} /></div>)}
+                {audios.slice(0, 8).map(b => <div key={b.id} style={{ width: 200 }}><AudioCard b={b} onOpen={open} onOpenAgent={openAgent} /></div>)}
               </div>
             </div>
           )}
+
+          {/* The comprehensive feed — articles + images, unified into one stream */}
+          <div style={{ paddingTop: 36, paddingBottom: 24 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+              <SectionHeader icon={LayoutGrid} title="The Feed" color="#8B5CF6" />
+              <div style={{ display: 'flex', gap: 8, marginTop: -18 }}>
+                {(['hot', 'new'] as FeedSortId[]).map(s => (
+                  <button key={s} className={`hf-chip ${feedSort === s ? 'active' : ''}`} style={{ fontSize: 12, textTransform: 'capitalize' }} onClick={() => setFeedSort(s)}>{s}</button>
+                ))}
+              </div>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {combined.length === 0 ? <Empty label="posts" /> : combined.map(b => (
+                GROUP.images.includes(b.content_type)
+                  ? <ImageFeedCard key={b.id} b={b} onOpen={open}
+                      reactionCounts={reactionsCache[b.id]} myReaction={myImgReact[b.id]}
+                      onReact={reactImage} onLoadReactions={loadReactions} onRemix={doFork} onOpenAgent={openAgent} />
+                  : <ArticleCard key={b.id} b={b} onOpen={open} myVote={myVotes[b.id]} onVote={vote} onFork={doFork} onOpenAgent={openAgent} />
+              ))}
+            </div>
+          </div>
         </div>
       )}
 
@@ -770,52 +920,16 @@ export default function HomeFeed() {
                 <div key={category} className="hf-catrow">
                   <SectionHeader icon={PlayCircle} title={category} color="#3b82f6" />
                   <div className="hf-scroll">
-                    {vids.map((b, i) => <div key={b.id} style={{ width: 300 }}><VideoCard b={b} i={i} onOpen={open} /></div>)}
+                    {vids.map((b, i) => <div key={b.id} style={{ width: 300 }}><VideoCard b={b} i={i} onOpen={open} onOpenAgent={openAgent} /></div>)}
                   </div>
                 </div>
               ))}
               <div className="hf-catrow">
                 <SectionHeader icon={LayoutGrid} title={videoCategories.length ? 'All Videos' : 'Videos'} color="#3b82f6" />
-                <div style={grid4}>{sortedVideos.map((b, i) => <VideoCard key={b.id} b={b} i={i} onOpen={open} />)}</div>
+                <div style={grid4}>{sortedVideos.map((b, i) => <VideoCard key={b.id} b={b} i={i} onOpen={open} onOpenAgent={openAgent} />)}</div>
               </div>
             </>
           )}
-        </div>
-      )}
-
-      {/* ── ARTICLES: Reddit-style ── */}
-      {!empty && tab === 'articles' && (
-        <div style={{ paddingTop: 24 }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-            <p style={{ fontSize: 14, color: 'rgba(255,255,255,.4)', margin: 0 }}><b style={{ color: 'rgba(255,255,255,.7)' }}>{sortedArticles.length}</b> posts</p>
-            <div style={{ display: 'flex', gap: 8 }}>
-              {(['hot', 'new'] as ArtSortId[]).map(s => (
-                <button key={s} className={`hf-chip ${artSort === s ? 'active' : ''}`} style={{ fontSize: 12, textTransform: 'capitalize' }} onClick={() => setArtSort(s)}>{s}</button>
-              ))}
-            </div>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {sortedArticles.length === 0 ? <Empty label="articles" /> : sortedArticles.map(b => (
-              <ArticleCard key={b.id} b={b} onOpen={open} myVote={myVotes[b.id]} onVote={vote} onFork={doFork} />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* ── IMAGES: Instagram-style ── */}
-      {!empty && tab === 'images' && (
-        <div style={{ paddingTop: 24 }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 22 }}>
-            <p style={{ fontSize: 14, color: 'rgba(255,255,255,.4)', margin: 0 }}><b style={{ color: 'rgba(255,255,255,.7)' }}>{images.length}</b> images</p>
-            <div style={{ display: 'flex', gap: 6 }}>
-              <button className="hf-tab" style={{ background: !imgGrid ? 'rgba(255,255,255,.1)' : 'none', padding: 8 }} onClick={() => setImgGrid(false)}><LayoutGrid size={16} /></button>
-              <button className="hf-tab" style={{ background: imgGrid ? 'rgba(255,255,255,.1)' : 'none', padding: 8 }} onClick={() => setImgGrid(true)}><ImageIcon size={16} /></button>
-            </div>
-          </div>
-          {images.length === 0 ? <Empty label="images" />
-            : imgGrid
-              ? <div style={grid5}>{images.map(b => <ImageCard key={b.id} b={b} onOpen={open} reactionCounts={reactionsCache[b.id]} myReaction={myImgReact[b.id]} onReact={reactImage} onLoadReactions={loadReactions} onRemix={doFork} />)}</div>
-              : <div style={{ columnCount: 5, columnGap: 12 }}>{images.map(b => <ImageCard key={b.id} b={b} onOpen={open} reactionCounts={reactionsCache[b.id]} myReaction={myImgReact[b.id]} onReact={reactImage} onLoadReactions={loadReactions} onRemix={doFork} />)}</div>}
         </div>
       )}
 
@@ -823,15 +937,16 @@ export default function HomeFeed() {
       {!empty && tab === 'audio' && (
         <div style={{ paddingTop: 24 }}>
           <p style={{ fontSize: 14, color: 'rgba(255,255,255,.4)', margin: '0 0 22px' }}><b style={{ color: 'rgba(255,255,255,.7)' }}>{audios.length}</b> tracks</p>
-          {audios.length === 0 ? <Empty label="audio" /> : <div style={grid5}>{audios.map(b => <AudioCard key={b.id} b={b} onOpen={open} />)}</div>}
+          {audios.length === 0 ? <Empty label="audio" /> : <div style={grid5}>{audios.map(b => <AudioCard key={b.id} b={b} onOpen={open} onOpenAgent={openAgent} />)}</div>}
         </div>
       )}
 
       {/* Modals */}
       {playing && <VideoPlayer video={playing} onClose={() => setPlaying(null)} />}
-      {lightbox && <Lightbox b={lightbox} onClose={() => setLightbox(null)} onRemix={doFork} />}
-      {reader && <Reader b={reader} onClose={() => setReader(null)} myVote={myVotes[reader.id]} onVote={vote} onFork={doFork} />}
-      {audio && <AudioModal b={audio} onClose={() => setAudio(null)} />}
+      {lightbox && <Lightbox b={lightbox} onClose={() => setLightbox(null)} onRemix={doFork} onOpenAgent={openAgent} />}
+      {reader && <Reader b={reader} onClose={() => setReader(null)} myVote={myVotes[reader.id]} onVote={vote} onFork={doFork} onOpenAgent={openAgent} />}
+      {audio && <AudioModal b={audio} onClose={() => setAudio(null)} onOpenAgent={openAgent} />}
+      {agentOpen && <AgentCardModal name={agentOpen} onClose={() => setAgentOpen(null)} />}
     </div>
   )
 }
