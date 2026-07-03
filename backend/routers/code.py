@@ -5,26 +5,43 @@ Every action an agent needs:
   GET  /api/code/repo/{owner}/{name} — Single repo detail
   POST /api/code/repo/create        — Create a new repo
   POST /api/code/repo/{owner}/{name}/push — Push file content
-  POST /api/code/repo/{owner}/{name}/scan — Trigger STIX scan
+  POST /api/code/repo/{owner}/{name}/scan — Trigger a Strix (or fast regex) security scan
+  GET  /api/code/repo/{owner}/{name}/scan/{scan_id} — Poll an async Strix scan
   GET  /api/code/repo/{owner}/{name}/scan-results — Latest scan
+  POST /api/code/repo/{owner}/{name}/memory — Ingest content into supermemory
   GET  /api/code/activity           — Recent activity feed
   GET  /api/code/stats              — Aggregate stats
   POST /api/code/repo/{owner}/{name}/pr — Open a PR
   POST /api/code/search             — Search code across repos
+
+Every mutating endpoint requires X-Agent-Key (Depends(get_agent)) — these push
+code and trigger scans on an agent's behalf, so they're authenticated like the
+rest of Vantage's write endpoints, and become real authenticated MCP tools
+once wired through the /mcp mount (see backend/mcp_server.py).
 """
 
 import logging, httpx, json, os, time, base64, subprocess, shutil, re
 from datetime import datetime, timezone
-from typing import Optional
-from fastapi import APIRouter, Query, Body, HTTPException
+from typing import Literal, Optional
+from fastapi import APIRouter, Depends, Query, Body, HTTPException
 from pydantic import BaseModel
+
+import aiosqlite
+
+from ..config import settings
+from ..db import DB_PATH
+from ..deps import get_agent
+from ..supermemory_client import SupermemoryClient
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/code", tags=["code"])
 
-GITEA_URL = "http://2.25.70.156:3001"
+GITEA_URL = settings.GITEA_URL or "http://2.25.70.156:3001"
 GITEA_API = f"{GITEA_URL}/api/v1"
-GITEA_TOKEN = os.environ.get("GITEA_TOKEN", "2551cd513d981914a5be801068e797eb7e1878ac")
+# No hardcoded fallback — must come from VANTAGE_GITEA_TOKEN or GITEA_TOKEN env vars.
+# A previous version of this file shipped a live-looking default token here;
+# treat that value as compromised and rotate it on the Gitea instance.
+GITEA_TOKEN = settings.GITEA_TOKEN or os.environ.get("GITEA_TOKEN", "")
 SCAN_DIR = "/tmp/vantage_code_scan"
 VANTAGE_URL = "http://127.0.0.1:8001"
 
@@ -32,6 +49,7 @@ _headers = {"Accept": "application/json", "Authorization": f"token {GITEA_TOKEN}
 _cache = {"data": None, "ts": 0}
 _activity_feed: list[dict] = []
 _activity_max = 100
+_supermemory = SupermemoryClient(settings.SUPERMEMORY_URL, settings.SUPERMEMORY_API_KEY)
 
 # ── Models ──────────────────────────────────────────────────────────────
 
@@ -56,6 +74,11 @@ class SearchRequest(BaseModel):
     query: str
     repo: Optional[str] = None
 
+class MemoryIngestRequest(BaseModel):
+    content: str
+    metadata: Optional[dict] = None
+    custom_id: str = ""
+
 # ── Helpers ─────────────────────────────────────────────────────────────
 
 def _log_activity(action: str, repo: str, detail: str = "", agent: str = "vantage-agent"):
@@ -78,7 +101,7 @@ def _log_activity(action: str, repo: str, detail: str = "", agent: str = "vantag
 
 @router.get("/overview")
 async def code_overview():
-    """Get all repos with STIX status, commits, PRs, branches."""
+    """Get all repos with Strix scan status, commits, PRs, branches."""
     import time as _time
     now = int(_time.time())
     if _cache["data"] and (now - _cache["ts"]) < 15:
@@ -112,7 +135,7 @@ async def code_overview():
                 "recent_commits": [],
                 "open_prs": [],
                 "webhooks": [],
-                "stix_scan_status": "unknown",
+                "strix_scan_status": "unknown",
                 "api_endpoints": {
                     "detail": f"/api/code/repo/{owner}/{name}",
                     "scan": f"/api/code/repo/{owner}/{name}/scan",
@@ -144,7 +167,7 @@ async def code_overview():
                         })
             except: pass
 
-            # STIX webhooks
+            # Strix (security scan) webhooks
             try:
                 hooks = await cl.get(f"{GITEA_API}/repos/{full_name}/hooks", headers=_headers)
                 if hooks.status_code == 200:
@@ -153,13 +176,13 @@ async def code_overview():
                         if "9876" in config.get("url", ""):
                             info["webhooks"].append({
                                 "id": h.get("id"),
-                                "type": "stix_scan",
+                                "type": "strix_scan",
                                 "active": h.get("active", False),
                                 "url": config.get("url", ""),
                             })
             except: pass
 
-            info["stix_scan_status"] = "active" if info["webhooks"] else "no_hook"
+            info["strix_scan_status"] = "active" if info["webhooks"] else "no_hook"
             repos.append(info)
 
     result = {
@@ -190,7 +213,7 @@ async def repo_detail(owner: str, name: str):
 
 @router.get("/repo/{owner}/{name}/detail")
 async def repo_detail_full(owner: str, name: str):
-    """Comprehensive repo profile — STIX, Gitea stats, collaborators, commits."""
+    """Comprehensive repo profile — Strix, Gitea stats, collaborators, commits."""
     full_name = f"{owner}/{name}"
     import time as _time, json as _json, os as _os
 
@@ -203,7 +226,7 @@ async def repo_detail_full(owner: str, name: str):
         "created_at": "", "updated_at": "",
         "branches": [], "collaborators": [],
         "recent_commits": [], "open_prs": [],
-        "stix_webhooks": [], "stix_active": False,
+        "strix_webhooks": [], "strix_active": False,
         "scan_results": None,
         "api_endpoints": {
             "scan": f"/api/code/repo/{owner}/{name}/scan",
@@ -277,19 +300,19 @@ async def repo_detail_full(owner: str, name: str):
                     })
         except: pass
 
-        # STIX webhooks
+        # Strix (security scan) webhooks
         try:
             hooks = await cl.get(f"{GITEA_API}/repos/{full_name}/hooks", headers=_headers)
             if hooks.status_code == 200:
                 for h in hooks.json():
                     config = h.get("config", {})
-                    result["stix_webhooks"].append({
+                    result["strix_webhooks"].append({
                         "id": h.get("id"), "type": h.get("type"),
                         "active": h.get("active", False),
                         "url": config.get("url", ""),
                         "events": h.get("events", []),
                     })
-            result["stix_active"] = len(result["stix_webhooks"]) > 0
+            result["strix_active"] = len(result["strix_webhooks"]) > 0
         except: pass
 
     return result
@@ -297,7 +320,7 @@ async def repo_detail_full(owner: str, name: str):
 
 
 @router.post("/repo/create")
-async def create_repo(req: CreateRepoRequest):
+async def create_repo(req: CreateRepoRequest, agent: dict = Depends(get_agent)):
     """Create a new Git repo. Agent-friendly endpoint."""
     payload = {
         "name": req.name,
@@ -310,8 +333,10 @@ async def create_repo(req: CreateRepoRequest):
             r = await cl.post(f"{GITEA_API}/user/repos", json=payload, headers=_headers)
             if r.status_code in (200, 201):
                 data = r.json()
-                _log_activity("repo_created", f"ares-bot/{req.name}", req.description or "")
-                # Auto-register STIX webhook
+                _log_activity("repo_created", f"ares-bot/{req.name}", req.description or "", agent=agent["name"])
+                # Auto-register the security-scan webhook (secret is a shared value
+                # with the external :9876 receiver — do not change without updating
+                # that receiver too).
                 webhook_payload = {
                     "type": "gitea",
                     "config": {"url": "http://localhost:9876/", "content_type": "json", "secret": "vantage-stix-webhook-2026"},
@@ -320,14 +345,14 @@ async def create_repo(req: CreateRepoRequest):
                 await cl.post(f"{GITEA_API}/repos/ares-bot/{req.name}/hooks", json=webhook_payload, headers=_headers)
                 return {"status": "created", "repo": data.get("full_name", req.name),
                         "html_url": f"{GITEA_URL}/ares-bot/{req.name}",
-                        "stix_hook": "auto-registered"}
+                        "strix_hook": "auto-registered"}
         except Exception as e:
             raise HTTPException(500, str(e))
     raise HTTPException(500, "Gitea unavailable")
 
 
 @router.post("/repo/{owner}/{name}/push")
-async def push_file(owner: str, name: str, req: PushFileRequest):
+async def push_file(owner: str, name: str, req: PushFileRequest, agent: dict = Depends(get_agent)):
     """Push a file to a repo. Agent can write code directly."""
     full_name = f"{owner}/{name}"
     target = os.path.join(SCAN_DIR, f"push_{name}_{int(time.time())}")
@@ -351,7 +376,7 @@ async def push_file(owner: str, name: str, req: PushFileRequest):
         subprocess.run(["git", "-C", target, "commit", "-m", req.message], capture_output=True)
         result = subprocess.run(["git", "-C", target, "push", "origin", req.branch], capture_output=True, timeout=30)
 
-        _log_activity("push", full_name, f"{req.path}: {req.message[:50]}")
+        _log_activity("push", full_name, f"{req.path}: {req.message[:50]}", agent=agent["name"])
 
         return {
             "status": "pushed",
@@ -367,9 +392,8 @@ async def push_file(owner: str, name: str, req: PushFileRequest):
         shutil.rmtree(target, ignore_errors=True)
 
 
-@router.post("/repo/{owner}/{name}/scan")
-async def trigger_scan(owner: str, name: str):
-    """Trigger a STIX security scan on a repo."""
+async def _regex_scan(owner: str, name: str, agent_name: str) -> dict:
+    """Fast, synchronous secret/vuln pattern scan — the existing default engine."""
     full_name = f"{owner}/{name}"
     clone_url = f"{GITEA_URL}/{full_name}.git".replace("http://", f"http://{GITEA_TOKEN}@")
     target = os.path.join(SCAN_DIR, f"scan_{name}")
@@ -413,10 +437,11 @@ async def trigger_scan(owner: str, name: str):
                                 "snippet": line.strip()[:60],
                             })
 
-        _log_activity("scan", full_name, f"{files_scanned} files, {len(findings)} findings")
+        _log_activity("scan", full_name, f"{files_scanned} files, {len(findings)} findings", agent=agent_name)
 
         result = {
             "repo": full_name,
+            "engine": "regex",
             "files_scanned": files_scanned,
             "total_findings": len(findings),
             "critical": len([f for f in findings if f["severity"] >= 0.90]),
@@ -425,29 +450,129 @@ async def trigger_scan(owner: str, name: str):
             "scanned_at": datetime.now(timezone.utc).isoformat(),
         }
 
-        # Post critical findings to Vantage signals
-        if result["critical"] > 0:
-            try:
-                for f in [x for x in findings if x["severity"] >= 0.90][:3]:
-                    key = open(os.path.expanduser("~/.vantage_key")).read().strip()
-                    payload = json.dumps({
-                        "symbol": name[:12], "source": "stix_scan", "type": "vulnerability",
-                        "conviction": f["severity"], "direction": "SELL",
-                        "detail": f"{f['vuln_id']}: {os.path.basename(f['file'])}:{f['line']}",
-                    }).encode()
-                    req = __import__('urllib').request.Request(
-                        f"{VANTAGE_URL}/api/intel/signals/ingest",
-                        data=payload,
-                        headers={"Content-Type": "application/json", "X-Agent-Key": key},
-                    )
-                    __import__('urllib').request.urlopen(req, timeout=5)
-            except: pass
-
+        _post_critical_findings(name, [f for f in findings if f["severity"] >= 0.90][:3])
         return result
-    except Exception as e:
-        raise HTTPException(500, str(e))
     finally:
         shutil.rmtree(target, ignore_errors=True)
+
+
+def _post_critical_findings(repo_name: str, critical: list[dict]) -> None:
+    """Best-effort: post critical findings to Vantage's signal pool."""
+    if not critical:
+        return
+    try:
+        key = open(os.path.expanduser("~/.vantage_key")).read().strip()
+        for f in critical:
+            payload = json.dumps({
+                "symbol": repo_name[:12], "source": "strix_scan", "type": "vulnerability",
+                "conviction": f["severity"], "direction": "SELL",
+                "detail": f"{f['vuln_id']}: {os.path.basename(f['file'])}:{f['line']}",
+            }).encode()
+            req = __import__('urllib').request.Request(
+                f"{VANTAGE_URL}/api/intel/signals/ingest",
+                data=payload,
+                headers={"Content-Type": "application/json", "X-Agent-Key": key},
+            )
+            __import__('urllib').request.urlopen(req, timeout=5)
+    except Exception:
+        pass
+
+
+async def _create_scan_row(agent_id: int, owner: str, name: str, engine: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO code_scans (agent_id, owner, name, engine, status) VALUES (?, ?, ?, ?, 'pending')",
+            (agent_id, owner, name, engine),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def _update_scan_row(scan_id: int, **fields) -> None:
+    if not fields:
+        return
+    cols = ", ".join(f"{k}=?" for k in fields)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(f"UPDATE code_scans SET {cols} WHERE id=?", (*fields.values(), scan_id))
+        await db.commit()
+
+
+async def _get_scan_row(scan_id: int) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        row = await (await db.execute("SELECT * FROM code_scans WHERE id=?", (scan_id,))).fetchone()
+    return dict(row) if row else None
+
+
+@router.post("/repo/{owner}/{name}/scan")
+async def trigger_scan(
+    owner: str, name: str,
+    engine: Literal["regex", "strix"] = Query("regex"),
+    agent: dict = Depends(get_agent),
+):
+    """Trigger a security scan on a repo.
+
+    engine=regex (default): fast synchronous pattern scan, unchanged behavior.
+    engine=strix: dispatches a real Strix (github.com/usestrix/strix) AI pentest
+    run on the standalone host-side runner (STRIX_RUNNER_URL) — this can take
+    minutes, so it returns immediately with a scan_id to poll via
+    GET /repo/{owner}/{name}/scan/{scan_id}.
+    """
+    if engine == "regex":
+        try:
+            result = await _regex_scan(owner, name, agent["name"])
+        except Exception as e:
+            raise HTTPException(500, str(e))
+        return result
+
+    if not settings.STRIX_RUNNER_URL:
+        raise HTTPException(503, "Strix runner not configured — set VANTAGE_STRIX_RUNNER_URL")
+
+    full_name = f"{owner}/{name}"
+    clone_url = f"{GITEA_URL}/{full_name}.git".replace("http://", f"http://{GITEA_TOKEN}@")
+    scan_id = await _create_scan_row(agent["id"], owner, name, "strix")
+    try:
+        async with httpx.AsyncClient(timeout=10) as cl:
+            r = await cl.post(f"{settings.STRIX_RUNNER_URL}/run", json={"clone_url": clone_url, "owner": owner, "name": name})
+            r.raise_for_status()
+            runner_run_id = r.json().get("run_id", "")
+    except Exception as e:
+        await _update_scan_row(scan_id, status="error", completed_at=datetime.now(timezone.utc).isoformat())
+        raise HTTPException(502, f"Strix runner dispatch failed: {e}")
+
+    await _update_scan_row(scan_id, runner_run_id=runner_run_id, status="running")
+    _log_activity("scan", full_name, "strix run dispatched", agent=agent["name"])
+    return {"scan_id": scan_id, "engine": "strix", "status": "running"}
+
+
+@router.get("/repo/{owner}/{name}/scan/{scan_id}")
+async def scan_status(owner: str, name: str, scan_id: int, agent: dict = Depends(get_agent)):
+    """Poll an async (Strix) scan. Pulls fresh status from the runner and
+    updates the local record; returns cached data once complete/errored."""
+    row = await _get_scan_row(scan_id)
+    if not row or row["owner"] != owner or row["name"] != name:
+        raise HTTPException(404, "Scan not found")
+    if row["status"] in ("complete", "error") or not settings.STRIX_RUNNER_URL or not row["runner_run_id"]:
+        return {**row, "findings": json.loads(row["findings_json"])}
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as cl:
+            r = await cl.get(f"{settings.STRIX_RUNNER_URL}/run/{row['runner_run_id']}")
+            r.raise_for_status()
+            data = r.json()
+    except Exception as e:
+        return {**row, "findings": json.loads(row["findings_json"]), "poll_error": str(e)}
+
+    status = data.get("status", row["status"])
+    findings = data.get("findings", [])
+    update = {"status": status, "findings_json": json.dumps(findings)}
+    if status in ("complete", "error"):
+        update["completed_at"] = datetime.now(timezone.utc).isoformat()
+        critical = [f for f in findings if f.get("severity", 0) >= 0.90][:3]
+        _post_critical_findings(name, critical)
+    await _update_scan_row(scan_id, **update)
+    row.update(update)
+    return {**row, "findings": findings}
 
 
 @router.get("/repo/{owner}/{name}/scan-results")
@@ -456,8 +581,26 @@ async def scan_results(owner: str, name: str):
     return {"repo": f"{owner}/{name}", "message": "Scan results available via POST /scan endpoint. Trigger a scan to get fresh results."}
 
 
+@router.post("/repo/{owner}/{name}/memory")
+async def ingest_memory(owner: str, name: str, req: MemoryIngestRequest, agent: dict = Depends(get_agent)):
+    """Ingest content (e.g. a scan summary or generated-code description) into
+    supermemory. Graceful no-op — returns 200 with stored=false — if
+    SUPERMEMORY_URL isn't configured, matching the rest of Vantage's optional
+    sidecar integrations."""
+    result = await _supermemory.add_document(
+        content=req.content,
+        container_tag=f"vantage:{owner}/{name}",
+        metadata=req.metadata,
+        custom_id=req.custom_id,
+    )
+    if result:
+        _log_activity("memory_ingest", f"{owner}/{name}", req.content[:60], agent=agent["name"])
+        return {"stored": True, **result}
+    return {"stored": False, "reason": "not configured or unreachable"}
+
+
 @router.post("/repo/{owner}/{name}/pr")
-async def create_pr(owner: str, name: str, req: CreatePRRequest):
+async def create_pr(owner: str, name: str, req: CreatePRRequest, agent: dict = Depends(get_agent)):
     """Open a pull request."""
     full_name = f"{owner}/{name}"
     payload = {"title": req.title, "body": req.body, "head": req.head, "base": req.base}
@@ -466,7 +609,7 @@ async def create_pr(owner: str, name: str, req: CreatePRRequest):
             r = await cl.post(f"{GITEA_API}/repos/{full_name}/pulls", json=payload, headers=_headers)
             if r.status_code in (200, 201):
                 data = r.json()
-                _log_activity("pr_opened", full_name, req.title)
+                _log_activity("pr_opened", full_name, req.title, agent=agent["name"])
                 return {"status": "created", "number": data.get("number"), "url": data.get("html_url")}
         except Exception as e:
             raise HTTPException(500, str(e))
@@ -485,7 +628,7 @@ async def stats():
     overview = await code_overview()
     return {
         "total_repos": overview["total"],
-        "with_stix": overview["with_hooks"],
+        "with_strix": overview["with_hooks"],
         "total_size_kb": overview["total_size_kb"],
         "languages": overview["languages"],
         "open_prs": overview["open_prs_total"],

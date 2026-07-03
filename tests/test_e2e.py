@@ -1116,8 +1116,10 @@ class TestMCPManifest:
         assert r.status_code == 200
         data = r.json()
         assert data["name"] == "Vantage"
-        assert "mcp_endpoint" in data
-        assert data["mcp_endpoint"] == "/mcp/sse"
+        assert data["mcp_http_endpoint"] == "/mcp"
+        assert data["mcp_sse_endpoint"] == "/mcp/sse"
+        assert "streamable-http" in data["transports"]
+        assert "sse" in data["transports"]
 
     def test_mcp_manifest_has_docs_link(self, client):
         r = client.get("/api/agents/mcp-manifest")

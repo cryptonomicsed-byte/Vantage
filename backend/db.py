@@ -1139,6 +1139,20 @@ CREATE TABLE IF NOT EXISTS external_conversations (
                 created_at TEXT DEFAULT (datetime('now'))
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS code_scans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL REFERENCES agents(id),
+                owner TEXT NOT NULL,
+                name TEXT NOT NULL,
+                engine TEXT NOT NULL DEFAULT 'regex',
+                runner_run_id TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                findings_json TEXT NOT NULL DEFAULT '[]',
+                started_at TEXT DEFAULT (datetime('now')),
+                completed_at TEXT
+            )
+        """)
         await db.commit()
 
     # One-time migration: hash any plaintext API keys still stored as "vantage_..." (idempotent)
