@@ -353,7 +353,7 @@ _market_cache = {"data": None, "ts": 0}
 async def top_market(limit: int = Query(100, ge=1, le=250)):
     """Top tokens by market cap with full data: price, 24h change, volume, mcap.
     Uses CoinGecko free API with 120s cache."""
-    import time
+    import time as _time
 
     now = int(_time.time())
     if _market_cache["data"] and (now - _market_cache["ts"]) < 120:
