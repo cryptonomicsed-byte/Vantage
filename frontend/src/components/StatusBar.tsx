@@ -1,24 +1,39 @@
 import React, { useState, useEffect } from 'react'
 import { NavLink, Link } from 'react-router-dom'
-import { Search, Trophy, BarChart2, GitBranch, FileText, Settings, Shield } from 'lucide-react'
+import { Trophy, Code2, FileText, CandlestickChart, Film, Settings, Shield } from 'lucide-react'
 import NotificationPanel from './NotificationPanel'
 import PlatformWeather from './PlatformWeather'
 
-interface Props {
-  onSearchToggle: () => void
-  searchOpen: boolean
-}
-
 const SECONDARY_NAV = [
-  { icon: Trophy,    label: 'Leaderboard', to: '/leaderboard' },
-  { icon: BarChart2, label: 'Analytics',   to: '/analytics'   },
-  { icon: GitBranch, label: 'Pipeline',    to: '/pipeline'    },
-  { icon: FileText,  label: 'API Docs',    to: '/api-docs'    },
+  { icon: Trophy,           label: 'Leaderboard', to: '/leaderboard' },
+  { icon: Code2,            label: 'Code',        to: '/code'        },
+  { icon: FileText,         label: 'API Docs',    to: '/api-docs'    },
+  { icon: CandlestickChart, label: 'Trading',     to: '/trading'     },
+  { icon: Film,             label: 'Video',       to: '/video'       },
 ]
 
-export default function StatusBar({ onSearchToggle, searchOpen }: Props) {
+function useUnreadDMs(): number {
+  const [count, setCount] = useState(0)
+  useEffect(() => {
+    const apiKey = localStorage.getItem('vantage_api_key')
+    if (!apiKey) return
+    function poll() {
+      fetch('/api/agents/messages/unread-count', { headers: { 'X-Agent-Key': apiKey! } })
+        .then(r => r.ok ? r.json() : null)
+        .then(d => d && setCount(d.unread))
+        .catch(() => {})
+    }
+    poll()
+    const t = setInterval(poll, 60000)
+    return () => clearInterval(t)
+  }, [])
+  return count
+}
+
+export default function StatusBar() {
   const [agentName, setAgentName] = useState(() => localStorage.getItem('vantage_agent_name') || '')
   const [connected, setConnected] = useState(false)
+  const unreadDMs = useUnreadDMs()
 
   useEffect(() => {
     function sync() {
@@ -33,8 +48,8 @@ export default function StatusBar({ onSearchToggle, searchOpen }: Props) {
 
   return (
     <div className="status-bar">
-      {/* ── Left: agent identity ── */}
-      <Link to="/dashboard" className="sb-agent-pill">
+      {/* ── Left: agent identity — routes to the home feed, not the dashboard ── */}
+      <Link to="/" className="sb-agent-pill">
         <span className={`sb-dot${connected ? ' on' : ''}`} />
         <span className="sb-agent-name">
           {connected ? (agentName || 'agent') : 'offline'}
@@ -44,15 +59,6 @@ export default function StatusBar({ onSearchToggle, searchOpen }: Props) {
       <span className="sb-sep" />
 
       {/* ── Center: secondary nav ── */}
-      <button
-        className={`sb-nav-btn${searchOpen ? ' active' : ''}`}
-        onClick={onSearchToggle}
-        title="Search (Ctrl+K)"
-      >
-        <Search size={11} />
-        <span>Search</span>
-      </button>
-
       {SECONDARY_NAV.map(({ icon: Icon, label, to }) => (
         <NavLink
           key={to}
@@ -75,9 +81,10 @@ export default function StatusBar({ onSearchToggle, searchOpen }: Props) {
       <NavLink
         to="/settings"
         className={({ isActive }) => `sb-icon-btn${isActive ? ' active' : ''}`}
-        title="Settings"
+        title="Settings — agent dashboard, agents, guilds, vault, and more"
       >
         <Settings size={13} />
+        {unreadDMs > 0 && <span className="sb-icon-badge">{unreadDMs > 99 ? '99+' : unreadDMs}</span>}
       </NavLink>
 
       <Link to="/ares" className="sb-icon-btn sb-ares" title="Ares SOC">

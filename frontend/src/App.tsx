@@ -1,7 +1,6 @@
 import React, { Component, ReactNode, useRef, useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom'
-import { Radio, GitBranch, Sparkles, Search, X } from 'lucide-react'
-import BroadcastFeed from './components/BroadcastFeed'
+import { Radio, GitBranch, Sparkles } from 'lucide-react'
 import HomeFeed from './components/HomeFeed'
 import AgentDirectory from './components/AgentDirectory'
 import AgentProfile from './components/AgentProfile'
@@ -32,7 +31,6 @@ import AgentCollectivesPage from './pages/AgentCollectivesPage'
 import VideoStudio from './components/VideoStudio'
 import CodeDashboard from './components/CodeDashboard'
 import RepoProfilePage from './components/RepoProfilePage'
-import Sidebar from './components/Sidebar'
 import CopilotDock from './components/CopilotDock'
 import StatusBar from './components/StatusBar'
 import SubNav from './components/SubNav'
@@ -117,15 +115,8 @@ function MarketPage() {
   return <MarketVelocity apiKey={apiKey || undefined} />
 }
 
-/* ── AppLayout — wraps all non-Ares pages with Sidebar + StatusBar ───────── */
-interface AppLayoutProps {
-  searchQuery: string
-  onSearchChange: (q: string) => void
-  searchOpen: boolean
-  onSearchToggle: () => void
-}
-
-function AppLayout({ searchQuery, onSearchChange, searchOpen, onSearchToggle }: AppLayoutProps) {
+/* ── AppLayout — wraps all non-Ares pages with StatusBar ─────────────────── */
+function AppLayout() {
   const location = useLocation()
   const section = getSection(location.pathname)
   const subLinks = SUB_NAV[section]
@@ -134,24 +125,7 @@ function AppLayout({ searchQuery, onSearchChange, searchOpen, onSearchToggle }: 
   return (
     <div className="app-shell">
       <Particles />
-      <Sidebar />
       <div className="content-area">
-        {searchOpen && (
-          <div className="search-overlay">
-            <Search size={14} className="search-overlay-icon" />
-            <input
-              autoFocus
-              className="search-overlay-input"
-              placeholder="Search broadcasts, agents…"
-              value={searchQuery}
-              onChange={e => onSearchChange(e.target.value)}
-              onKeyDown={e => e.key === 'Escape' && onSearchToggle()}
-            />
-            <button className="search-overlay-close" onClick={onSearchToggle}>
-              <X size={14} />
-            </button>
-          </div>
-        )}
         <div id="feed-topbar-slot" />
         <ActivityTicker />
         {subLinks && <SubNav links={subLinks} />}
@@ -199,36 +173,21 @@ function AppLayout({ searchQuery, onSearchChange, searchOpen, onSearchToggle }: 
           </Routes>
         </main>
       </div>
-      <StatusBar onSearchToggle={onSearchToggle} searchOpen={searchOpen} />
+      <StatusBar />
     </div>
   )
 }
 
 /* ── App ──────────────────────────────────────────────────────────────────── */
 export default function App() {
-  const [searchQuery, setSearchQuery] = useState('')
-  const [searchOpen, setSearchOpen] = useState(false)
-  function toggleSearch() {
-    setSearchOpen(o => {
-      if (o) setSearchQuery('')
-      return !o
-    })
-  }
   return (
     <BrowserRouter>
       <Routes>
-        {/* Ares SOC — full-screen, no sidebar */}
+        {/* Ares SOC — full-screen, admin-only */}
         <Route path="/ares" element={<AresSOC />} />
 
-        {/* All other routes use AppLayout (Sidebar + StatusBar + content) */}
-        <Route path="*" element={
-          <AppLayout
-            searchQuery={searchQuery}
-            onSearchChange={setSearchQuery}
-            searchOpen={searchOpen}
-            onSearchToggle={toggleSearch}
-          />
-        } />
+        {/* All other routes use AppLayout (StatusBar + content, no sidebar) */}
+        <Route path="*" element={<AppLayout />} />
       </Routes>
     </BrowserRouter>
   )
