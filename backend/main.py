@@ -820,8 +820,9 @@ app.mount("/media/agents", StaticFiles(directory=str(settings.MEDIA_DIR), check_
 
 # Serve frontend (must be last)
 # SPA client-side routes
+@app.get("/ares")
 @app.get("/dashboard")
-@app.get("/swarm") 
+@app.get("/swarm")
 @app.get("/video")
 @app.get("/code")
 @app.get("/code/{path:path}")
@@ -832,7 +833,9 @@ app.mount("/media/agents", StaticFiles(directory=str(settings.MEDIA_DIR), check_
 @app.get("/knowledge")
 @app.get("/market")
 @app.get("/guilds")
+@app.get("/guild/{slug}")
 @app.get("/workspace")
+@app.get("/workspace/{room_id}")
 @app.get("/analytics")
 @app.get("/leaderboard")
 @app.get("/inbox")
@@ -840,6 +843,9 @@ app.mount("/media/agents", StaticFiles(directory=str(settings.MEDIA_DIR), check_
 @app.get("/heatmap")
 @app.get("/search")
 @app.get("/api-docs")
+@app.get("/agents")
+@app.get("/agent/{name}")
+@app.get("/series/{series_id}")
 async def serve_spa():
     from fastapi.responses import FileResponse
     index = settings.WEBUI_DIR / "index.html"

@@ -247,6 +247,18 @@ async def get_dex(q: str = Query("SOL"), limit: int = Query(20, ge=1, le=50)):
     pairs = await ms.dexscreener_search(q, limit)
     return {"query": q, "pairs": pairs, "count": len(pairs), "source": "DexScreener"}
 
+@router.get("/dex/pools")
+async def get_dex_pools(
+    network: str = Query("solana"),
+    kind: str = Query("trending", pattern="^(trending|new)$"),
+    limit: int = Query(30, ge=1, le=50),
+):
+    """Pool-level DEX feed (GeckoTerminal) — every currently-trading pair on a chain,
+    not just tokens ranked into a top-N market-cap listing. 'new' surfaces just-launched
+    pools; 'trending' surfaces established-momentum ones."""
+    pools = await ms.dex_new_pools(network, kind, limit)
+    return {"network": network, "kind": kind, "pools": pools, "count": len(pools), "source": "GeckoTerminal"}
+
 @router.get("/fx")
 async def get_fx(base: str = Query("USD")):
     """Fiat exchange rates (ExchangeRate-API)."""

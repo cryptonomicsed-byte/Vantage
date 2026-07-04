@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, Waypoints } from 'lucide-react'
+import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, Waypoints, ListOrdered } from 'lucide-react'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Analytics — the deep-dive lenses behind Trading's default Dashboard tab. These
@@ -314,6 +314,59 @@ function AresDex() {
   )
 }
 
+function AresAllTokens() {
+  const [network, setNetwork] = useState('solana')
+  const [kind, setKind] = useState<'trending' | 'new'>('trending')
+  const [data, setData] = useState<any>(null)
+  const [loading, setLoading] = useState(false)
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const r = await fetch(`/api/intel/dex/pools?network=${encodeURIComponent(network)}&kind=${kind}&limit=50`)
+      if (r.ok) setData(await r.json())
+    } catch {}
+    setLoading(false)
+  }, [network, kind])
+  useEffect(() => { load() }, [load])
+  const pools = data?.pools || []
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
+        <select className="ares-input" value={network} onChange={e => setNetwork(e.target.value)} style={{ maxWidth: 160 }}>
+          <option value="solana">Solana</option>
+          <option value="eth">Ethereum</option>
+          <option value="base">Base</option>
+        </select>
+        <button className={`btn btn-sm ${kind === 'trending' ? 'btn-primary' : ''}`} onClick={() => setKind('trending')}>Trending</button>
+        <button className={`btn btn-sm ${kind === 'new' ? 'btn-primary' : ''}`} onClick={() => setKind('new')}>New</button>
+        <button className="btn btn-ghost btn-sm" onClick={load}>Refresh</button>
+      </div>
+      <div className="ares-section-title">
+        {pools.length} pools — every pair currently trading, not just top-ranked tokens {loading && <span style={{ fontSize: 11, color: 'var(--muted)' }}>loading…</span>}
+      </div>
+      <div className="dash-panel" style={{ maxHeight: 560, overflowY: 'auto', padding: 0 }}>
+        <table className="ares-table">
+          <thead><tr><th>Pair</th><th>Price</th><th>Liquidity</th><th>Vol 24h</th><th>24h</th><th>Buys/Sells 24h</th><th>Created</th></tr></thead>
+          <tbody>
+            {pools.length === 0 && <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No pools.</td></tr>}
+            {pools.map((p: any, i: number) => (
+              <tr key={i}>
+                <td style={{ fontWeight: 600 }}>{p.pair}</td>
+                <td style={{ fontFamily: 'monospace' }}>{p.price_usd != null ? '$' + Number(p.price_usd).toPrecision(4) : '—'}</td>
+                <td style={{ fontFamily: 'monospace' }}>{p.liquidity_usd ? '$' + (p.liquidity_usd / 1e3).toFixed(0) + 'K' : '—'}</td>
+                <td style={{ fontFamily: 'monospace' }}>{p.volume_24h ? '$' + (p.volume_24h / 1e3).toFixed(0) + 'K' : '—'}</td>
+                <td style={{ color: (p.change_24h_pct || 0) >= 0 ? 'var(--green)' : 'var(--danger)', fontWeight: 700 }}>{p.change_24h_pct != null ? p.change_24h_pct.toFixed(1) + '%' : '—'}</td>
+                <td style={{ fontSize: 11, color: 'var(--muted)' }}>{p.buys_24h ?? '—'} / {p.sells_24h ?? '—'}</td>
+                <td style={{ fontSize: 10, color: 'var(--muted)' }}>{p.created_at ? new Date(p.created_at).toLocaleString() : '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 function AresWhales() {
   const { data, loading } = useAresApi('/api/intel/whales', 30000)
   const txs = data?.transactions || []
@@ -513,7 +566,7 @@ function AresTrace() {
             <div style={{ color: 'var(--muted)', padding: 20 }}>{data.reason || 'No recent transactions.'}</div>
           ) : (
             <table className="ares-table">
-              <thead><tr><th>Direction</th><th>Amount</th><th>Fee</th><th>Counterparties</th></tr></thead>
+              <thead><tr><th>Direction</th><th>Amount</th><th>Fee</th><th>Counterparties</th><th>SPL Tokens</th></tr></thead>
               <tbody>
                 {data.transactions.map((t: any, i: number) => (
                   <tr key={i}>
@@ -531,6 +584,26 @@ function AresTrace() {
                         >
                           {c.address.slice(0, 6)}…{c.address.slice(-4)}
                         </button>
+                      ))}
+                    </td>
+                    <td>
+                      {(t.token_transfers || []).map((tt: any, k: number) => (
+                        <div key={k} style={{ marginBottom: 4 }}>
+                          <span style={{ fontFamily: 'monospace', fontSize: 10, color: tt.direction === 'in' ? 'var(--green)' : 'var(--danger)' }}>
+                            {tt.direction === 'in' ? '+' : '−'}{tt.amount} <span style={{ color: 'var(--muted)' }}>{tt.mint.slice(0, 4)}…{tt.mint.slice(-4)}</span>
+                          </span>
+                          {(tt.counterparties || []).map((c: any, j: number) => (
+                            <button
+                              key={j}
+                              className="btn btn-ghost btn-sm"
+                              onClick={() => pivot(c.address)}
+                              title={`${c.role} · ${c.amount}`}
+                              style={{ fontFamily: 'monospace', fontSize: 10, marginLeft: 4 }}
+                            >
+                              {c.address.slice(0, 6)}…{c.address.slice(-4)}
+                            </button>
+                          ))}
+                        </div>
                       ))}
                     </td>
                   </tr>
@@ -555,6 +628,7 @@ const INTEL_TABS = [
   { id: 'alpha',     label: 'Alpha',     icon: TrendingUp },
   { id: 'yields',    label: 'Yields',    icon: Layers },
   { id: 'dex',       label: 'DEX',       icon: Droplets },
+  { id: 'alltokens', label: 'All Tokens', icon: ListOrdered },
   { id: 'whales',    label: 'Whales',    icon: Waves },
   { id: 'fx',        label: 'FX',        icon: DollarSign },
   { id: 'backtest',  label: 'Backtest',  icon: History },
@@ -581,6 +655,7 @@ export default function MarketIntel() {
       {tab === 'alpha' && <AresAlpha />}
       {tab === 'yields' && <AresYields />}
       {tab === 'dex' && <AresDex />}
+      {tab === 'alltokens' && <AresAllTokens />}
       {tab === 'whales' && <AresWhales />}
       {tab === 'fx' && <AresFx />}
       {tab === 'backtest' && <AresBacktest />}

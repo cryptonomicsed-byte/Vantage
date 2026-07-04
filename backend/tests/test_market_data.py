@@ -125,6 +125,61 @@ async def test_defillama_yields_filters_and_sorts(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_dex_new_pools_parses_gecko_terminal_shape(monkeypatch):
+    async def fake_get(url, timeout=10):
+        assert "geckoterminal.com/api/v2/networks/solana/trending_pools" in url
+        return {"data": [
+            {"attributes": {
+                "name": "ANSEM / SOL",
+                "address": "poolAddr1",
+                "base_token_price_usd": "0.337312932838420503500620977080690993734125630494353469295469302",
+                "pool_created_at": "2026-06-28T06:33:28Z",
+                "reserve_in_usd": "3602642.6057",
+                "volume_usd": {"h24": "42291478.2476591"},
+                "price_change_percentage": {"h24": "34.405"},
+                "transactions": {"h24": {"buys": 34807, "sells": 24745}},
+            }},
+        ]}
+    monkeypatch.setattr(ms, "_get_json", fake_get)
+    ms._cache.clear()
+    rows = await ms.dex_new_pools("solana", "trending", limit=10)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["pair"] == "ANSEM/SOL"
+    assert r["pool_address"] == "poolAddr1"
+    assert r["price_usd"] == pytest.approx(0.337312932838420503500620977080690993734125630494353469295469302)
+    assert r["liquidity_usd"] == pytest.approx(3602642.6057)
+    assert r["volume_24h"] == pytest.approx(42291478.2476591)
+    assert r["change_24h_pct"] == pytest.approx(34.405)
+    assert r["buys_24h"] == 34807 and r["sells_24h"] == 24745
+
+
+@pytest.mark.asyncio
+async def test_dex_new_pools_kind_selects_endpoint(monkeypatch):
+    seen_urls = []
+    async def fake_get(url, timeout=10):
+        seen_urls.append(url)
+        return {"data": []}
+    monkeypatch.setattr(ms, "_get_json", fake_get)
+    ms._cache.clear()
+    await ms.dex_new_pools("eth", "new", limit=5)
+    assert "networks/eth/new_pools" in seen_urls[0]
+
+
+@pytest.mark.asyncio
+async def test_dex_new_pools_cache_reuse(monkeypatch):
+    calls = {"n": 0}
+    async def fake_get(url, timeout=10):
+        calls["n"] += 1
+        return {"data": [{"attributes": {"name": "X / SOL", "reserve_in_usd": "1000"}}]}
+    monkeypatch.setattr(ms, "_get_json", fake_get)
+    ms._cache.clear()
+    await ms.dex_new_pools("solana", "trending", limit=10)
+    await ms.dex_new_pools("solana", "trending", limit=10)
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
 async def test_btc_address_lookup_annotates_in_out_counterparties(monkeypatch):
     tx_in = {
         "txid": "tx1hash",
@@ -207,6 +262,48 @@ async def test_sol_address_lookup_annotates_native_transfer(monkeypatch):
     tx = out["transactions"][0]
     assert tx["direction"] == "out" and tx["amount"] == pytest.approx(1.0)
     assert tx["counterparties"] == [{"address": "solB", "role": "recipient", "amount": pytest.approx(1.0)}]
+    assert tx["token_transfers"] == []  # no preTokenBalances/postTokenBalances in this mocked tx
+
+
+@pytest.mark.asyncio
+async def test_sol_address_lookup_annotates_spl_token_transfer(monkeypatch):
+    """SPL token deltas (meta.preTokenBalances/postTokenBalances) are already present
+    in the jsonParsed getTransaction response — this confirms they're now parsed into
+    a per-mint token_transfers list with counterparties, not just native SOL."""
+    async def fake_rpc(method, params, timeout=10):
+        if method == "getBalance":
+            return {"value": 2_000_000_000}
+        if method == "getSignaturesForAddress":
+            return [{"signature": "sig1", "blockTime": 1700000000, "confirmationStatus": "finalized"}]
+        if method == "getTransaction":
+            return {
+                "transaction": {"message": {"accountKeys": [{"pubkey": "solA"}, {"pubkey": "solB"}]}},
+                "meta": {
+                    "preBalances": [3_000_000_000, 500_000_000], "postBalances": [3_000_000_000, 500_000_000], "fee": 5000,
+                    "preTokenBalances": [
+                        {"accountIndex": 0, "mint": "MintX", "owner": "solA", "uiTokenAmount": {"uiAmount": 100.0}},
+                        {"accountIndex": 1, "mint": "MintX", "owner": "solB", "uiTokenAmount": {"uiAmount": 0.0}},
+                    ],
+                    "postTokenBalances": [
+                        {"accountIndex": 0, "mint": "MintX", "owner": "solA", "uiTokenAmount": {"uiAmount": 60.0}},
+                        {"accountIndex": 1, "mint": "MintX", "owner": "solB", "uiTokenAmount": {"uiAmount": 40.0}},
+                    ],
+                },
+            }
+        return None
+
+    monkeypatch.setattr(ms, "_sol_rpc", fake_rpc)
+    ms._cache.clear()
+
+    out = await ms.address_lookup("solana", "solA")
+    tx = out["transactions"][0]
+    assert tx["direction"] == "in" and tx["amount"] == pytest.approx(0.0)  # no native SOL delta here
+    transfers = tx["token_transfers"]
+    assert len(transfers) == 1
+    t = transfers[0]
+    assert t["mint"] == "MintX"
+    assert t["direction"] == "out" and t["amount"] == pytest.approx(40.0)
+    assert t["counterparties"] == [{"address": "solB", "role": "recipient", "amount": pytest.approx(40.0)}]
 
 
 @pytest.mark.asyncio
@@ -228,6 +325,27 @@ async def test_wallet_trace_endpoint_returns_lookup(client, monkeypatch):
     r = await client.get("/api/intel/trace/bitcoin/addrA")
     assert r.status_code == 200, r.text
     assert r.json()["balance"] == {"amount": 1.0, "unit": "BTC"}
+
+
+@pytest.mark.asyncio
+async def test_dex_pools_endpoint_returns_gecko_terminal_data(client, monkeypatch):
+    async def fake_pools(network, kind, limit):
+        assert network == "solana" and kind == "new" and limit == 10
+        return [{"pair": "FOO/SOL", "pool_address": "p1", "price_usd": 0.01,
+                 "liquidity_usd": 1000.0, "volume_24h": 500.0, "change_24h_pct": 5.0,
+                 "buys_24h": 10, "sells_24h": 3, "created_at": "2026-07-04T00:00:00Z"}]
+    monkeypatch.setattr(ms, "dex_new_pools", fake_pools)
+    r = await client.get("/api/intel/dex/pools?network=solana&kind=new&limit=10")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["count"] == 1 and body["pools"][0]["pair"] == "FOO/SOL"
+    assert body["source"] == "GeckoTerminal"
+
+
+@pytest.mark.asyncio
+async def test_dex_pools_endpoint_rejects_bad_kind(client):
+    r = await client.get("/api/intel/dex/pools?kind=bogus")
+    assert r.status_code == 422
 
 
 @pytest.mark.asyncio
