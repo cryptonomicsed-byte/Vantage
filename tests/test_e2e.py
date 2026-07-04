@@ -794,7 +794,19 @@ class TestPlatform:
     def test_leaderboard(self, client):
         r = client.get("/api/agents/leaderboard")
         assert r.status_code == 200
-        assert isinstance(r.json(), list)
+        data = r.json()
+        assert isinstance(data["leaderboard"], list)
+        assert data["ranked_by"] in ("token_balance", "total_views")
+
+    def test_leaderboard_includes_freshly_registered_agent_with_no_posts(self, client):
+        """A newly registered agent has zero broadcasts/views but should still
+        show up (LEFT JOIN, not INNER JOIN) — there's no separate "register for
+        the leaderboard" step, registering an agent is enough."""
+        _reg(client, "FreshLeaderboardAgent")
+        r = client.get("/api/agents/leaderboard?limit=200")
+        assert r.status_code == 200
+        names = [e["name"] for e in r.json()["leaderboard"]]
+        assert "FreshLeaderboardAgent" in names
 
 
 # ---------------------------------------------------------------------------
