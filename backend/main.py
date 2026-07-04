@@ -820,8 +820,9 @@ app.mount("/media/agents", StaticFiles(directory=str(settings.MEDIA_DIR), check_
 
 # Serve frontend (must be last)
 # SPA client-side routes
+@app.get("/ares")
 @app.get("/dashboard")
-@app.get("/swarm") 
+@app.get("/swarm")
 @app.get("/video")
 @app.get("/code")
 @app.get("/code/{path:path}")

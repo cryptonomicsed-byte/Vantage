@@ -536,25 +536,25 @@ export default function AresSOC() {
   if (!adminKey) return <LoginScreen onAuth={setAdminKey} />
 
   return (
-    <div className="ares-soc">
+    <div className="ares-root">
       {/* Header */}
-      <div className="ares-soc-header">
+      <div className="ares-header">
         <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
           <div style={{ fontSize: 18, fontWeight: 700 }}>🛡️ SENTINEL CONTROL</div>
         </div>
       </div>
 
       {/* Tab bar */}
-      <div className="ares-soc-tabs">
+      <div className="ares-tabs">
         {SOC_TABS.map(t => (
-          <button key={t.id} className={`ares-soc-tab ${activeTab === t.id ? 'active' : ''}`} onClick={() => setActiveTab(t.id)}>
+          <button key={t.id} className={`ares-tab ${activeTab === t.id ? 'active' : ''}`} onClick={() => setActiveTab(t.id)}>
             <t.icon size={14} /> {t.label}
           </button>
         ))}
       </div>
 
       {/* Content */}
-      <div className="ares-soc-content">
+      <div className="ares-content">
         {activeTab === 'soc-overview' && <SocOverview adminFetch={adminFetch} />}
         {activeTab === 'soc-threat' && <SocThreat adminFetch={adminFetch} showToast={showToast} />}
         {activeTab === 'soc-security' && <SocSecurity adminFetch={adminFetch} showToast={showToast} />}
