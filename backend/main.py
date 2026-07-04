@@ -836,8 +836,6 @@ app.mount("/media/agents", StaticFiles(directory=str(settings.MEDIA_DIR), check_
 @app.get("/market")
 @app.get("/guilds")
 @app.get("/workspace")
-@app.get("/create")
-@app.get("/pipeline")
 @app.get("/analytics")
 @app.get("/leaderboard")
 @app.get("/inbox")
