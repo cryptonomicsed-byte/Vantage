@@ -506,6 +506,53 @@ async def dexscreener_search(query: str, limit: int = 20) -> list[dict]:
     return rows
 
 
+# ── DEX new/trending pools (GeckoTerminal) — broader token coverage ────────────────
+# CoinGecko/Pyth-backed market lists are all ranked by market cap, which structurally
+# excludes brand-new/low-cap tokens. This surfaces the actual pool-level feed instead —
+# every currently-trading pair on a chain, not just the ones that made a top-N ranking.
+async def dex_new_pools(network: str = "solana", kind: str = "trending", limit: int = 30) -> list[dict]:
+    """Pool-level DEX feed: 'trending' (established momentum) or 'new' (just launched).
+    Cached 30s."""
+    network = (network or "solana").strip().lower()
+    kind = "new" if kind == "new" else "trending"
+    key = f"dexpools:{network}:{kind}:{limit}"
+    cached = _cache_get(key, 30)
+    if cached is not None:
+        return cached
+    endpoint = "new_pools" if kind == "new" else "trending_pools"
+    data = await _get_json(
+        f"https://api.geckoterminal.com/api/v2/networks/{network}/{endpoint}?page=1", timeout=10
+    )
+    pools = (data or {}).get("data") or []
+    rows = []
+    for p in pools[:limit]:
+        a = p.get("attributes") or {}
+        name = a.get("name") or "? / ?"
+        base_sym, _, quote_sym = name.partition(" / ")
+        vol = a.get("volume_usd") or {}
+        chg = a.get("price_change_percentage") or {}
+        txns = (a.get("transactions") or {}).get("h24") or {}
+        try:
+            price_usd = float(a["base_token_price_usd"]) if a.get("base_token_price_usd") else None
+        except (TypeError, ValueError):
+            price_usd = None
+        rows.append({
+            "pair": f"{base_sym.strip()}/{quote_sym.strip() or '?'}",
+            "pool_address": a.get("address"),
+            "network": network,
+            "price_usd": price_usd,
+            "liquidity_usd": float(a["reserve_in_usd"]) if a.get("reserve_in_usd") else None,
+            "volume_24h": float(vol["h24"]) if vol.get("h24") else 0.0,
+            "change_24h_pct": float(chg["h24"]) if chg.get("h24") else None,
+            "buys_24h": txns.get("buys"),
+            "sells_24h": txns.get("sells"),
+            "created_at": a.get("pool_created_at"),
+        })
+    if rows:
+        _cache_put(key, rows)
+    return rows
+
+
 # ── FX rates (ExchangeRate-API) ─────────────────────────────────────────────────────
 async def fx_rates(base: str = "USD") -> dict:
     """Fiat exchange rates for a base currency. Cached 1h."""
@@ -610,9 +657,59 @@ async def _sol_rpc(method: str, params: list, timeout: float = 10) -> Optional[d
     return None
 
 
+def _sol_token_transfers(p: dict, address: str) -> list[dict]:
+    """SPL token deltas for `address` within an already-parsed transaction `p`,
+    via pre/post *token*-balance deltas (meta.preTokenBalances/postTokenBalances —
+    already present in the jsonParsed getTransaction response _sol_address_lookup
+    fetches, at zero extra RPC cost; just unused until now). Counterparties are
+    other token accounts with an opposite-signed delta for the same mint."""
+    try:
+        pre_tok = p["meta"].get("preTokenBalances") or []
+        post_tok = p["meta"].get("postTokenBalances") or []
+    except (KeyError, TypeError):
+        return []
+    if not pre_tok and not post_tok:
+        return []
+
+    pre_by_idx = {b["accountIndex"]: b for b in pre_tok}
+    post_by_idx = {b["accountIndex"]: b for b in post_tok}
+
+    def ui_amount(b: Optional[dict]) -> float:
+        return ((b or {}).get("uiTokenAmount") or {}).get("uiAmount") or 0.0
+
+    # Per-mint delta for every token account touched in this tx, keyed by owner.
+    deltas_by_mint: dict[str, dict[str, float]] = {}
+    for idx in set(pre_by_idx) | set(post_by_idx):
+        b = post_by_idx.get(idx) or pre_by_idx.get(idx)
+        mint, owner = b.get("mint"), b.get("owner")
+        if not mint or not owner:
+            continue
+        delta = ui_amount(post_by_idx.get(idx)) - ui_amount(pre_by_idx.get(idx))
+        if delta:
+            deltas_by_mint.setdefault(mint, {})[owner] = deltas_by_mint.get(mint, {}).get(owner, 0) + delta
+
+    transfers = []
+    for mint, by_owner in deltas_by_mint.items():
+        own_delta = by_owner.get(address)
+        if not own_delta:
+            continue
+        counterparties = [
+            {"address": owner, "role": "recipient" if own_delta < 0 else "sender", "amount": round(abs(d), 9)}
+            for owner, d in by_owner.items()
+            if owner != address and d != 0 and (d > 0) != (own_delta > 0)
+        ]
+        transfers.append({
+            "mint": mint,
+            "direction": "out" if own_delta < 0 else "in",
+            "amount": round(abs(own_delta), 9),
+            "counterparties": sorted(counterparties, key=lambda c: -c["amount"])[:10],
+        })
+    return transfers
+
+
 async def _sol_address_lookup(address: str, limit: int = 15) -> Optional[dict]:
     """Native-SOL balance + recent transactions with counterparties, via pre/post
-    account-balance deltas. No SPL token transfers in v1."""
+    account-balance deltas, plus SPL token transfers (see _sol_token_transfers)."""
     bal = await _sol_rpc("getBalance", [address])
     if bal is None:
         return None
@@ -656,6 +753,7 @@ async def _sol_address_lookup(address: str, limit: int = 15) -> Optional[dict]:
             "amount": round(abs(delta), 9),
             "fee": round(p["meta"].get("fee", 0) / 1e9, 9),
             "counterparties": sorted(counterparties, key=lambda c: -c["amount"])[:10],
+            "token_transfers": _sol_token_transfers(p, address),
         })
     return {
         "balance": {"amount": round(bal["value"] / 1e9, 9), "unit": "SOL"},
@@ -767,7 +865,7 @@ SOURCES = [
     {"name": "Messari", "category": "fundamentals", "url": "https://data.messari.io", "integrated": False},
     {"name": "DefiLlama", "category": "defi", "url": "https://yields.llama.fi", "integrated": True},
     {"name": "DEX Screener", "category": "dex", "url": "https://api.dexscreener.com", "integrated": True},
-    {"name": "GeckoTerminal", "category": "dex", "url": "https://api.geckoterminal.com", "integrated": False},
+    {"name": "GeckoTerminal", "category": "dex", "url": "https://api.geckoterminal.com", "integrated": True},
     {"name": "0x", "category": "dex", "url": "https://api.0x.org", "integrated": False},
     {"name": "1inch", "category": "dex", "url": "https://api.1inch.io", "integrated": False},
     {"name": "Kraken", "category": "exchange", "url": "https://api.kraken.com", "integrated": False},
