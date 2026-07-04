@@ -105,6 +105,12 @@ class Settings(BaseSettings):
     SUPERMEMORY_URL: str = ""
     SUPERMEMORY_API_KEY: str = ""
 
+    # Parrot security scan gate (ClamAV/YARA/binwalk container) for uploaded
+    # artifacts. Unlike the enrichment sidecars above, this one fails CLOSED:
+    # if set but unreachable, uploads are rejected rather than silently passed
+    # through. Empty URL disables the gate entirely (pre-existing behavior).
+    PARROT_SECURITY_URL: str = ""
+
 
 settings = Settings()
 

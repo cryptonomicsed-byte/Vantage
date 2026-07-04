@@ -1186,6 +1186,20 @@ CREATE TABLE IF NOT EXISTS external_conversations (
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_job_tasks_job ON job_tasks(job_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_job_tasks_status ON job_tasks(status)")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS security_scans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER REFERENCES agents(id),
+                artifact_type TEXT NOT NULL,
+                artifact_ref TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                normalized INTEGER NOT NULL DEFAULT 0,
+                findings_json TEXT NOT NULL DEFAULT '[]',
+                started_at TEXT DEFAULT (datetime('now')),
+                completed_at TEXT
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_security_scans_agent ON security_scans(agent_id)")
         await db.commit()
 
     # One-time migration: hash any plaintext API keys still stored as "vantage_..." (idempotent)

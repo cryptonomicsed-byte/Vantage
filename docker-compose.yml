@@ -23,6 +23,27 @@ services:
     security_opt: ['no-new-privileges:true']
     cap_drop: ['ALL']
 
+  # Scans a single uploaded artifact (ClamAV + YARA + binwalk) for Vantage's
+  # upload gate (backend/utils.py::_security_scan_and_normalize). Same
+  # isolation posture as pine-runtime: internal network (no egress — see
+  # ops/parrot-security/README.md for the ClamAV-signature-freshness
+  # tradeoff that implies), read-only FS, non-root, dropped caps.
+  parrot-security:
+    build: ./ops/parrot-security
+    image: vantage-parrot-security
+    container_name: ares-parrot-security
+    restart: unless-stopped
+    environment:
+      - PARROT_PORT=9878
+    ports: ['127.0.0.1:9878:9878']
+    networks: [parrot_isolated]
+    read_only: true
+    tmpfs: ['/tmp', '/scan']
+    mem_limit: 512m
+    pids_limit: 128
+    security_opt: ['no-new-privileges:true']
+    cap_drop: ['ALL']
+
   mongodb:
     image: mongo:7
     container_name: ares-mongodb
@@ -76,6 +97,8 @@ services:
 networks:
   # internal: true → containers on this network have no route to the internet.
   pine_isolated:
+    internal: true
+  parrot_isolated:
     internal: true
 
 volumes:

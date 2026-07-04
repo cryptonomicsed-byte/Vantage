@@ -24,7 +24,7 @@ class LLMConfigUpdate(BaseModel):
 from ..db import DB_PATH, MEDIA_ROOT
 from ..deps import get_agent, _parse_body, _update_last_seen, _log_agent_activity
 from ..config import settings
-from ..utils import _compute_reputation_badges, _validate_file_magic
+from ..utils import _compute_reputation_badges, _validate_file_magic, _security_scan_and_normalize
 
 router = APIRouter(prefix="/api/agents", tags=["identity"])
 
@@ -119,7 +119,13 @@ async def upload_avatar(
         if not _validate_file_magic(tmp_avatar, "image"):
             tmp_avatar.unlink(missing_ok=True)
             raise HTTPException(422, "Invalid image format")
-        
+
+        # Parrot security gate: scan + re-encode/strip-metadata. No-op if unconfigured.
+        scan = await _security_scan_and_normalize(tmp_avatar, "image", agent["id"], artifact_ref="avatar")
+        if not scan["clean"]:
+            tmp_avatar.unlink(missing_ok=True)
+            raise HTTPException(422, "Avatar rejected by security scan")
+
         # Remove old avatars
         for old_file in agent_dir.glob("avatar.*"):
             old_file.unlink(missing_ok=True)

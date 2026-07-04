@@ -18,6 +18,7 @@ from fastapi import UploadFile
 
 from .config import settings
 from .db import DB_PATH, MEDIA_ROOT
+from .parrot_client import ParrotClient
 
 logger = logging.getLogger(__name__)
 
@@ -283,6 +284,81 @@ def _validate_file_magic(path: Path, content_type: str) -> bool:
         return True
     except Exception:
         return False
+
+
+_parrot = ParrotClient(settings.PARROT_SECURITY_URL)
+
+
+def _normalize_image(path: Path) -> bool:
+    """Re-encode an image file in place onto a fresh pixel buffer and strip
+    all metadata (EXIF/XMP/ICC) — the actual defense against polyglots and
+    ImageTragick-style payloads, since a malicious file that still decodes to
+    valid pixels won't survive being re-serialized from scratch. Preserves
+    multi-frame GIF/WEBP animation (dropping only metadata, not frames)."""
+    try:
+        from PIL import Image, ImageSequence
+        with Image.open(path) as img:
+            img.load()
+            fmt = img.format
+            n_frames = getattr(img, "n_frames", 1)
+            if n_frames > 1:
+                frames = [f.convert(img.mode).copy() for f in ImageSequence.Iterator(img)]
+                frames[0].save(
+                    path, format=fmt, save_all=True, append_images=frames[1:],
+                    loop=img.info.get("loop", 0), duration=img.info.get("duration", 100),
+                )
+            else:
+                clean_img = Image.new(img.mode, img.size)
+                clean_img.putdata(list(img.getdata()))
+                clean_img.save(path, format=fmt)
+        return True
+    except Exception as exc:
+        logger.warning("image normalization failed for %s: %s", path, exc)
+        return False
+
+
+async def _record_security_scan(
+    agent_id: Optional[int], artifact_type: str, artifact_ref: str,
+    clean: bool, findings: list, normalized: bool,
+) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO security_scans
+               (agent_id, artifact_type, artifact_ref, status, normalized, findings_json, completed_at)
+               VALUES (?, ?, ?, ?, ?, ?, datetime('now'))""",
+            (
+                agent_id, artifact_type, artifact_ref,
+                "clean" if clean else "quarantined", int(normalized), _json.dumps(findings),
+            ),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def _security_scan_and_normalize(
+    path: Path, kind: str, agent_id: Optional[int] = None, artifact_ref: str = "",
+) -> dict:
+    """Scan `path`'s bytes through the parrot-security gate and, for clean
+    images, re-encode + strip metadata in place.
+
+    Fails closed: if PARROT_SECURITY_URL is configured but the scanner is
+    unreachable, `clean` is False. If unconfigured, `clean` is always True —
+    the gate is a no-op, preserving pre-existing (magic-byte-only) behavior.
+    """
+    try:
+        content = path.read_bytes()
+    except Exception as exc:
+        logger.warning("could not read %s for security scan: %s", path, exc)
+        return {"clean": False, "scan_id": None, "findings": [{"error": str(exc)}]}
+
+    result = await _parrot.scan(content, path.name, kind)
+    clean = bool(result["clean"])
+    normalized = clean and kind == "image" and _normalize_image(path)
+
+    scan_id = await _record_security_scan(
+        agent_id, kind, artifact_ref or path.name, clean, result["findings"], normalized,
+    )
+    return {"clean": clean, "scan_id": scan_id, "findings": result["findings"]}
 
 
 def _is_ssrf_safe_url(url: str) -> bool:

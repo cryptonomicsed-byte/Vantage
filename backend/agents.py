@@ -48,6 +48,7 @@ from .utils import (
     _VALID_WEBHOOK_EVENTS, _fire_webhooks,
     _SEVERITY_MAP, _append_receipt,
     _VIDEO_MAGIC, _AUDIO_MAGIC, _IMAGE_MAGIC, _validate_file_magic,
+    _security_scan_and_normalize,
     _compute_reputation_badges,
     _notify_webhook, _check_token_milestones, _MILESTONES,
     _save_thumbnail,
@@ -86,7 +87,7 @@ async def _push_broadcast_to_omokoda(title: str, stream_url: str, agent_name: st
         logger.warning("omokoda vault push failed for '%s': %s", title, exc)
 
 
-async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Path) -> None:
+async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Path, agent_id: int = None) -> None:
     out_dir = agent_dir / str(broadcast_id)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -104,6 +105,20 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
             )
             await db.commit()
         logger.error("broadcast %s rejected: invalid file magic bytes", broadcast_id)
+        return
+
+    # Parrot security gate: scan the raw upload before FFmpeg spends CPU on it.
+    # No-op (clean=True) if PARROT_SECURITY_URL is unset.
+    scan = await _security_scan_and_normalize(
+        input_path, "video", agent_id, artifact_ref=str(broadcast_id)
+    )
+    if not scan["clean"]:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE broadcasts SET status='error' WHERE id=?", (broadcast_id,)
+            )
+            await db.commit()
+        logger.error("broadcast %s quarantined by security scan: %s", broadcast_id, scan["findings"])
         return
 
     try:
@@ -487,7 +502,7 @@ async def publish(
         # Store file but don't transcode yet — scheduled loop will trigger publish-now
         asyncio.create_task(_append_receipt(str(agent["name"]), "publish_video", {"broadcast_id": broadcast_id, "title": title, "status": "scheduled"}, tier=agent.get("tier", 0)))
         return {"broadcast_id": broadcast_id, "status": "scheduled", "publish_at": publish_at}
-    background_tasks.add_task(_process_broadcast, broadcast_id, tmp_path, agent_dir)
+    background_tasks.add_task(_process_broadcast, broadcast_id, tmp_path, agent_dir, agent["id"])
     asyncio.create_task(_append_receipt(str(agent["name"]), "publish_video", {"broadcast_id": broadcast_id, "title": title, "status": "pending"}, tier=agent.get("tier", 0)))
     return {"broadcast_id": broadcast_id, "status": "pending"}
 
@@ -960,6 +975,16 @@ async def create_audio_post(
             await db.commit()
         raise HTTPException(status_code=422, detail="Unsupported audio format. Supported: MP3, AAC, WAV, OGG, FLAC, M4A.")
 
+    # Parrot security gate: scan the raw upload before FFmpeg touches it.
+    # No-op (clean=True) if PARROT_SECURITY_URL is unset.
+    scan = await _security_scan_and_normalize(raw_path, "audio", agent["id"], artifact_ref=str(broadcast_id))
+    if not scan["clean"]:
+        raw_path.unlink(missing_ok=True)
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM broadcasts WHERE id=?", (broadcast_id,))
+            await db.commit()
+        raise HTTPException(status_code=422, detail="Upload rejected by security scan")
+
     # Transcode to MP3 for universal browser compatibility.
     # Falls back to the raw file if FFmpeg is unavailable or fails.
     mp3_path = agent_dir / f"audio_{broadcast_id}.mp3"
@@ -1338,6 +1363,11 @@ async def create_image_post(
         dest = out_dir / f"img_{i:03d}{ext}"
         dest.write_bytes(content)
         if not _validate_file_magic(dest, "image"):
+            dest.unlink(missing_ok=True)
+            continue
+        # Parrot security gate: scan + re-encode/strip-metadata. No-op if unconfigured.
+        scan = await _security_scan_and_normalize(dest, "image", agent["id"], artifact_ref=str(broadcast_id))
+        if not scan["clean"]:
             dest.unlink(missing_ok=True)
             continue
         image_urls.append(f"/media/agents/{agent['name']}/{broadcast_id}/{dest.name}")
