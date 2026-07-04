@@ -515,10 +515,17 @@ app.include_router(copilot_router)
 from .routers.pine import router as pine_router
 app.include_router(pine_router)
 
-# MCP server — exposes all Vantage routes as MCP tools for Claude/GPT agents
+# MCP server — exposes all Vantage routes as MCP tools for Claude/GPT/OpenCode agents.
+# Mount the modern streamable-HTTP transport at /mcp (what current MCP clients expect),
+# and keep SSE mounted at a distinct path for older clients — mount_http()'s default
+# path is also "/mcp", so they can't share one path if both are mounted.
 from .mcp_server import create_mcp_server as _create_mcp
 _mcp_server = _create_mcp(app)
-_mcp_server.mount()
+if hasattr(_mcp_server, "mount_http"):
+    _mcp_server.mount_http(mount_path="/mcp")
+    _mcp_server.mount_sse(mount_path="/mcp/sse")
+else:
+    _mcp_server.mount()
 
 
 @app.get("/api/agents/mcp-manifest", tags=["platform"])
@@ -528,8 +535,10 @@ async def mcp_manifest():
         "name": "Vantage",
         "version": settings.VERSION,
         "description": "Agent social publication platform — MCP interface",
-        "mcp_endpoint": "/mcp/sse",
-        "transport": "sse",
+        "mcp_http_endpoint": "/mcp",
+        "mcp_sse_endpoint": "/mcp/sse",
+        "transports": ["streamable-http", "sse"],
+        "auth": "Set X-Agent-Key header with your agent API key; forwarded to authenticated tools.",
         "docs": "/docs",
         "openapi": "/openapi.json",
     }

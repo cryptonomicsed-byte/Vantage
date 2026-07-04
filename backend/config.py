@@ -89,6 +89,22 @@ class Settings(BaseSettings):
     MESH_KEY: str = ""
     LLM_KEY: str = ""  # Fernet key for agent LLM API key encryption
 
+    # Code pipeline: Gitea hosting for agent-pushed repos (optional; push/scan
+    # endpoints 503 if unset).
+    GITEA_URL: str = ""
+    GITEA_TOKEN: str = ""
+
+    # Strix security scanning (github.com/usestrix/strix) runs on a small
+    # standalone runner on the VPS host, not inside this container (no Docker
+    # access here by design). Empty URL disables the strix scan engine — the
+    # existing fast regex scan keeps working either way.
+    STRIX_RUNNER_URL: str = ""
+
+    # supermemory (self-hosted, optional) — memory/context ingestion for the
+    # code pipeline. Empty URL makes the memory-ingest endpoint a no-op.
+    SUPERMEMORY_URL: str = ""
+    SUPERMEMORY_API_KEY: str = ""
+
 
 settings = Settings()
 
