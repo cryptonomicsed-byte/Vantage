@@ -52,7 +52,7 @@ const IMG_REACTIONS = ['❤️', '🔥', '💡', '🤨']
 /* ── Scoped stylesheet ──────────────────────────────────────────────────── */
 const STYLE_ID = 'homefeed-styles'
 const CSS = `
-.hf-wrap{--b1:#3b82f6;--b2:#8B5CF6;--b3:#06b6d4;color:#fff}
+.hf-wrap{--b1:#3b82f6;--b2:#8B5CF6;--b3:#06b6d4;color:#fff;display:flow-root}
 .hf-tab{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border-radius:8px;font-size:14px;font-weight:500;color:rgba(255,255,255,.5);cursor:pointer;transition:all .2s;white-space:nowrap;border:none;background:none}
 .hf-tab:hover{color:rgba(255,255,255,.85);background:rgba(255,255,255,.05)}
 .hf-tab.active{color:#fff;background:rgba(255,255,255,.1)}
@@ -813,22 +813,31 @@ export default function HomeFeed() {
 
   return (
     <div className="hf-wrap">
-      {/* Live market ticker + content-type tabs + tag filter chips */}
-      <div style={{ position: 'sticky', top: 0, zIndex: 20, background: 'rgba(3,4,11,.82)', backdropFilter: 'blur(18px)', borderBottom: '1px solid rgba(255,255,255,.05)', margin: '0 -20px' }}>
-        <LiveTicker />
-        <div style={{ display: 'flex', gap: 4, padding: '12px 20px 0', overflowX: 'auto' }}>
-          {TABS.map(({ id, label, Icon }) => (
-            <button key={id} className={`hf-tab ${tab === id ? 'active' : ''}`} onClick={() => { setTab(id); window.scrollTo({ top: 0, behavior: 'smooth' }) }}>
-              <Icon size={16} /> {label}
-            </button>
-          ))}
-        </div>
-        {tags.length > 0 && (
-          <div style={{ display: 'flex', gap: 8, padding: '12px 20px', overflowX: 'auto' }}>
-            <button className={`hf-chip ${filter === 'all' ? 'active' : ''}`} onClick={() => setFilter('all')}>All</button>
-            {tags.map(t => <button key={t} className={`hf-chip ${filter === t ? 'active' : ''}`} onClick={() => setFilter(t)}>{t}</button>)}
+      {/* Live market ticker + content-type tabs + tag filter chips.
+          `.main`'s own top padding (--main-pad-top, set in index.css) would
+          otherwise leave a gap above this banner and the true top of the
+          page. A plain (non-sticky) outer div carries the negative margin
+          that bleeds up through it — negative margins on a `position:
+          sticky` element itself don't reliably shift its rest position in
+          every engine, so the sticky behavior lives on a zero-margin inner
+          div instead. */}
+      <div style={{ margin: 'calc(-1 * var(--main-pad-top, 0px)) -20px 0' }}>
+        <div style={{ position: 'sticky', top: 0, zIndex: 20, background: 'rgba(3,4,11,.82)', backdropFilter: 'blur(18px)', borderBottom: '1px solid rgba(255,255,255,.05)' }}>
+          <LiveTicker />
+          <div style={{ display: 'flex', gap: 4, padding: '12px 20px 0', overflowX: 'auto' }}>
+            {TABS.map(({ id, label, Icon }) => (
+              <button key={id} className={`hf-tab ${tab === id ? 'active' : ''}`} onClick={() => { setTab(id); window.scrollTo({ top: 0, behavior: 'smooth' }) }}>
+                <Icon size={16} /> {label}
+              </button>
+            ))}
           </div>
-        )}
+          {tags.length > 0 && (
+            <div style={{ display: 'flex', gap: 8, padding: '12px 20px', overflowX: 'auto' }}>
+              <button className={`hf-chip ${filter === 'all' ? 'active' : ''}`} onClick={() => setFilter('all')}>All</button>
+              {tags.map(t => <button key={t} className={`hf-chip ${filter === t ? 'active' : ''}`} onClick={() => setFilter(t)}>{t}</button>)}
+            </div>
+          )}
+        </div>
       </div>
 
       {empty && (
