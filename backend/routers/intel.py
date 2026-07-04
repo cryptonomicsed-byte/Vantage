@@ -275,6 +275,42 @@ async def get_whales(limit: int = Query(10, ge=1, le=25), min_value_btc: float =
     txs = await ms.whale_txs(limit, min_value_btc)
     return {"transactions": txs, "count": len(txs), "chain": "bitcoin", "source": "mempool.space"}
 
+# ── Wallet money-flow graph — accumulated from real observed counterparties,
+# not a fabricated data source. Every /trace lookup and /watchlist/refresh
+# feeds this: nodes are wallet addresses, links are real sender/recipient
+# relationships the trace has actually surfaced. ────────────────────────────
+async def _record_wallet_edges(chain: str, address: str, transactions: list[dict]) -> None:
+    edges: dict[tuple[str, str], dict] = {}
+
+    def _accumulate(counterparties: list[dict]) -> None:
+        for c in counterparties or []:
+            cp_address, role = c.get("address"), c.get("role")
+            if not cp_address or not role:
+                continue
+            e = edges.setdefault((cp_address, role), {"value": 0.0, "count": 0})
+            e["value"] += c.get("amount") or 0.0
+            e["count"] += 1
+
+    for t in transactions or []:
+        _accumulate(t.get("counterparties"))
+        for tt in t.get("token_transfers") or []:
+            _accumulate(tt.get("counterparties"))
+
+    if not edges:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        for (cp_address, role), agg in edges.items():
+            await db.execute(
+                """INSERT INTO wallet_edges (chain, address_a, address_b, role, tx_count, total_value)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(chain, address_a, address_b, role) DO UPDATE SET
+                     tx_count = tx_count + excluded.tx_count,
+                     total_value = total_value + excluded.total_value,
+                     last_seen = datetime('now')""",
+                (chain, address, cp_address, role, agg["count"], agg["value"]),
+            )
+        await db.commit()
+
 @router.get("/trace/{chain}/{address}")
 @_limiter.limit("30/minute")
 async def get_wallet_trace(request: Request, chain: str, address: str, limit: int = Query(10, ge=1, le=25)):
@@ -284,7 +320,10 @@ async def get_wallet_trace(request: Request, chain: str, address: str, limit: in
     frontend, not server-side recursion. Rate-limited separately from other
     intel endpoints since its cost is driven by user clicks, not a fixed poll
     interval, against a rate-limited public RPC."""
-    return await ms.address_lookup(chain, address)
+    result = await ms.address_lookup(chain, address)
+    if result.get("supported"):
+        await _record_wallet_edges(result.get("chain"), address, result.get("transactions") or [])
+    return result
 
 # ── Wallet watchlist — persisted tracking, shared across agents (unlike the
 # one-shot /trace above). No server-side poller exists anywhere in this
@@ -356,7 +395,46 @@ async def refresh_watchlist_wallets(agent: dict = Depends(get_agent)):
     if not rows:
         return {"wallets": [], "count": 0}
     refreshed = await ms.refresh_watchlist(rows)
+    for w in refreshed:
+        if w.get("supported"):
+            await _record_wallet_edges(w["chain"], w["address"], w.get("recent_transactions") or [])
     return {"wallets": refreshed, "count": len(refreshed)}
+
+@router.get("/wallet-network")
+async def get_wallet_network(
+    chain: str = Query("solana"),
+    min_tx_count: int = Query(1, ge=1),
+    limit: int = Query(200, ge=1, le=1000),
+):
+    """Real money-flow graph built from wallet_edges — accumulated every time
+    /trace or /watchlist/refresh surfaces a counterparty, from both manual
+    lookups and tracked-wallet refreshes. Nodes are wallet addresses, links
+    are observed sender/recipient relationships. No separate clustering
+    algorithm: force-directed physics on the frontend naturally clusters
+    densely-connected wallets into visible 'hot zones'."""
+    chain = (chain or "").strip().lower()
+    canon = "bitcoin" if chain in ("bitcoin", "btc") else "solana" if chain in ("solana", "sol") else chain
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT * FROM wallet_edges WHERE chain=? AND tx_count>=?
+               ORDER BY total_value DESC LIMIT ?""",
+            (canon, min_tx_count, limit),
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+
+    node_ids: set[str] = set()
+    links = []
+    for r in rows:
+        node_ids.add(r["address_a"])
+        node_ids.add(r["address_b"])
+        links.append({
+            "source": r["address_a"], "target": r["address_b"], "role": r["role"],
+            "tx_count": r["tx_count"], "total_value": r["total_value"],
+            "first_seen": r["first_seen"], "last_seen": r["last_seen"],
+        })
+    nodes = [{"id": a} for a in node_ids]
+    return {"chain": canon, "nodes": nodes, "links": links, "node_count": len(nodes), "link_count": len(links)}
 
 @router.get("/backtest")
 async def get_backtest(symbol: str = Query("BTC"), days: int = Query(90, ge=14, le=365)):

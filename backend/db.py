@@ -1212,6 +1212,21 @@ CREATE TABLE IF NOT EXISTS external_conversations (
             )
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_tracked_wallets_agent ON tracked_wallets(added_by_agent_id)")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS wallet_edges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chain TEXT NOT NULL,
+                address_a TEXT NOT NULL,
+                address_b TEXT NOT NULL,
+                role TEXT NOT NULL,
+                tx_count INTEGER NOT NULL DEFAULT 0,
+                total_value REAL NOT NULL DEFAULT 0,
+                first_seen TEXT DEFAULT (datetime('now')),
+                last_seen TEXT DEFAULT (datetime('now')),
+                UNIQUE(chain, address_a, address_b, role)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_wallet_edges_a ON wallet_edges(chain, address_a)")
         await db.commit()
 
     # One-time migration: hash any plaintext API keys still stored as "vantage_..." (idempotent)

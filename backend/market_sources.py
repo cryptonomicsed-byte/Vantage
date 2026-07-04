@@ -828,7 +828,7 @@ async def refresh_watchlist(wallets: list[dict]) -> list[dict]:
             "supported": data.get("supported", False),
             "balance": data.get("balance"),
             "tx_count": data.get("tx_count"),
-            "recent_transactions": txs[:5],
+            "recent_transactions": txs,
             "whale_activity": whale_activity,
         }
 

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, Waypoints, ListOrdered, Eye, Plus, Trash2 } from 'lucide-react'
+import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, Waypoints, ListOrdered, Eye, Plus, Trash2, Share2 } from 'lucide-react'
+import MoneyFlowGraph from '../MoneyFlowGraph'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Analytics — the deep-dive lenses behind Trading's default Dashboard tab. These
@@ -756,6 +757,7 @@ const INTEL_TABS = [
   { id: 'alltokens', label: 'All Tokens', icon: ListOrdered },
   { id: 'whales',    label: 'Whales',    icon: Waves },
   { id: 'watchlist', label: 'Watchlist', icon: Eye },
+  { id: 'moneyflow', label: 'Money Flow', icon: Share2 },
   { id: 'fx',        label: 'FX',        icon: DollarSign },
   { id: 'backtest',  label: 'Backtest',  icon: History },
   { id: 'sentiment', label: 'Sentiment', icon: Zap },
@@ -784,6 +786,7 @@ export default function MarketIntel() {
       {tab === 'alltokens' && <AresAllTokens />}
       {tab === 'whales' && <AresWhales />}
       {tab === 'watchlist' && <AresWatchlist />}
+      {tab === 'moneyflow' && <MoneyFlowGraph />}
       {tab === 'fx' && <AresFx />}
       {tab === 'backtest' && <AresBacktest />}
       {tab === 'sentiment' && <AresSentiment />}
