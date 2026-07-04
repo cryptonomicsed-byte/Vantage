@@ -669,6 +669,102 @@ class TestAdminAPI:
         r = client.get("/api/admin/stats")
         assert r.status_code in (403, 503)
 
+    def test_list_agents_includes_tier_jail_reputation(self, client):
+        _reg(client, "AdminTierTarget")
+        r = client.get("/api/admin/agents", headers=self._ah())
+        assert r.status_code == 200
+        row = next(a for a in r.json() if a["name"] == "AdminTierTarget")
+        assert "tier" in row and "jail_mode" in row and "reputation" in row
+
+    def test_rate_limit_status_endpoint(self, client):
+        key = _reg(client, "RateStatusAgent")
+        # Generate at least one tracked request against the real limiter.
+        client.get("/api/agents/me/profile", headers=_headers(key))
+        r = client.get("/api/admin/rate-limit-status", headers=self._ah())
+        assert r.status_code == 200
+        body = r.json()
+        assert "limit" in body and "window_seconds" in body and "agents" in body
+        # Don't assert this specific agent is present: the endpoint caps at the
+        # top 50 by request volume, and in a full suite run many other agents
+        # may have made more requests within the same 60s window. Assert the
+        # shape/content is real instead of relying on suite-wide ordering.
+        assert isinstance(body["agents"], list) and len(body["agents"]) >= 1
+        row = body["agents"][0]
+        assert {"agent_id", "agent_name", "requests_in_window", "limit", "pct_of_limit"} <= row.keys()
+
+    def test_rate_limit_status_requires_admin(self, client):
+        r = client.get("/api/admin/rate-limit-status")
+        assert r.status_code in (403, 503)
+
+    def test_security_scans_list_endpoint(self, client, tmp_path):
+        import asyncio
+        import backend.utils as utils_module
+        from PIL import Image
+        import io
+
+        key = _reg(client, "SecScanListAgent")
+        agent_id = client.get("/api/agents/me/profile", headers=_headers(key)).json()["id"]
+        p = tmp_path / "a.jpg"
+        img = Image.new("RGB", (4, 4))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        p.write_bytes(buf.getvalue())
+        asyncio.run(utils_module._security_scan_and_normalize(p, "image", agent_id, artifact_ref="list-test"))
+
+        r = client.get("/api/admin/security-scans", headers=self._ah())
+        assert r.status_code == 200
+        body = r.json()
+        assert body["count"] >= 1
+        assert any(s["artifact_ref"] == "list-test" for s in body["scans"])
+
+    def test_security_scans_list_filters_by_status(self, client):
+        r = client.get("/api/admin/security-scans?status=quarantined", headers=self._ah())
+        assert r.status_code == 200
+        assert all(s["status"] == "quarantined" for s in r.json()["scans"])
+
+    def test_security_scans_list_requires_admin(self, client):
+        r = client.get("/api/admin/security-scans")
+        assert r.status_code in (403, 503)
+
+    def test_code_scans_list_endpoint(self, client):
+        r = client.get("/api/admin/code-scans", headers=self._ah())
+        assert r.status_code == 200
+        body = r.json()
+        assert "scans" in body and "count" in body
+
+    def test_code_scans_list_requires_admin(self, client):
+        r = client.get("/api/admin/code-scans")
+        assert r.status_code in (403, 503)
+
+    def test_jobs_overview_endpoint(self, client):
+        r = client.get("/api/admin/jobs-overview", headers=self._ah())
+        assert r.status_code == 200
+        body = r.json()
+        assert "jobs_by_status" in body
+        assert "tasks_by_status" in body
+        assert "expired_leases" in body
+        assert "recent_jobs" in body
+
+    def test_jobs_overview_counts_a_real_job(self, client):
+        poster_key = _reg(client, "JobsOverviewPoster")
+        r = client.post(
+            "/api/jobs",
+            json={
+                "job_type": "code",
+                "title": "Overview test job",
+                "tasks": [{"title": "task one"}],
+            },
+            headers=_headers(poster_key),
+        )
+        assert r.status_code == 200, r.text
+        overview = client.get("/api/admin/jobs-overview", headers=self._ah()).json()
+        assert overview["jobs_by_status"].get("open", 0) >= 1
+        assert any(j["title"] == "Overview test job" for j in overview["recent_jobs"])
+
+    def test_jobs_overview_requires_admin(self, client):
+        r = client.get("/api/admin/jobs-overview")
+        assert r.status_code in (403, 503)
+
 
 # ---------------------------------------------------------------------------
 # Search & Feeds

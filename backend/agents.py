@@ -40,7 +40,10 @@ limiter = Limiter(key_func=get_remote_address)
 from .config import settings
 from .db import DB_PATH, MEDIA_ROOT, init_agents_db
 from .memory_enrichment import MemoryIntelligence
-from .deps import get_agent, get_admin, _parse_body, _update_last_seen, _log_agent_activity
+from .deps import (
+    get_agent, get_admin, _parse_body, _update_last_seen, _log_agent_activity,
+    _agent_rate_buckets, _AGENT_RATE_LIMIT, _AGENT_RATE_WINDOW,
+)
 from .utils import (
     _log_buffer, _BufferHandler,
     _feed_clients, _gossip_channels, _broadcast_gossip, notify_feed_clients,
@@ -8440,6 +8443,117 @@ async def admin_verify_receipt_chain(_: str = Depends(get_admin)):
     return {"ok": True, "checked": len(rows)}
 
 
+@admin_router.get("/security-scans")
+async def admin_list_security_scans(
+    limit: int = Query(100, ge=1, le=500),
+    status: Optional[str] = None,
+    artifact_type: Optional[str] = None,
+    agent_id: Optional[int] = None,
+    _: str = Depends(get_admin),
+):
+    """Parrot-security upload quarantine history — the security_scans table
+    has no admin list endpoint today, only a single-scan-by-id lookup."""
+    clauses, params = [], []
+    if status:
+        clauses.append("status=?"); params.append(status)
+    if artifact_type:
+        clauses.append("artifact_type=?"); params.append(artifact_type)
+    if agent_id:
+        clauses.append("agent_id=?"); params.append(agent_id)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"SELECT * FROM security_scans {where} ORDER BY started_at DESC LIMIT ?", params
+        ) as cur:
+            rows = await cur.fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["findings"] = _json.loads(d.pop("findings_json"))
+        except (TypeError, ValueError):
+            d["findings"] = []
+        out.append(d)
+    return {"scans": out, "count": len(out)}
+
+
+@admin_router.get("/code-scans")
+async def admin_list_code_scans(
+    limit: int = Query(100, ge=1, le=500),
+    status: Optional[str] = None,
+    engine: Optional[str] = None,
+    owner: Optional[str] = None,
+    name: Optional[str] = None,
+    _: str = Depends(get_admin),
+):
+    """Strix/regex code-scan history — the code_scans table has no admin
+    list endpoint today, only agent-scoped dispatch/poll endpoints."""
+    clauses, params = [], []
+    if status:
+        clauses.append("status=?"); params.append(status)
+    if engine:
+        clauses.append("engine=?"); params.append(engine)
+    if owner:
+        clauses.append("owner=?"); params.append(owner)
+    if name:
+        clauses.append("name=?"); params.append(name)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"SELECT * FROM code_scans {where} ORDER BY started_at DESC LIMIT ?", params
+        ) as cur:
+            rows = await cur.fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["findings"] = _json.loads(d.pop("findings_json"))
+        except (TypeError, ValueError):
+            d["findings"] = []
+        out.append(d)
+    return {"scans": out, "count": len(out)}
+
+
+@admin_router.get("/jobs-overview")
+async def admin_jobs_overview(_: str = Depends(get_admin)):
+    """Aggregate health view of the multi-agent Job Conductor (jobs/job_tasks)
+    — distinct from the older creation_jobs/task_dead_letter pipeline counted
+    in /telemetry. No existing endpoint computes counts; GET /api/jobs only
+    returns raw rows."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT status, COUNT(*) as n FROM jobs GROUP BY status"
+        ) as cur:
+            job_counts = {r["status"]: r["n"] for r in await cur.fetchall()}
+        async with db.execute(
+            "SELECT status, COUNT(*) as n FROM job_tasks GROUP BY status"
+        ) as cur:
+            task_counts = {r["status"]: r["n"] for r in await cur.fetchall()}
+        async with db.execute(
+            """SELECT COUNT(*) as n FROM job_tasks
+               WHERE status='claimed' AND claim_expires_at <= datetime('now')"""
+        ) as cur:
+            expired_leases = (await cur.fetchone())["n"]
+        async with db.execute(
+            """SELECT j.id, j.title, j.job_type, j.status, j.created_at,
+                      COUNT(t.id) as task_count
+               FROM jobs j LEFT JOIN job_tasks t ON t.job_id=j.id
+               GROUP BY j.id ORDER BY j.created_at DESC LIMIT 20"""
+        ) as cur:
+            recent_jobs = [dict(r) for r in await cur.fetchall()]
+    return {
+        "jobs_by_status": job_counts,
+        "tasks_by_status": task_counts,
+        "expired_leases": expired_leases,
+        "recent_jobs": recent_jobs,
+    }
+
+
 @admin_router.patch("/agents/{agent_id}/tier")
 async def admin_set_tier(agent_id: int, request: Request, _: str = Depends(get_admin)):
     """Manually set an agent's tier (0-5)."""
@@ -8458,7 +8572,8 @@ async def admin_list_agents(_: str = Depends(get_admin)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT id, name, bio, avatar_url, agent_status, is_admin, created_at, token_balance, sui_address
+            """SELECT id, name, bio, avatar_url, agent_status, is_admin, created_at,
+                      token_balance, sui_address, tier, jail_mode, reputation
                FROM agents ORDER BY created_at DESC"""
         ) as cur:
             rows = await cur.fetchall()
@@ -8553,6 +8668,42 @@ async def admin_rate_limits(_: str = Depends(get_admin)):
         "broadcast_activity": broadcast_activity,
         "comment_activity": comment_activity,
     }
+
+
+@admin_router.get("/rate-limit-status")
+async def admin_rate_limit_status(_: str = Depends(get_admin)):
+    """Real live view of the in-memory per-agent sliding-window rate limiter
+    (backend/deps.py::_check_agent_rate) — distinct from /rate-limits above,
+    which is actually a 5-minute broadcast/comment content-frequency count and
+    doesn't reflect the real request-rate limiter state at all."""
+    import time as _time
+    now = _time.monotonic()
+    agent_ids = [aid for aid, times in _agent_rate_buckets.items()
+                 if any(now - t < _AGENT_RATE_WINDOW for t in times)]
+    names = {}
+    if agent_ids:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            placeholders = ",".join("?" for _ in agent_ids)
+            async with db.execute(
+                f"SELECT id, name FROM agents WHERE id IN ({placeholders})", agent_ids
+            ) as cur:
+                names = {r["id"]: r["name"] for r in await cur.fetchall()}
+    rows = []
+    for aid, times in _agent_rate_buckets.items():
+        active = [t for t in times if now - t < _AGENT_RATE_WINDOW]
+        if not active:
+            continue
+        rows.append({
+            "agent_id": aid,
+            "agent_name": names.get(aid, f"agent-{aid}"),
+            "requests_in_window": len(active),
+            "limit": _AGENT_RATE_LIMIT,
+            "window_seconds": _AGENT_RATE_WINDOW,
+            "pct_of_limit": round(len(active) / _AGENT_RATE_LIMIT * 100, 1),
+        })
+    rows.sort(key=lambda r: r["requests_in_window"], reverse=True)
+    return {"limit": _AGENT_RATE_LIMIT, "window_seconds": _AGENT_RATE_WINDOW, "agents": rows[:50]}
 
 
 # 8. Admin honeypot hits
