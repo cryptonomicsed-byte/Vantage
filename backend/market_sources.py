@@ -570,27 +570,32 @@ async def fx_rates(base: str = "USD") -> dict:
 
 
 # ── On-chain whale activity (mempool.space, BTC) ────────────────────────────────────
-async def whale_txs(limit: int = 10) -> list[dict]:
-    """Largest recent BTC mempool transactions by value (whale activity). Cached 30s."""
-    cached = _cache_get("whales", 30)
+async def whale_txs(limit: int = 10, min_value_btc: Optional[float] = None) -> list[dict]:
+    """Largest recent BTC mempool transactions by value (whale activity), optionally
+    filtered to only transactions >= min_value_btc. The raw mempool.space fetch is
+    cached 30s unfiltered/untruncated; filtering and limiting happen fresh on every
+    call so different callers can use different thresholds against the same fetch."""
+    cached = _cache_get("whales:raw", 30)
     if cached is not None:
-        return cached
-    data = await _get_json("https://mempool.space/api/mempool/recent", timeout=8)
-    txs = data if isinstance(data, list) else []
-    rows = []
-    for t in txs:
-        sats = t.get("value") or 0
-        rows.append({
-            "txid": (t.get("txid") or "")[:16] + "…",
-            "value_btc": round(sats / 1e8, 4),
-            "fee_sat": t.get("fee"),
-            "size_vb": t.get("vsize"),
-        })
-    rows.sort(key=lambda r: -(r["value_btc"] or 0))
-    rows = rows[:limit]
-    if rows:
-        _cache_put("whales", rows)
-    return rows
+        rows = cached
+    else:
+        data = await _get_json("https://mempool.space/api/mempool/recent", timeout=8)
+        txs = data if isinstance(data, list) else []
+        rows = []
+        for t in txs:
+            sats = t.get("value") or 0
+            rows.append({
+                "txid": (t.get("txid") or "")[:16] + "…",
+                "value_btc": round(sats / 1e8, 4),
+                "fee_sat": t.get("fee"),
+                "size_vb": t.get("vsize"),
+            })
+        rows.sort(key=lambda r: -(r["value_btc"] or 0))
+        if rows:
+            _cache_put("whales:raw", rows)
+    if min_value_btc is not None:
+        rows = [r for r in rows if (r["value_btc"] or 0) >= min_value_btc]
+    return rows[:limit]
 
 
 # ── Wallet fund-flow trace (bitcoin: mempool.space; solana: public JSON RPC) ─────────
@@ -791,6 +796,43 @@ async def address_lookup(chain: str, address: str) -> dict:
         }
     out = {"chain": canon, "address": address, "supported": True, "source": source, **data}
     return _cache_put(key, out)
+
+
+# ── Wallet watchlist refresh (bounded concurrency over address_lookup) ──────────────
+# No free no-key "mempool by value" endpoint exists for Solana the way
+# mempool.space's /mempool/recent does for Bitcoin, so there's no equivalent whale
+# feed to poll. Instead, whale detection for tracked wallets rides on top of
+# address_lookup's own transaction deltas: a large balance move on a wallet you're
+# already watching *is* the whale signal, for either chain.
+_WATCHLIST_WHALE_THRESHOLD = {"bitcoin": 10.0, "solana": 500.0}
+
+
+async def refresh_watchlist(wallets: list[dict]) -> list[dict]:
+    """Re-run address_lookup for every tracked wallet with bounded concurrency
+    (address_lookup's own 20s cache means repeat refreshes inside that window are
+    free). Each row is annotated with whale_activity: True if any recent
+    transaction's amount is at or above that chain's whale threshold."""
+    sem = asyncio.Semaphore(3)
+
+    async def one(w: dict) -> dict:
+        async with sem:
+            data = await address_lookup(w["chain"], w["address"])
+        txs = data.get("transactions") or []
+        threshold = _WATCHLIST_WHALE_THRESHOLD.get(data.get("chain"))
+        whale_activity = threshold is not None and any((t.get("amount") or 0) >= threshold for t in txs)
+        return {
+            "id": w["id"],
+            "chain": w["chain"],
+            "address": w["address"],
+            "label": w["label"],
+            "supported": data.get("supported", False),
+            "balance": data.get("balance"),
+            "tx_count": data.get("tx_count"),
+            "recent_transactions": txs[:5],
+            "whale_activity": whale_activity,
+        }
+
+    return list(await asyncio.gather(*[one(w) for w in wallets]))
 
 
 # ── Real backtest (SMA crossover vs buy-and-hold over CoinGecko history) ─────────────

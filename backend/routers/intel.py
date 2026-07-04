@@ -3,12 +3,16 @@ All data geo-unrestricted, no API keys needed."""
 
 import logging, asyncio, json, time, threading
 import httpx
-from fastapi import APIRouter, Query, Request
+import aiosqlite
+from fastapi import APIRouter, Query, Request, Depends, HTTPException
+from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from backend import market_sources as ms
 from backend import indicators as ind
+from backend.db import DB_PATH
+from backend.deps import get_agent
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/intel", tags=["intel"])
@@ -265,9 +269,10 @@ async def get_fx(base: str = Query("USD")):
     return await ms.fx_rates(base)
 
 @router.get("/whales")
-async def get_whales(limit: int = Query(10, ge=1, le=25)):
-    """Largest recent BTC mempool transactions (mempool.space)."""
-    txs = await ms.whale_txs(limit)
+async def get_whales(limit: int = Query(10, ge=1, le=25), min_value_btc: float = Query(None, ge=0)):
+    """Largest recent BTC mempool transactions (mempool.space), optionally
+    filtered to only transactions at or above min_value_btc."""
+    txs = await ms.whale_txs(limit, min_value_btc)
     return {"transactions": txs, "count": len(txs), "chain": "bitcoin", "source": "mempool.space"}
 
 @router.get("/trace/{chain}/{address}")
@@ -280,6 +285,78 @@ async def get_wallet_trace(request: Request, chain: str, address: str, limit: in
     intel endpoints since its cost is driven by user clicks, not a fixed poll
     interval, against a rate-limited public RPC."""
     return await ms.address_lookup(chain, address)
+
+# ── Wallet watchlist — persisted tracking, shared across agents (unlike the
+# one-shot /trace above). No server-side poller exists anywhere in this
+# codebase for market data — the frontend hits /watchlist/refresh on its own
+# interval, same as every other intel tab. ──────────────────────────────────
+class WatchlistAddRequest(BaseModel):
+    chain: str
+    address: str
+    label: str = ""
+
+@router.post("/watchlist")
+async def add_watchlist_wallet(req: WatchlistAddRequest, agent: dict = Depends(get_agent)):
+    """Add a wallet to the shared tracked-wallet watchlist (bitcoin/solana only,
+    matching /trace's chain support). Re-adding an existing (chain, address)
+    updates its label instead of erroring."""
+    chain = (req.chain or "").strip().lower()
+    if chain not in ("bitcoin", "btc", "solana", "sol"):
+        raise HTTPException(422, "chain must be 'bitcoin' or 'solana'")
+    canon = "bitcoin" if chain in ("bitcoin", "btc") else "solana"
+    address = req.address.strip()
+    if not address:
+        raise HTTPException(422, "address is required")
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute(
+            """INSERT INTO tracked_wallets (chain, address, label, added_by_agent_id)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(chain, address) DO UPDATE SET label=excluded.label
+               WHERE excluded.label != ''""",
+            (canon, address, req.label.strip(), agent["id"]),
+        )
+        await db.commit()
+        async with db.execute(
+            "SELECT * FROM tracked_wallets WHERE chain=? AND address=?", (canon, address)
+        ) as cur:
+            row = await cur.fetchone()
+    return dict(row)
+
+@router.get("/watchlist")
+async def list_watchlist_wallets(agent: dict = Depends(get_agent)):
+    """List every tracked wallet — shared across all agents, like /trace and /whales."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM tracked_wallets ORDER BY created_at DESC") as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    return {"wallets": rows, "count": len(rows)}
+
+@router.delete("/watchlist/{wallet_id}")
+async def remove_watchlist_wallet(wallet_id: int, agent: dict = Depends(get_agent)):
+    """Remove a wallet from the shared watchlist. Any authenticated agent may
+    remove any entry — this is shared platform intel, not per-agent private data."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("DELETE FROM tracked_wallets WHERE id=?", (wallet_id,))
+        await db.commit()
+        rowcount = cur.rowcount
+    if rowcount == 0:
+        raise HTTPException(404, "Wallet not found in watchlist")
+    return {"status": "deleted"}
+
+@router.get("/watchlist/refresh")
+async def refresh_watchlist_wallets(agent: dict = Depends(get_agent)):
+    """Re-run the wallet trace for every tracked wallet at once (bounded
+    concurrency, reusing address_lookup's own 20s cache) and flag large recent
+    balance moves as whale activity."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM tracked_wallets ORDER BY created_at DESC") as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    if not rows:
+        return {"wallets": [], "count": 0}
+    refreshed = await ms.refresh_watchlist(rows)
+    return {"wallets": refreshed, "count": len(refreshed)}
 
 @router.get("/backtest")
 async def get_backtest(symbol: str = Query("BTC"), days: int = Query(90, ge=14, le=365)):
