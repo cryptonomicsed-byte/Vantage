@@ -180,6 +180,26 @@ async def test_dex_new_pools_cache_reuse(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_whale_txs_min_value_btc_filters(monkeypatch):
+    async def fake_get(url, timeout=8):
+        return [
+            {"txid": "a" * 40, "value": int(15 * 1e8), "fee": 1000, "vsize": 200},
+            {"txid": "b" * 40, "value": int(2 * 1e8), "fee": 500, "vsize": 150},
+            {"txid": "c" * 40, "value": int(30 * 1e8), "fee": 2000, "vsize": 300},
+        ]
+    monkeypatch.setattr(ms, "_get_json", fake_get)
+    ms._cache.clear()
+
+    unfiltered = await ms.whale_txs(limit=10)
+    assert len(unfiltered) == 3
+
+    filtered = await ms.whale_txs(limit=10, min_value_btc=10)
+    assert len(filtered) == 2
+    assert all(r["value_btc"] >= 10 for r in filtered)
+    assert filtered[0]["value_btc"] == 30  # still sorted largest-first
+
+
+@pytest.mark.asyncio
 async def test_btc_address_lookup_annotates_in_out_counterparties(monkeypatch):
     tx_in = {
         "txid": "tx1hash",

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, Waypoints, ListOrdered } from 'lucide-react'
+import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, Waypoints, ListOrdered, Eye, Plus, Trash2 } from 'lucide-react'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Analytics — the deep-dive lenses behind Trading's default Dashboard tab. These
@@ -30,6 +30,20 @@ function useAresApi(path: string, interval = 60000) {
   }, [path])
   useEffect(() => { load(); const t = setInterval(load, interval); return () => clearInterval(t) }, [load, interval])
   return { data, loading, refresh: load }
+}
+
+// Watchlist is the one intel endpoint group that's agent-authenticated (add/
+// remove/refresh mutate shared state) — mirrors Portfolio.tsx's localStorage
+// 'vantage_api_key' → X-Agent-Key pattern.
+function agentKey(): string {
+  return localStorage.getItem('vantage_api_key') || ''
+}
+
+async function intelAuthApi(path: string, opts: RequestInit = {}): Promise<Response> {
+  return fetch(`/api/intel${path}`, {
+    ...opts,
+    headers: { 'X-Agent-Key': agentKey(), 'Content-Type': 'application/json', ...(opts.headers || {}) },
+  })
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -617,6 +631,117 @@ function AresTrace() {
   )
 }
 
+function AresWatchlist() {
+  const [chain, setChain] = useState('solana')
+  const [address, setAddress] = useState('')
+  const [label, setLabel] = useState('')
+  const [wallets, setWallets] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+  const [adding, setAdding] = useState(false)
+  const [authError, setAuthError] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const r = await intelAuthApi('/watchlist/refresh')
+      if (r.status === 401) {
+        setAuthError(true)
+      } else if (r.ok) {
+        setAuthError(false)
+        const d = await r.json()
+        setWallets(d.wallets || [])
+      }
+    } catch { /* offline — keep last-known list */ }
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { load(); const t = setInterval(load, 45000); return () => clearInterval(t) }, [load])
+
+  async function addWallet() {
+    if (!address.trim()) return
+    setAdding(true)
+    try {
+      const r = await intelAuthApi('/watchlist', {
+        method: 'POST',
+        body: JSON.stringify({ chain, address: address.trim(), label: label.trim() }),
+      })
+      if (r.status === 401) setAuthError(true)
+      else if (r.ok) { setAddress(''); setLabel(''); await load() }
+    } catch { /* ignore */ }
+    setAdding(false)
+  }
+
+  async function removeWallet(id: number) {
+    try {
+      const r = await intelAuthApi(`/watchlist/${id}`, { method: 'DELETE' })
+      if (r.ok) setWallets(prev => prev.filter(w => w.id !== id))
+    } catch { /* ignore */ }
+  }
+
+  if (authError) {
+    return (
+      <div style={{ color: 'var(--muted)', padding: 20 }}>
+        Set your agent API key (Settings → API Docs) to add and view tracked wallets — the watchlist is agent-authenticated, shared across the whole platform.
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+        <select className="ares-input" value={chain} onChange={e => setChain(e.target.value)} style={{ maxWidth: 120 }}>
+          <option value="solana">Solana</option>
+          <option value="bitcoin">Bitcoin</option>
+        </select>
+        <input
+          className="ares-input"
+          placeholder="Wallet address"
+          value={address}
+          onChange={e => setAddress(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && addWallet()}
+          style={{ minWidth: 240, flex: 1 }}
+        />
+        <input
+          className="ares-input"
+          placeholder="Label (optional)"
+          value={label}
+          onChange={e => setLabel(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && addWallet()}
+          style={{ maxWidth: 160 }}
+        />
+        <button className="btn btn-primary btn-sm" onClick={addWallet} disabled={adding}><Plus size={14} /> Track</button>
+        <button className="btn btn-ghost btn-sm" onClick={load}>Refresh</button>
+      </div>
+      <div className="ares-section-title">
+        {wallets.length} tracked wallet{wallets.length === 1 ? '' : 's'} — large recent balance moves are flagged as whale activity {loading && <span style={{ fontSize: 11, color: 'var(--muted)' }}>refreshing…</span>}
+      </div>
+      <div className="dash-panel" style={{ maxHeight: 560, overflowY: 'auto', padding: 0 }}>
+        <table className="ares-table">
+          <thead><tr><th>Chain</th><th>Address</th><th>Label</th><th>Balance</th><th>Tx Count</th><th>Whale</th><th></th></tr></thead>
+          <tbody>
+            {wallets.length === 0 && <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No tracked wallets yet — add one above.</td></tr>}
+            {wallets.map((w: any) => (
+              <tr key={w.id} className={w.whale_activity ? 'threat-high' : ''}>
+                <td style={{ textTransform: 'capitalize' }}>{w.chain}</td>
+                <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{w.address.slice(0, 6)}…{w.address.slice(-4)}</td>
+                <td>{w.label || '—'}</td>
+                <td style={{ fontFamily: 'monospace' }}>{w.balance ? `${w.balance.amount} ${w.balance.unit}` : '—'}</td>
+                <td style={{ fontSize: 11, color: 'var(--muted)' }}>{w.tx_count ?? '—'}</td>
+                <td>
+                  {w.whale_activity
+                    ? <span style={{ fontSize: 10, fontWeight: 700, color: '#ff2d4a', border: '1px solid #ff2d4a', borderRadius: 4, padding: '1px 6px', textTransform: 'uppercase', letterSpacing: 0.5 }}>Whale</span>
+                    : <span style={{ color: 'var(--muted)' }}>—</span>}
+                </td>
+                <td><button className="btn btn-ghost btn-sm" onClick={() => removeWallet(w.id)} title="Remove from watchlist"><Trash2 size={12} /></button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 // AresCharts (native OHLC + Pine editor) moved to TradingDashboard.tsx, which
 // is now the default Trading tab — kept out of this file to avoid two
 // disconnected chart surfaces existing side by side.
@@ -630,6 +755,7 @@ const INTEL_TABS = [
   { id: 'dex',       label: 'DEX',       icon: Droplets },
   { id: 'alltokens', label: 'All Tokens', icon: ListOrdered },
   { id: 'whales',    label: 'Whales',    icon: Waves },
+  { id: 'watchlist', label: 'Watchlist', icon: Eye },
   { id: 'fx',        label: 'FX',        icon: DollarSign },
   { id: 'backtest',  label: 'Backtest',  icon: History },
   { id: 'sentiment', label: 'Sentiment', icon: Zap },
@@ -657,6 +783,7 @@ export default function MarketIntel() {
       {tab === 'dex' && <AresDex />}
       {tab === 'alltokens' && <AresAllTokens />}
       {tab === 'whales' && <AresWhales />}
+      {tab === 'watchlist' && <AresWatchlist />}
       {tab === 'fx' && <AresFx />}
       {tab === 'backtest' && <AresBacktest />}
       {tab === 'sentiment' && <AresSentiment />}
