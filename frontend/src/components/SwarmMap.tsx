@@ -701,9 +701,9 @@ export default function SwarmMap() {
       <div style={{
         position: 'absolute', top: 0, right: 0, bottom: 0,
         width: taskPanelOpen ? 280 : 36, transition: 'width 0.2s',
-        background: 'rgba(5,5,8,0.92)', borderLeft: '1px solid rgba(138,75,255,0.25)',
+        background: 'rgba(5,5,8,0.45)', borderLeft: '1px solid rgba(138,75,255,0.25)',
         display: 'flex', flexDirection: 'column', zIndex: 10,
-        backdropFilter: 'blur(12px)',
+        backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)',
       }}>
         <button
           onClick={() => setTaskPanelOpen(o => !o)}

@@ -473,12 +473,14 @@ const SocDiagnostics = ({ adminFetch }: { adminFetch: Function; showToast: (m: s
   )
 }
 
+interface LogEntry { ts: string; level: string; logger: string; msg: string }
+
 const SocLogs = ({ adminFetch }: { adminFetch: (path: string) => Promise<Response> }) => {
-  const [logs, setLogs] = useState<string[]>([]); const [loading, setLoading] = useState(true)
+  const [logs, setLogs] = useState<LogEntry[]>([]); const [loading, setLoading] = useState(true)
   const load = useCallback(async () => { setLoading(true); try { const r = await adminFetch('/api/admin/logs?n=100'); if (r.ok) { const d = await r.json(); setLogs((d.logs || []).slice().reverse()) } } catch {}; setLoading(false) }, [adminFetch])
   useEffect(() => { load() }, [load])
-  const classify = (line: string): 'error' | 'warn' | 'normal' => {
-    const u = line.toUpperCase(); if (u.includes('ERROR') || u.includes('EXCEPTION')) return 'error'; if (u.includes('WARN')) return 'warn'; return 'normal'
+  const classify = (level: string): 'error' | 'warn' | 'normal' => {
+    const u = (level || '').toUpperCase(); if (u.includes('ERROR') || u.includes('CRITICAL')) return 'error'; if (u.includes('WARN')) return 'warn'; return 'normal'
   }
   return (
     <div>
@@ -489,7 +491,11 @@ const SocLogs = ({ adminFetch }: { adminFetch: (path: string) => Promise<Respons
       <div className="ares-log-list">
         {loading && <div style={{ color: 'var(--muted)' }}>Loading…</div>}
         {!loading && logs.length === 0 && <div style={{ color: 'var(--muted)' }}>No logs.</div>}
-        {logs.map((line, i) => <div key={i} className={`ares-log-entry ares-log-${classify(line)}`}>{line}</div>)}
+        {logs.map((entry, i) => (
+          <div key={i} className={`ares-log-entry ares-log-${classify(entry.level)}`}>
+            {entry.ts} [{entry.level}] {entry.logger}: {entry.msg}
+          </div>
+        ))}
       </div>
     </div>
   )
