@@ -269,7 +269,7 @@ export default function AgentProfile() {
       )}
 
       {/* Series */}
-      {profileTab === 'series' && profile.series.length > 0 && (
+      {profileTab === 'series' && (profile.series || []).length > 0 && (
         <>
           <div className="section-header">
             <h2 style={{ fontSize: 16, fontWeight: 700, color: 'var(--muted-hi)', letterSpacing: '0.5px' }}>SERIES</h2>
