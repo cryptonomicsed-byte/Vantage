@@ -40,7 +40,10 @@ limiter = Limiter(key_func=get_remote_address)
 from .config import settings
 from .db import DB_PATH, MEDIA_ROOT, init_agents_db
 from .memory_enrichment import MemoryIntelligence
-from .deps import get_agent, get_admin, _parse_body, _update_last_seen, _log_agent_activity
+from .deps import (
+    get_agent, get_admin, _parse_body, _update_last_seen, _log_agent_activity,
+    _agent_rate_buckets, _AGENT_RATE_LIMIT, _AGENT_RATE_WINDOW,
+)
 from .utils import (
     _log_buffer, _BufferHandler,
     _feed_clients, _gossip_channels, _broadcast_gossip, notify_feed_clients,
@@ -48,6 +51,7 @@ from .utils import (
     _VALID_WEBHOOK_EVENTS, _fire_webhooks,
     _SEVERITY_MAP, _append_receipt,
     _VIDEO_MAGIC, _AUDIO_MAGIC, _IMAGE_MAGIC, _validate_file_magic,
+    _security_scan_and_normalize,
     _compute_reputation_badges,
     _notify_webhook, _check_token_milestones, _MILESTONES,
     _save_thumbnail,
@@ -86,7 +90,7 @@ async def _push_broadcast_to_omokoda(title: str, stream_url: str, agent_name: st
         logger.warning("omokoda vault push failed for '%s': %s", title, exc)
 
 
-async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Path) -> None:
+async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Path, agent_id: int = None) -> None:
     out_dir = agent_dir / str(broadcast_id)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -104,6 +108,20 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
             )
             await db.commit()
         logger.error("broadcast %s rejected: invalid file magic bytes", broadcast_id)
+        return
+
+    # Parrot security gate: scan the raw upload before FFmpeg spends CPU on it.
+    # No-op (clean=True) if PARROT_SECURITY_URL is unset.
+    scan = await _security_scan_and_normalize(
+        input_path, "video", agent_id, artifact_ref=str(broadcast_id)
+    )
+    if not scan["clean"]:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE broadcasts SET status='error' WHERE id=?", (broadcast_id,)
+            )
+            await db.commit()
+        logger.error("broadcast %s quarantined by security scan: %s", broadcast_id, scan["findings"])
         return
 
     try:
@@ -487,7 +505,7 @@ async def publish(
         # Store file but don't transcode yet — scheduled loop will trigger publish-now
         asyncio.create_task(_append_receipt(str(agent["name"]), "publish_video", {"broadcast_id": broadcast_id, "title": title, "status": "scheduled"}, tier=agent.get("tier", 0)))
         return {"broadcast_id": broadcast_id, "status": "scheduled", "publish_at": publish_at}
-    background_tasks.add_task(_process_broadcast, broadcast_id, tmp_path, agent_dir)
+    background_tasks.add_task(_process_broadcast, broadcast_id, tmp_path, agent_dir, agent["id"])
     asyncio.create_task(_append_receipt(str(agent["name"]), "publish_video", {"broadcast_id": broadcast_id, "title": title, "status": "pending"}, tier=agent.get("tier", 0)))
     return {"broadcast_id": broadcast_id, "status": "pending"}
 
@@ -504,9 +522,13 @@ async def get_feed(request: Request, limit: int = 50, offset: int = 0, content_t
             f"""SELECT b.id, b.title, b.description, b.content_type, b.stream_url,
                       b.thumbnail_url, b.view_count, b.created_at, b.model_name,
                       b.model_provider, b.tags, b.post_content, b.forked_from,
-                      b.duration_seconds as duration_sec,
-                      a.name as agent_name, a.avatar_url
+                      b.duration_seconds as duration_sec, b.guild_id, g.slug as guild_slug,
+                      a.name as agent_name, a.avatar_url,
+                      (SELECT COUNT(*) FROM comments c WHERE c.broadcast_id=b.id) as comment_count,
+                      (SELECT COUNT(*) FROM reactions r WHERE r.broadcast_id=b.id AND r.reaction_type='👍') as upvotes,
+                      (SELECT COUNT(*) FROM reactions r WHERE r.broadcast_id=b.id AND r.reaction_type='👎') as downvotes
                FROM broadcasts b JOIN agents a ON a.id = b.agent_id
+               LEFT JOIN guilds g ON g.id = b.guild_id
                WHERE b.status = 'ready' AND a.jail_mode = 0 {type_clause}
                ORDER BY b.created_at DESC
                LIMIT ? OFFSET ?""",
@@ -956,6 +978,16 @@ async def create_audio_post(
             await db.commit()
         raise HTTPException(status_code=422, detail="Unsupported audio format. Supported: MP3, AAC, WAV, OGG, FLAC, M4A.")
 
+    # Parrot security gate: scan the raw upload before FFmpeg touches it.
+    # No-op (clean=True) if PARROT_SECURITY_URL is unset.
+    scan = await _security_scan_and_normalize(raw_path, "audio", agent["id"], artifact_ref=str(broadcast_id))
+    if not scan["clean"]:
+        raw_path.unlink(missing_ok=True)
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM broadcasts WHERE id=?", (broadcast_id,))
+            await db.commit()
+        raise HTTPException(status_code=422, detail="Upload rejected by security scan")
+
     # Transcode to MP3 for universal browser compatibility.
     # Falls back to the raw file if FFmpeg is unavailable or fails.
     mp3_path = agent_dir / f"audio_{broadcast_id}.mp3"
@@ -1336,6 +1368,11 @@ async def create_image_post(
         if not _validate_file_magic(dest, "image"):
             dest.unlink(missing_ok=True)
             continue
+        # Parrot security gate: scan + re-encode/strip-metadata. No-op if unconfigured.
+        scan = await _security_scan_and_normalize(dest, "image", agent["id"], artifact_ref=str(broadcast_id))
+        if not scan["clean"]:
+            dest.unlink(missing_ok=True)
+            continue
         image_urls.append(f"/media/agents/{agent['name']}/{broadcast_id}/{dest.name}")
 
     if not image_urls:
@@ -1552,7 +1589,7 @@ async def delete_comment(comment_id: int, agent: dict = Depends(get_agent)):
 # Reactions
 # ---------------------------------------------------------------------------
 
-VALID_REACTIONS = {"🤖", "🔥", "💡", "⚡", "🎯", "👁️"}
+VALID_REACTIONS = {"🤖", "🔥", "💡", "⚡", "🎯", "👁️", "❤️", "🤨", "👍", "👎"}
 
 
 @router.post("/broadcasts/{broadcast_id}/react")
@@ -8419,6 +8456,117 @@ async def admin_verify_receipt_chain(_: str = Depends(get_admin)):
     return {"ok": True, "checked": len(rows)}
 
 
+@admin_router.get("/security-scans")
+async def admin_list_security_scans(
+    limit: int = Query(100, ge=1, le=500),
+    status: Optional[str] = None,
+    artifact_type: Optional[str] = None,
+    agent_id: Optional[int] = None,
+    _: str = Depends(get_admin),
+):
+    """Parrot-security upload quarantine history — the security_scans table
+    has no admin list endpoint today, only a single-scan-by-id lookup."""
+    clauses, params = [], []
+    if status:
+        clauses.append("status=?"); params.append(status)
+    if artifact_type:
+        clauses.append("artifact_type=?"); params.append(artifact_type)
+    if agent_id:
+        clauses.append("agent_id=?"); params.append(agent_id)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"SELECT * FROM security_scans {where} ORDER BY started_at DESC LIMIT ?", params
+        ) as cur:
+            rows = await cur.fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["findings"] = _json.loads(d.pop("findings_json"))
+        except (TypeError, ValueError):
+            d["findings"] = []
+        out.append(d)
+    return {"scans": out, "count": len(out)}
+
+
+@admin_router.get("/code-scans")
+async def admin_list_code_scans(
+    limit: int = Query(100, ge=1, le=500),
+    status: Optional[str] = None,
+    engine: Optional[str] = None,
+    owner: Optional[str] = None,
+    name: Optional[str] = None,
+    _: str = Depends(get_admin),
+):
+    """Strix/regex code-scan history — the code_scans table has no admin
+    list endpoint today, only agent-scoped dispatch/poll endpoints."""
+    clauses, params = [], []
+    if status:
+        clauses.append("status=?"); params.append(status)
+    if engine:
+        clauses.append("engine=?"); params.append(engine)
+    if owner:
+        clauses.append("owner=?"); params.append(owner)
+    if name:
+        clauses.append("name=?"); params.append(name)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"SELECT * FROM code_scans {where} ORDER BY started_at DESC LIMIT ?", params
+        ) as cur:
+            rows = await cur.fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["findings"] = _json.loads(d.pop("findings_json"))
+        except (TypeError, ValueError):
+            d["findings"] = []
+        out.append(d)
+    return {"scans": out, "count": len(out)}
+
+
+@admin_router.get("/jobs-overview")
+async def admin_jobs_overview(_: str = Depends(get_admin)):
+    """Aggregate health view of the multi-agent Job Conductor (jobs/job_tasks)
+    — distinct from the older creation_jobs/task_dead_letter pipeline counted
+    in /telemetry. No existing endpoint computes counts; GET /api/jobs only
+    returns raw rows."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT status, COUNT(*) as n FROM jobs GROUP BY status"
+        ) as cur:
+            job_counts = {r["status"]: r["n"] for r in await cur.fetchall()}
+        async with db.execute(
+            "SELECT status, COUNT(*) as n FROM job_tasks GROUP BY status"
+        ) as cur:
+            task_counts = {r["status"]: r["n"] for r in await cur.fetchall()}
+        async with db.execute(
+            """SELECT COUNT(*) as n FROM job_tasks
+               WHERE status='claimed' AND claim_expires_at <= datetime('now')"""
+        ) as cur:
+            expired_leases = (await cur.fetchone())["n"]
+        async with db.execute(
+            """SELECT j.id, j.title, j.job_type, j.status, j.created_at,
+                      COUNT(t.id) as task_count
+               FROM jobs j LEFT JOIN job_tasks t ON t.job_id=j.id
+               GROUP BY j.id ORDER BY j.created_at DESC LIMIT 20"""
+        ) as cur:
+            recent_jobs = [dict(r) for r in await cur.fetchall()]
+    return {
+        "jobs_by_status": job_counts,
+        "tasks_by_status": task_counts,
+        "expired_leases": expired_leases,
+        "recent_jobs": recent_jobs,
+    }
+
+
 @admin_router.patch("/agents/{agent_id}/tier")
 async def admin_set_tier(agent_id: int, request: Request, _: str = Depends(get_admin)):
     """Manually set an agent's tier (0-5)."""
@@ -8437,7 +8585,8 @@ async def admin_list_agents(_: str = Depends(get_admin)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT id, name, bio, avatar_url, agent_status, is_admin, created_at, token_balance, sui_address
+            """SELECT id, name, bio, avatar_url, agent_status, is_admin, created_at,
+                      token_balance, sui_address, tier, jail_mode, reputation
                FROM agents ORDER BY created_at DESC"""
         ) as cur:
             rows = await cur.fetchall()
@@ -8532,6 +8681,42 @@ async def admin_rate_limits(_: str = Depends(get_admin)):
         "broadcast_activity": broadcast_activity,
         "comment_activity": comment_activity,
     }
+
+
+@admin_router.get("/rate-limit-status")
+async def admin_rate_limit_status(_: str = Depends(get_admin)):
+    """Real live view of the in-memory per-agent sliding-window rate limiter
+    (backend/deps.py::_check_agent_rate) — distinct from /rate-limits above,
+    which is actually a 5-minute broadcast/comment content-frequency count and
+    doesn't reflect the real request-rate limiter state at all."""
+    import time as _time
+    now = _time.monotonic()
+    agent_ids = [aid for aid, times in _agent_rate_buckets.items()
+                 if any(now - t < _AGENT_RATE_WINDOW for t in times)]
+    names = {}
+    if agent_ids:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            placeholders = ",".join("?" for _ in agent_ids)
+            async with db.execute(
+                f"SELECT id, name FROM agents WHERE id IN ({placeholders})", agent_ids
+            ) as cur:
+                names = {r["id"]: r["name"] for r in await cur.fetchall()}
+    rows = []
+    for aid, times in _agent_rate_buckets.items():
+        active = [t for t in times if now - t < _AGENT_RATE_WINDOW]
+        if not active:
+            continue
+        rows.append({
+            "agent_id": aid,
+            "agent_name": names.get(aid, f"agent-{aid}"),
+            "requests_in_window": len(active),
+            "limit": _AGENT_RATE_LIMIT,
+            "window_seconds": _AGENT_RATE_WINDOW,
+            "pct_of_limit": round(len(active) / _AGENT_RATE_LIMIT * 100, 1),
+        })
+    rows.sort(key=lambda r: r["requests_in_window"], reverse=True)
+    return {"limit": _AGENT_RATE_LIMIT, "window_seconds": _AGENT_RATE_WINDOW, "agents": rows[:50]}
 
 
 # 8. Admin honeypot hits

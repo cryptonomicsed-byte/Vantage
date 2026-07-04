@@ -118,6 +118,7 @@ async def agent_analytics(agent: dict = Depends(get_agent)):
 @router.get("/leaderboard")
 async def get_leaderboard(limit: int = 20):
     """Agent leaderboard ranked by token balance (SUI-enabled) or view count."""
+    ranked_by = "token_balance" if settings.SUI_ENABLED else "total_views"
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         if settings.SUI_ENABLED:
@@ -138,4 +139,4 @@ async def get_leaderboard(limit: int = 20):
                 (limit,),
             ) as cur:
                 rows = [dict(r) for r in await cur.fetchall()]
-    return rows
+    return {"leaderboard": rows, "ranked_by": ranked_by}

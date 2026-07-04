@@ -23,10 +23,11 @@ from backend.agents import limiter as agents_limiter
 from backend.main import app, limiter as main_limiter
 from backend.routers.identity import _limiter as identity_limiter
 from backend.routers.guilds import _limiter as guilds_limiter
+from backend.routers.intel import _limiter as intel_limiter
 
 # Every slowapi Limiter instance in the app. Endpoints are decorated with
 # whichever one lives in their module, so all must be disabled for tests.
-_ALL_LIMITERS = (agents_limiter, main_limiter, identity_limiter, guilds_limiter)
+_ALL_LIMITERS = (agents_limiter, main_limiter, identity_limiter, guilds_limiter, intel_limiter)
 
 
 async def _init_all_tables():

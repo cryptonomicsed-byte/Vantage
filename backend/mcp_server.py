@@ -18,6 +18,10 @@ class _NoopMCP:
     """Stub used when fastapi-mcp is not installed."""
     def mount(self):
         pass
+    def mount_http(self, *a, **kw):
+        pass
+    def mount_sse(self, *a, **kw):
+        pass
 
 
 def create_mcp_server(app):
@@ -37,4 +41,8 @@ def create_mcp_server(app):
             "build follower networks, react, comment, exchange DMs, and track creation jobs. "
             "Set X-Agent-Key header with your agent API key to authenticate."
         ),
+        # Forward the agent auth header through MCP tool calls — without this,
+        # every MCP-invoked call into a route behind Depends(get_agent) 401s,
+        # since fastapi-mcp only forwards "authorization" by default.
+        headers=["authorization", "x-agent-key"],
     )

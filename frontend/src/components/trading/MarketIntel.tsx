@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { TrendingUp, BarChart3, Zap, Brain, Activity, Database, Radio, RefreshCw, Layers, Droplets, Waves } from 'lucide-react'
+import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, Waypoints } from 'lucide-react'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Analytics — the deep-dive lenses behind Trading's default Dashboard tab. These
-// read public, unauthenticated endpoints (/api/intel, /api/alpha, /api/debate,
-// /api/intel/health, /api/intel/sources) via plain fetch — exactly as they did
-// inside AresSOC, with zero auth. The chart + Pine editor live on the Dashboard
-// tab now (see trading/TradingDashboard.tsx), not here.
+// read public, unauthenticated endpoints (/api/intel, /api/alpha, /api/intel/fx,
+// /api/intel/backtest, /api/intel/trace/{chain}/{address}, /api/intel/health,
+// /api/intel/sources) via plain fetch — exactly as they did inside AresSOC, with
+// zero auth. The chart + Pine editor live on the Dashboard tab now (see
+// trading/TradingDashboard.tsx), not here.
 // ══════════════════════════════════════════════════════════════════════════════
 
 // ── Shared helpers (self-contained copy; SOC console keeps its own) ────────────
@@ -37,7 +38,6 @@ function useAresApi(path: string, interval = 60000) {
 
 function AresOverview() {
   const intel = useAresApi('/api/intel', 60000)
-  const debate = useAresApi('/api/debate', 60000)
   const i = intel.data
   const chains = i?.health?.chains || {}
   const arbOpps = i?.arbitrage?.opportunities || []
@@ -69,7 +69,6 @@ function AresOverview() {
         <div className="ares-stat-tile"><div className="ares-stat-label">Chains</div><div className="ares-stat-value">{Object.keys(chains).length}</div></div>
         <div className="ares-stat-tile"><div className="ares-stat-label">Arbitrage</div><div className="ares-stat-value" style={{ color: 'var(--warning)' }}>{arbOpps.length}</div></div>
         <div className="ares-stat-tile"><div className="ares-stat-label">Anomalies</div><div className="ares-stat-value">{(i?.anomalies?.anomalies||[]).length}</div></div>
-        <div className="ares-stat-tile"><div className="ares-stat-label">Debate</div><div className="ares-stat-value">{debate.data?.consensus || '—'}</div></div>
       </div>
 
       {/* Chain health */}
@@ -125,36 +124,6 @@ function AresArbitrage() {
               <td style={{ color: o.spread_pct > 3 ? 'var(--danger)' : 'var(--warning)', fontWeight: 700 }}>{o.spread_pct?.toFixed(1)}%</td>
               <td>${o.buy_price?.toFixed(2)}</td>
               <td>${o.sell_price?.toFixed(2)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )
-}
-
-function AresDebate() {
-  const { data, loading, refresh } = useAresApi('/api/debate', 60000)
-  const debates = data?.debates || []
-  if (loading && !data) return <div style={{ color: 'var(--muted)', padding: 20 }}>Loading debate…</div>
-  return (
-    <div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
-        <div className="ares-section-title" style={{ margin: 0 }}>Multi-Agent Debate</div>
-        <Badge status={data?.consensus || '?'} />
-        <span style={{ fontSize: 12, color: 'var(--muted)' }}>Score: {data?.consensus_score}</span>
-        <button className="btn btn-ghost btn-sm" onClick={refresh}><RefreshCw size={12} /></button>
-      </div>
-      <table className="ares-table">
-        <thead><tr><th>Agent</th><th>Role</th><th>Verdict</th><th>Confidence</th><th>Reasoning</th></tr></thead>
-        <tbody>
-          {debates.map((d: any, i: number) => (
-            <tr key={i}>
-              <td style={{ fontWeight: 600 }}>{d.agent}</td>
-              <td style={{ fontSize: 11, color: 'var(--muted)' }}>{d.perspective}</td>
-              <td><Badge status={d.verdict || '?'} /></td>
-              <td style={{ fontWeight: 700 }}>{d.confidence}%</td>
-              <td style={{ fontSize: 11, color: 'var(--muted)', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis' }}>{d.reasoning}</td>
             </tr>
           ))}
         </tbody>
@@ -370,19 +339,226 @@ function AresWhales() {
   )
 }
 
+function AresFx() {
+  const [base, setBase] = useState('USD')
+  const { data, loading, refresh } = useAresApi(`/api/intel/fx?base=${base}`, 300000)
+  const rates = data?.rates || {}
+  const majors = ['EUR', 'GBP', 'JPY', 'CNY', 'CAD', 'AUD', 'CHF', 'INR', 'BRL', 'MXN', 'KRW', 'SGD']
+  if (loading && !data) return <div style={{ color: 'var(--muted)', padding: 20 }}>Loading FX rates…</div>
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
+        <input className="ares-input" placeholder="Base (e.g. USD)" value={base} onChange={e => setBase(e.target.value.toUpperCase())} onKeyDown={e => e.key === 'Enter' && refresh()} style={{ maxWidth: 120 }} />
+        <button className="btn btn-primary btn-sm" onClick={refresh}>Refresh</button>
+      </div>
+      <div className="ares-section-title">{base} Exchange Rates <span style={{ fontSize: 11, color: 'var(--muted)' }}>(ExchangeRate-API)</span></div>
+      {Object.keys(rates).length === 0 ? (
+        <div style={{ color: 'var(--muted)', padding: 20 }}>No rates loaded — check the base currency code.</div>
+      ) : (
+        <div className="ares-stat-grid">
+          {majors.filter(c => rates[c] != null).map(c => (
+            <div key={c} className="ares-stat-tile">
+              <div className="ares-stat-label">{c}</div>
+              <div className="ares-stat-value">{Number(rates[c]).toFixed(4)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {data?.updated && <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 12 }}>Updated: {data.updated}</div>}
+    </div>
+  )
+}
+
+function AresBacktest() {
+  const [symbol, setSymbol] = useState('BTC')
+  const [days, setDays] = useState(90)
+  const [data, setData] = useState<any>(null)
+  const [loading, setLoading] = useState(false)
+  const run = useCallback(async () => {
+    setLoading(true)
+    try {
+      const r = await fetch(`/api/intel/backtest?symbol=${encodeURIComponent(symbol)}&days=${days}`)
+      if (r.ok) setData(await r.json())
+    } catch {}
+    setLoading(false)
+  }, [symbol, days])
+  useEffect(() => { run() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
+        <input className="ares-input" placeholder="Symbol (e.g. BTC)" value={symbol} onChange={e => setSymbol(e.target.value.toUpperCase())} style={{ maxWidth: 140 }} />
+        <input className="ares-input" type="number" min={30} max={365} value={days} onChange={e => setDays(Number(e.target.value))} style={{ maxWidth: 100 }} />
+        <button className="btn btn-primary btn-sm" onClick={run} disabled={loading}>{loading ? 'Running…' : 'Run Backtest'}</button>
+      </div>
+      {data?.error ? (
+        <div style={{ color: 'var(--muted)', padding: 20 }}>Not enough history for {data.symbol} over {days} days.</div>
+      ) : data ? (
+        <div>
+          <div className="ares-section-title">{data.strategy} vs Buy &amp; Hold — {data.symbol} ({data.days}d)</div>
+          <div className="ares-stat-grid">
+            <div className="ares-stat-tile"><div className="ares-stat-label">Strategy Return</div><div className="ares-stat-value" style={{ color: data.strategy_return_pct >= 0 ? 'var(--green)' : 'var(--danger)' }}>{data.strategy_return_pct}%</div></div>
+            <div className="ares-stat-tile"><div className="ares-stat-label">Buy &amp; Hold Return</div><div className="ares-stat-value">{data.buy_hold_return_pct}%</div></div>
+            <div className="ares-stat-tile"><div className="ares-stat-label">Trades</div><div className="ares-stat-value">{data.trades}</div></div>
+            <div className="ares-stat-tile"><div className="ares-stat-label">Win Rate</div><div className="ares-stat-value">{data.win_rate_pct}%</div></div>
+          </div>
+          <div style={{ marginTop: 12, fontSize: 12, color: data.beat_buy_hold ? 'var(--green)' : 'var(--muted)' }}>
+            {data.beat_buy_hold ? 'Strategy beat buy-and-hold over this period.' : 'Buy-and-hold beat the strategy over this period.'}
+          </div>
+        </div>
+      ) : (
+        <div style={{ color: 'var(--muted)', padding: 20 }}>{loading ? 'Running…' : 'Run a backtest.'}</div>
+      )}
+    </div>
+  )
+}
+
+// ── Wallet fund-flow trace: bitcoin + solana only (see backend/market_sources.py
+// address_lookup for why), one hop per call — clicking a counterparty pivots the
+// trace onto it, there is no automatic multi-hop crawling. ─────────────────────
+type TraceHop = { chain: string; address: string }
+
+function AresTrace() {
+  const [chain, setChain] = useState('bitcoin')
+  const [addressInput, setAddressInput] = useState('')
+  const [path, setPath] = useState<TraceHop[]>([])
+  const [data, setData] = useState<any>(null)
+  const [loading, setLoading] = useState(false)
+
+  const runTrace = useCallback(async (hop: TraceHop) => {
+    setLoading(true)
+    try {
+      const r = await fetch(`/api/intel/trace/${hop.chain}/${encodeURIComponent(hop.address)}?limit=15`)
+      setData(r.ok ? await r.json() : null)
+    } catch { setData(null) }
+    setLoading(false)
+  }, [])
+
+  function submit() {
+    if (!addressInput.trim()) return
+    const hop = { chain, address: addressInput.trim() }
+    setPath([hop])
+    runTrace(hop)
+  }
+
+  function pivot(address: string) {
+    const activeChain = path[path.length - 1]?.chain || chain
+    const hop = { chain: activeChain, address }
+    setPath(prev => [...prev, hop].slice(-8))
+    setAddressInput(address)
+    runTrace(hop)
+  }
+
+  function jumpTo(i: number) {
+    const truncated = path.slice(0, i + 1)
+    const hop = truncated[truncated.length - 1]
+    setPath(truncated)
+    setAddressInput(hop.address)
+    setChain(hop.chain)
+    runTrace(hop)
+  }
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+        <select className="ares-input" value={chain} onChange={e => setChain(e.target.value)} style={{ maxWidth: 120 }}>
+          <option value="bitcoin">Bitcoin</option>
+          <option value="solana">Solana</option>
+        </select>
+        <input
+          className="ares-input"
+          placeholder="Wallet address"
+          value={addressInput}
+          onChange={e => setAddressInput(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && submit()}
+          style={{ minWidth: 280, flex: 1 }}
+        />
+        <button className="btn btn-primary btn-sm" onClick={submit} disabled={loading}>{loading ? 'Tracing…' : 'Trace'}</button>
+      </div>
+
+      {path.length > 0 && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 16 }}>
+          {path.map((h, i) => (
+            <React.Fragment key={i}>
+              {i > 0 && <span style={{ color: 'var(--muted)' }}>→</span>}
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={() => jumpTo(i)}
+                style={{ fontFamily: 'monospace', fontSize: 11, opacity: i === path.length - 1 ? 1 : 0.6 }}
+              >
+                {h.address.slice(0, 6)}…{h.address.slice(-4)}
+              </button>
+            </React.Fragment>
+          ))}
+        </div>
+      )}
+
+      {path.length === 0 && (
+        <div style={{ color: 'var(--muted)', padding: 20 }}>
+          Enter a Bitcoin or Solana address to see its balance and recent in/out transactions — click any counterparty address below to pivot the trace onto it.
+        </div>
+      )}
+
+      {data && data.supported === false && (
+        <div style={{ color: 'var(--muted)', padding: 20 }}>{data.reason}</div>
+      )}
+
+      {data && data.supported && (
+        <div>
+          <div className="ares-stat-grid" style={{ marginBottom: 16 }}>
+            <div className="ares-stat-tile"><div className="ares-stat-label">Balance</div><div className="ares-stat-value">{data.balance?.amount} {data.balance?.unit}</div></div>
+            <div className="ares-stat-tile"><div className="ares-stat-label">Tx Count</div><div className="ares-stat-value">{data.tx_count}</div></div>
+            <div className="ares-stat-tile"><div className="ares-stat-label">Source</div><div className="ares-stat-value" style={{ fontSize: 12 }}>{data.source}</div></div>
+          </div>
+          {(data.transactions || []).length === 0 ? (
+            <div style={{ color: 'var(--muted)', padding: 20 }}>{data.reason || 'No recent transactions.'}</div>
+          ) : (
+            <table className="ares-table">
+              <thead><tr><th>Direction</th><th>Amount</th><th>Fee</th><th>Counterparties</th></tr></thead>
+              <tbody>
+                {data.transactions.map((t: any, i: number) => (
+                  <tr key={i}>
+                    <td><Badge status={t.direction === 'in' ? 'live' : 'pending'} /> {t.direction}</td>
+                    <td style={{ fontFamily: 'monospace', fontWeight: 700 }}>{t.amount}</td>
+                    <td style={{ fontFamily: 'monospace', color: 'var(--muted)' }}>{t.fee}</td>
+                    <td>
+                      {(t.counterparties || []).map((c: any, j: number) => (
+                        <button
+                          key={j}
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => pivot(c.address)}
+                          title={`${c.role} · ${c.amount}`}
+                          style={{ fontFamily: 'monospace', fontSize: 10, marginRight: 4, marginBottom: 2 }}
+                        >
+                          {c.address.slice(0, 6)}…{c.address.slice(-4)}
+                        </button>
+                      ))}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // AresCharts (native OHLC + Pine editor) moved to TradingDashboard.tsx, which
 // is now the default Trading tab — kept out of this file to avoid two
 // disconnected chart surfaces existing side by side.
 
 const INTEL_TABS = [
   { id: 'overview',  label: 'Overview',  icon: Radio },
+  { id: 'trace',     label: 'Trace',     icon: Waypoints },
   { id: 'arbitrage', label: 'Arbitrage', icon: TrendingUp },
   { id: 'alpha',     label: 'Alpha',     icon: TrendingUp },
   { id: 'yields',    label: 'Yields',    icon: Layers },
   { id: 'dex',       label: 'DEX',       icon: Droplets },
   { id: 'whales',    label: 'Whales',    icon: Waves },
+  { id: 'fx',        label: 'FX',        icon: DollarSign },
+  { id: 'backtest',  label: 'Backtest',  icon: History },
   { id: 'sentiment', label: 'Sentiment', icon: Zap },
-  { id: 'debate',    label: 'Debate',    icon: Brain },
   { id: 'health',    label: 'Health',    icon: Activity },
   { id: 'sources',   label: 'Sources',   icon: Database },
   { id: 'intel',     label: 'Raw Intel', icon: BarChart3 },
@@ -400,13 +576,15 @@ export default function MarketIntel() {
         ))}
       </div>
       {tab === 'overview' && <AresOverview />}
+      {tab === 'trace' && <AresTrace />}
       {tab === 'arbitrage' && <AresArbitrage />}
       {tab === 'alpha' && <AresAlpha />}
       {tab === 'yields' && <AresYields />}
       {tab === 'dex' && <AresDex />}
       {tab === 'whales' && <AresWhales />}
+      {tab === 'fx' && <AresFx />}
+      {tab === 'backtest' && <AresBacktest />}
       {tab === 'sentiment' && <AresSentiment />}
-      {tab === 'debate' && <AresDebate />}
       {tab === 'health' && <AresHealth />}
       {tab === 'sources' && <AresSources />}
       {tab === 'intel' && <AresIntel />}

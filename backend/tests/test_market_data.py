@@ -124,6 +124,118 @@ async def test_defillama_yields_filters_and_sorts(monkeypatch):
     assert all(r["tvl_usd"] >= 1_000_000 for r in rows)
 
 
+@pytest.mark.asyncio
+async def test_btc_address_lookup_annotates_in_out_counterparties(monkeypatch):
+    tx_in = {
+        "txid": "tx1hash",
+        "status": {"confirmed": True, "block_time": 1700000000},
+        "fee": 500,
+        "vin": [{"prevout": {"scriptpubkey_address": "addrB", "value": 100500000}}],
+        "vout": [{"scriptpubkey_address": "addrA", "value": 100000000}],
+    }
+    tx_out = {
+        "txid": "tx2hash",
+        "status": {"confirmed": True, "block_time": 1700000100},
+        "fee": 1000000,
+        "vin": [{"prevout": {"scriptpubkey_address": "addrA", "value": 100000000}}],
+        "vout": [
+            {"scriptpubkey_address": "addrC", "value": 40000000},
+            {"scriptpubkey_address": "addrA", "value": 59000000},  # change back to self
+        ],
+    }
+
+    async def fake_get(url, timeout=8):
+        if url.endswith("/txs"):
+            return [tx_in, tx_out]
+        return {"chain_stats": {"funded_txo_sum": 100000000, "spent_txo_sum": 41000000, "tx_count": 2}}
+
+    monkeypatch.setattr(ms, "_get_json", fake_get)
+    ms._cache.clear()
+
+    out = await ms.address_lookup("bitcoin", "addrA")
+    assert out["supported"] is True
+    assert out["chain"] == "bitcoin"
+    assert out["balance"] == {"amount": 0.59, "unit": "BTC"}
+    assert out["tx_count"] == 2
+    txs = out["transactions"]
+    assert txs[0]["direction"] == "in" and txs[0]["amount"] == pytest.approx(1.0)
+    assert txs[0]["counterparties"] == [{"address": "addrB", "role": "sender", "amount": pytest.approx(1.005)}]
+    assert txs[1]["direction"] == "out" and txs[1]["amount"] == pytest.approx(0.41)
+    # The change output back to addrA itself must not appear as a counterparty.
+    assert txs[1]["counterparties"] == [{"address": "addrC", "role": "recipient", "amount": pytest.approx(0.4)}]
+
+
+@pytest.mark.asyncio
+async def test_btc_lookup_chain_alias_and_cache_reuse(monkeypatch):
+    calls = {"n": 0}
+
+    async def fake_get(url, timeout=8):
+        calls["n"] += 1
+        if url.endswith("/txs"):
+            return []
+        return {"chain_stats": {"funded_txo_sum": 100, "spent_txo_sum": 0, "tx_count": 0}}
+
+    monkeypatch.setattr(ms, "_get_json", fake_get)
+    ms._cache.clear()
+
+    first = await ms.address_lookup("btc", "addrX")   # alias for "bitcoin"
+    second = await ms.address_lookup("bitcoin", "addrX")
+    assert first == second
+    assert calls["n"] == 2  # only the first lookup hit the network; second served from cache
+
+
+@pytest.mark.asyncio
+async def test_sol_address_lookup_annotates_native_transfer(monkeypatch):
+    async def fake_rpc(method, params, timeout=10):
+        if method == "getBalance":
+            return {"value": 2_000_000_000}
+        if method == "getSignaturesForAddress":
+            return [{"signature": "sig1", "blockTime": 1700000000, "confirmationStatus": "finalized"}]
+        if method == "getTransaction":
+            return {
+                "transaction": {"message": {"accountKeys": [{"pubkey": "solA"}, {"pubkey": "solB"}]}},
+                "meta": {"preBalances": [3_000_000_000, 500_000_000], "postBalances": [2_000_000_000, 1_500_000_000], "fee": 5000},
+            }
+        return None
+
+    monkeypatch.setattr(ms, "_sol_rpc", fake_rpc)
+    ms._cache.clear()
+
+    out = await ms.address_lookup("solana", "solA")
+    assert out["supported"] is True
+    assert out["balance"] == {"amount": 2.0, "unit": "SOL"}
+    tx = out["transactions"][0]
+    assert tx["direction"] == "out" and tx["amount"] == pytest.approx(1.0)
+    assert tx["counterparties"] == [{"address": "solB", "role": "recipient", "amount": pytest.approx(1.0)}]
+
+
+@pytest.mark.asyncio
+async def test_address_lookup_unsupported_chain_fails_soft():
+    ms._cache.clear()
+    out = await ms.address_lookup("ethereum", "0xdead")
+    assert out == {
+        "chain": "ethereum", "address": "0xdead", "supported": False,
+        "reason": "Chain 'ethereum' not supported for live trace yet.", "transactions": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_wallet_trace_endpoint_returns_lookup(client, monkeypatch):
+    async def fake_lookup(chain, address):
+        return {"chain": chain, "address": address, "supported": True, "source": "mempool.space",
+                "balance": {"amount": 1.0, "unit": "BTC"}, "tx_count": 0, "transactions": []}
+    monkeypatch.setattr(ms, "address_lookup", fake_lookup)
+    r = await client.get("/api/intel/trace/bitcoin/addrA")
+    assert r.status_code == 200, r.text
+    assert r.json()["balance"] == {"amount": 1.0, "unit": "BTC"}
+
+
+@pytest.mark.asyncio
+async def test_debate_endpoints_removed(client):
+    assert (await client.get("/api/intel/debate")).status_code == 404
+    assert (await client.get("/api/debate")).status_code == 404
+
+
 # ── /api/trading/positions integration (live-valued) ──────────────────────────────
 
 def _h(agent):

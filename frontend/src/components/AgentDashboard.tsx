@@ -535,7 +535,22 @@ export default function AgentDashboard() {
   })()
 
   /* ── Not connected ─────────────────────────────────────────────────── */
-  if (!connected) return (
+  if (!connected) {
+    // A stored key is auto-connecting (see the mount effect above) — show a
+    // brief loading state instead of the "enter your key" form, which would
+    // otherwise flash for a moment even though the user is already connected.
+    // Only fall through to the full form once that auto-connect genuinely
+    // fails (`error` gets set) or there was never a stored key to try.
+    if (apiKey && !error) return (
+      <div style={{ maxWidth: 500 }}>
+        <h1 className="page-title">Dashboard</h1>
+        <div className="loading-wrap" style={{ minHeight: '30vh' }}>
+          <div className="spinner" />
+          <div className="loading-text">Connecting…</div>
+        </div>
+      </div>
+    )
+    return (
     <div style={{ maxWidth: 500 }}>
       <h1 className="page-title">Dashboard</h1>
       <div className="dash-panel">
@@ -567,7 +582,8 @@ export default function AgentDashboard() {
 
       {error && <div style={{ color: 'var(--danger)', fontSize: 13, marginTop: 8, padding: '8px 12px', background: 'rgba(255,45,74,0.08)', borderRadius: 6, border: '1px solid rgba(255,45,74,0.2)' }}>{error}</div>}
     </div>
-  )
+    )
+  }
 
   /* ── Connected ─────────────────────────────────────────────────────── */
   return (

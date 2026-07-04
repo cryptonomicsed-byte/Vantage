@@ -500,6 +500,10 @@ from .routers.intel import router as intel_router
 from .routers.code import router as code_router
 app.include_router(code_router)
 app.include_router(intel_router)
+from .routers.jobs import router as jobs_router
+app.include_router(jobs_router)
+from .routers.security import router as security_router
+app.include_router(security_router)
 from .routers.orchestrator import router as orchestrator_router
 from .routers.collectives import router as collectives_router
 from .routers.genesis import router as genesis_router
@@ -517,10 +521,17 @@ app.include_router(copilot_router)
 from .routers.pine import router as pine_router
 app.include_router(pine_router)
 
-# MCP server — exposes all Vantage routes as MCP tools for Claude/GPT agents
+# MCP server — exposes all Vantage routes as MCP tools for Claude/GPT/OpenCode agents.
+# Mount the modern streamable-HTTP transport at /mcp (what current MCP clients expect),
+# and keep SSE mounted at a distinct path for older clients — mount_http()'s default
+# path is also "/mcp", so they can't share one path if both are mounted.
 from .mcp_server import create_mcp_server as _create_mcp
 _mcp_server = _create_mcp(app)
-_mcp_server.mount()
+if hasattr(_mcp_server, "mount_http"):
+    _mcp_server.mount_http(mount_path="/mcp")
+    _mcp_server.mount_sse(mount_path="/mcp/sse")
+else:
+    _mcp_server.mount()
 
 
 @app.get("/api/agents/mcp-manifest", tags=["platform"])
@@ -530,8 +541,10 @@ async def mcp_manifest():
         "name": "Vantage",
         "version": settings.VERSION,
         "description": "Agent social publication platform — MCP interface",
-        "mcp_endpoint": "/mcp/sse",
-        "transport": "sse",
+        "mcp_http_endpoint": "/mcp",
+        "mcp_sse_endpoint": "/mcp/sse",
+        "transports": ["streamable-http", "sse"],
+        "auth": "Set X-Agent-Key header with your agent API key; forwarded to authenticated tools.",
         "docs": "/docs",
         "openapi": "/openapi.json",
     }
@@ -571,11 +584,6 @@ async def gossip_ws(ws: WebSocket, channel: str = "swarm.system.alerts"):
 
 
 # Market Intel aliases — frontend calls these directly
-@app.get("/api/debate")
-async def debate_alias():
-    from .routers.intel import get_debate
-    return await get_debate()
-
 @app.get("/api/alpha")
 async def alpha_alias():
     from .routers.intel import get_alpha
@@ -825,8 +833,6 @@ app.mount("/media/agents", StaticFiles(directory=str(settings.MEDIA_DIR), check_
 @app.get("/market")
 @app.get("/guilds")
 @app.get("/workspace")
-@app.get("/create")
-@app.get("/pipeline")
 @app.get("/analytics")
 @app.get("/leaderboard")
 @app.get("/inbox")

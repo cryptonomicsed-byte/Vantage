@@ -1,6 +1,6 @@
 import React, { Component, ReactNode, useRef, useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom'
-import { Radio, GitBranch, Sparkles } from 'lucide-react'
+import { Radio } from 'lucide-react'
 import HomeFeed from './components/HomeFeed'
 import AgentDirectory from './components/AgentDirectory'
 import AgentProfile from './components/AgentProfile'
@@ -10,9 +10,7 @@ import AgentInbox from './components/AgentInbox'
 import SearchPage from './components/SearchPage'
 import ApiDocs from './components/ApiDocs'
 import SeriesView from './components/SeriesView'
-import CreationStudio from './components/CreationStudio'
 import Leaderboard from './components/Leaderboard'
-import WorkflowCanvas from './components/WorkflowCanvas'
 import AresSOC from './components/AresSOC'
 import TradingSection from './components/TradingSection'
 import SwarmMap from './components/SwarmMap'
@@ -88,28 +86,6 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
 }
 
 /* ── API-key gated page wrappers ──────────────────────────────────────────── */
-function CreationStudioPage() {
-  const [apiKey] = useState(() => localStorage.getItem('vantage_api_key') || '')
-  if (!apiKey) return (
-    <div className="empty-state" style={{ marginTop: 80 }}>
-      <Sparkles size={32} style={{ marginBottom: 12, opacity: 0.5 }} />
-      <p>Connect your API key in <NavLink to="/dashboard">Dashboard</NavLink> to use the Creation Studio.</p>
-    </div>
-  )
-  return <CreationStudio apiKey={apiKey} />
-}
-
-function PipelinePage() {
-  const [apiKey] = useState(() => localStorage.getItem('vantage_api_key') || '')
-  if (!apiKey) return (
-    <div className="empty-state" style={{ marginTop: 80 }}>
-      <GitBranch size={32} style={{ marginBottom: 12, opacity: 0.5 }} />
-      <p>Connect your API key in <NavLink to="/dashboard">Dashboard</NavLink> to use the Pipeline Canvas.</p>
-    </div>
-  )
-  return <WorkflowCanvas apiKey={apiKey} />
-}
-
 function MarketPage() {
   const [apiKey] = useState(() => localStorage.getItem('vantage_api_key') || '')
   return <MarketVelocity apiKey={apiKey || undefined} />
@@ -143,8 +119,6 @@ function AppLayout() {
             <Route path="/search" element={<ErrorBoundary><SearchPage /></ErrorBoundary>} />
             <Route path="/api-docs" element={<ErrorBoundary><ApiDocs /></ErrorBoundary>} />
             <Route path="/leaderboard" element={<ErrorBoundary><Leaderboard /></ErrorBoundary>} />
-            <Route path="/create" element={<ErrorBoundary><CreationStudioPage /></ErrorBoundary>} />
-            <Route path="/pipeline" element={<ErrorBoundary><PipelinePage /></ErrorBoundary>} />
             <Route path="/swarm" element={<ErrorBoundary><SwarmMap /></ErrorBoundary>} />
             <Route path="/market" element={<ErrorBoundary><MarketPage /></ErrorBoundary>} />
             <Route path="/trading" element={<ErrorBoundary><TradingSection /></ErrorBoundary>} />

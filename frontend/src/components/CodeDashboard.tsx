@@ -7,9 +7,11 @@ interface RepoInfo {
   updated_at: string; html_url: string
   language: string; size_kb: number
   branches: string[]; recent_commits: any[]; open_prs: any[]; webhooks: any[]
-  stix_scan_status: string; api_endpoints: any
+  strix_scan_status: string; api_endpoints: any
 }
 interface ActivityEvent { action: string; repo: string; detail: string; agent: string; timestamp: string }
+
+function apiKey(): string { return localStorage.getItem('vantage_api_key') || '' }
 
 export default function CodeDashboard() {
   const navigate = useNavigate()
@@ -55,8 +57,8 @@ export default function CodeDashboard() {
         <div style={{display:'flex',gap:8}}><button className="btn btn-sm" onClick={()=>setShowCreate(!showCreate)}><Plus size={14}/> New Repo</button><button className="btn btn-sm" onClick={loadAll}><RefreshCw size={14}/></button></div>
       </div>
       {showCreate && (<div className="cd-create-form"><input className="ares-input" placeholder="repo-name" value={newRepoName} onChange={e=>setNewRepoName(e.target.value)} style={{flex:1}}/><button className="btn" onClick={createRepo}>Create</button><button className="btn btn-sm" onClick={()=>setShowCreate(false)}>Cancel</button></div>)}
-      <div className="cd-pipeline"><div className="cd-pipe-step active"><Activity size={14}/> OpenCode</div><div className="cd-pipe-arrow">→</div><div className="cd-pipe-step active"><GitBranch size={14}/> Gitea ({data?.total||0})</div><div className="cd-pipe-arrow">→</div><div className="cd-pipe-step active"><Shield size={14}/> STIX ({data?.with_hooks||0})</div><div className="cd-pipe-arrow">→</div><div className="cd-pipe-step active"><Activity size={14}/> Vantage</div></div>
-      <div className="cd-stats"><div className="cd-stat"><Code2 size={16}/><span>{data?.total||0} repos</span></div><div className="cd-stat"><Shield size={16} style={{color:'#22c55e'}}/><span>{data?.with_hooks||0} STIX</span></div><div className="cd-stat"><GitPullRequest size={16}/><span>{data?.open_prs_total||0} PRs</span></div></div>
+      <div className="cd-pipeline"><div className="cd-pipe-step active"><Activity size={14}/> OpenCode</div><div className="cd-pipe-arrow">→</div><div className="cd-pipe-step active"><GitBranch size={14}/> Gitea ({data?.total||0})</div><div className="cd-pipe-arrow">→</div><div className="cd-pipe-step active"><Shield size={14}/> Strix ({data?.with_hooks||0})</div><div className="cd-pipe-arrow">→</div><div className="cd-pipe-step active"><Activity size={14}/> Vantage</div></div>
+      <div className="cd-stats"><div className="cd-stat"><Code2 size={16}/><span>{data?.total||0} repos</span></div><div className="cd-stat"><Shield size={16} style={{color:'#22c55e'}}/><span>{data?.with_hooks||0} Strix</span></div><div className="cd-stat"><GitPullRequest size={16}/><span>{data?.open_prs_total||0} PRs</span></div></div>
       <div className="cd-main-layout">
         <div className="cd-grid">
           {data?.repos.map((repo: RepoInfo) => (
