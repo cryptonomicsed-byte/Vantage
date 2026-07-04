@@ -498,6 +498,8 @@ from .routers.intel import router as intel_router
 from .routers.code import router as code_router
 app.include_router(code_router)
 app.include_router(intel_router)
+from .routers.jobs import router as jobs_router
+app.include_router(jobs_router)
 from .routers.orchestrator import router as orchestrator_router
 from .routers.collectives import router as collectives_router
 from .routers.genesis import router as genesis_router
