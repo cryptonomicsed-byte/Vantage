@@ -168,7 +168,16 @@ async def get_agent_profile(name: str):
             agent["follower_count"] = (await cur.fetchone())["cnt"]
         async with db.execute("SELECT COUNT(*) as cnt FROM agent_follows WHERE follower_id=?", (agent["id"],)) as cur:
             agent["following_count"] = (await cur.fetchone())["cnt"]
-            
+
+        async with db.execute(
+            """SELECT s.id, s.title, s.description, s.thumbnail_url, s.created_at,
+                      COUNT(b.id) as episode_count
+               FROM series s LEFT JOIN broadcasts b ON b.series_id=s.id AND b.status='ready'
+               WHERE s.agent_id=? GROUP BY s.id ORDER BY s.created_at""",
+            (agent["id"],),
+        ) as cur:
+            agent["series"] = [dict(r) for r in await cur.fetchall()]
+
     return agent
 
 
