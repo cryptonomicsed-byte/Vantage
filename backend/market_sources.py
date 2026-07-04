@@ -546,6 +546,155 @@ async def whale_txs(limit: int = 10) -> list[dict]:
     return rows
 
 
+# ── Wallet fund-flow trace (bitcoin: mempool.space; solana: public JSON RPC) ─────────
+# v1 scope only: bitcoin + solana-native (no SPL tokens, no EVM chains — neither
+# mempool.space nor a free no-key RPC gives a comparably good tx-history API for
+# those). One hop per call — the frontend pivots to a counterparty by calling this
+# again with that address, there is no server-side recursion.
+async def _btc_address_lookup(address: str) -> Optional[dict]:
+    summary = await _get_json(f"https://mempool.space/api/address/{address}", timeout=8)
+    if not summary:
+        return None
+    txs = await _get_json(f"https://mempool.space/api/address/{address}/txs", timeout=10) or []
+    cs = summary.get("chain_stats", {})
+    balance_sats = cs.get("funded_txo_sum", 0) - cs.get("spent_txo_sum", 0)
+    rows = []
+    for t in txs[:25]:
+        vin = t.get("vin", [])
+        vout = t.get("vout", [])
+        sent = sum(
+            (v.get("prevout") or {}).get("value", 0) for v in vin
+            if (v.get("prevout") or {}).get("scriptpubkey_address") == address
+        )
+        received = sum(v.get("value", 0) for v in vout if v.get("scriptpubkey_address") == address)
+        net = received - sent
+        counterparties = []
+        if net < 0:
+            for v in vout:
+                a = v.get("scriptpubkey_address")
+                if a and a != address:
+                    counterparties.append({"address": a, "role": "recipient", "amount": round(v.get("value", 0) / 1e8, 8)})
+        else:
+            for v in vin:
+                prevout = v.get("prevout") or {}
+                a = prevout.get("scriptpubkey_address")
+                if a and a != address:
+                    counterparties.append({"address": a, "role": "sender", "amount": round(prevout.get("value", 0) / 1e8, 8)})
+        rows.append({
+            "txid": t.get("txid"),
+            "timestamp": (t.get("status") or {}).get("block_time"),
+            "confirmed": (t.get("status") or {}).get("confirmed", False),
+            "direction": "out" if net < 0 else "in",
+            "amount": round(abs(net) / 1e8, 8),
+            "fee": round(t.get("fee", 0) / 1e8, 8),
+            "counterparties": counterparties[:10],
+        })
+    return {
+        "balance": {"amount": round(balance_sats / 1e8, 8), "unit": "BTC"},
+        "tx_count": cs.get("tx_count", 0),
+        "transactions": rows,
+    }
+
+
+_SOL_RPC_URL = "https://api.mainnet-beta.solana.com"
+
+
+async def _sol_rpc(method: str, params: list, timeout: float = 10) -> Optional[dict]:
+    try:
+        async with httpx.AsyncClient(timeout=timeout, headers=UA) as c:
+            r = await c.post(_SOL_RPC_URL, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+            if r.status_code == 200:
+                return r.json().get("result")
+    except Exception as e:
+        logger.debug("solana RPC %s failed: %s", method, e)
+    return None
+
+
+async def _sol_address_lookup(address: str, limit: int = 15) -> Optional[dict]:
+    """Native-SOL balance + recent transactions with counterparties, via pre/post
+    account-balance deltas. No SPL token transfers in v1."""
+    bal = await _sol_rpc("getBalance", [address])
+    if bal is None:
+        return None
+    sigs = await _sol_rpc("getSignaturesForAddress", [address, {"limit": limit}]) or []
+    sem = asyncio.Semaphore(3)
+
+    async def fetch(sig: str):
+        async with sem:
+            return await _sol_rpc(
+                "getTransaction",
+                [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}],
+                timeout=12,
+            )
+
+    parsed = await asyncio.gather(*[fetch(s["signature"]) for s in sigs])
+    rows = []
+    for s, p in zip(sigs, parsed):
+        if not p:
+            continue
+        try:
+            keys = [k.get("pubkey") for k in p["transaction"]["message"]["accountKeys"]]
+            pre, post = p["meta"]["preBalances"], p["meta"]["postBalances"]
+        except (KeyError, TypeError):
+            continue
+        if address not in keys:
+            continue
+        i = keys.index(address)
+        delta = (post[i] - pre[i]) / 1e9
+        counterparties = []
+        for j, k in enumerate(keys):
+            if k == address:
+                continue
+            d2 = (post[j] - pre[j]) / 1e9
+            if d2 != 0 and (d2 > 0) != (delta > 0):
+                counterparties.append({"address": k, "role": "recipient" if delta < 0 else "sender", "amount": round(abs(d2), 9)})
+        rows.append({
+            "txid": s["signature"],
+            "timestamp": s.get("blockTime"),
+            "confirmed": s.get("confirmationStatus") == "finalized",
+            "direction": "out" if delta < 0 else "in",
+            "amount": round(abs(delta), 9),
+            "fee": round(p["meta"].get("fee", 0) / 1e9, 9),
+            "counterparties": sorted(counterparties, key=lambda c: -c["amount"])[:10],
+        })
+    return {
+        "balance": {"amount": round(bal["value"] / 1e9, 9), "unit": "SOL"},
+        "tx_count": len(sigs),
+        "transactions": rows,
+    }
+
+
+_CHAIN_ALIASES = {"btc": "bitcoin", "bitcoin": "bitcoin", "sol": "solana", "solana": "solana"}
+
+
+async def address_lookup(chain: str, address: str) -> dict:
+    """Balance + annotated in/out transactions for an address — bitcoin/solana
+    only. Fails soft (`supported: False`) for anything else, never raises."""
+    canon = _CHAIN_ALIASES.get((chain or "").lower())
+    key = f"trace:{canon}:{address}"
+    cached = _cache_get(key, 20)
+    if cached is not None:
+        return cached
+    if canon == "bitcoin":
+        data = await _btc_address_lookup(address)
+        source = "mempool.space"
+    elif canon == "solana":
+        data = await _sol_address_lookup(address)
+        source = "solana-rpc"
+    else:
+        return {
+            "chain": chain, "address": address, "supported": False,
+            "reason": f"Chain '{chain}' not supported for live trace yet.", "transactions": [],
+        }
+    if data is None:
+        return {
+            "chain": canon, "address": address, "supported": True,
+            "reason": "Address lookup failed or address has no history.", "transactions": [],
+        }
+    out = {"chain": canon, "address": address, "supported": True, "source": source, **data}
+    return _cache_put(key, out)
+
+
 # ── Real backtest (SMA crossover vs buy-and-hold over CoinGecko history) ─────────────
 async def backtest(symbol: str, days: int = 90, fast: int = 10, slow: int = 30) -> Optional[dict]:
     """Backtest a fast/slow SMA-crossover strategy against buy-and-hold over real
@@ -629,7 +778,7 @@ SOURCES = [
     {"name": "ExchangeRate-API", "category": "fx", "url": "https://open.er-api.com", "integrated": True},
     {"name": "Currency Rates", "category": "fx", "url": "https://cdn.jsdelivr.net", "integrated": False},
     {"name": "NBP", "category": "fx", "url": "https://api.nbp.pl", "integrated": False},
-    {"name": "Solana JSON RPC", "category": "rpc", "url": "https://api.mainnet-beta.solana.com", "integrated": False},
+    {"name": "Solana JSON RPC", "category": "rpc", "url": "https://api.mainnet-beta.solana.com", "integrated": True},
     {"name": "ZMOK (ETH RPC)", "category": "rpc", "url": "https://api.zmok.io", "integrated": False},
     {"name": "Mempool (fees)", "category": "onchain", "url": "https://mempool.space", "integrated": True},
     {"name": "CoinMap", "category": "global", "url": "https://coinmap.org", "integrated": False},
