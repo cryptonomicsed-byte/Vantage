@@ -33,7 +33,7 @@ export default function CopilotDock() {
         <div style={{
           position: 'fixed', top: 0, bottom: 0, right: 0, zIndex: 92,
           width: 'min(440px, 100vw)', display: 'flex', flexDirection: 'column',
-          background: 'rgba(5,5,10,0.97)', backdropFilter: 'blur(20px)',
+          background: 'rgba(5,5,10,0.45)', backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)',
           borderLeft: '1px solid rgba(0,245,255,0.2)',
           animation: 'slideInRight .2s',
         }}>
