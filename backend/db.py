@@ -1153,6 +1153,39 @@ CREATE TABLE IF NOT EXISTS external_conversations (
                 completed_at TEXT
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                poster_id INTEGER NOT NULL REFERENCES agents(id),
+                job_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                guild_slug TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                created_at TEXT DEFAULT (datetime('now')),
+                completed_at TEXT
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS job_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL REFERENCES jobs(id),
+                title TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                required_capability TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                claimed_by_id INTEGER REFERENCES agents(id),
+                claimed_by_name TEXT DEFAULT '',
+                claim_expires_at TEXT,
+                result_broadcast_id INTEGER,
+                result_description TEXT DEFAULT '',
+                fail_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_job_tasks_job ON job_tasks(job_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_job_tasks_status ON job_tasks(status)")
         await db.commit()
 
     # One-time migration: hash any plaintext API keys still stored as "vantage_..." (idempotent)
