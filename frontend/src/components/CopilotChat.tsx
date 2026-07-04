@@ -29,7 +29,133 @@ const SUGGESTIONS = [
   'Check my PnL',
   'Set alert when ETH hits 5000',
   'Go to trading',
+  '/help',
 ]
+
+const HELP_TEXT = [
+  'Available commands:',
+  '/help — show this list',
+  '/create <prompt> — start a creation job (aliases: /video, /image, /article — same pipeline today, it doesn\'t yet branch by media type)',
+  '/pipeline — list your recent creation jobs',
+  '/trade <SYMBOL> <buy|sell> <QTY> — place a market order (no leverage support yet)',
+  '/code <description> — post a claimable code job for the swarm (not instant generation)',
+  '/audit <owner>/<repo> — run a Strix security scan on a Gitea repo',
+  '/swarm invite @agent1 @agent2 [room name] — create a workspace room and invite named agents',
+  'Anything else is sent to the regular Copilot assistant.',
+].join('\n')
+
+/** Slash commands hit real REST endpoints directly — simpler and more
+ * predictable than routing new command types through /api/copilot/chat's
+ * regex intent parser. Free text (no leading "/") is unaffected. */
+async function runSlashCommand(query: string, apiKey: string): Promise<string> {
+  const cmd = (query.slice(1).split(/\s+/)[0] || '').toLowerCase()
+  const rest = query.slice(1 + cmd.length).trim()
+
+  if (cmd === 'help') return HELP_TEXT
+  if (!apiKey) return 'Connect your API key in Dashboard to use commands.'
+
+  if (['create', 'video', 'image', 'article'].includes(cmd)) {
+    if (!rest) return `Usage: /${cmd} <prompt>`
+    const fd = new FormData()
+    fd.append('prompt', rest)
+    try {
+      const r = await fetch('/api/agents/create', { method: 'POST', headers: { 'X-Agent-Key': apiKey }, body: fd })
+      const data = await r.json()
+      if (!r.ok) return `Failed to start creation job: ${data.detail || r.statusText}`
+      return `Creation job #${data.job_id} started. Use /pipeline to check status.`
+    } catch { return 'Network error starting creation job.' }
+  }
+
+  if (cmd === 'pipeline') {
+    try {
+      const r = await fetch('/api/agents/me/creation-jobs', { headers: { 'X-Agent-Key': apiKey } })
+      if (!r.ok) return `Failed to load jobs: ${r.statusText}`
+      const data = await r.json()
+      const jobs = Array.isArray(data) ? data : (data.jobs || [])
+      if (jobs.length === 0) return 'No creation jobs yet. Try /create <prompt>.'
+      return jobs.slice(0, 10).map((j: any) => `#${j.id} — ${j.status} — ${(j.prompt || '').slice(0, 60)}`).join('\n')
+    } catch { return 'Network error loading pipeline.' }
+  }
+
+  if (cmd === 'trade') {
+    const parts = rest.split(/\s+/).filter(Boolean)
+    const [symbol, side, qtyStr] = parts
+    const quantity = Number(qtyStr)
+    if (parts.length < 3 || !['buy', 'sell'].includes((side || '').toLowerCase()) || Number.isNaN(quantity)) {
+      return 'Usage: /trade <SYMBOL> <buy|sell> <QTY>'
+    }
+    try {
+      const r = await fetch('/api/trading/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Agent-Key': apiKey },
+        body: JSON.stringify({ symbol, side: side.toLowerCase(), quantity, chain: 'solana', order_type: 'market' }),
+      })
+      const data = await r.json()
+      if (!r.ok) return `Order failed: ${data.detail || r.statusText}`
+      return `Order placed: ${side.toLowerCase()} ${quantity} ${symbol} (order #${data.id ?? '?'}).`
+    } catch { return 'Network error placing order.' }
+  }
+
+  if (cmd === 'code') {
+    if (!rest) return 'Usage: /code <description>'
+    const title = rest.slice(0, 80)
+    try {
+      const r = await fetch('/api/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Agent-Key': apiKey },
+        body: JSON.stringify({
+          title, description: rest, job_type: 'code',
+          tasks: [{ title, required_capability: 'implementer' }],
+        }),
+      })
+      const data = await r.json()
+      if (!r.ok) return `Failed to post job: ${data.detail || r.statusText}`
+      return `Posted job #${data.id} (job_type=code) for the swarm to claim — this posts an open task, it doesn't generate code instantly.`
+    } catch { return 'Network error posting job.' }
+  }
+
+  if (cmd === 'audit') {
+    const m = rest.trim().match(/^([\w.-]+)\/([\w.-]+)$/)
+    if (!m) return 'Usage: /audit <owner>/<repo>'
+    const [, owner, name] = m
+    try {
+      const r = await fetch(`/api/code/repo/${owner}/${name}/scan?engine=strix`, { method: 'POST', headers: { 'X-Agent-Key': apiKey } })
+      const data = await r.json()
+      if (!r.ok) return `Scan failed: ${data.detail || r.statusText}`
+      return `Strix scan ${data.status} (scan_id ${data.scan_id}) on ${owner}/${name}.`
+    } catch { return 'Network error triggering scan.' }
+  }
+
+  if (cmd === 'swarm') {
+    const inviteMatch = rest.match(/^invite\s+(.+)$/i)
+    if (!inviteMatch) return 'Usage: /swarm invite @agent1 @agent2 [room name]'
+    const body = inviteMatch[1].trim()
+    const handles = Array.from(body.matchAll(/@([\w.-]+)/g)).map(m2 => m2[1])
+    if (handles.length === 0) return 'Usage: /swarm invite @agent1 @agent2 [room name]'
+    const roomName = body.replace(/@[\w.-]+/g, '').trim() || `collab-${Date.now()}`
+    try {
+      const r = await fetch('/api/agents/rooms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Agent-Key': apiKey },
+        body: JSON.stringify({ name: roomName }),
+      })
+      const room = await r.json()
+      if (!r.ok) return `Failed to create room: ${room.detail || r.statusText}`
+      const roomId = room.room_id
+      await Promise.all(handles.map(h => {
+        const fd = new FormData()
+        fd.append('content', `You're invited to workspace room "${roomName}": /workspace/${roomId}`)
+        fd.append('subject', 'Workspace invite')
+        return fetch(`/api/agents/messages/send/${encodeURIComponent(h)}`, {
+          method: 'POST', headers: { 'X-Agent-Key': apiKey }, body: fd,
+        }).catch(() => {})
+      }))
+      return `Created room "${roomName}" (#${roomId}) and invited ${handles.map(h => '@' + h).join(', ')}.`
+    } catch { return 'Network error creating room.' }
+  }
+
+  return `Unknown command /${cmd}. Try /help.`
+}
 
 function IntentBadge({ action, confidence }: { action: string; confidence: number }) {
   const color = confidence > 0.7 ? 'var(--cyan)' : confidence > 0.4 ? 'var(--warning)' : 'var(--muted)'
@@ -153,6 +279,14 @@ export default function CopilotChat() {
     setInput('')
     setMessages(prev => [...prev, { role: 'user', text: query }])
     setLoading(true)
+
+    if (query.startsWith('/')) {
+      const reply = await runSlashCommand(query, apiKey)
+      setMessages(prev => [...prev, { role: 'assistant', text: reply, intent: null }])
+      setLoading(false)
+      return
+    }
+
     try {
       const r = await fetch('/api/copilot/chat', {
         method: 'POST',

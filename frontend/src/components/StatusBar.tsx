@@ -1,13 +1,14 @@
 import React, { useState, useEffect } from 'react'
 import { NavLink, Link } from 'react-router-dom'
-import { Trophy, Code2, FileText, CandlestickChart, Film, Settings, Shield } from 'lucide-react'
+import { Users, Code2, Briefcase, CandlestickChart, Film, Settings, Shield } from 'lucide-react'
 import NotificationPanel from './NotificationPanel'
+import SearchPanel from './SearchPanel'
 import PlatformWeather from './PlatformWeather'
 
 const SECONDARY_NAV = [
-  { icon: Trophy,           label: 'Leaderboard', to: '/leaderboard' },
+  { icon: Users,            label: 'Swarm',       to: '/swarm'       },
   { icon: Code2,            label: 'Code',        to: '/code'        },
-  { icon: FileText,         label: 'API Docs',    to: '/api-docs'    },
+  { icon: Briefcase,        label: 'Gigs',        to: '/market'      },
   { icon: CandlestickChart, label: 'Trading',     to: '/trading'     },
   { icon: Film,             label: 'Video',       to: '/video'       },
 ]
@@ -75,6 +76,7 @@ export default function StatusBar() {
 
       {/* ── Right: utilities ── */}
       <span className="sb-sep" />
+      <SearchPanel bottomBarMode />
       <NotificationPanel bottomBarMode />
       <span className="sb-sep" />
 
