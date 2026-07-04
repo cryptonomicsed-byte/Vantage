@@ -183,7 +183,11 @@ export default function NeuralVault() {
 
       if (!graphRef.current) {
         graphRef.current = new ForceGraph3D(mountRef.current!)
-          .backgroundColor('#04030d')
+          // Fully transparent — three-render-objects creates the WebGLRenderer
+          // with alpha:true and honors this color's alpha channel, so the
+          // mount container's own glass (rgba + backdrop-filter) CSS shows
+          // through instead of a solid backdrop.
+          .backgroundColor('rgba(4,3,13,0)')
           .showNavInfo(false)
           .nodeLabel((n: any) => `<div style="font-family:monospace;font-size:11px;color:#dfe6ff;background:rgba(5,5,16,.9);padding:4px 8px;border-radius:6px;border:1px solid rgba(255,255,255,.12)">${n.name}</div>`)
           .nodeThreeObject((n: any) => {
@@ -294,7 +298,7 @@ export default function NeuralVault() {
   )
 
   return (
-    <div style={{ position: 'relative', height: 'calc(100vh - 175px)', minHeight: 480, borderRadius: 12, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.06)' }}>
+    <div style={{ position: 'relative', height: 'calc(100vh - 175px)', minHeight: 480, borderRadius: 12, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.06)', background: 'rgba(5,8,16,0.45)', backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)' }}>
       {/* HUD header */}
       <div style={{ position: 'absolute', top: 12, left: 14, zIndex: 10, pointerEvents: 'none' }}>
         <div style={{ fontFamily: 'monospace', fontSize: 12, color: '#b9a8ff', letterSpacing: 1 }}>
