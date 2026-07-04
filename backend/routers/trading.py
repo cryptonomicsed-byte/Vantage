@@ -137,14 +137,42 @@ async def delete_wallet(wallet_id: int, agent: dict = Depends(get_agent)):
 
 @router.post("/wallets/{wallet_id}/sync")
 async def sync_wallet(wallet_id: int, agent: dict = Depends(get_agent)):
-    """Placeholder for balance refresh from chain. Actual sync delegated to external engine."""
+    """Refresh balance from chain for bitcoin/solana wallets (mempool.space /
+    public Solana RPC via market_sources.address_lookup) — real, not a no-op.
+    Falls back to the old timestamp-only bump for any other chain, since
+    there's no free no-key balance source for those yet."""
+    from backend import market_sources as ms
     async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        row = await (await db.execute(
+            "SELECT chain, address FROM trading_wallets WHERE id=? AND agent_id=?",
+            (wallet_id, agent["id"])
+        )).fetchone()
+        if not row:
+            raise HTTPException(404, "Wallet not found")
+
+        status = "chain_unsupported_for_live_sync"
+        result = await ms.address_lookup(row["chain"], row["address"])
+        if result.get("supported") and result.get("balance"):
+            amount = result["balance"]["amount"]
+            unit = result["balance"]["unit"]
+            price = await ms.resolve_price(unit)
+            value_usd = round(amount * price, 2) if price else None
+            await db.execute(
+                """INSERT INTO trading_balances (wallet_id, token, balance, value_usd)
+                   VALUES (?,?,?,?)
+                   ON CONFLICT(wallet_id, token) DO UPDATE SET
+                     balance=excluded.balance, value_usd=excluded.value_usd, updated_at=datetime('now')""",
+                (wallet_id, unit, amount, value_usd),
+            )
+            status = "synced"
+
         await db.execute(
             "UPDATE trading_wallets SET last_synced_at=datetime('now') WHERE id=? AND agent_id=?",
             (wallet_id, agent["id"])
         )
         await db.commit()
-    return {"status": "sync_requested", "wallet_id": wallet_id}
+    return {"status": status, "wallet_id": wallet_id}
 
 # ── Wallet Generation ────────────────────────────────────
 

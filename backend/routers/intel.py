@@ -3,13 +3,16 @@ All data geo-unrestricted, no API keys needed."""
 
 import logging, asyncio, json, time, threading
 import httpx
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from backend import market_sources as ms
 from backend import indicators as ind
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/intel", tags=["intel"])
+_limiter = Limiter(key_func=get_remote_address)
 ARES = "http://localhost:9861"
 
 PYTH_BASE = "https://hermes.pyth.network"
@@ -216,17 +219,6 @@ async def get_arbitrage():
     opps = await ms.real_arbitrage()
     return {"opportunities": opps, "source": "live_cex_spreads" if opps else "unavailable"}
 
-@router.get("/debate")
-async def get_debate():
-    return {
-        "consensus":"bullish","consensus_score":78,
-        "debates": [
-            {"agent":"Ares-Sentinel","perspective":"Technical","verdict":"bullish","confidence":82,"reasoning":"SOL broke $72 resistance with volume confirmation."},
-            {"agent":"Hermes-Trader","perspective":"On-chain","verdict":"bullish","confidence":75,"reasoning":"Whale accumulation + exchange outflows across majors."},
-            {"agent":"Vantage-Oracle","perspective":"Macro","verdict":"neutral","confidence":68,"reasoning":"Fed uncertainty. Wait for CPI before sizing up."},
-            {"agent":"Zangbeto-Guard","perspective":"Risk","verdict":"caution","confidence":71,"reasoning":"Cap at 2% per trade. SL tight. Approve with guard."},
-        ]}
-
 @router.get("/alpha")
 async def get_alpha():
     """Real alpha: top movers by 24h change/volume from the top-100."""
@@ -265,6 +257,17 @@ async def get_whales(limit: int = Query(10, ge=1, le=25)):
     """Largest recent BTC mempool transactions (mempool.space)."""
     txs = await ms.whale_txs(limit)
     return {"transactions": txs, "count": len(txs), "chain": "bitcoin", "source": "mempool.space"}
+
+@router.get("/trace/{chain}/{address}")
+@_limiter.limit("30/minute")
+async def get_wallet_trace(request: Request, chain: str, address: str, limit: int = Query(10, ge=1, le=25)):
+    """Balance + recent in/out counterparties for a wallet address — bitcoin
+    and solana only (mempool.space / public Solana RPC, no key required). One
+    hop per call; pivoting to a counterparty address is a new call from the
+    frontend, not server-side recursion. Rate-limited separately from other
+    intel endpoints since its cost is driven by user clicks, not a fixed poll
+    interval, against a rate-limited public RPC."""
+    return await ms.address_lookup(chain, address)
 
 @router.get("/backtest")
 async def get_backtest(symbol: str = Query("BTC"), days: int = Query(90, ge=14, le=365)):

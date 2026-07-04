@@ -334,6 +334,7 @@ function Wallets() {
   const [form, setForm] = useState({ label: '', chain: 'solana', address: '' })
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
+  const [syncingId, setSyncingId] = useState<number | null>(null)
 
   async function add() {
     if (!form.label || !form.address) { setMsg('Label and address required'); return }
@@ -351,6 +352,12 @@ function Wallets() {
     wallets.reload()
   }
 
+  async function sync(id: number) {
+    setSyncingId(id)
+    try { await tradingApi(`/wallets/${id}/sync`, { method: 'POST' }); wallets.reload() } catch {}
+    setSyncingId(null)
+  }
+
   const rows = wallets.data || []
   return (
     <div>
@@ -365,19 +372,27 @@ function Wallets() {
           <button className="btn btn-primary btn-sm" onClick={add} disabled={busy}><Plus size={12} /> Add Wallet</button>
           {msg && <span style={{ fontSize: 12, color: 'var(--muted)' }}>{msg}</span>}
         </div>
-        <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 10 }}>Track-only: store public addresses for bookkeeping. No private keys are required or used here.</div>
+        <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 10 }}>Track-only: store public addresses for bookkeeping, no private keys used. Sync fetches a real balance for bitcoin/solana addresses (mempool.space / Solana RPC) — other chains aren't live-synced yet.</div>
       </div>
       <table className="ares-table">
-        <thead><tr><th>Label</th><th>Chain</th><th>Address</th><th>Synced</th><th></th></tr></thead>
+        <thead><tr><th>Label</th><th>Chain</th><th>Address</th><th>Balance</th><th>Synced</th><th></th></tr></thead>
         <tbody>
-          {rows.length === 0 && <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No wallets yet.</td></tr>}
+          {rows.length === 0 && <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No wallets yet.</td></tr>}
           {rows.map((w: any) => (
             <tr key={w.id}>
               <td style={{ fontWeight: 600 }}>{w.label}</td>
               <td>{w.chain}</td>
               <td style={{ fontFamily: 'monospace', fontSize: 11, color: 'var(--muted)' }}>{w.address}</td>
+              <td style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                {(w.balances || []).length === 0 ? <span style={{ color: 'var(--muted)' }}>—</span> : w.balances.map((b: any) => `${b.balance} ${b.token}`).join(', ')}
+              </td>
               <td style={{ fontSize: 11, color: 'var(--muted)' }}>{w.last_synced_at ? timeAgo(w.last_synced_at) : '—'}</td>
-              <td style={{ textAlign: 'right' }}><button className="btn btn-ghost btn-sm" onClick={() => remove(w.id)}><XCircle size={12} /></button></td>
+              <td style={{ textAlign: 'right', display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
+                <button className="btn btn-ghost btn-sm" onClick={() => sync(w.id)} disabled={syncingId === w.id} title="Refresh balance from chain">
+                  <RefreshCw size={12} className={syncingId === w.id ? 'spin' : ''} />
+                </button>
+                <button className="btn btn-ghost btn-sm" onClick={() => remove(w.id)}><XCircle size={12} /></button>
+              </td>
             </tr>
           ))}
         </tbody>

@@ -80,3 +80,61 @@ async def test_paper_fill_missing_order_404(client, registered_agent):
 async def test_paper_fill_requires_agent_key(client):
     r = await client.post("/api/trading/orders/1/paper-fill")
     assert r.status_code == 401
+
+
+# ── Wallet sync: real balance lookup, not the old no-op timestamp bump ─────────────
+
+@pytest.mark.asyncio
+async def test_sync_wallet_populates_real_balance(client, fresh_agent, monkeypatch):
+    async def fake_lookup(chain, address):
+        assert chain == "bitcoin" and address == "bc1qtest"
+        return {"chain": "bitcoin", "address": address, "supported": True, "source": "mempool.space",
+                "balance": {"amount": 0.5, "unit": "BTC"}, "tx_count": 3, "transactions": []}
+
+    async def fake_price(symbol):
+        assert symbol == "BTC"
+        return 60000.0
+
+    monkeypatch.setattr(ms, "address_lookup", fake_lookup)
+    monkeypatch.setattr(ms, "resolve_price", fake_price)
+    h = _h(await fresh_agent())
+
+    rw = await client.post("/api/trading/wallets", headers=h,
+                            json={"label": "btc-1", "chain": "bitcoin", "address": "bc1qtest"})
+    assert rw.status_code == 200, rw.text
+    wallet_id = rw.json()["id"]
+
+    rs = await client.post(f"/api/trading/wallets/{wallet_id}/sync", headers=h)
+    assert rs.status_code == 200, rs.text
+    assert rs.json()["status"] == "synced"
+
+    rg = await client.get(f"/api/trading/wallets/{wallet_id}", headers=h)
+    assert rg.status_code == 200, rg.text
+    balances = rg.json()["balances"]
+    assert balances == [{"token": "BTC", "balance": 0.5, "value_usd": 30000.0}]
+
+
+@pytest.mark.asyncio
+async def test_sync_wallet_unsupported_chain_is_a_soft_noop(client, fresh_agent, monkeypatch):
+    async def fake_lookup(chain, address):
+        return {"chain": chain, "address": address, "supported": False,
+                "reason": "unsupported", "transactions": []}
+    monkeypatch.setattr(ms, "address_lookup", fake_lookup)
+    h = _h(await fresh_agent())
+
+    rw = await client.post("/api/trading/wallets", headers=h,
+                            json={"label": "eth-1", "chain": "ethereum", "address": "0xdead"})
+    wallet_id = rw.json()["id"]
+
+    rs = await client.post(f"/api/trading/wallets/{wallet_id}/sync", headers=h)
+    assert rs.status_code == 200, rs.text
+    assert rs.json()["status"] == "chain_unsupported_for_live_sync"
+
+    rg = await client.get(f"/api/trading/wallets/{wallet_id}", headers=h)
+    assert rg.json()["balances"] == []
+
+
+@pytest.mark.asyncio
+async def test_sync_wallet_missing_wallet_404(client, registered_agent):
+    r = await client.post("/api/trading/wallets/999999/sync", headers=_h(registered_agent))
+    assert r.status_code == 404
