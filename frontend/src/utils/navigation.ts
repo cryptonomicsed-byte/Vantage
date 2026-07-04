@@ -4,8 +4,13 @@
 // one SubNav row; Gigs unifies the task marketplace and the leaderboard.
 // Create/Pipeline are retired in favor of Copilot slash commands
 // (see CopilotChat.tsx). Search is a popover next to Notifications, not a
-// nav entry. Everything else (agent dashboard, directory, vault, analytics,
-// docs, settings) lives together under Settings.
+// nav entry.
+//
+// Dashboard (agent profile/agents/vault/analytics) and Settings (the
+// Settings icon at the bottom bar, plus API Docs) are deliberately separate
+// SubNav rows, not one shared row: the Settings icon routes to /settings,
+// which surfaces API Docs and a way back to the Dashboard, rather than
+// dumping every settings-adjacent link onto the Dashboard's own tab strip.
 
 export const SECTION_PATHS: Record<string, string[]> = {
   // /trading is a single-page workspace (TradingSection owns its own internal
@@ -15,20 +20,23 @@ export const SECTION_PATHS: Record<string, string[]> = {
   video: ['/video'],
   swarm: ['/swarm', '/workspace', '/guilds', '/heatmap'],
   gigs: ['/market', '/leaderboard'],
-  settings: [
-    '/settings', '/api-docs', '/dashboard', '/agents', '/vault',
-    '/inbox', '/knowledge', '/collectives', '/analytics', '/search',
+  dashboard: [
+    '/dashboard', '/agents', '/vault', '/analytics',
+    '/inbox', '/knowledge', '/collectives', '/search',
   ],
+  settings: ['/settings', '/api-docs'],
 }
 
 export const SUB_NAV: Record<string, Array<{ to: string; label: string }>> = {
-  settings: [
+  dashboard: [
     { to: '/dashboard', label: 'Dashboard' },
     { to: '/agents',    label: 'Agents'    },
     { to: '/vault',     label: 'Vault'     },
     { to: '/analytics', label: 'Analytics' },
-    { to: '/settings',  label: 'Settings'  },
-    { to: '/api-docs',  label: 'API Docs'  },
+  ],
+  settings: [
+    { to: '/api-docs',  label: 'API Docs'      },
+    { to: '/dashboard', label: 'Open Dashboard' },
   ],
   swarm: [
     { to: '/swarm',     label: 'Graph'     },
@@ -44,7 +52,7 @@ export const SUB_NAV: Record<string, Array<{ to: string; label: string }>> = {
 
 export function getSection(pathname: string): string {
   if (pathname === '/') return 'feed'
-  if (pathname.startsWith('/agent/')) return 'settings'
+  if (pathname.startsWith('/agent/')) return 'dashboard'
   if (pathname.startsWith('/guild/')) return 'swarm'
   if (pathname.startsWith('/series/')) return ''
   for (const [section, paths] of Object.entries(SECTION_PATHS)) {
