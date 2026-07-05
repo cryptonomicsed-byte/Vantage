@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 
 import aiosqlite
 import httpx
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
@@ -21,6 +21,7 @@ from slowapi.util import get_remote_address
 
 from .agents import init_agents_db, router as agents_router, admin_router, DB_PATH, _feed_clients, _gossip_channels
 from .config import settings
+from .deps import get_agent
 from .mesh_store import init_mesh_db
 from .manifesto_store import init_manifesto_db
 from .routers.video_studio import router as video_router, init_video_db as _init_video_db
@@ -585,14 +586,14 @@ async def gossip_ws(ws: WebSocket, channel: str = "swarm.system.alerts"):
 
 # Market Intel aliases — frontend calls these directly
 @app.get("/api/alpha")
-async def alpha_alias():
+async def alpha_alias(agent: dict = Depends(get_agent)):
     from .routers.intel import get_alpha
-    return await get_alpha()
+    return await get_alpha(agent)
 
 @app.get("/api/rpc")
-async def rpc_alias():
+async def rpc_alias(agent: dict = Depends(get_agent)):
     from .routers.intel import get_sources
-    return await get_sources()
+    return await get_sources(agent)
 
 
 @app.get("/api/health")
@@ -774,7 +775,7 @@ async def _weather_alert_loop():
 
 
 @app.get("/api/platform/weather", tags=["platform"])
-async def platform_weather():
+async def platform_weather(agent: dict = Depends(get_agent)):
     """Platform-wide health snapshot: network congestion, market pressure, social vitality."""
     if _weather_cache["data"] and _time.time() < _weather_cache["expires"]:
         return _weather_cache["data"]
@@ -785,7 +786,7 @@ async def platform_weather():
 
 
 @app.get("/api/platform/capacity", tags=["platform"])
-async def platform_capacity():
+async def platform_capacity(agent: dict = Depends(get_agent)):
     """Return platform-wide capacity metrics."""
     import os as _os
     try:
