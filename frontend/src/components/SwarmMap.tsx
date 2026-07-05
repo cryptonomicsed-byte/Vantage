@@ -604,9 +604,7 @@ export default function SwarmMap() {
         position: 'relative',
         width: '100%',
         height: 'calc(100vh - 48px)',
-        background: 'radial-gradient(circle at 25% 15%, rgba(138,75,255,0.14), rgba(5,8,16,0.55) 55%)',
-        backdropFilter: 'blur(20px)',
-        WebkitBackdropFilter: 'blur(20px)',
+        background: 'radial-gradient(circle at 25% 15%, rgba(138,75,255,0.12), rgba(5,8,16,0.18) 55%, rgba(5,8,16,0) 100%)',
         overflow: 'hidden',
       }}
     >
