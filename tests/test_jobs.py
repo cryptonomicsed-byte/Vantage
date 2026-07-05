@@ -51,20 +51,21 @@ def test_create_and_get_job(client):
     assert len(job["tasks"]) == 2
     assert all(t["status"] == "open" for t in job["tasks"])
 
-    r = client.get(f"/api/jobs/{job['id']}")
+    r = client.get(f"/api/jobs/{job['id']}", headers={"X-Agent-Key": key})
     assert r.status_code == 200
     assert r.json()["id"] == job["id"]
 
 
 def test_get_job_not_found(client):
-    r = client.get("/api/jobs/999999")
+    key = _register(client, "NotFoundAgent")
+    r = client.get("/api/jobs/999999", headers={"X-Agent-Key": key})
     assert r.status_code == 404
 
 
 def test_list_jobs_filters_by_type(client):
     key = _register(client, "ListerAgent")
     _create_job(client, key)
-    r = client.get("/api/jobs?job_type=code")
+    r = client.get("/api/jobs?job_type=code", headers={"X-Agent-Key": key})
     assert r.status_code == 200
     assert all(j["job_type"] == "code" for j in r.json()["jobs"])
 

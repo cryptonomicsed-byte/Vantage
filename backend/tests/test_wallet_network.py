@@ -28,15 +28,16 @@ def _fake_lookup(counterparties_by_call):
 
 
 @pytest.mark.asyncio
-async def test_trace_accumulates_wallet_edges(client, monkeypatch):
+async def test_trace_accumulates_wallet_edges(client, monkeypatch, fresh_agent):
+    agent = await fresh_agent()
     monkeypatch.setattr(ms, "address_lookup", _fake_lookup(
         [{"address": "CounterpartyEdge1111111111111111111111111", "role": "recipient", "amount": 2.5}],
     ))
 
-    r = await client.get("/api/intel/trace/solana/TraceSourceWallet22222222222222222222222")
+    r = await client.get("/api/intel/trace/solana/TraceSourceWallet22222222222222222222222", headers=_h(agent))
     assert r.status_code == 200, r.text
 
-    net = await client.get("/api/intel/wallet-network", params={"chain": "solana", "min_tx_count": 1, "limit": 500})
+    net = await client.get("/api/intel/wallet-network", params={"chain": "solana", "min_tx_count": 1, "limit": 500}, headers=_h(agent))
     assert net.status_code == 200, net.text
     data = net.json()
     match = [l for l in data["links"] if l["source"] == "TraceSourceWallet22222222222222222222222"
@@ -49,16 +50,17 @@ async def test_trace_accumulates_wallet_edges(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_repeated_trace_accumulates_same_edge(client, monkeypatch):
+async def test_repeated_trace_accumulates_same_edge(client, monkeypatch, fresh_agent):
+    agent = await fresh_agent()
     monkeypatch.setattr(ms, "address_lookup", _fake_lookup(
         [{"address": "RepeatCounterparty333333333333333333333", "role": "sender", "amount": 1.0}],
     ))
 
     source = "RepeatSourceWallet4444444444444444444444444"
-    await client.get(f"/api/intel/trace/solana/{source}")
-    await client.get(f"/api/intel/trace/solana/{source}")
+    await client.get(f"/api/intel/trace/solana/{source}", headers=_h(agent))
+    await client.get(f"/api/intel/trace/solana/{source}", headers=_h(agent))
 
-    net = await client.get("/api/intel/wallet-network", params={"chain": "solana", "limit": 500})
+    net = await client.get("/api/intel/wallet-network", params={"chain": "solana", "limit": 500}, headers=_h(agent))
     match = [l for l in net.json()["links"] if l["source"] == source and l["target"] == "RepeatCounterparty333333333333333333333"]
     assert len(match) == 1
     assert match[0]["tx_count"] == 2
@@ -81,22 +83,23 @@ async def test_watchlist_refresh_also_accumulates_edges(client, fresh_agent, mon
     r = await client.get("/api/intel/watchlist/refresh", headers=_h(agent))
     assert r.status_code == 200, r.text
 
-    net = await client.get("/api/intel/wallet-network", params={"chain": "solana", "limit": 500})
+    net = await client.get("/api/intel/wallet-network", params={"chain": "solana", "limit": 500}, headers=_h(agent))
     match = [l for l in net.json()["links"] if l["source"] == address and l["target"] == "WatchlistCounterparty666666666666666666"]
     assert len(match) == 1
     assert match[0]["total_value"] == pytest.approx(9.0)
 
 
 @pytest.mark.asyncio
-async def test_wallet_network_min_tx_count_filters(client, monkeypatch):
+async def test_wallet_network_min_tx_count_filters(client, monkeypatch, fresh_agent):
+    agent = await fresh_agent()
     monkeypatch.setattr(ms, "address_lookup", _fake_lookup(
         [{"address": "OneHitWonder7777777777777777777777777777", "role": "recipient", "amount": 1.0}],
     ))
     source = "MinTxCountSource8888888888888888888888888"
-    await client.get(f"/api/intel/trace/solana/{source}")
+    await client.get(f"/api/intel/trace/solana/{source}", headers=_h(agent))
 
-    strict = await client.get("/api/intel/wallet-network", params={"chain": "solana", "min_tx_count": 5, "limit": 500})
+    strict = await client.get("/api/intel/wallet-network", params={"chain": "solana", "min_tx_count": 5, "limit": 500}, headers=_h(agent))
     assert not any(l["source"] == source for l in strict.json()["links"])
 
-    lenient = await client.get("/api/intel/wallet-network", params={"chain": "solana", "min_tx_count": 1, "limit": 500})
+    lenient = await client.get("/api/intel/wallet-network", params={"chain": "solana", "min_tx_count": 1, "limit": 500}, headers=_h(agent))
     assert any(l["source"] == source for l in lenient.json()["links"])

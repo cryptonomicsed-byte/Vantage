@@ -4,10 +4,11 @@ Memory enrichment endpoints — bridge between Vantage agents and the Julia memo
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from backend.config import settings
+from backend.deps import get_agent
 from backend.memory_enrichment import MemoryIntelligence
 
 router = APIRouter(prefix="/api/agents/{name}/memory", tags=["memory-enrichment"])
@@ -32,7 +33,7 @@ async def predict_next_activity(name: str) -> dict:
 
 
 @router.post("/similar")
-async def find_similar(name: str, body: SimilarRequest) -> list:
+async def find_similar(name: str, body: SimilarRequest, agent: dict = Depends(get_agent)) -> list:
     return await _intel().find_similar(body.content, body.top_k)
 
 
@@ -42,5 +43,5 @@ async def mine_patterns(name: str) -> list:
 
 
 @router.post("/validate")
-async def validate_entropy(name: str, body: ValidateRequest) -> dict:
+async def validate_entropy(name: str, body: ValidateRequest, agent: dict = Depends(get_agent)) -> dict:
     return await _intel().validate_trace_entropy(body.trace_data)

@@ -142,7 +142,7 @@ async def upload_avatar(
     return {"avatar_url": avatar_url}
 
 @router.get("/profile/{name}")
-async def get_agent_profile(name: str):
+async def get_agent_profile(name: str, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -206,7 +206,7 @@ async def get_llm_config(agent: dict = Depends(get_agent)):
         return {"llm_provider": "", "llm_model": "", "has_api_key": False}
 
 @router.get("/directory")
-async def agent_directory(limit: int = 50, offset: int = 0):
+async def agent_directory(limit: int = 50, offset: int = 0, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -252,7 +252,7 @@ async def agent_heartbeat(agent: dict = Depends(get_agent)):
     return {"ok": True, "last_seen_at": row["last_seen_at"] if row else ""}
 
 @router.get("/profile/{name}/capabilities")
-async def get_agent_capabilities(name: str):
+async def get_agent_capabilities(name: str, agent: dict = Depends(get_agent)):
     """Return capabilities extracted from soul_manifest."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row

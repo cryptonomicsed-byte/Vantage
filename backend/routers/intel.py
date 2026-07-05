@@ -87,7 +87,7 @@ async def _fetch_prices_batch(ids: list[str]) -> dict:
 # ── Endpoints ──
 
 @router.get("/market")
-async def full_market(limit: int = Query(100, ge=1, le=500)):
+async def full_market(limit: int = Query(100, ge=1, le=500), agent: dict = Depends(get_agent)):
     """Full market rundown — all crypto tokens with prices from Pyth."""
     feeds = await _get_all_crypto_feeds()
     if not feeds:
@@ -179,7 +179,7 @@ async def _majors():
     return btc, eth, sol
 
 @router.get("")
-async def get_intel():
+async def get_intel(agent: dict = Depends(get_agent)):
     """Aggregate overview — BTC/ETH/SOL + chain health + sentiment."""
     btc, eth, sol = await _majors()
 
@@ -219,13 +219,13 @@ async def get_intel():
     }
 
 @router.get("/arbitrage")
-async def get_arbitrage():
+async def get_arbitrage(agent: dict = Depends(get_agent)):
     """Real cross-exchange spreads (Binance/OKX/KuCoin/Coinbase/Gemini)."""
     opps = await ms.real_arbitrage()
     return {"opportunities": opps, "source": "live_cex_spreads" if opps else "unavailable"}
 
 @router.get("/alpha")
-async def get_alpha():
+async def get_alpha(agent: dict = Depends(get_agent)):
     """Real alpha: top movers by 24h change/volume from the top-100."""
     movers = await ms.top_movers(8)
     lead = movers[0]["symbol"] if movers else "—"
@@ -235,19 +235,19 @@ async def get_alpha():
     }
 
 @router.get("/sentiment")
-async def get_sentiment():
+async def get_sentiment(agent: dict = Depends(get_agent)):
     """Real sentiment derived from top-100 market breadth + BTC dominance."""
     b = await ms.market_breadth()
     return {"sentiment": b, "indicators": b.get("indicators", [])}
 
 @router.get("/yields")
-async def get_yields(limit: int = Query(25, ge=1, le=100)):
+async def get_yields(limit: int = Query(25, ge=1, le=100), agent: dict = Depends(get_agent)):
     """Top DeFi yield pools by APY (DefiLlama, TVL ≥ $1M)."""
     pools = await ms.defillama_yields(limit)
     return {"pools": pools, "count": len(pools), "source": "DefiLlama"}
 
 @router.get("/dex")
-async def get_dex(q: str = Query("SOL"), limit: int = Query(20, ge=1, le=50)):
+async def get_dex(q: str = Query("SOL"), limit: int = Query(20, ge=1, le=50), agent: dict = Depends(get_agent)):
     """DEX pairs/liquidity for a token query (DexScreener)."""
     pairs = await ms.dexscreener_search(q, limit)
     return {"query": q, "pairs": pairs, "count": len(pairs), "source": "DexScreener"}
@@ -256,8 +256,7 @@ async def get_dex(q: str = Query("SOL"), limit: int = Query(20, ge=1, le=50)):
 async def get_dex_pools(
     network: str = Query("solana"),
     kind: str = Query("trending", pattern="^(trending|new)$"),
-    limit: int = Query(30, ge=1, le=50),
-):
+    limit: int = Query(30, ge=1, le=50), agent: dict = Depends(get_agent)):
     """Pool-level DEX feed (GeckoTerminal) — every currently-trading pair on a chain,
     not just tokens ranked into a top-N market-cap listing. 'new' surfaces just-launched
     pools; 'trending' surfaces established-momentum ones."""
@@ -265,12 +264,12 @@ async def get_dex_pools(
     return {"network": network, "kind": kind, "pools": pools, "count": len(pools), "source": "GeckoTerminal"}
 
 @router.get("/fx")
-async def get_fx(base: str = Query("USD")):
+async def get_fx(base: str = Query("USD"), agent: dict = Depends(get_agent)):
     """Fiat exchange rates (ExchangeRate-API)."""
     return await ms.fx_rates(base)
 
 @router.get("/whales")
-async def get_whales(limit: int = Query(10, ge=1, le=25), min_value_btc: float = Query(None, ge=0)):
+async def get_whales(limit: int = Query(10, ge=1, le=25), min_value_btc: float = Query(None, ge=0), agent: dict = Depends(get_agent)):
     """Largest recent BTC mempool transactions (mempool.space), optionally
     filtered to only transactions at or above min_value_btc."""
     txs = await ms.whale_txs(limit, min_value_btc)
@@ -314,7 +313,7 @@ async def _record_wallet_edges(chain: str, address: str, transactions: list[dict
 
 @router.get("/trace/{chain}/{address}")
 @_limiter.limit("30/minute")
-async def get_wallet_trace(request: Request, chain: str, address: str, limit: int = Query(10, ge=1, le=25)):
+async def get_wallet_trace(request: Request, chain: str, address: str, limit: int = Query(10, ge=1, le=25), agent: dict = Depends(get_agent)):
     """Balance + recent in/out counterparties for a wallet address — bitcoin
     and solana only (mempool.space / public Solana RPC, no key required). One
     hop per call; pivoting to a counterparty address is a new call from the
@@ -450,8 +449,7 @@ async def refresh_watchlist_wallets(agent: dict = Depends(get_agent)):
 async def get_wallet_network(
     chain: str = Query("solana"),
     min_tx_count: int = Query(1, ge=1),
-    limit: int = Query(200, ge=1, le=1000),
-):
+    limit: int = Query(200, ge=1, le=1000), agent: dict = Depends(get_agent)):
     """Real money-flow graph built from wallet_edges — accumulated every time
     /trace or /watchlist/refresh surfaces a counterparty, from both manual
     lookups and tracked-wallet refreshes. Nodes are wallet addresses, links
@@ -483,7 +481,7 @@ async def get_wallet_network(
     return {"chain": canon, "nodes": nodes, "links": links, "node_count": len(nodes), "link_count": len(links)}
 
 @router.get("/backtest")
-async def get_backtest(symbol: str = Query("BTC"), days: int = Query(90, ge=14, le=365)):
+async def get_backtest(symbol: str = Query("BTC"), days: int = Query(90, ge=14, le=365), agent: dict = Depends(get_agent)):
     """Backtest an SMA-crossover strategy vs buy-and-hold over real history."""
     result = await ms.backtest(symbol, days)
     if result is None:
@@ -491,13 +489,13 @@ async def get_backtest(symbol: str = Query("BTC"), days: int = Query(90, ge=14, 
     return result
 
 @router.get("/ohlc/{symbol}")
-async def get_ohlc(symbol: str, interval: str = Query("1d"), limit: int = Query(200, ge=10, le=500)):
+async def get_ohlc(symbol: str, interval: str = Query("1d"), limit: int = Query(200, ge=10, le=500), agent: dict = Depends(get_agent)):
     """OHLCV candles for charting (Binance klines → CoinGecko fallback)."""
     candles = await ms.ohlc(symbol, interval, limit)
     return {"symbol": symbol.upper(), "interval": interval, "candles": candles, "count": len(candles)}
 
 @router.get("/indicators/{symbol}")
-async def get_indicators(symbol: str, interval: str = Query("1d"), limit: int = Query(200, ge=10, le=500)):
+async def get_indicators(symbol: str, interval: str = Query("1d"), limit: int = Query(200, ge=10, le=500), agent: dict = Depends(get_agent)):
     """Built-in technical indicators (SMA/EMA/RSI/MACD/Bollinger) over live candles."""
     candles = await ms.ohlc(symbol, interval, limit)
     if not candles:
@@ -510,7 +508,7 @@ async def get_indicators(symbol: str, interval: str = Query("1d"), limit: int = 
     }
 
 @router.get("/sources-registry")
-async def get_sources_registry():
+async def get_sources_registry(agent: dict = Depends(get_agent)):
     """Transparency: the full no-auth public source registry and integration status."""
     integrated = [s for s in ms.SOURCES if s["integrated"]]
     return {
@@ -520,7 +518,7 @@ async def get_sources_registry():
     }
 
 @router.get("/health")
-async def get_health_detail():
+async def get_health_detail(agent: dict = Depends(get_agent)):
     chains = {}
     for chain in ["solana", "polygon", "base", "sui"]:
         try:
@@ -546,7 +544,7 @@ async def get_health_detail():
     return {"chains": chains}
 
 @router.get("/sources")
-async def get_sources():
+async def get_sources(agent: dict = Depends(get_agent)):
     try:
         async with httpx.AsyncClient(timeout=3) as c:
             r = await c.get(f"{ARES}/")
@@ -566,7 +564,7 @@ async def get_sources():
 _market_cache = {"data": None, "ts": 0}
 
 @router.get("/market/top")
-async def top_market(limit: int = Query(100, ge=1, le=250)):
+async def top_market(limit: int = Query(100, ge=1, le=250), agent: dict = Depends(get_agent)):
     """Top tokens by market cap with full data: price, 24h change, volume, mcap.
     Uses CoinGecko free API with 120s cache."""
     import time as _time
@@ -629,7 +627,7 @@ _signal_lock = threading.Lock()
 MAX_POOL_SIZE = 200
 
 @router.post("/signals/ingest")
-async def ingest_signal(payload: dict):
+async def ingest_signal(payload: dict, agent: dict = Depends(get_agent)):
     """Accept a signal from any source (predictor, trading agents, ingester).
     Stored in in-memory pool, returned by GET /signals alongside live data."""
     required = ["symbol", "source", "type"]
@@ -656,8 +654,7 @@ async def ingest_signal(payload: dict):
 @router.get("/signals")
 async def unified_signals(
     limit: int = Query(20, ge=1, le=100),
-    min_conviction: float = Query(0, ge=0, le=10),
-):
+    min_conviction: float = Query(0, ge=0, le=10), agent: dict = Depends(get_agent)):
     """Aggregate signals from all live sources into one ranked feed."""
     import json, os, time, asyncio
     from datetime import datetime
@@ -918,7 +915,7 @@ async def unified_signals(
 
 
 @router.get("/memory/graph")
-async def memory_graph(agent_name: str = None, limit: int = 80):
+async def memory_graph(agent_name: str = None, limit: int = 80, agent: dict = Depends(get_agent)):
     """Per-agent neural memory vault graph.
     
     Pulls from the real Vantage memory infrastructure:

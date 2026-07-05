@@ -565,7 +565,7 @@ async def create_snapshot(data: PnLSnapshotCreate, agent: dict = Depends(get_age
 # ── Market Data (Bridge) ────────────────────────────────────
 
 @router.get("/markets")
-async def list_markets():
+async def list_markets(agent: dict = Depends(get_agent)):
     """Available trading markets fetched from RPC proxy."""
     try:
         import httpx
