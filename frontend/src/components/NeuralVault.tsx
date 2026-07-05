@@ -298,7 +298,7 @@ export default function NeuralVault() {
   )
 
   return (
-    <div style={{ position: 'relative', height: 'calc(100vh - 175px)', minHeight: 480, borderRadius: 12, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.06)', background: 'rgba(5,8,16,0.45)', backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)' }}>
+    <div style={{ position: 'relative', height: 'calc(100vh - 175px)', minHeight: 480, borderRadius: 12, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.08)', background: 'radial-gradient(circle at 25% 15%, rgba(138,75,255,0.14), rgba(5,8,16,0.55) 55%)', backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)' }}>
       {/* HUD header */}
       <div style={{ position: 'absolute', top: 12, left: 14, zIndex: 10, pointerEvents: 'none' }}>
         <div style={{ fontFamily: 'monospace', fontSize: 12, color: '#b9a8ff', letterSpacing: 1 }}>

@@ -22,10 +22,12 @@ class WalletCreate(BaseModel):
     chain: str
     address: str
     encrypted_key: str = ""
+    exchange: str = ""  # e.g. "Coinbase", "Binance" — blank means self-custody
 
 class WalletUpdate(BaseModel):
     label: Optional[str] = None
     encrypted_key: Optional[str] = None
+    exchange: Optional[str] = None
 
 class OrderCreate(BaseModel):
     symbol: str
@@ -81,13 +83,40 @@ async def create_wallet(data: WalletCreate, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         try:
             cur = await db.execute(
-                "INSERT INTO trading_wallets (agent_id, label, chain, address, encrypted_private_key) VALUES (?,?,?,?,?)",
-                (agent["id"], data.label, data.chain, data.address, data.encrypted_key)
+                "INSERT INTO trading_wallets (agent_id, label, chain, address, encrypted_private_key, exchange) VALUES (?,?,?,?,?,?)",
+                (agent["id"], data.label, data.chain, data.address, data.encrypted_key, data.exchange)
             )
             await db.commit()
-            return {"id": cur.lastrowid, "label": data.label, "chain": data.chain, "address": data.address}
+            return {"id": cur.lastrowid, "label": data.label, "chain": data.chain, "address": data.address, "exchange": data.exchange}
         except aiosqlite.IntegrityError:
             raise HTTPException(409, f"Wallet '{data.label}' already exists for this agent")
+
+@router.patch("/wallets/{wallet_id}")
+async def update_wallet(wallet_id: int, data: WalletUpdate, agent: dict = Depends(get_agent)):
+    """Rename a wallet, mark/unmark it as held on an exchange, or rotate its
+    stored encrypted key — whatever's provided. Ownership-scoped like every
+    other wallet endpoint."""
+    fields, params = [], []
+    if data.label is not None:
+        fields.append("label=?"); params.append(data.label)
+    if data.exchange is not None:
+        fields.append("exchange=?"); params.append(data.exchange)
+    if data.encrypted_key is not None:
+        fields.append("encrypted_private_key=?"); params.append(data.encrypted_key)
+    if not fields:
+        raise HTTPException(422, "At least one field (label, exchange, encrypted_key) is required")
+    params.extend([wallet_id, agent["id"]])
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            cur = await db.execute(
+                f"UPDATE trading_wallets SET {', '.join(fields)} WHERE id=? AND agent_id=?", params,
+            )
+            await db.commit()
+        except aiosqlite.IntegrityError:
+            raise HTTPException(409, f"Wallet '{data.label}' already exists for this agent")
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Wallet not found")
+    return {"status": "updated"}
 
 @router.get("/wallets")
 async def list_wallets(agent: dict = Depends(get_agent)):

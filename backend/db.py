@@ -1206,12 +1206,22 @@ CREATE TABLE IF NOT EXISTS external_conversations (
                 chain TEXT NOT NULL,
                 address TEXT NOT NULL,
                 label TEXT DEFAULT '',
+                address_type TEXT NOT NULL DEFAULT 'wallet',
+                notes TEXT DEFAULT '',
                 added_by_agent_id INTEGER REFERENCES agents(id),
                 created_at TEXT DEFAULT (datetime('now')),
                 UNIQUE(chain, address)
             )
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_tracked_wallets_agent ON tracked_wallets(added_by_agent_id)")
+        try:
+            await db.execute("ALTER TABLE tracked_wallets ADD COLUMN address_type TEXT NOT NULL DEFAULT 'wallet'")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE tracked_wallets ADD COLUMN notes TEXT DEFAULT ''")
+        except Exception:
+            pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS wallet_edges (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

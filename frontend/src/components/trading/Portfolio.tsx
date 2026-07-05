@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { Wallet, ListOrdered, Layers, BookOpen, PieChart, RefreshCw, Plus, XCircle, Zap, ShieldCheck, Coins } from 'lucide-react'
+import { Wallet, ListOrdered, Layers, BookOpen, PieChart, RefreshCw, Plus, XCircle, Zap, ShieldCheck, Coins, Pencil, Check, Landmark } from 'lucide-react'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Portfolio — the agent-scoped trading workspace built on the existing
@@ -331,17 +331,19 @@ function Orders({ simulated }: { simulated: boolean }) {
 
 function Wallets() {
   const wallets = useTrading<any[]>('/wallets')
-  const [form, setForm] = useState({ label: '', chain: 'solana', address: '' })
+  const [form, setForm] = useState({ label: '', chain: 'solana', address: '', exchange: '' })
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
   const [syncingId, setSyncingId] = useState<number | null>(null)
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [editDraft, setEditDraft] = useState({ label: '', exchange: '' })
 
   async function add() {
     if (!form.label || !form.address) { setMsg('Label and address required'); return }
     setBusy(true); setMsg('')
     try {
       const r = await tradingApi('/wallets', { method: 'POST', body: JSON.stringify({ ...form, encrypted_key: '' }) })
-      if (r.ok) { setForm({ label: '', chain: 'solana', address: '' }); wallets.reload() }
+      if (r.ok) { setForm({ label: '', chain: 'solana', address: '', exchange: '' }); wallets.reload() }
       else { const e = await r.json().catch(() => ({})); setMsg(e.detail || 'Failed') }
     } catch { setMsg('Failed') }
     setBusy(false)
@@ -358,6 +360,18 @@ function Wallets() {
     setSyncingId(null)
   }
 
+  function startEdit(w: any) {
+    setEditingId(w.id)
+    setEditDraft({ label: w.label || '', exchange: w.exchange || '' })
+  }
+
+  async function saveEdit(id: number) {
+    try {
+      const r = await tradingApi(`/wallets/${id}`, { method: 'PATCH', body: JSON.stringify(editDraft) })
+      if (r.ok) { setEditingId(null); wallets.reload() }
+    } catch { /* ignore */ }
+  }
+
   const rows = wallets.data || []
   return (
     <div>
@@ -367,34 +381,63 @@ function Wallets() {
           <input className="ares-input" placeholder="Label" value={form.label} onChange={e => setForm({ ...form, label: e.target.value })} />
           <input className="ares-input" placeholder="Chain" value={form.chain} onChange={e => setForm({ ...form, chain: e.target.value })} />
           <input className="ares-input" placeholder="Address (public)" value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} />
+          <input className="ares-input" placeholder="Exchange (optional — e.g. Coinbase)" value={form.exchange} onChange={e => setForm({ ...form, exchange: e.target.value })} />
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <button className="btn btn-primary btn-sm" onClick={add} disabled={busy}><Plus size={12} /> Add Wallet</button>
           {msg && <span style={{ fontSize: 12, color: 'var(--muted)' }}>{msg}</span>}
         </div>
-        <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 10 }}>Track-only: store public addresses for bookkeeping, no private keys used. Sync fetches a real balance for bitcoin/solana addresses (mempool.space / Solana RPC) — other chains aren't live-synced yet.</div>
+        <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 10 }}>Track-only: store public addresses for bookkeeping, no private keys used. Sync fetches a real balance for bitcoin/solana addresses (mempool.space / Solana RPC) — other chains aren't live-synced yet. Leave Exchange blank for a self-custody wallet, or name the exchange it's held on (Coinbase, Binance, …) to organize which wallets are custodial.</div>
       </div>
       <table className="ares-table">
-        <thead><tr><th>Label</th><th>Chain</th><th>Address</th><th>Balance</th><th>Synced</th><th></th></tr></thead>
+        <thead><tr><th>Label</th><th>Chain</th><th>Address</th><th>Held On</th><th>Balance</th><th>Synced</th><th></th></tr></thead>
         <tbody>
-          {rows.length === 0 && <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No wallets yet.</td></tr>}
-          {rows.map((w: any) => (
-            <tr key={w.id}>
-              <td style={{ fontWeight: 600 }}>{w.label}</td>
-              <td>{w.chain}</td>
-              <td style={{ fontFamily: 'monospace', fontSize: 11, color: 'var(--muted)' }}>{w.address}</td>
-              <td style={{ fontFamily: 'monospace', fontSize: 12 }}>
-                {(w.balances || []).length === 0 ? <span style={{ color: 'var(--muted)' }}>—</span> : w.balances.map((b: any) => `${b.balance} ${b.token}`).join(', ')}
-              </td>
-              <td style={{ fontSize: 11, color: 'var(--muted)' }}>{w.last_synced_at ? timeAgo(w.last_synced_at) : '—'}</td>
-              <td style={{ textAlign: 'right', display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
-                <button className="btn btn-ghost btn-sm" onClick={() => sync(w.id)} disabled={syncingId === w.id} title="Refresh balance from chain">
-                  <RefreshCw size={12} className={syncingId === w.id ? 'spin' : ''} />
-                </button>
-                <button className="btn btn-ghost btn-sm" onClick={() => remove(w.id)}><XCircle size={12} /></button>
-              </td>
-            </tr>
-          ))}
+          {rows.length === 0 && <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No wallets yet.</td></tr>}
+          {rows.map((w: any) => {
+            const editing = editingId === w.id
+            return (
+              <tr key={w.id}>
+                <td style={{ fontWeight: 600 }}>
+                  {editing
+                    ? <input className="ares-input" value={editDraft.label} onChange={e => setEditDraft(d => ({ ...d, label: e.target.value }))} style={{ fontSize: 12, padding: '2px 6px', width: 100 }} />
+                    : w.label}
+                </td>
+                <td>{w.chain}</td>
+                <td style={{ fontFamily: 'monospace', fontSize: 11, color: 'var(--muted)' }}>{w.address}</td>
+                <td>
+                  {editing ? (
+                    <input className="ares-input" placeholder="e.g. Coinbase" value={editDraft.exchange} onChange={e => setEditDraft(d => ({ ...d, exchange: e.target.value }))} style={{ fontSize: 12, padding: '2px 6px', width: 110 }} />
+                  ) : w.exchange ? (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--warning)', border: '1px solid var(--warning)', borderRadius: 4, padding: '1px 6px' }}>
+                      <Landmark size={11} /> {w.exchange}
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: 11, color: 'var(--muted)' }}>Self-custody</span>
+                  )}
+                </td>
+                <td style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                  {(w.balances || []).length === 0 ? <span style={{ color: 'var(--muted)' }}>—</span> : w.balances.map((b: any) => `${b.balance} ${b.token}`).join(', ')}
+                </td>
+                <td style={{ fontSize: 11, color: 'var(--muted)' }}>{w.last_synced_at ? timeAgo(w.last_synced_at) : '—'}</td>
+                <td style={{ textAlign: 'right', display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
+                  {editing ? (
+                    <>
+                      <button className="btn btn-ghost btn-sm" onClick={() => saveEdit(w.id)} title="Save"><Check size={12} /></button>
+                      <button className="btn btn-ghost btn-sm" onClick={() => setEditingId(null)} title="Cancel"><XCircle size={12} /></button>
+                    </>
+                  ) : (
+                    <>
+                      <button className="btn btn-ghost btn-sm" onClick={() => sync(w.id)} disabled={syncingId === w.id} title="Refresh balance from chain">
+                        <RefreshCw size={12} className={syncingId === w.id ? 'spin' : ''} />
+                      </button>
+                      <button className="btn btn-ghost btn-sm" onClick={() => startEdit(w)} title="Edit"><Pencil size={12} /></button>
+                      <button className="btn btn-ghost btn-sm" onClick={() => remove(w.id)}><XCircle size={12} /></button>
+                    </>
+                  )}
+                </td>
+              </tr>
+            )
+          })}
         </tbody>
       </table>
     </div>

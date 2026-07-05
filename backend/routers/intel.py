@@ -2,6 +2,7 @@
 All data geo-unrestricted, no API keys needed."""
 
 import logging, asyncio, json, time, threading
+from typing import Optional
 import httpx
 import aiosqlite
 from fastapi import APIRouter, Query, Request, Depends, HTTPException
@@ -329,16 +330,27 @@ async def get_wallet_trace(request: Request, chain: str, address: str, limit: in
 # one-shot /trace above). No server-side poller exists anywhere in this
 # codebase for market data — the frontend hits /watchlist/refresh on its own
 # interval, same as every other intel tab. ──────────────────────────────────
+ADDRESS_TYPES = {"wallet", "exchange", "contract", "smart_wallet"}
+
 class WatchlistAddRequest(BaseModel):
     chain: str
     address: str
     label: str = ""
+    address_type: str = "wallet"
+    notes: str = ""
+
+class WatchlistUpdateRequest(BaseModel):
+    label: Optional[str] = None
+    address_type: Optional[str] = None
+    notes: Optional[str] = None
 
 @router.post("/watchlist")
 async def add_watchlist_wallet(req: WatchlistAddRequest, agent: dict = Depends(get_agent)):
     """Add a wallet to the shared tracked-wallet watchlist (bitcoin/solana only,
     matching /trace's chain support). Re-adding an existing (chain, address)
-    updates its label instead of erroring."""
+    updates its label/type/notes instead of erroring — organize a personal
+    wallet, an exchange's hot wallet, a token contract (CA), or a smart
+    wallet/multisig, each with its own name and notable-info notes."""
     chain = (req.chain or "").strip().lower()
     if chain not in ("bitcoin", "btc", "solana", "sol"):
         raise HTTPException(422, "chain must be 'bitcoin' or 'solana'")
@@ -346,14 +358,20 @@ async def add_watchlist_wallet(req: WatchlistAddRequest, agent: dict = Depends(g
     address = req.address.strip()
     if not address:
         raise HTTPException(422, "address is required")
+    address_type = (req.address_type or "wallet").strip().lower()
+    if address_type not in ADDRESS_TYPES:
+        raise HTTPException(422, f"address_type must be one of {sorted(ADDRESS_TYPES)}")
+    notes = req.notes.strip()[:2000]
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         await db.execute(
-            """INSERT INTO tracked_wallets (chain, address, label, added_by_agent_id)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(chain, address) DO UPDATE SET label=excluded.label
-               WHERE excluded.label != ''""",
-            (canon, address, req.label.strip(), agent["id"]),
+            """INSERT INTO tracked_wallets (chain, address, label, address_type, notes, added_by_agent_id)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(chain, address) DO UPDATE SET
+                 label=CASE WHEN excluded.label != '' THEN excluded.label ELSE label END,
+                 address_type=excluded.address_type,
+                 notes=CASE WHEN excluded.notes != '' THEN excluded.notes ELSE notes END""",
+            (canon, address, req.label.strip(), address_type, notes, agent["id"]),
         )
         await db.commit()
         async with db.execute(
@@ -370,6 +388,34 @@ async def list_watchlist_wallets(agent: dict = Depends(get_agent)):
         async with db.execute("SELECT * FROM tracked_wallets ORDER BY created_at DESC") as cur:
             rows = [dict(r) for r in await cur.fetchall()]
     return {"wallets": rows, "count": len(rows)}
+
+@router.patch("/watchlist/{wallet_id}")
+async def update_watchlist_wallet(wallet_id: int, req: WatchlistUpdateRequest, agent: dict = Depends(get_agent)):
+    """Rename a tracked wallet, re-tag its address_type, or update its notes —
+    whatever's provided. Any authenticated agent may edit any entry, same as
+    add/remove, since this is shared platform intel."""
+    fields, params = [], []
+    if req.label is not None:
+        fields.append("label=?"); params.append(req.label.strip())
+    if req.address_type is not None:
+        address_type = req.address_type.strip().lower()
+        if address_type not in ADDRESS_TYPES:
+            raise HTTPException(422, f"address_type must be one of {sorted(ADDRESS_TYPES)}")
+        fields.append("address_type=?"); params.append(address_type)
+    if req.notes is not None:
+        fields.append("notes=?"); params.append(req.notes.strip()[:2000])
+    if not fields:
+        raise HTTPException(422, "At least one field (label, address_type, notes) is required")
+    params.append(wallet_id)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(f"UPDATE tracked_wallets SET {', '.join(fields)} WHERE id=?", params)
+        await db.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Wallet not found in watchlist")
+        async with db.execute("SELECT * FROM tracked_wallets WHERE id=?", (wallet_id,)) as cur2:
+            row = await cur2.fetchone()
+    return dict(row)
 
 @router.delete("/watchlist/{wallet_id}")
 async def remove_watchlist_wallet(wallet_id: int, agent: dict = Depends(get_agent)):
