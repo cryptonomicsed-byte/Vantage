@@ -1,4 +1,4 @@
-import React, { Component, ReactNode, useRef, useState } from 'react'
+import React, { Component, ReactNode, useEffect, useRef, useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom'
 import { Radio } from 'lucide-react'
 import HomeFeed from './components/HomeFeed'
@@ -33,6 +33,7 @@ import CopilotDock from './components/CopilotDock'
 import StatusBar from './components/StatusBar'
 import SubNav from './components/SubNav'
 import { getSection, SUB_NAV } from './utils/navigation'
+import { ensureAgentKey, hasStoredAgentKey } from './utils/ensureAgentKey'
 
 /* ── Particles ────────────────────────────────────────────────────────────── */
 function Particles() {
@@ -97,6 +98,27 @@ function AppLayout() {
   const section = getSection(location.pathname)
   const subLinks = SUB_NAV[section]
   const [observerEnabled, setObserverEnabled] = useState(false)
+
+  // Every API call needs X-Agent-Key now (PR #39) — a first-time visitor has
+  // none stored, so give them a throwaway agent identity automatically rather
+  // than showing a login wall. Returning visitors already have a key in
+  // localStorage, so this resolves synchronously and renders with no flash.
+  const [keyReady, setKeyReady] = useState(hasStoredAgentKey)
+  useEffect(() => {
+    if (keyReady) return
+    ensureAgentKey().finally(() => setKeyReady(true))
+  }, [keyReady])
+
+  if (!keyReady) {
+    return (
+      <div className="app-shell">
+        <Particles />
+        <div className="content-area" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}>
+          <div className="loading-text">Connecting…</div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="app-shell">
