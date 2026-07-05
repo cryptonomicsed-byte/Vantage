@@ -192,7 +192,7 @@ export default function MoneyFlowGraph() {
         <button className="btn btn-ghost btn-sm" onClick={load}><RefreshCw size={12} className={loading ? 'spin' : ''} /> Refresh</button>
       </div>
 
-      <div style={{ position: 'relative', height: 560, borderRadius: 12, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.06)', background: 'rgba(5,8,16,0.45)', backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)' }}>
+      <div style={{ position: 'relative', height: 560, borderRadius: 12, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.08)', background: 'radial-gradient(circle at 25% 15%, rgba(138,75,255,0.14), rgba(5,8,16,0.55) 55%)', backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)' }}>
         <div style={{ position: 'absolute', top: 12, left: 14, zIndex: 10, pointerEvents: 'none' }}>
           <div style={{ fontFamily: 'monospace', fontSize: 12, color: '#b9a8ff', letterSpacing: 1, display: 'flex', alignItems: 'center', gap: 6 }}>
             <Share2 size={13} /> MONEY-FLOW GRAPH
