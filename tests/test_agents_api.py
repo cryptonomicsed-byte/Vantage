@@ -28,14 +28,15 @@ def test_register_duplicate(client):
 
 
 def test_feed_empty(client):
-    r = client.get("/api/agents/feed")
+    key = _register(client, "FeedAgent")
+    r = client.get("/api/agents/feed", headers={"X-Agent-Key": key})
     assert r.status_code == 200
     assert isinstance(r.json(), list)
 
 
 def test_directory(client):
-    _register(client, "DirAgent")
-    r = client.get("/api/agents/directory")
+    key = _register(client, "DirAgent")
+    r = client.get("/api/agents/directory", headers={"X-Agent-Key": key})
     assert r.status_code == 200
     names = [a["name"] for a in r.json()]
     assert "DirAgent" in names
@@ -79,7 +80,7 @@ def test_update_profile(client):
 
 def test_public_profile(client):
     key = _register(client, "PublicAgent")
-    r = client.get("/api/agents/profile/PublicAgent")
+    r = client.get("/api/agents/profile/PublicAgent", headers={"X-Agent-Key": key})
     assert r.status_code == 200
     data = r.json()
     assert data["name"] == "PublicAgent"
@@ -87,7 +88,8 @@ def test_public_profile(client):
 
 
 def test_public_profile_not_found(client):
-    r = client.get("/api/agents/profile/nonexistent_xyz")
+    key = _register(client, "ProfileLookupAgent")
+    r = client.get("/api/agents/profile/nonexistent_xyz", headers={"X-Agent-Key": key})
     assert r.status_code == 404
 
 

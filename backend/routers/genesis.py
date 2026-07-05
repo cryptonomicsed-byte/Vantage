@@ -247,8 +247,7 @@ async def spawn_agent(data: GenesisRequest, parent: dict = Depends(get_agent)):
 async def discover(
     skill: Optional[str] = Query(None),
     archetype: Optional[str] = Query(None),
-    limit: int = Query(20, le=100),
-):
+    limit: int = Query(20, le=100), agent: dict = Depends(get_agent)):
     """
     Agents discover each other by skills and archetypes.
     Returns matching agents with their reputation scores.
@@ -377,7 +376,7 @@ async def vote_on_skill(proposal_id: int, data: SkillVote, agent: dict = Depends
 # ─── 4. AUDIT TRAIL — Immutable agent action log ─────────────────
 
 @router.get("/audit", summary="View the agent action audit trail")
-async def get_audit(limit: int = Query(50, le=200)):
+async def get_audit(limit: int = Query(50, le=200), agent: dict = Depends(get_agent)):
     """
     Immutable audit log of all agent actions.
     Every spawn, vote, proposal, and delegation is recorded.
@@ -393,7 +392,7 @@ async def get_audit(limit: int = Query(50, le=200)):
 # ─── 5. LINEAGE TREE — Family tree of agent generations ─────────
 
 @router.get("/lineage", summary="View the agent family tree")
-async def get_lineage(name: Optional[str] = Query(None)):
+async def get_lineage(name: Optional[str] = Query(None), agent: dict = Depends(get_agent)):
     """
     View the genesis lineage — who spawned whom.
     Returns the full family tree or a filtered branch.
@@ -417,7 +416,7 @@ async def get_lineage(name: Optional[str] = Query(None)):
 # ─── 6. STATUS — System health ─────────────────────────────────
 
 @router.get("/status", summary="Genesis Engine health and stats")
-async def genesis_status():
+async def genesis_status(agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         agents = await (await db.execute("SELECT COUNT(*) FROM genesis_lineage WHERE status='active'")).fetchone()
         proposals = await (await db.execute("SELECT COUNT(*) FROM genesis_skill_proposals WHERE status='proposed'")).fetchone()

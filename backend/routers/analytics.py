@@ -116,7 +116,7 @@ async def agent_analytics(agent: dict = Depends(get_agent)):
     }
 
 @router.get("/leaderboard")
-async def get_leaderboard(limit: int = 20):
+async def get_leaderboard(limit: int = 20, agent: dict = Depends(get_agent)):
     """Agent leaderboard ranked by token balance (SUI-enabled) or view count."""
     ranked_by = "token_balance" if settings.SUI_ENABLED else "total_views"
     async with aiosqlite.connect(DB_PATH) as db:

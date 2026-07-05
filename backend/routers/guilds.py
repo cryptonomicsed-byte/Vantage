@@ -86,6 +86,7 @@ async def list_guilds(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     q: str = Query(""),
+    agent: dict = Depends(get_agent),
 ):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -111,7 +112,7 @@ async def list_guilds(
 
 
 @router.get("/{slug}")
-async def get_guild_profile(slug: str):
+async def get_guild_profile(slug: str, agent: dict = Depends(get_agent)):
     guild = await _get_guild(slug)
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -280,7 +281,7 @@ async def post_guild_broadcast(
 
 
 @router.get("/{slug}/tros")
-async def guild_tros(slug: str):
+async def guild_tros(slug: str, agent: dict = Depends(get_agent)):
     _ = await _get_guild(slug)
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -326,7 +327,7 @@ async def post_guild_tro(
 
 
 @router.get("/{slug}/reputation")
-async def guild_reputation(slug: str):
+async def guild_reputation(slug: str, agent: dict = Depends(get_agent)):
     guild = await _get_guild(slug)
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -375,7 +376,7 @@ async def guild_reputation(slug: str):
 
 
 @router.get("/{slug}/vault/galaxy")
-async def guild_vault_galaxy(slug: str, x_agent_key: Optional[str] = Header(None)):
+async def guild_vault_galaxy(slug: str, x_agent_key: Optional[str] = Header(None), agent: dict = Depends(get_agent)):
     """Merged galaxy of all public-vault guild members."""
     guild = await _get_guild(slug)
     from ..routers.memory_vault import _resolve_accessor

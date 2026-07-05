@@ -100,7 +100,7 @@ def _log_activity(action: str, repo: str, detail: str = "", agent: str = "vantag
 # ═══════════════════════════════════════════════════════════════════════════
 
 @router.get("/overview")
-async def code_overview():
+async def code_overview(agent: dict = Depends(get_agent)):
     """Get all repos with Strix scan status, commits, PRs, branches."""
     import time as _time
     now = int(_time.time())
@@ -200,7 +200,7 @@ async def code_overview():
 
 
 @router.get("/repo/{owner}/{name}")
-async def repo_detail(owner: str, name: str):
+async def repo_detail(owner: str, name: str, agent: dict = Depends(get_agent)):
     """Get detailed info for a single repo."""
     full_name = f"{owner}/{name}"
     async with httpx.AsyncClient(timeout=10) as cl:
@@ -212,7 +212,7 @@ async def repo_detail(owner: str, name: str):
     raise HTTPException(404, "Repo not found")
 
 @router.get("/repo/{owner}/{name}/detail")
-async def repo_detail_full(owner: str, name: str):
+async def repo_detail_full(owner: str, name: str, agent: dict = Depends(get_agent)):
     """Comprehensive repo profile — Strix, Gitea stats, collaborators, commits."""
     full_name = f"{owner}/{name}"
     import time as _time, json as _json, os as _os
@@ -617,13 +617,13 @@ async def create_pr(owner: str, name: str, req: CreatePRRequest, agent: dict = D
 
 
 @router.get("/activity")
-async def activity(limit: int = Query(20, ge=1, le=100)):
+async def activity(limit: int = Query(20, ge=1, le=100), agent: dict = Depends(get_agent)):
     """Recent activity feed — pushes, scans, PRs, repo creation."""
     return {"activity": list(reversed(_activity_feed[-limit:])), "total": len(_activity_feed)}
 
 
 @router.get("/stats")
-async def stats():
+async def stats(agent: dict = Depends(get_agent)):
     """Aggregate stats across all repos."""
     overview = await code_overview()
     return {

@@ -126,14 +126,14 @@ async def test_vault_note_links_filters_by_path(client, fresh_agent):
         headers=_h(a),
         json={"to_agent_name": b["name"], "link_type": "references", "note": "knowledge/x.md"},
     )
-    r = await client.get(f"/api/agents/{a['name']}/vault/note-links?path=knowledge/x.md")
+    r = await client.get(f"/api/agents/{a['name']}/vault/note-links?path=knowledge/x.md", headers=_h(a))
     assert r.status_code == 200, r.text
     links = r.json()["links"]
     assert len(links) == 1
     assert links[0]["source_agent_name"] == a["name"]
     assert links[0]["target_agent_name"] == b["name"]
 
-    r2 = await client.get(f"/api/agents/{a['name']}/vault/note-links?path=knowledge/other.md")
+    r2 = await client.get(f"/api/agents/{a['name']}/vault/note-links?path=knowledge/other.md", headers=_h(a))
     assert r2.json()["links"] == []
 
 

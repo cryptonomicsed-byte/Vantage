@@ -110,6 +110,7 @@ async def list_jobs(
     status: Optional[str] = None,
     guild_slug: Optional[str] = None,
     limit: int = Query(50, ge=1, le=200),
+    agent: dict = Depends(get_agent),
 ):
     clauses, params = [], []
     if job_type:
@@ -125,7 +126,7 @@ async def list_jobs(
 
 
 @router.get("/{job_id}")
-async def get_job(job_id: int):
+async def get_job(job_id: int, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         job = await _row(db, "SELECT * FROM jobs WHERE id = ?", (job_id,))
         if not job:

@@ -337,25 +337,25 @@ async def test_address_lookup_unsupported_chain_fails_soft():
 
 
 @pytest.mark.asyncio
-async def test_wallet_trace_endpoint_returns_lookup(client, monkeypatch):
+async def test_wallet_trace_endpoint_returns_lookup(client, monkeypatch, registered_agent):
     async def fake_lookup(chain, address):
         return {"chain": chain, "address": address, "supported": True, "source": "mempool.space",
                 "balance": {"amount": 1.0, "unit": "BTC"}, "tx_count": 0, "transactions": []}
     monkeypatch.setattr(ms, "address_lookup", fake_lookup)
-    r = await client.get("/api/intel/trace/bitcoin/addrA")
+    r = await client.get("/api/intel/trace/bitcoin/addrA", headers=_h(registered_agent))
     assert r.status_code == 200, r.text
     assert r.json()["balance"] == {"amount": 1.0, "unit": "BTC"}
 
 
 @pytest.mark.asyncio
-async def test_dex_pools_endpoint_returns_gecko_terminal_data(client, monkeypatch):
+async def test_dex_pools_endpoint_returns_gecko_terminal_data(client, monkeypatch, registered_agent):
     async def fake_pools(network, kind, limit):
         assert network == "solana" and kind == "new" and limit == 10
         return [{"pair": "FOO/SOL", "pool_address": "p1", "price_usd": 0.01,
                  "liquidity_usd": 1000.0, "volume_24h": 500.0, "change_24h_pct": 5.0,
                  "buys_24h": 10, "sells_24h": 3, "created_at": "2026-07-04T00:00:00Z"}]
     monkeypatch.setattr(ms, "dex_new_pools", fake_pools)
-    r = await client.get("/api/intel/dex/pools?network=solana&kind=new&limit=10")
+    r = await client.get("/api/intel/dex/pools?network=solana&kind=new&limit=10", headers=_h(registered_agent))
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["count"] == 1 and body["pools"][0]["pair"] == "FOO/SOL"
@@ -363,8 +363,8 @@ async def test_dex_pools_endpoint_returns_gecko_terminal_data(client, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_dex_pools_endpoint_rejects_bad_kind(client):
-    r = await client.get("/api/intel/dex/pools?kind=bogus")
+async def test_dex_pools_endpoint_rejects_bad_kind(client, registered_agent):
+    r = await client.get("/api/intel/dex/pools?kind=bogus", headers=_h(registered_agent))
     assert r.status_code == 422
 
 

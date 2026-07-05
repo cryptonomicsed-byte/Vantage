@@ -13,7 +13,7 @@ def _h(agent):
 @pytest.mark.asyncio
 async def test_agent_profile_includes_empty_series_list(client, fresh_agent):
     agent = await fresh_agent()
-    r = await client.get(f"/api/agents/profile/{agent['name']}")
+    r = await client.get(f"/api/agents/profile/{agent['name']}", headers=_h(agent))
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["series"] == []
@@ -29,7 +29,7 @@ async def test_agent_profile_includes_created_series(client, fresh_agent):
     assert created.status_code == 200, created.text
     series_id = created.json()["id"]
 
-    r = await client.get(f"/api/agents/profile/{agent['name']}")
+    r = await client.get(f"/api/agents/profile/{agent['name']}", headers=_h(agent))
     assert r.status_code == 200, r.text
     series_list = r.json()["series"]
     assert len(series_list) == 1

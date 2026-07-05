@@ -816,7 +816,7 @@ async def vimax_generate(project_id: int, agent: dict = Depends(get_agent)):
         return {"ok": False, "error": f"ViMax unavailable: {str(e)[:200]}"}
 
 @router.get("/vimax-status")
-async def vimax_status():
+async def vimax_status(agent: dict = Depends(get_agent)):
     """Check if ViMax creative agent is online."""
     import httpx
     try:

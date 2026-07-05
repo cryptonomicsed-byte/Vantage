@@ -56,7 +56,7 @@ async def sync_vault(agent_name: str, agent: dict = Depends(get_agent)):
     return {"status": "synced"}
 
 @router.get("/{agent_name}/vault/config")
-async def get_vault_config(agent_name: str):
+async def get_vault_config(agent_name: str, agent: dict = Depends(get_agent)):
     target = await _resolve_agent(agent_name)
     vault = MemoryVault(target["id"], target["name"])
     config = await vault.get_config()
@@ -85,8 +85,7 @@ async def update_vault_config(
 async def get_galaxy_data(
     agent_name: str,
     x_agent_key: Optional[str] = Header(None),
-    x_federation_peer: Optional[str] = Header(None),
-):
+    x_federation_peer: Optional[str] = Header(None), agent: dict = Depends(get_agent)):
     target = await _resolve_agent(agent_name)
     vault = MemoryVault(target["id"], target["name"])
     accessor_id = await _resolve_accessor(x_agent_key)
@@ -105,8 +104,7 @@ async def search_vault(
     agent_name: str,
     q: str = Query(..., min_length=1),
     x_agent_key: Optional[str] = Header(None),
-    x_federation_peer: Optional[str] = Header(None),
-):
+    x_federation_peer: Optional[str] = Header(None), agent: dict = Depends(get_agent)):
     target = await _resolve_agent(agent_name)
     vault = MemoryVault(target["id"], target["name"])
     accessor_id = await _resolve_accessor(x_agent_key)
@@ -152,8 +150,7 @@ async def get_access_log(
 @router.get("/{agent_name}/vault/download")
 async def download_vault(
     agent_name: str,
-    x_agent_key: Optional[str] = Header(None),
-):
+    x_agent_key: Optional[str] = Header(None), agent: dict = Depends(get_agent)):
     target = await _resolve_agent(agent_name)
     vault = MemoryVault(target["id"], target["name"])
     accessor_id = await _resolve_accessor(x_agent_key)
@@ -181,8 +178,7 @@ _EXCLUDED_EXPORT_FILES = OKF_RESERVED_FILENAMES | {"README.md", "SOUL.md"}
 async def export_vault_universal(
     agent_name: str,
     format: Literal["universal"] = Query("universal"),
-    x_agent_key: Optional[str] = Header(None),
-):
+    x_agent_key: Optional[str] = Header(None), agent: dict = Depends(get_agent)):
     """Portable JSON export — round-trips through POST /vault/import."""
     target = await _resolve_agent(agent_name)
     vault = MemoryVault(target["id"], target["name"])
@@ -333,8 +329,7 @@ def _ttl_literal(s: str) -> str:
 @router.get("/{agent_name}/vault/graph.ttl")
 async def export_vault_ttl(
     agent_name: str,
-    x_agent_key: Optional[str] = Header(None),
-):
+    x_agent_key: Optional[str] = Header(None), agent: dict = Depends(get_agent)):
     """RDF/Turtle export of the vault's knowledge — Knowledge Triples become
     real subject/predicate/object statements; every other concept gets a
     label + type statement so the whole vault is one linked-data graph."""
@@ -400,8 +395,7 @@ async def search_vault_sessions(
     q: str = Query(..., min_length=1),
     limit: int = Query(20, ge=1, le=100),
     x_agent_key: Optional[str] = Header(None),
-    x_federation_peer: Optional[str] = Header(None),
-):
+    x_federation_peer: Optional[str] = Header(None), agent: dict = Depends(get_agent)):
     """Full-text search scoped to traces/ (Ghost Traces / thought sessions) —
     the general /vault/search spans every family; this is the Traces-tab
     variant the UI's Sessions search box calls."""
@@ -438,8 +432,7 @@ async def get_vault_file(
     agent_name: str,
     path: str,
     x_agent_key: Optional[str] = Header(None),
-    x_federation_peer: Optional[str] = Header(None),
-):
+    x_federation_peer: Optional[str] = Header(None), agent: dict = Depends(get_agent)):
     target = await _resolve_agent(agent_name)
     vault = MemoryVault(target["id"], target["name"])
     accessor_id = await _resolve_accessor(x_agent_key)
@@ -462,8 +455,7 @@ async def get_vault_file(
 async def get_vault_stats(
     agent_name: str,
     x_agent_key: Optional[str] = Header(None),
-    x_federation_peer: Optional[str] = Header(None),
-):
+    x_federation_peer: Optional[str] = Header(None), agent: dict = Depends(get_agent)):
     target = await _resolve_agent(agent_name)
     vault = MemoryVault(target["id"], target["name"])
     accessor_id = await _resolve_accessor(x_agent_key)
@@ -531,7 +523,7 @@ async def create_vault_note(
 # ── Cross-agent memory links ──────────────────────────────────────────────────
 
 @router.get("/{agent_name}/vault/links")
-async def get_memory_links(agent_name: str):
+async def get_memory_links(agent_name: str, agent: dict = Depends(get_agent)):
     target = await _resolve_agent(agent_name)
     agent_id = target["id"]
     async with aiosqlite.connect(DB_PATH) as db:
@@ -546,7 +538,7 @@ async def get_memory_links(agent_name: str):
 
 
 @router.get("/{agent_name}/vault/note-links")
-async def get_note_links(agent_name: str, path: str = Query(...)):
+async def get_note_links(agent_name: str, path: str = Query(...), agent: dict = Depends(get_agent)):
     """Links touching one specific note (used by the star-detail panel),
     as opposed to /vault/links which returns every link for the agent."""
     target = await _resolve_agent(agent_name)

@@ -162,7 +162,7 @@ async def agent_heartbeat(
 # ── block queries (public) ─────────────────────────────────────────────────────────────
 
 @router.get("/blocks/{block_id}")
-async def get_block(block_id: str):
+async def get_block(block_id: str, agent: dict = Depends(get_agent)):
     """Full block snapshot: active agents, open proposals, available resources."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -199,7 +199,7 @@ async def get_block(block_id: str):
 
 
 @router.get("/blocks/{block_id}/agents")
-async def get_block_agents(block_id: str, filter: str = "", capabilities: int = 0):
+async def get_block_agents(block_id: str, filter: str = "", capabilities: int = 0, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         sql = "SELECT * FROM mesh_agents WHERE block_id=? AND status='active'"
@@ -220,7 +220,7 @@ async def get_block_agents(block_id: str, filter: str = "", capabilities: int = 
 
 
 @router.get("/blocks/{block_id}/events")
-async def block_events(block_id: str, limit: int = 50):
+async def block_events(block_id: str, limit: int = 50, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -279,7 +279,7 @@ async def create_proposal(request: Request, agent: dict = Depends(get_agent)):
 
 
 @router.get("/proposals/{block_id}")
-async def list_proposals(block_id: str, status: str = "open"):
+async def list_proposals(block_id: str, status: str = "open", agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -298,7 +298,7 @@ async def list_proposals(block_id: str, status: str = "open"):
 
 
 @router.get("/proposal/{proposal_id}")
-async def get_proposal(proposal_id: str):
+async def get_proposal(proposal_id: str, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM mesh_proposals WHERE id=?", (proposal_id,)) as cur:
@@ -426,7 +426,7 @@ async def register_resource(request: Request, agent: dict = Depends(get_agent)):
 
 
 @router.get("/resources/{block_id}")
-async def list_resources(block_id: str, filter: str = ""):
+async def list_resources(block_id: str, filter: str = "", agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         sql = "SELECT * FROM mesh_resources WHERE block_id=?"
@@ -517,7 +517,7 @@ async def release_resource(
 # ── trust ──────────────────────────────────────────────────────────────────────────────────
 
 @router.get("/trust/{agent_id}")
-async def get_trust(agent_id: str, block_id: str = ""):
+async def get_trust(agent_id: str, block_id: str = "", agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         if block_id:
@@ -574,7 +574,7 @@ async def record_trust_signal(
 
 
 @router.get("/blocks/{block_id}/neighbors/suggest")
-async def suggest_block_neighbors(block_id: str, for_agent: str = "", limit: int = 10):
+async def suggest_block_neighbors(block_id: str, for_agent: str = "", limit: int = 10, agent: dict = Depends(get_agent)):
     """Suggest neighbors for an agent based on trust score and activity."""
     suggestions = await suggest_neighbors(block_id, for_agent, limit=limit)
     return {"suggestions": suggestions}
