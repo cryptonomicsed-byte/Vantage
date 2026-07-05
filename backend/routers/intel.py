@@ -629,7 +629,7 @@ _signal_lock = threading.Lock()
 MAX_POOL_SIZE = 200
 
 @router.post("/signals/ingest")
-async def ingest_signal(payload: dict):
+async def ingest_signal(payload: dict, agent: dict = Depends(get_agent)):
     """Accept a signal from any source (predictor, trading agents, ingester).
     Stored in in-memory pool, returned by GET /signals alongside live data."""
     required = ["symbol", "source", "type"]

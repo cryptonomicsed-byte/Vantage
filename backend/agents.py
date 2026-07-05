@@ -5764,7 +5764,7 @@ async def delete_knowledge_snippet(snippet_id: int, agent: dict = Depends(get_ag
 
 
 @router.post("/knowledge/query", tags=["platform"])
-async def vql_query(request: Request):
+async def vql_query(request: Request, agent: dict = Depends(get_agent)):
     """
     Vantage Query Language (VQL) — path traversal on the knowledge graph.
     Query by subject/predicate/object with wildcards (*), specify depth for hop traversal.

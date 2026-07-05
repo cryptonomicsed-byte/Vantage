@@ -1482,7 +1482,7 @@ class TestVQL:
             json={"subject": "VQLSubject", "predicate": "knows", "object": "VQLObject", "confidence": 0.9},
             headers=_headers(key),
         )
-        r = client.post("/api/agents/knowledge/query", json={"subject": "VQLSubject"})
+        r = client.post("/api/agents/knowledge/query", json={"subject": "VQLSubject"}, headers=_headers(key))
         assert r.status_code == 200
         data = r.json()
         assert "results" in data
@@ -1501,7 +1501,7 @@ class TestVQL:
             json={"subject": "TopicA", "predicate": "unrelated", "object": "TopicC"},
             headers=_headers(key),
         )
-        r = client.post("/api/agents/knowledge/query", json={"subject": "TopicA", "predicate": "rel_to"})
+        r = client.post("/api/agents/knowledge/query", json={"subject": "TopicA", "predicate": "rel_to"}, headers=_headers(key))
         assert r.status_code == 200
         preds = [row["predicate"] for row in r.json()["results"]]
         assert all(p == "rel_to" for p in preds)
@@ -1521,6 +1521,7 @@ class TestVQL:
         r = client.post(
             "/api/agents/knowledge/query",
             json={"subject": "ConfSubject", "min_confidence": 0.5},
+            headers=_headers(key),
         )
         assert r.status_code == 200
         objects = [row["object"] for row in r.json()["results"]]
@@ -1543,6 +1544,7 @@ class TestVQL:
         r = client.post(
             "/api/agents/knowledge/query",
             json={"subject": "NodeA", "depth": 2},
+            headers=_headers(key),
         )
         assert r.status_code == 200
         subjects = {row["subject"] for row in r.json()["results"]}
@@ -1556,7 +1558,7 @@ class TestVQL:
             json={"subject": "AnySubject", "predicate": "any_pred", "object": "AnyObj"},
             headers=_headers(key),
         )
-        r = client.post("/api/agents/knowledge/query", json={"subject": "*", "predicate": "*", "object": "*"})
+        r = client.post("/api/agents/knowledge/query", json={"subject": "*", "predicate": "*", "object": "*"}, headers=_headers(key))
         assert r.status_code == 200
         assert r.json()["result_count"] >= 1
 
@@ -1576,6 +1578,7 @@ class TestVQL:
         r = client.post(
             "/api/agents/knowledge/query",
             json={"subject": "FilterSubject", "agent_filter": "VQLAgentFilter1"},
+            headers=_headers(key1),
         )
         assert r.status_code == 200
         objects = [row["object"] for row in r.json()["results"]]

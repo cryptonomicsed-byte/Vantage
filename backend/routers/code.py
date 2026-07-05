@@ -639,7 +639,7 @@ async def stats():
 
 
 @router.post("/search")
-async def search_code(req: SearchRequest):
+async def search_code(req: SearchRequest, agent: dict = Depends(get_agent)):
     """Search code across repos (grep-style)."""
     results = []
     search_dir = os.path.join(SCAN_DIR, "search_cache")
