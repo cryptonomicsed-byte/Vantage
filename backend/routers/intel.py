@@ -1136,3 +1136,65 @@ async def memory_graph(agent_name: str = None, limit: int = 80, agent: dict = De
         "groups": list(galaxies.keys()),
         "timestamp": int(_time.time()),
     }
+
+@router.get('/daily')
+async def daily_intel(limit: int = Query(10, ge=1, le=50)):
+    import aiosqlite
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, title, post_content, created_at FROM broadcasts WHERE content_type='intel' ORDER BY created_at DESC LIMIT ?",
+            (limit,)
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    return {'reports': rows, 'count': len(rows)}
+
+@router.get('/wallet/generate')
+async def generate_wallet(chain: str = Query('solana'), agent: dict = Depends(get_agent)):
+    import sys as _s; _s.path.insert(0, '/opt/ares')
+    from ares_bip39 import generate_mnemonic, mnemonic_to_seed, BIPON39_WORDLIST
+    from solders.keypair import Keypair
+    import hashlib as _hl
+
+    mnemonic = generate_mnemonic(256)
+    seed = mnemonic_to_seed(mnemonic)
+    words = mnemonic.split()
+
+    # IfaScript elemental analysis
+    MACRO_GROUPS = {
+        'ESU': (0, 87), 'SANGO': (88, 143), 'OSUN': (144, 179),
+        'YEMOJA': (180, 215), 'OYA': (216, 251), 'OGUN': (252, 263),
+        'OBATALA': (264, 275),
+    }
+    macros = {'air': 0, 'earth': 0, 'fire': 0, 'water': 0}
+    macro_dist = {}
+    for w in words:
+        idx = BIPON39_WORDLIST.index(w) if w in BIPON39_WORDLIST else 0
+        for mg_name, (lo, hi) in MACRO_GROUPS.items():
+            if lo <= idx <= hi:
+                macro_dist[mg_name] = macro_dist.get(mg_name, 0) + 1
+                if mg_name in ('ESU', 'OYA'): macros['air'] += 1
+                elif mg_name in ('OGUN', 'SANGO'): macros['fire'] += 1
+                elif mg_name in ('OSUN', 'YEMOJA'): macros['water'] += 1
+                elif mg_name == 'OBATALA': macros['earth'] += 1
+                break
+    dominant = max(macro_dist, key=macro_dist.get) if macro_dist else 'ESU'
+    ifascript = {'dominant_macro': dominant, 'elemental_signature': macros, 'macro_distribution': macro_dist}
+
+    if chain == 'solana':
+        kp = Keypair.from_seed(seed[:32])
+        addr = str(kp.pubkey())
+        pk = seed[:32].hex()
+    elif chain == 'ethereum':
+        pk = seed[:32].hex()
+        addr = '0x' + _hl.sha3_256(seed[32:64]).hexdigest()[-40:]
+    else:
+        addr = '0x' + seed[:20].hex()
+        pk = seed[:32].hex()
+
+    return {
+        'chain': chain, 'address': addr, 'mnemonic': mnemonic,
+        'private_key': pk, 'word_count': len(words),
+        'ifascript': ifascript,
+        'warning': 'SAVE THESE NOW. Never stored. Cannot be recovered.'
+    }
