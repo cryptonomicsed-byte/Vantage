@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, Waypoints } from 'lucide-react'
+import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, Waypoints, ListOrdered, Eye, Plus, Trash2, Share2, Pencil, Check, X, Brain } from 'lucide-react'
+import MoneyFlowGraph from '../MoneyFlowGraph'
+import AgentIntel from './AgentIntel'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Analytics — the deep-dive lenses behind Trading's default Dashboard tab. These
@@ -30,6 +32,20 @@ function useAresApi(path: string, interval = 60000) {
   }, [path])
   useEffect(() => { load(); const t = setInterval(load, interval); return () => clearInterval(t) }, [load, interval])
   return { data, loading, refresh: load }
+}
+
+// Watchlist is the one intel endpoint group that's agent-authenticated (add/
+// remove/refresh mutate shared state) — mirrors Portfolio.tsx's localStorage
+// 'vantage_api_key' → X-Agent-Key pattern.
+function agentKey(): string {
+  return localStorage.getItem('vantage_api_key') || ''
+}
+
+async function intelAuthApi(path: string, opts: RequestInit = {}): Promise<Response> {
+  return fetch(`/api/intel${path}`, {
+    ...opts,
+    headers: { 'X-Agent-Key': agentKey(), 'Content-Type': 'application/json', ...(opts.headers || {}) },
+  })
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -314,6 +330,59 @@ function AresDex() {
   )
 }
 
+function AresAllTokens() {
+  const [network, setNetwork] = useState('solana')
+  const [kind, setKind] = useState<'trending' | 'new'>('trending')
+  const [data, setData] = useState<any>(null)
+  const [loading, setLoading] = useState(false)
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const r = await fetch(`/api/intel/dex/pools?network=${encodeURIComponent(network)}&kind=${kind}&limit=50`)
+      if (r.ok) setData(await r.json())
+    } catch {}
+    setLoading(false)
+  }, [network, kind])
+  useEffect(() => { load() }, [load])
+  const pools = data?.pools || []
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
+        <select className="ares-input" value={network} onChange={e => setNetwork(e.target.value)} style={{ maxWidth: 160 }}>
+          <option value="solana">Solana</option>
+          <option value="eth">Ethereum</option>
+          <option value="base">Base</option>
+        </select>
+        <button className={`btn btn-sm ${kind === 'trending' ? 'btn-primary' : ''}`} onClick={() => setKind('trending')}>Trending</button>
+        <button className={`btn btn-sm ${kind === 'new' ? 'btn-primary' : ''}`} onClick={() => setKind('new')}>New</button>
+        <button className="btn btn-ghost btn-sm" onClick={load}>Refresh</button>
+      </div>
+      <div className="ares-section-title">
+        {pools.length} pools — every pair currently trading, not just top-ranked tokens {loading && <span style={{ fontSize: 11, color: 'var(--muted)' }}>loading…</span>}
+      </div>
+      <div className="dash-panel" style={{ maxHeight: 560, overflowY: 'auto', padding: 0 }}>
+        <table className="ares-table">
+          <thead><tr><th>Pair</th><th>Price</th><th>Liquidity</th><th>Vol 24h</th><th>24h</th><th>Buys/Sells 24h</th><th>Created</th></tr></thead>
+          <tbody>
+            {pools.length === 0 && <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No pools.</td></tr>}
+            {pools.map((p: any, i: number) => (
+              <tr key={i}>
+                <td style={{ fontWeight: 600 }}>{p.pair}</td>
+                <td style={{ fontFamily: 'monospace' }}>{p.price_usd != null ? '$' + Number(p.price_usd).toPrecision(4) : '—'}</td>
+                <td style={{ fontFamily: 'monospace' }}>{p.liquidity_usd ? '$' + (p.liquidity_usd / 1e3).toFixed(0) + 'K' : '—'}</td>
+                <td style={{ fontFamily: 'monospace' }}>{p.volume_24h ? '$' + (p.volume_24h / 1e3).toFixed(0) + 'K' : '—'}</td>
+                <td style={{ color: (p.change_24h_pct || 0) >= 0 ? 'var(--green)' : 'var(--danger)', fontWeight: 700 }}>{p.change_24h_pct != null ? p.change_24h_pct.toFixed(1) + '%' : '—'}</td>
+                <td style={{ fontSize: 11, color: 'var(--muted)' }}>{p.buys_24h ?? '—'} / {p.sells_24h ?? '—'}</td>
+                <td style={{ fontSize: 10, color: 'var(--muted)' }}>{p.created_at ? new Date(p.created_at).toLocaleString() : '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 function AresWhales() {
   const { data, loading } = useAresApi('/api/intel/whales', 30000)
   const txs = data?.transactions || []
@@ -513,7 +582,7 @@ function AresTrace() {
             <div style={{ color: 'var(--muted)', padding: 20 }}>{data.reason || 'No recent transactions.'}</div>
           ) : (
             <table className="ares-table">
-              <thead><tr><th>Direction</th><th>Amount</th><th>Fee</th><th>Counterparties</th></tr></thead>
+              <thead><tr><th>Direction</th><th>Amount</th><th>Fee</th><th>Counterparties</th><th>SPL Tokens</th></tr></thead>
               <tbody>
                 {data.transactions.map((t: any, i: number) => (
                   <tr key={i}>
@@ -533,6 +602,26 @@ function AresTrace() {
                         </button>
                       ))}
                     </td>
+                    <td>
+                      {(t.token_transfers || []).map((tt: any, k: number) => (
+                        <div key={k} style={{ marginBottom: 4 }}>
+                          <span style={{ fontFamily: 'monospace', fontSize: 10, color: tt.direction === 'in' ? 'var(--green)' : 'var(--danger)' }}>
+                            {tt.direction === 'in' ? '+' : '−'}{tt.amount} <span style={{ color: 'var(--muted)' }}>{tt.mint.slice(0, 4)}…{tt.mint.slice(-4)}</span>
+                          </span>
+                          {(tt.counterparties || []).map((c: any, j: number) => (
+                            <button
+                              key={j}
+                              className="btn btn-ghost btn-sm"
+                              onClick={() => pivot(c.address)}
+                              title={`${c.role} · ${c.amount}`}
+                              style={{ fontFamily: 'monospace', fontSize: 10, marginLeft: 4 }}
+                            >
+                              {c.address.slice(0, 6)}…{c.address.slice(-4)}
+                            </button>
+                          ))}
+                        </div>
+                      ))}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -540,6 +629,197 @@ function AresTrace() {
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+const ADDRESS_TYPE_LABELS: Record<string, string> = {
+  wallet: 'Wallet', exchange: 'Exchange', contract: 'Contract (CA)', smart_wallet: 'Smart Wallet',
+}
+const ADDRESS_TYPE_COLORS: Record<string, string> = {
+  wallet: '#00f5ff', exchange: '#f59e0b', contract: '#a855f7', smart_wallet: '#4ade80',
+}
+function TypeBadge({ type }: { type: string }) {
+  const color = ADDRESS_TYPE_COLORS[type] || '#8892a6'
+  return (
+    <span style={{ fontSize: 10, fontWeight: 700, color, border: `1px solid ${color}`, borderRadius: 4, padding: '1px 6px', whiteSpace: 'nowrap' }}>
+      {ADDRESS_TYPE_LABELS[type] || type}
+    </span>
+  )
+}
+
+function AresWatchlist() {
+  const [chain, setChain] = useState('solana')
+  const [address, setAddress] = useState('')
+  const [label, setLabel] = useState('')
+  const [addressType, setAddressType] = useState('wallet')
+  const [notes, setNotes] = useState('')
+  const [wallets, setWallets] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+  const [adding, setAdding] = useState(false)
+  const [authError, setAuthError] = useState(false)
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [editDraft, setEditDraft] = useState<{ label: string; address_type: string; notes: string }>({ label: '', address_type: 'wallet', notes: '' })
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const r = await intelAuthApi('/watchlist/refresh')
+      if (r.status === 401) {
+        setAuthError(true)
+      } else if (r.ok) {
+        setAuthError(false)
+        const d = await r.json()
+        setWallets(d.wallets || [])
+      }
+    } catch { /* offline — keep last-known list */ }
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { load(); const t = setInterval(load, 45000); return () => clearInterval(t) }, [load])
+
+  async function addWallet() {
+    if (!address.trim()) return
+    setAdding(true)
+    try {
+      const r = await intelAuthApi('/watchlist', {
+        method: 'POST',
+        body: JSON.stringify({ chain, address: address.trim(), label: label.trim(), address_type: addressType, notes: notes.trim() }),
+      })
+      if (r.status === 401) setAuthError(true)
+      else if (r.ok) { setAddress(''); setLabel(''); setNotes(''); setAddressType('wallet'); await load() }
+    } catch { /* ignore */ }
+    setAdding(false)
+  }
+
+  async function removeWallet(id: number) {
+    try {
+      const r = await intelAuthApi(`/watchlist/${id}`, { method: 'DELETE' })
+      if (r.ok) setWallets(prev => prev.filter(w => w.id !== id))
+    } catch { /* ignore */ }
+  }
+
+  function startEdit(w: any) {
+    setEditingId(w.id)
+    setEditDraft({ label: w.label || '', address_type: w.address_type || 'wallet', notes: w.notes || '' })
+  }
+
+  async function saveEdit(id: number) {
+    try {
+      const r = await intelAuthApi(`/watchlist/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(editDraft),
+      })
+      if (r.ok) {
+        const updated = await r.json()
+        setWallets(prev => prev.map(w => (w.id === id ? { ...w, ...updated } : w)))
+        setEditingId(null)
+      }
+    } catch { /* ignore */ }
+  }
+
+  if (authError) {
+    return (
+      <div style={{ color: 'var(--muted)', padding: 20 }}>
+        Set your agent API key (Settings → API Docs) to add and view tracked wallets — the watchlist is agent-authenticated, shared across the whole platform.
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+        <select className="ares-input" value={chain} onChange={e => setChain(e.target.value)} style={{ maxWidth: 120 }}>
+          <option value="solana">Solana</option>
+          <option value="bitcoin">Bitcoin</option>
+        </select>
+        <input
+          className="ares-input"
+          placeholder="Wallet address"
+          value={address}
+          onChange={e => setAddress(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && addWallet()}
+          style={{ minWidth: 220, flex: 1 }}
+        />
+        <input
+          className="ares-input"
+          placeholder="Label (optional)"
+          value={label}
+          onChange={e => setLabel(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && addWallet()}
+          style={{ maxWidth: 150 }}
+        />
+        <select className="ares-input" value={addressType} onChange={e => setAddressType(e.target.value)} style={{ maxWidth: 140 }} title="What kind of address is this?">
+          {Object.entries(ADDRESS_TYPE_LABELS).map(([id, lbl]) => <option key={id} value={id}>{lbl}</option>)}
+        </select>
+        <input
+          className="ares-input"
+          placeholder="Notes (optional)"
+          value={notes}
+          onChange={e => setNotes(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && addWallet()}
+          style={{ minWidth: 160, flex: 1 }}
+        />
+        <button className="btn btn-primary btn-sm" onClick={addWallet} disabled={adding}><Plus size={14} /> Track</button>
+        <button className="btn btn-ghost btn-sm" onClick={load}>Refresh</button>
+      </div>
+      <div className="ares-section-title">
+        {wallets.length} tracked wallet{wallets.length === 1 ? '' : 's'} — large recent balance moves are flagged as whale activity {loading && <span style={{ fontSize: 11, color: 'var(--muted)' }}>refreshing…</span>}
+      </div>
+      <div className="dash-panel" style={{ maxHeight: 560, overflowY: 'auto', padding: 0 }}>
+        <table className="ares-table">
+          <thead><tr><th>Chain</th><th>Address</th><th>Type</th><th>Label</th><th>Notes</th><th>Balance</th><th>Tx Count</th><th>Whale</th><th></th></tr></thead>
+          <tbody>
+            {wallets.length === 0 && <tr><td colSpan={9} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No tracked wallets yet — add one above.</td></tr>}
+            {wallets.map((w: any) => {
+              const editing = editingId === w.id
+              return (
+                <tr key={w.id} className={w.whale_activity ? 'threat-high' : ''}>
+                  <td style={{ textTransform: 'capitalize' }}>{w.chain}</td>
+                  <td style={{ fontFamily: 'monospace', fontSize: 11 }} title={w.address}>{w.address.slice(0, 6)}…{w.address.slice(-4)}</td>
+                  <td>
+                    {editing ? (
+                      <select className="ares-input" value={editDraft.address_type} onChange={e => setEditDraft(d => ({ ...d, address_type: e.target.value }))} style={{ fontSize: 11, padding: '2px 6px' }}>
+                        {Object.entries(ADDRESS_TYPE_LABELS).map(([id, lbl]) => <option key={id} value={id}>{lbl}</option>)}
+                      </select>
+                    ) : <TypeBadge type={w.address_type || 'wallet'} />}
+                  </td>
+                  <td>
+                    {editing
+                      ? <input className="ares-input" value={editDraft.label} onChange={e => setEditDraft(d => ({ ...d, label: e.target.value }))} style={{ fontSize: 11, padding: '2px 6px', width: 100 }} />
+                      : (w.label || '—')}
+                  </td>
+                  <td style={{ maxWidth: 220 }}>
+                    {editing
+                      ? <input className="ares-input" value={editDraft.notes} onChange={e => setEditDraft(d => ({ ...d, notes: e.target.value }))} style={{ fontSize: 11, padding: '2px 6px', width: '100%' }} />
+                      : <span title={w.notes || ''} style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11, color: 'var(--muted)' }}>{w.notes || '—'}</span>}
+                  </td>
+                  <td style={{ fontFamily: 'monospace' }}>{w.balance ? `${w.balance.amount} ${w.balance.unit}` : '—'}</td>
+                  <td style={{ fontSize: 11, color: 'var(--muted)' }}>{w.tx_count ?? '—'}</td>
+                  <td>
+                    {w.whale_activity
+                      ? <span style={{ fontSize: 10, fontWeight: 700, color: '#ff2d4a', border: '1px solid #ff2d4a', borderRadius: 4, padding: '1px 6px', textTransform: 'uppercase', letterSpacing: 0.5 }}>Whale</span>
+                      : <span style={{ color: 'var(--muted)' }}>—</span>}
+                  </td>
+                  <td style={{ whiteSpace: 'nowrap' }}>
+                    {editing ? (
+                      <>
+                        <button className="btn btn-ghost btn-sm" onClick={() => saveEdit(w.id)} title="Save"><Check size={12} /></button>
+                        <button className="btn btn-ghost btn-sm" onClick={() => setEditingId(null)} title="Cancel"><X size={12} /></button>
+                      </>
+                    ) : (
+                      <>
+                        <button className="btn btn-ghost btn-sm" onClick={() => startEdit(w)} title="Edit"><Pencil size={12} /></button>
+                        <button className="btn btn-ghost btn-sm" onClick={() => removeWallet(w.id)} title="Remove from watchlist"><Trash2 size={12} /></button>
+                      </>
+                    )}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }
@@ -555,13 +835,17 @@ const INTEL_TABS = [
   { id: 'alpha',     label: 'Alpha',     icon: TrendingUp },
   { id: 'yields',    label: 'Yields',    icon: Layers },
   { id: 'dex',       label: 'DEX',       icon: Droplets },
+  { id: 'alltokens', label: 'All Tokens', icon: ListOrdered },
   { id: 'whales',    label: 'Whales',    icon: Waves },
+  { id: 'watchlist', label: 'Watchlist', icon: Eye },
+  { id: 'moneyflow', label: 'Money Flow', icon: Share2 },
   { id: 'fx',        label: 'FX',        icon: DollarSign },
   { id: 'backtest',  label: 'Backtest',  icon: History },
   { id: 'sentiment', label: 'Sentiment', icon: Zap },
   { id: 'health',    label: 'Health',    icon: Activity },
   { id: 'sources',   label: 'Sources',   icon: Database },
   { id: 'intel',     label: 'Raw Intel', icon: BarChart3 },
+  { id: 'agent-intel', label: 'Agent Intel', icon: Brain },
 ]
 
 export default function MarketIntel() {
@@ -581,13 +865,17 @@ export default function MarketIntel() {
       {tab === 'alpha' && <AresAlpha />}
       {tab === 'yields' && <AresYields />}
       {tab === 'dex' && <AresDex />}
+      {tab === 'alltokens' && <AresAllTokens />}
       {tab === 'whales' && <AresWhales />}
+      {tab === 'watchlist' && <AresWatchlist />}
+      {tab === 'moneyflow' && <MoneyFlowGraph />}
       {tab === 'fx' && <AresFx />}
       {tab === 'backtest' && <AresBacktest />}
       {tab === 'sentiment' && <AresSentiment />}
       {tab === 'health' && <AresHealth />}
       {tab === 'sources' && <AresSources />}
       {tab === 'intel' && <AresIntel />}
+      {tab === 'agent-intel' && <AgentIntel />}
     </div>
   )
 }

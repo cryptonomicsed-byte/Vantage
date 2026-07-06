@@ -926,3 +926,15 @@ async def memory_graph(agent_name: str = None, limit: int = 80):
         "groups": list(galaxies.keys()),
         "timestamp": int(_time.time()),
     }
+
+@router.get('/daily')
+async def daily_intel(limit: int = Query(10, ge=1, le=50)):
+    import aiosqlite
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, title, post_content, created_at FROM broadcasts WHERE content_type='intel' ORDER BY created_at DESC LIMIT ?",
+            (limit,)
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    return {'reports': rows, 'count': len(rows)}

@@ -510,8 +510,12 @@ app.include_router(collectives_router)
 app.include_router(orchestrator_router)
 from .routers.memory_enrichment import router as memory_enrichment_router
 app.include_router(memory_enrichment_router)
+from .routers.telegram_webhook import router as telegram_router
+from .routers.pumpfun import router as pumpfun_router
 from .routers.mesh import router as mesh_router
 app.include_router(mesh_router)
+app.include_router(pumpfun_router)
+app.include_router(telegram_router)
 from .routers.manifesto import router as manifesto_router
 app.include_router(manifesto_router)
 from .routers.copilot import router as copilot_router
