@@ -247,6 +247,9 @@ async def sync_wallet(wallet_id: int, agent: dict = Depends(get_agent)):
             "UPDATE trading_wallets SET last_synced_at=datetime('now') WHERE id=? AND agent_id=?",
             (wallet_id, agent["id"])
         )
+        # Keep the equity curve synced: refresh today's net-worth point from the
+        # freshly-synced linked-wallet balances.
+        await _upsert_networth_snapshot(db, agent["id"])
         await db.commit()
     return {"status": status, "wallet_id": wallet_id}
 
@@ -913,3 +916,210 @@ async def auto_snapshot(agent: dict = Depends(get_agent)):
         )
         await db.commit()
     return {"status": "snapshot_saved", "date": today, "portfolio_value_usd": value}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LINKED-WALLET LEDGER — real on-chain holdings, activity, per-trade P&L, equity.
+#
+# The honest ledger is sourced from the agent's LINKED WALLETS, not manually
+# logged orders: trades come from wallet_trades (populated by the wallet_tracker
+# daemon), holdings from trading_balances (wallet sync), and net worth/equity is
+# the live USD value of those balances. Everything below is agent-scoped by
+# joining wallet_trades / trading_balances back to trading_wallets.agent_id.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Schema the wallet_tracker daemon writes; created here too so the endpoints work
+# before the daemon has ever run.
+_WALLET_TRADES_DDL = """
+CREATE TABLE IF NOT EXISTS wallet_trades (
+    signature    TEXT PRIMARY KEY,
+    wallet       TEXT,
+    timestamp    INTEGER,
+    ts_iso       TEXT,
+    type         TEXT,
+    source       TEXT,
+    description  TEXT,
+    fee_sol      REAL,
+    sol_change   REAL,
+    token_mint   TEXT,
+    token_amount REAL,
+    raw          TEXT
+)
+"""
+
+
+def _avgcost_from_trades(trades: list) -> tuple:
+    """Pure SOL-denominated average-cost engine over on-chain swaps.
+
+    Each trade is a dict with token_mint, token_amount (+recv/-sent) and
+    sol_change (+recv/-spent). A token BUY (token_amount>0) costs the SOL it
+    spent; a SELL (token_amount<0) realizes P&L against the running average SOL
+    cost. Returns (book, annotated_trades) where every annotated trade carries
+    its own realized_pnl_sol — so P&L is attributed to each trade, not just the
+    aggregate. Kept pure (no DB) so it is unit-testable.
+    """
+    book: dict = {}
+    annotated = []
+    for t in trades:
+        mint = t.get("token_mint")
+        amt = float(t.get("token_amount") or 0)
+        sol = float(t.get("sol_change") or 0)
+        realized = 0.0
+        if mint and abs(amt) > 1e-12:
+            b = book.setdefault(mint, {"net_qty": 0.0, "cost_basis_sol": 0.0, "realized_sol": 0.0})
+            if amt > 0:  # BUY token with SOL
+                qty = amt
+                b["net_qty"] += qty
+                b["cost_basis_sol"] += max(-sol, 0.0)
+            else:        # SELL token for SOL
+                qty = -amt
+                proceeds = max(sol, 0.0)
+                sell_price = proceeds / qty if qty else 0.0
+                avg = (b["cost_basis_sol"] / b["net_qty"]) if b["net_qty"] > 1e-12 else 0.0
+                sell_qty = min(qty, b["net_qty"]) if b["net_qty"] > 0 else 0.0
+                realized = (sell_price - avg) * sell_qty
+                b["realized_sol"] += realized
+                b["net_qty"] -= qty
+                b["cost_basis_sol"] -= avg * sell_qty
+                if b["net_qty"] <= 1e-12:
+                    b["net_qty"] = max(b["net_qty"], 0.0)
+                    b["cost_basis_sol"] = max(b["cost_basis_sol"], 0.0)
+        ann = dict(t)
+        ann["realized_pnl_sol"] = round(realized, 9)
+        ann["running_qty"] = round(book.get(mint, {}).get("net_qty", 0.0), 9) if mint else None
+        annotated.append(ann)
+    return book, annotated
+
+
+async def _agent_wallet_trades(db, agent_id: int) -> list:
+    """All on-chain trades for the agent's linked wallets, oldest first."""
+    await db.execute(_WALLET_TRADES_DDL)
+    db.row_factory = aiosqlite.Row
+    rows = await (await db.execute(
+        """SELECT wt.signature, wt.wallet, wt.timestamp, wt.ts_iso, wt.type,
+                  wt.source, wt.description, wt.fee_sol, wt.sol_change,
+                  wt.token_mint, wt.token_amount
+           FROM wallet_trades wt
+           JOIN trading_wallets tw ON tw.address = wt.wallet
+           WHERE tw.agent_id = ?
+           ORDER BY wt.timestamp ASC, wt.signature ASC""",
+        (agent_id,)
+    )).fetchall()
+    return [dict(r) for r in rows]
+
+
+async def _agent_networth_usd(db, agent_id: int) -> float:
+    """Live USD net worth of the agent's linked wallets, from synced balances."""
+    db.row_factory = aiosqlite.Row
+    row = await (await db.execute(
+        """SELECT COALESCE(SUM(b.value_usd), 0) AS total
+           FROM trading_balances b
+           JOIN trading_wallets w ON w.id = b.wallet_id
+           WHERE w.agent_id = ?""",
+        (agent_id,)
+    )).fetchone()
+    return round(float(row["total"] or 0), 2)
+
+
+async def _upsert_networth_snapshot(db, agent_id: int) -> dict:
+    """Upsert today's equity point from real linked-wallet net worth. Callable
+    inside another transaction (does not commit)."""
+    value = await _agent_networth_usd(db, agent_id)
+    today = date.today().isoformat()
+    prev = await (await db.execute(
+        "SELECT portfolio_value_usd FROM trading_pnl_snapshots WHERE agent_id=? AND snapshot_date<? ORDER BY snapshot_date DESC LIMIT 1",
+        (agent_id, today)
+    )).fetchone()
+    prev_val = (prev[0] if prev else None)
+    daily_pnl = round(value - prev_val, 2) if prev_val else 0.0
+    daily_pct = round((value - prev_val) / prev_val * 100, 2) if prev_val else 0.0
+    await db.execute(
+        """INSERT INTO trading_pnl_snapshots
+             (agent_id, snapshot_date, portfolio_value_usd, daily_pnl_usd, daily_pnl_pct, notes)
+           VALUES (?,?,?,?,?,?)
+           ON CONFLICT(agent_id, snapshot_date) DO UPDATE SET
+             portfolio_value_usd=excluded.portfolio_value_usd,
+             daily_pnl_usd=excluded.daily_pnl_usd,
+             daily_pnl_pct=excluded.daily_pnl_pct""",
+        (agent_id, today, value, daily_pnl, daily_pct, "auto: linked-wallet net worth")
+    )
+    return {"snapshot_date": today, "net_worth_usd": value,
+            "daily_pnl_usd": daily_pnl, "daily_pnl_pct": daily_pct}
+
+
+@router.get("/activity")
+async def wallet_activity(agent: dict = Depends(get_agent), limit: int = Query(100, le=500)):
+    """Real on-chain trades across the agent's linked wallets, newest first, each
+    annotated with its own realized P&L (SOL + USD). This IS the honest activity
+    ledger — it reflects what the wallets actually did, not logged intent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        trades = await _agent_wallet_trades(db, agent["id"])
+    book, annotated = _avgcost_from_trades(trades)
+    sol_price = await _fetch_quote("SOL") or 0.0
+    total_realized_sol = round(sum(b["realized_sol"] for b in book.values()), 9)
+    for a in annotated:
+        a["realized_pnl_usd"] = round(a["realized_pnl_sol"] * sol_price, 2) if sol_price else None
+    annotated.reverse()  # newest first
+    return {
+        "trades": annotated[:limit],
+        "count": len(annotated),
+        "realized_pnl_sol": total_realized_sol,
+        "realized_pnl_usd": round(total_realized_sol * sol_price, 2) if sol_price else None,
+        "sol_price_usd": round(sol_price, 4) if sol_price else None,
+    }
+
+
+@router.get("/holdings")
+async def wallet_holdings(agent: dict = Depends(get_agent)):
+    """Real current holdings aggregated across the agent's linked wallets (from
+    synced balances), plus realized P&L from on-chain activity. This is the
+    honest 'positions' view — what the wallets actually hold right now."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            """SELECT b.token,
+                      SUM(b.balance)   AS balance,
+                      SUM(b.value_usd) AS value_usd,
+                      COUNT(DISTINCT w.id) AS wallet_count
+               FROM trading_balances b
+               JOIN trading_wallets w ON w.id = b.wallet_id
+               WHERE w.agent_id = ?
+               GROUP BY b.token
+               ORDER BY COALESCE(SUM(b.value_usd), 0) DESC""",
+            (agent["id"],)
+        )).fetchall()
+        holdings = [{
+            "token": r["token"],
+            "balance": round(float(r["balance"] or 0), 8),
+            "value_usd": round(float(r["value_usd"]), 2) if r["value_usd"] is not None else None,
+            "wallet_count": r["wallet_count"],
+        } for r in rows]
+        trades = await _agent_wallet_trades(db, agent["id"])
+    book, _ = _avgcost_from_trades(trades)
+    sol_price = await _fetch_quote("SOL") or 0.0
+    realized_sol = round(sum(b["realized_sol"] for b in book.values()), 9)
+    return {
+        "holdings": holdings,
+        "total_value_usd": round(sum(h["value_usd"] or 0 for h in holdings), 2),
+        "realized_pnl_sol": realized_sol,
+        "realized_pnl_usd": round(realized_sol * sol_price, 2) if sol_price else None,
+        "sol_price_usd": round(sol_price, 4) if sol_price else None,
+        "open_tokens": len([b for b in book.values() if b["net_qty"] > 1e-9]),
+    }
+
+
+@router.get("/networth")
+async def get_networth(agent: dict = Depends(get_agent)):
+    """Live net worth of the agent's linked wallets (sum of synced balance USD)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        value = await _agent_networth_usd(db, agent["id"])
+    return {"net_worth_usd": value}
+
+
+@router.post("/networth/snapshot")
+async def snapshot_networth(agent: dict = Depends(get_agent)):
+    """Record today's equity point from real linked-wallet net worth."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        result = await _upsert_networth_snapshot(db, agent["id"])
+        await db.commit()
+    return {"status": "snapshot_saved", **result}
