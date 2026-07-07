@@ -1,7 +1,8 @@
+import os
 """Trading API router — wallets, orders, strategies, PnL, and journal."""
 import json, hashlib, hmac, logging, time
 from typing import Optional, List
-from datetime import datetime, date
+from datetime import datetime, timezone, date
 
 import aiosqlite
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -90,6 +91,52 @@ async def create_wallet(data: WalletCreate, agent: dict = Depends(get_agent)):
             return {"id": cur.lastrowid, "label": data.label, "chain": data.chain, "address": data.address, "exchange": data.exchange}
         except aiosqlite.IntegrityError:
             raise HTTPException(409, f"Wallet '{data.label}' already exists for this agent")
+
+@router.get("/wallets/live")
+async def wallets_live(agent: dict = Depends(get_agent)):
+    """Return all wallets with live on-chain balances via Helius RPC."""
+    import urllib.request, json as _json
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        wallets = await db.execute(
+            "SELECT id, label, chain, address, balance_hint, last_synced_at FROM trading_wallets WHERE agent_id = ?",
+            (agent["id"],)
+        )
+        wallets = [dict(w) for w in await wallets.fetchall()]
+    
+    # Try live Helius refresh for Solana wallets
+    helius_key = os.environ.get("HELIUS_API_KEY", "3b16b895-d4f1-404b-8edd-f3be766830ca")
+    
+    for w in wallets:
+        if w.get("chain") == "solana" and w.get("address"):
+            try:
+                payload = _json.dumps({
+                    "jsonrpc": "2.0", "id": 1, "method": "getBalance",
+                    "params": [w["address"]]
+                }).encode()
+                req = urllib.request.Request(
+                    f"https://mainnet.helius-rpc.com/?api-key={helius_key}",
+                    data=payload,
+                    headers={"Content-Type": "application/json"}
+                )
+                resp = urllib.request.urlopen(req, timeout=5)
+                data = _json.loads(resp.read().decode())
+                sol = data.get("result", {}).get("value", 0) / 1e9
+                w["balance_live"] = f"{sol} SOL"
+                w["balance_value_usd"] = round(sol * 81, 2)  # approximate
+            except:
+                w["balance_live"] = w.get("balance_hint", "unknown")
+                w["balance_value_usd"] = 0
+    
+    return {
+        "wallets": wallets,
+        "count": len(wallets),
+        "total_value_usd": sum(w.get("balance_value_usd", 0) for w in wallets),
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+
+@router.post("/strategies")
 
 @router.patch("/wallets/{wallet_id}")
 async def update_wallet(wallet_id: int, data: WalletUpdate, agent: dict = Depends(get_agent)):
@@ -442,7 +489,9 @@ async def add_journal(order_id: int, data: JournalCreate, agent: dict = Depends(
 
 # ── Strategies ──────────────────────────────────────────────
 
-@router.post("/strategies")
+
+# ── Live Wallet Feed ─────────────────────────────────────────
+
 async def create_strategy(data: StrategyCreate, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
