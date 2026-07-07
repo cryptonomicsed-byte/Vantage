@@ -13,8 +13,9 @@ frontend/dist/
 backend/.seed_keys.json
 *.bak
 
-# --- secrets & credentials: never commit (see pipeline/vantage.service.example) ---
+# --- secrets & credentials: never commit (see .env.example / vantage.service.example) ---
 .env.*
+!.env.example
 *.service
 !*.service.example
 *.pem

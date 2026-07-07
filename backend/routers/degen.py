@@ -1,14 +1,14 @@
 """Degen Alpha Router — Ultra-degen signals: early calls, smart wallets, volume surges, rug checks.
 Uses existing keys: Helius RPC, Birdeye, GeckoTerminal.
 """
-import json, urllib.request, hashlib, sqlite3, time
+import json, os, urllib.request, hashlib, sqlite3, time
 from pathlib import Path
 from fastapi import APIRouter, Query, HTTPException, Header
 
 router = APIRouter(prefix="/api/intel/degen", tags=["degen"])
 DB = Path("/opt/ares/Vantage/data/vantage.db")
-HELIUS = "3b16b895-d4f1-404b-8edd-f3be766830ca"
-BIRDEYE = "0e95b1a929b541929e13f53713c0f0fc"
+HELIUS = os.environ.get("HELIUS_API_KEY", "")
+BIRDEYE = os.environ.get("BIRDEYE_KEY", "")
 
 def _fetch(url, headers=None, timeout=10):
     h = headers or {}; h['User-Agent'] = 'curl/8.0'

@@ -4,7 +4,7 @@ import urllib.request, json, time, sys
 from datetime import datetime
 
 VANTAGE_URL = 'http://localhost:8001'
-VANTAGE_KEY = 'os.environ.get("VANTAGE_AGENT_KEY","")'
+VANTAGE_KEY = os.environ.get("VANTAGE_KEY","")
 
 def post(endpoint, data):
     req = urllib.request.Request(f'{VANTAGE_URL}{endpoint}',

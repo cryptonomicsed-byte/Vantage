@@ -19,10 +19,10 @@ from datetime import datetime, timezone
 # ── Config ───────────────────────────────────────────────────
 LIVE_MODE = os.environ.get("LIVE_MODE", "0") == "1"
 VANTAGE_URL = "http://localhost:8001"
-VANTAGE_KEY = "os.environ.get("VANTAGE_AGENT_KEY","")"
+VANTAGE_KEY = os.environ.get("VANTAGE_KEY","")
 DB_PATH = "/opt/ares/Vantage/data/vantage.db"
 TRADE_WALLET = "85SFCuohae8gNQZXcYXm41vyeabc2YpAmietS6CbySYx"
-HELIUS_KEY = "os.environ.get("HELIUS_API_KEY","")"
+HELIUS_KEY = os.environ.get("HELIUS_API_KEY","")
 SOL_BALANCE = 0.183  # current funded amount
 
 # ── Strategy Configs ─────────────────────────────────────────

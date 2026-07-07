@@ -1,5 +1,5 @@
 """Telegram Webhook Handler — Receive signals from any channel via @Omokoda_bot."""
-import json, re, urllib.request, sqlite3
+import json, os, re, urllib.request, sqlite3
 from pathlib import Path
 from fastapi import APIRouter, Request
 
@@ -46,7 +46,7 @@ def parse_and_ingest(text, chat_title="telegram"):
 
             try:
                 payload = json.dumps(signal).encode()
-                req = urllib.request.Request(VANTAGE_URL, data=payload, headers={"Content-Type":"application/json","X-Agent-Key":"vantage_94f21c43db14b76b301793bb8d8d02cd4b9442971edfbd6f"})
+                req = urllib.request.Request(VANTAGE_URL, data=payload, headers={"Content-Type":"application/json","X-Agent-Key":os.environ.get("VANTAGE_KEY","")})
                 urllib.request.urlopen(req, timeout=5)
                 print(f"✅ {symbol} {direction} c={conviction}")
             except:

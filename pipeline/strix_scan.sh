@@ -6,9 +6,9 @@
 REPO_PATH="$1"
 SCAN_MODE="${2:---scan-mode quick}"
 STRIX_LLM="${STRIX_LLM:-deepseek/deepseek-chat}"
-LLM_API_KEY="${LLM_API_KEY:-sk-bd3dade513374b9f88cefbccc80b629b}"
+LLM_API_KEY="${LLM_API_KEY:-}"
 VANTAGE_URL="http://localhost:8001"
-VANTAGE_KEY="vantage_94f21c43db14b76b301793bb8d8d02cd4b9442971edfbd6f"
+VANTAGE_KEY="${VANTAGE_KEY:-}"
 REPO_NAME=$(basename "$REPO_PATH")
 RUN_ID="strix-$(date +%Y%m%d-%H%M%S)"
 

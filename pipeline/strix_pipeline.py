@@ -48,7 +48,7 @@ def run_strix(target_path, mode="quick"):
     
     env = os.environ.copy()
     env["STRIX_LLM"] = "deepseek/deepseek-chat"
-    env["LLM_API_KEY"] = "sk-bd3dade513374b9f88cefbccc80b629b"
+    env["LLM_API_KEY"] = os.environ.get("LLM_API_KEY", "")
     
     try:
         result = subprocess.run(

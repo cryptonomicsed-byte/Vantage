@@ -1,14 +1,14 @@
 """Pump.fun Degen Trenches — Solana meme coin alpha.
 Data: GeckoTerminal (real-time Solana pools), Birdeye (prices), Jupiter (quotes)
 """
-import json, urllib.request, hashlib, sqlite3
+import json, os, urllib.request, hashlib, sqlite3
 from pathlib import Path
 from fastapi import APIRouter, Query, HTTPException, Header
 
 router = APIRouter(prefix="/api/intel/pumpfun", tags=["pumpfun"])
 DB = Path("/opt/ares/Vantage/data/vantage.db")
-BIRDEYE = "0e95b1a929b541929e13f53713c0f0fc"
-HELIUS = "3b16b895-d4f1-404b-8edd-f3be766830ca"
+BIRDEYE = os.environ.get("BIRDEYE_KEY", "")
+HELIUS = os.environ.get("HELIUS_API_KEY", "")
 
 def get_agent(key):
     h = hashlib.sha256(key.encode()).hexdigest()

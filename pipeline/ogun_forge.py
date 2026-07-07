@@ -235,7 +235,7 @@ def run(symbol="SOL/USD", interval=60):
                             "type": "strategy",
                             "detail": f"{result['signal']} | Entry: {result['entry']:.2f} | SL: {result['sl']:.2f} | TP: {result['tp']:.2f} | ATR: {result['atr']:.2f}"
                         }).encode(),
-                        headers={"Content-Type": "application/json", "X-Agent-Key": "os.environ.get("VANTAGE_AGENT_KEY","")"}
+                        headers={"Content-Type": "application/json", "X-Agent-Key": os.environ.get("VANTAGE_KEY","")}
                     )
                     urllib.request.urlopen(req, timeout=5)
                 except: pass

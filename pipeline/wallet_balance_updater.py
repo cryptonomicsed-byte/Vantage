@@ -6,7 +6,7 @@ Runs as daemon every 60s. No private keys stored.
 import urllib.request, json, sqlite3, time, sys
 from datetime import datetime, timezone
 
-HELIUS_KEY = "os.environ.get("HELIUS_API_KEY","")"
+HELIUS_KEY = os.environ.get("HELIUS_API_KEY","")
 DB_PATH = "/opt/ares/Vantage/data/vantage.db"
 INTERVAL = int(sys.argv[1]) if len(sys.argv) > 1 else 60
 

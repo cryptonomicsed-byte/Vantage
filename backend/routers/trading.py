@@ -106,7 +106,7 @@ async def wallets_live(agent: dict = Depends(get_agent)):
         wallets = [dict(w) for w in await wallets.fetchall()]
     
     # Try live Helius refresh for Solana wallets
-    helius_key = os.environ.get("HELIUS_API_KEY", "3b16b895-d4f1-404b-8edd-f3be766830ca")
+    helius_key = os.environ.get("HELIUS_API_KEY", "")
     
     for w in wallets:
         if w.get("chain") == "solana" and w.get("address"):

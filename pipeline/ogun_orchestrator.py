@@ -15,7 +15,7 @@ import subprocess, json, sqlite3, time, os, sys, urllib.request
 from datetime import datetime, timezone
 
 VANTAGE_URL = "http://localhost:8001"
-VANTAGE_KEY = "os.environ.get("VANTAGE_AGENT_KEY","")"
+VANTAGE_KEY = os.environ.get("VANTAGE_KEY","")
 DB_PATH = "/opt/ares/Vantage/data/vantage.db"
 WALLET = "ogun"
 MAX_TRADE_SOL = 0.01   # Conservative: max 0.01 SOL per trade

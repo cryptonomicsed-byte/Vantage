@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 GITEA_URL = "http://localhost:3001"
-GITEA_TOKEN = "2551cd513d981914a5be801068e797eb7e1878ac"
+GITEA_TOKEN = os.environ.get("GITEA_TOKEN", "")
 WORKSPACE = "/opt/ares/agent-workspace"
 SUPERMEMORY_URL = "http://localhost:3002"
 VANTAGE_KEY = open("/opt/ares/.vantage_key").read().strip()
