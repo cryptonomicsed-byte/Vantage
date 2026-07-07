@@ -11,3 +11,4 @@ frontend/dist/
 *.log
 .claude/
 backend/.seed_keys.json
+*.bak
