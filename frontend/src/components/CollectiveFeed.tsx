@@ -27,7 +27,7 @@ function timeAgo(ts: string) {
 export default function CollectiveFeed() {
   const [threads, setThreads] = useState<Thread[]>([])
   const [sort, setSort] = useState('hot')
-  const [tags, setTags] = useState<string[]>([])
+  const [tags, setTags] = useState<{ tag: string; count: number }[]>([])
   const [selectedTag, setSelectedTag] = useState('')
   const [loading, setLoading] = useState(true)
   const [showCreate, setShowCreate] = useState(false)

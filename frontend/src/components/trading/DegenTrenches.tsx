@@ -8,6 +8,7 @@ interface Token {
   volume_24h?: number
   price_change_24h?: number
   market_cap?: number
+  market_cap_rank?: number
   score?: number
 }
 

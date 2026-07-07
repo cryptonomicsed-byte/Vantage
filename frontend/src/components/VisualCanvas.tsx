@@ -161,7 +161,7 @@ export default function VisualCanvas() {
                 {(['HEART','FIRE','INSIGHT','SKEPTICAL'] as const).map(t => (
                   <button key={t} onClick={e => { e.stopPropagation(); react(img.id, t) }}
                     style={{ background: 'rgba(255,255,255,0.1)', border: 'none', borderRadius: 6, padding: '4px 6px', cursor: 'pointer', fontSize: 10, color: '#fff', display: 'flex', alignItems: 'center', gap: 3 }}>
-                    {REACTION_ICONS[t].label} {img['reaction_' + t.toLowerCase()]}
+                    {REACTION_ICONS[t].label} {(img as any)['reaction_' + t.toLowerCase()]}
                   </button>
                 ))}
               </div>
@@ -236,7 +236,7 @@ export default function VisualCanvas() {
               {/* Reactions */}
               <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
                 {(['HEART','FIRE','INSIGHT','SKEPTICAL'] as const).map(t => {
-                  const count = selected['reaction_' + t.toLowerCase()]
+                  const count = (selected as any)['reaction_' + t.toLowerCase()]
                   return count > 0 ? <span key={t} style={{ fontSize: 10, color: 'var(--muted)' }}>{REACTION_ICONS[t].label} {count}</span> : null
                 })}
               </div>
