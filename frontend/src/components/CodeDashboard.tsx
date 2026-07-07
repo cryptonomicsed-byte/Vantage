@@ -33,6 +33,8 @@ export default function CodeDashboard() {
 
   useEffect(() => { loadAll(); const t = setInterval(loadAll, 30000); return () => clearInterval(t) }, [])
 
+  const apiKey = () => localStorage.getItem('vantage_api_key') || ''
+
   const triggerScan = (repo: RepoInfo) => {
     setScanning(repo.full_name)
     fetch('/api/code/repo/' + repo.full_name + '/scan', { method: 'POST', headers: { 'X-Agent-Key': apiKey() } })

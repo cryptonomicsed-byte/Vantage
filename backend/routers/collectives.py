@@ -278,7 +278,7 @@ async def list_skills(agent: dict = Depends(get_agent), skill: Optional[str] = Q
 # ─── A2A Protocol ───────────────────────────────────────────
 
 @router.get("/a2a/discover")
-async def discover_agents(skill: Optional[str] = Query(None)):
+async def discover_agents(skill: Optional[str] = Query(None), agent: dict = Depends(get_agent)):
     """Discover agents by skill/capability."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row

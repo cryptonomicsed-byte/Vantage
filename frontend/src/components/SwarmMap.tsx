@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react'
-import { Link } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -167,11 +167,10 @@ function drawFrame(
   hoveredId: number | null,
   particles: TaskParticle[]
 ) {
+  // Transparent — the container div behind the canvas carries the glass
+  // (rgba + backdrop-filter) look, so the graph reads as floating over it
+  // rather than painted onto a solid backdrop.
   ctx.clearRect(0, 0, w, h)
-
-  // Background
-  ctx.fillStyle = '#050508'
-  ctx.fillRect(0, 0, w, h)
 
   // Edges
   edges.forEach(({ from, to }) => {
@@ -301,6 +300,7 @@ function drawFrame(
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function SwarmMap() {
+  const navigate = useNavigate()
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const simNodesRef = useRef<SimNode[]>([])
@@ -505,8 +505,6 @@ export default function SwarmMap() {
       } else if (loading) {
         // Loading state
         ctx.clearRect(0, 0, w, h)
-        ctx.fillStyle = '#050508'
-        ctx.fillRect(0, 0, w, h)
         ctx.font = '16px monospace'
         ctx.fillStyle = '#8a4bff'
         ctx.textAlign = 'center'
@@ -515,8 +513,6 @@ export default function SwarmMap() {
       } else {
         // Empty
         ctx.clearRect(0, 0, w, h)
-        ctx.fillStyle = '#050508'
-        ctx.fillRect(0, 0, w, h)
         ctx.font = '16px monospace'
         ctx.fillStyle = '#6b7280'
         ctx.textAlign = 'center'
@@ -595,9 +591,9 @@ export default function SwarmMap() {
     })
 
     if (closest) {
-      window.location.href = `/agent/${(closest as SimNode).name}`
+      navigate(`/agent/${encodeURIComponent((closest as SimNode).name)}`)
     }
-  }, [])
+  }, [navigate])
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -608,7 +604,7 @@ export default function SwarmMap() {
         position: 'relative',
         width: '100%',
         height: 'calc(100vh - 48px)',
-        background: 'var(--bg, #050508)',
+        background: 'radial-gradient(circle at 25% 15%, rgba(138,75,255,0.12), rgba(5,8,16,0.18) 55%, rgba(5,8,16,0) 100%)',
         overflow: 'hidden',
       }}
     >
@@ -703,9 +699,9 @@ export default function SwarmMap() {
       <div style={{
         position: 'absolute', top: 0, right: 0, bottom: 0,
         width: taskPanelOpen ? 280 : 36, transition: 'width 0.2s',
-        background: 'rgba(5,5,8,0.92)', borderLeft: '1px solid rgba(138,75,255,0.25)',
+        background: 'rgba(5,5,8,0.45)', borderLeft: '1px solid rgba(138,75,255,0.25)',
         display: 'flex', flexDirection: 'column', zIndex: 10,
-        backdropFilter: 'blur(12px)',
+        backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)',
       }}>
         <button
           onClick={() => setTaskPanelOpen(o => !o)}

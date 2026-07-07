@@ -95,7 +95,7 @@ function project(
 }
 
 // ─── Main component ────────────────────────────────────────────────────────────
-export default function GalaxyViewer({ data, agentName: _agentName }: Props) {
+export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect }: Props) {
   const canvasRef    = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const rafRef       = useRef<number>(0)
@@ -229,14 +229,10 @@ export default function GalaxyViewer({ data, agentName: _agentName }: Props) {
     const sel  = selectedNode
 
     // ── Background ─────────────────────────────────────────────────────────
+    // Transparent — .galaxy-container carries the glass (rgba + backdrop-
+    // filter) look, so the canvas floats over it instead of painting an
+    // opaque backdrop every frame.
     ctx.clearRect(0, 0, w, h)
-
-    // Deep black with subtle blue tint
-    const bg = ctx.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.max(w, h) * 0.7)
-    bg.addColorStop(0, '#03060f')
-    bg.addColorStop(1, '#010208')
-    ctx.fillStyle = bg
-    ctx.fillRect(0, 0, w, h)
 
     // Subtle grid
     ctx.save()
@@ -531,8 +527,12 @@ export default function GalaxyViewer({ data, agentName: _agentName }: Props) {
     if (!wasDrag && hoveredRef.current) {
       const node = nodes.find(n => n.id === hoveredRef.current)
       setSelectedNode(prev => prev?.id === node?.id ? null : (node || null))
+      // Tell the parent (MemoryVaultTab) so it can fetch and show the real
+      // memory content — this callback existed in the props but was never
+      // invoked, so clicking a star never opened the note-reading panel.
+      if (node) onStarSelect?.(node)
     }
-  }, [nodes])
+  }, [nodes, onStarSelect])
 
   const handleMouseLeave = useCallback(() => {
     dragRef.current    = false

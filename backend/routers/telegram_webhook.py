@@ -16,66 +16,6 @@ PATTERNS = [
     (re.compile(r'[Cc]onviction[:\s]+(\d+)', re.I), 0.7),
 ]
 
-def extract_and_route(text, chat_title="telegram"):
-    """Extract wallet addresses and token CAs from text, route to watchlist/pumpfun."""
-    import re as _re, sqlite3 as _sq, hashlib as _hl
-    sol_addr = _re.compile(r'[1-9A-HJ-NP-Za-km-z]{32,44}')
-    eth_addr = _re.compile(r'0x[a-fA-F0-9]{40}')
-    btc_addr = _re.compile(r'[13][a-km-zA-HJ-NP-Z1-9]{25,34}')
-    pumpfun_ca = _re.compile(r'[1-9A-HJ-NP-Za-km-z]{32,44}pump')
-
-    found = set()
-
-    for addr in sol_addr.findall(text):
-        if addr in found: continue
-        found.add(addr)
-        # Auto-detect via Helius
-        try:
-            import urllib.request as _ur, json as _j
-            payload = _j.dumps({"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":[addr,{"encoding":"jsonParsed"}]}).encode()
-            req = _ur.Request("https://mainnet.helius-rpc.com/?api-key=3b16b895-d4f1-404b-8edd-f3be766830ca",data=payload,headers={"Content-Type":"application/json"})
-            info = _j.loads(_ur.urlopen(req,timeout=5).read().decode()).get("result",{}).get("value",{})
-            owner = info.get("owner","")
-            program = info.get("data",{}).get("program","")
-            if program in ("spl-token","spl-token-2022") or "pump" in addr.lower():
-                # Token mint → pumpfun tracking
-                try:
-                    _ur.urlopen(_ur.Request("http://localhost:8001/api/intel/pumpfun/watchlist?mint="+addr+"&label="+chat_title[:20],
-                        headers={"X-Agent-Key":"vantage_94f21c43db14b76b301793bb8d8d02cd4b9442971edfbd6f"}),timeout=3)
-                    print(f"  📦 CA routed to pumpfun: {addr[:16]}...")
-                except: pass
-            elif owner in ("11111111111111111111111111111111","TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"):
-                # Wallet → watchlist
-                try:
-                    payload2 = _j.dumps({"address":addr,"chain":"solana","label":f"Telegram: {chat_title[:20]}"}).encode()
-                    _ur.urlopen(_ur.Request("http://localhost:8001/api/intel/watchlist",data=payload2,
-                        headers={"Content-Type":"application/json","X-Agent-Key":"vantage_94f21c43db14b76b301793bb8d8d02cd4b9442971edfbd6f"}),timeout=3)
-                    print(f"  👛 Wallet routed to watchlist: {addr[:16]}...")
-                except: pass
-        except: pass
-
-    for addr in eth_addr.findall(text):
-        if addr in found: continue
-        found.add(addr)
-        try:
-            import urllib.request as _ur, json as _j
-            payload = _j.dumps({"address":addr,"chain":"ethereum","label":f"Telegram: {chat_title[:20]}"}).encode()
-            _ur.urlopen(_ur.Request("http://localhost:8001/api/intel/watchlist",data=payload,
-                headers={"Content-Type":"application/json","X-Agent-Key":"vantage_94f21c43db14b76b301793bb8d8d02cd4b9442971edfbd6f"}),timeout=3)
-            print(f"  👛 ETH wallet routed: {addr[:16]}...")
-        except: pass
-
-    for addr in btc_addr.findall(text):
-        if addr in found: continue
-        found.add(addr)
-        try:
-            import urllib.request as _ur, json as _j
-            payload = _j.dumps({"address":addr,"chain":"bitcoin","label":f"Telegram: {chat_title[:20]}"}).encode()
-            _ur.urlopen(_ur.Request("http://localhost:8001/api/intel/watchlist",data=payload,
-                headers={"Content-Type":"application/json","X-Agent-Key":"vantage_94f21c43db14b76b301793bb8d8d02cd4b9442971edfbd6f"}),timeout=3)
-            print(f"  👛 BTC wallet routed: {addr[:16]}...")
-        except: pass
-
 def parse_and_ingest(text, chat_title="telegram"):
     """Parse text for trading signals and ingest into Vantage."""
     for pattern, base_conviction in PATTERNS:
@@ -111,13 +51,9 @@ def parse_and_ingest(text, chat_title="telegram"):
                 print(f"✅ {symbol} {direction} c={conviction}")
             except:
                 pass
-            # Also extract addresses from the message
-            extract_and_route(text, chat_title)
             return
 
     print(f"📝 No pattern: {text[:100]}")
-    # Still try to extract addresses even without a trading signal
-    extract_and_route(text, chat_title)
 
 @router.post("/webhook")
 async def telegram_webhook(request: Request):

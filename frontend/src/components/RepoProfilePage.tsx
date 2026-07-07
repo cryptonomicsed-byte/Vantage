@@ -12,7 +12,44 @@ export default function RepoProfilePage() {
   const [scanResult, setScanResult] = useState<any>(null)
 
   useEffect(() => { if (!owner || !name) return; fetch('/api/code/repo/' + owner + '/' + name + '/detail').then(r=>r.json()).then(d=>{setRepo(d);setLoading(false)}).catch(()=>setLoading(false)) }, [owner, name])
-  const triggerScan = () => { setScanning(true); fetch('/api/code/repo/' + owner + '/' + name + '/scan',{method:'POST', headers: { 'X-Agent-Key': apiKey() }}).then(r=>r.json()).then(d=>{setScanResult(d);setScanning(false)}).catch(()=>setScanning(false)) }
+
+  // Normalize a scan_status poll response (findings array, no aggregate counts)
+  // into the same {files_scanned, critical, high, findings} shape the old
+  // synchronous regex-scan response used, so the render below doesn't need
+  // two code paths.
+  const _toScanResult = (findings: any[], extra: Record<string, any> = {}) => ({
+    files_scanned: undefined,
+    critical: findings.filter((f: any) => (f.severity ?? 0) >= 0.9).length,
+    high: findings.filter((f: any) => (f.severity ?? 0) >= 0.7 && (f.severity ?? 0) < 0.9).length,
+    findings,
+    ...extra,
+  })
+
+  const pollStrixScan = (scanId: number) => {
+    fetch(`/api/code/repo/${owner}/${name}/scan/${scanId}`, { headers: { 'X-Agent-Key': apiKey() } })
+      .then(r => r.json())
+      .then(d => {
+        if (d.status === 'complete' || d.status === 'error') {
+          setScanResult(_toScanResult(d.findings || [], { engine: 'strix', status: d.status }))
+          setScanning(false)
+        } else {
+          setScanResult(_toScanResult(d.findings || [], { engine: 'strix', status: d.status }))
+          setTimeout(() => pollStrixScan(scanId), 3000)
+        }
+      })
+      .catch(() => setScanning(false))
+  }
+
+  const triggerScan = () => {
+    setScanning(true); setScanResult(null)
+    fetch(`/api/code/repo/${owner}/${name}/scan?engine=strix`, { method: 'POST', headers: { 'X-Agent-Key': apiKey() } })
+      .then(r => r.json())
+      .then(d => {
+        if (d.scan_id) pollStrixScan(d.scan_id)
+        else { setScanResult(d); setScanning(false) }
+      })
+      .catch(() => setScanning(false))
+  }
 
   if (loading) return <div style={{padding:40,textAlign:'center'}}><div className="vf-spinner"/></div>
   if (!repo) return <div style={{padding:40,color:'var(--muted)'}}>Repo not found</div>
@@ -25,7 +62,7 @@ export default function RepoProfilePage() {
       {repo.description && <p className="rp-description">{repo.description}</p>}
       <div className="rp-grid">
         <div className="rp-col">
-          <div className="rp-section"><div className="rp-section-title"><Shield size={15}/> Strix Security</div>{repo.strix_active?<div><div className="rp-stix-status"><CheckCircle2 size={14} style={{color:'#22c55e'}}/> Active on every push</div>{repo.strix_webhooks?.map((h:any,i:number)=><div key={i} className="rp-info-row"><span className="rp-info-label">Hook #{h.id}</span><span className="rp-info-value">{h.active?'Active':'Inactive'}</span></div>)}<button className="btn btn-sm" onClick={triggerScan} disabled={scanning} style={{marginTop:10}}><Play size={12}/> {scanning?'Scanning...':'Run Strix Scan'}</button></div>:<div className="rp-stix-status"><AlertTriangle size={14} style={{color:'#f59e0b'}}/> No Strix webhook</div>}{scanResult&&<div className="rp-scan-result" style={{marginTop:12}}><div className="rp-scan-header"><span>Scan</span><span>{scanResult.files_scanned} files</span></div><div className="rp-scan-counts"><span className="rp-sev rp-sev-crit">{scanResult.critical} critical</span><span className="rp-sev rp-sev-high">{scanResult.high} high</span></div>{scanResult.findings?.slice(0,5).map((f:any,i:number)=><div key={i} className="rp-finding"><span className={'rp-finding-sev '+(f.severity>=0.9?'crit':'high')}>{f.vuln_id}</span><span className="rp-finding-file">{f.file}:{f.line}</span><span className="rp-finding-snippet">{f.snippet}</span></div>)}</div>}</div>
+          <div className="rp-section"><div className="rp-section-title"><Shield size={15}/> Strix Security</div>{repo.strix_active?<div><div className="rp-stix-status"><CheckCircle2 size={14} style={{color:'#22c55e'}}/> Active on every push</div>{repo.strix_webhooks?.map((h:any,i:number)=><div key={i} className="rp-info-row"><span className="rp-info-label">Hook #{h.id}</span><span className="rp-info-value">{h.active?'Active':'Inactive'}</span></div>)}<button className="btn btn-sm" onClick={triggerScan} disabled={scanning} style={{marginTop:10}}><Play size={12}/> {scanning?'Scanning...':'Run Strix Scan'}</button></div>:<div className="rp-stix-status"><AlertTriangle size={14} style={{color:'#f59e0b'}}/> No Strix webhook</div>}{scanResult&&<div className="rp-scan-result" style={{marginTop:12}}><div className="rp-scan-header"><span>Scan{scanResult.status&&scanResult.status!=='complete'?` (${scanResult.status})`:''}</span><span>{scanResult.files_scanned!==undefined?`${scanResult.files_scanned} files`:`${scanResult.findings?.length||0} findings so far`}</span></div><div className="rp-scan-counts"><span className="rp-sev rp-sev-crit">{scanResult.critical} critical</span><span className="rp-sev rp-sev-high">{scanResult.high} high</span></div>{scanResult.findings?.slice(0,5).map((f:any,i:number)=><div key={i} className="rp-finding"><span className={'rp-finding-sev '+(f.severity>=0.9?'crit':'high')}>{f.vuln_id}</span><span className="rp-finding-file">{f.file}:{f.line}</span><span className="rp-finding-snippet">{f.snippet}</span></div>)}</div>}</div>
           <div className="rp-section"><div className="rp-section-title"><GitBranch size={15}/> Branches ({repo.branches?.length||0})</div><div className="rp-branches">{repo.branches?.map((b:string)=><span key={b} className={'rp-branch '+(b===repo.default_branch?'rp-branch-default':'')}>{b}</span>)}</div></div>
           <div className="rp-section"><div className="rp-section-title">Clone</div><code className="rp-clone-url">git clone {repo.clone_url}</code></div>
         </div>

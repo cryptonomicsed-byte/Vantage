@@ -69,18 +69,19 @@ class TestRegistration:
         assert r.json()["name"] == "OwnProfile"
 
     def test_get_public_profile(self, client):
-        _reg(client, "PubProf")
-        r = client.get("/api/agents/profile/PubProf")
+        key = _reg(client, "PubProf")
+        r = client.get("/api/agents/profile/PubProf", headers=_headers(key))
         assert r.status_code == 200
         assert "broadcasts" in r.json()
 
     def test_profile_not_found(self, client):
-        r = client.get("/api/agents/profile/nobody_xyz_999")
+        key = _reg(client, "ProfileNotFoundAgent")
+        r = client.get("/api/agents/profile/nobody_xyz_999", headers=_headers(key))
         assert r.status_code == 404
 
     def test_directory_lists_agents(self, client):
-        _reg(client, "DirE2E")
-        r = client.get("/api/agents/directory")
+        key = _reg(client, "DirE2E")
+        r = client.get("/api/agents/directory", headers=_headers(key))
         assert r.status_code == 200
         names = [a["name"] for a in r.json()]
         assert "DirE2E" in names
@@ -108,7 +109,7 @@ class TestSoulManifest:
             headers=_headers(key),
         )
         assert r.status_code == 200
-        profile = client.get("/api/agents/profile/SoulAgent").json()
+        profile = client.get("/api/agents/profile/SoulAgent", headers=_headers(key)).json()
         stored = json.loads(profile["soul_manifest"]) if isinstance(profile["soul_manifest"], str) else profile["soul_manifest"]
         assert stored["capabilities"] == ["text-publishing", "auditing"]
 
@@ -169,7 +170,7 @@ class TestTextPosts:
             headers=_headers(key),
         )
         bid = r.json()["broadcast_id"]
-        feed = client.get("/api/agents/feed").json()
+        feed = client.get("/api/agents/feed", headers=_headers(key)).json()
         ids = [b["id"] for b in feed]
         assert bid not in ids
 
@@ -189,7 +190,7 @@ class TestTextPosts:
     def test_text_post_with_tags(self, client):
         key = _reg(client, "TagAgent")
         bid = _text_post(client, key, title="Tagged", content="body", tags=["ai", "research"])
-        feed = client.get("/api/agents/feed").json()
+        feed = client.get("/api/agents/feed", headers=_headers(key)).json()
         post = next((b for b in feed if b["id"] == bid), None)
         assert post is not None
 
@@ -336,7 +337,7 @@ class TestReactions:
         key = _reg(client, "GetReact")
         bid = _text_post(client, key, title="Reactions List")
         client.post(f"/api/agents/broadcasts/{bid}/react", json={"reaction": "💡"}, headers=_headers(key))
-        r = client.get(f"/api/agents/broadcasts/{bid}/reactions")
+        r = client.get(f"/api/agents/broadcasts/{bid}/reactions", headers=_headers(key))
         assert r.status_code == 200
         data = r.json()
         assert any(item["reaction_type"] == "💡" for item in data)
@@ -378,7 +379,7 @@ class TestComments:
         key = _reg(client, "GetComment")
         bid = _text_post(client, key, title="Comments List")
         client.post(f"/api/agents/broadcasts/{bid}/comments", json={"content": "Hello"}, headers=_headers(key))
-        r = client.get(f"/api/agents/broadcasts/{bid}/comments")
+        r = client.get(f"/api/agents/broadcasts/{bid}/comments", headers=_headers(key))
         assert r.status_code == 200
         assert len(r.json()) >= 1
 
@@ -489,7 +490,7 @@ class TestSeries:
         key = _reg(client, "PubSeries")
         r = client.post("/api/agents/me/series", json={"title": "Public Series"}, headers=_headers(key))
         sid = r.json()["id"]
-        r2 = client.get(f"/api/agents/series/{sid}")
+        r2 = client.get(f"/api/agents/series/{sid}", headers=_headers(key))
         assert r2.status_code == 200
         assert r2.json()["title"] == "Public Series"
 
@@ -497,7 +498,7 @@ class TestSeries:
         key = _reg(client, "SeriesPosts")
         sid = client.post("/api/agents/me/series", json={"title": "With Posts"}, headers=_headers(key)).json()["id"]
         bid = _text_post(client, key, title="Episode 1", series_id=sid)
-        r = client.get(f"/api/agents/series/{sid}")
+        r = client.get(f"/api/agents/series/{sid}", headers=_headers(key))
         post_ids = [b["id"] for b in r.json()["broadcasts"]]
         assert bid in post_ids
 
@@ -669,6 +670,102 @@ class TestAdminAPI:
         r = client.get("/api/admin/stats")
         assert r.status_code in (403, 503)
 
+    def test_list_agents_includes_tier_jail_reputation(self, client):
+        _reg(client, "AdminTierTarget")
+        r = client.get("/api/admin/agents", headers=self._ah())
+        assert r.status_code == 200
+        row = next(a for a in r.json() if a["name"] == "AdminTierTarget")
+        assert "tier" in row and "jail_mode" in row and "reputation" in row
+
+    def test_rate_limit_status_endpoint(self, client):
+        key = _reg(client, "RateStatusAgent")
+        # Generate at least one tracked request against the real limiter.
+        client.get("/api/agents/me/profile", headers=_headers(key))
+        r = client.get("/api/admin/rate-limit-status", headers=self._ah())
+        assert r.status_code == 200
+        body = r.json()
+        assert "limit" in body and "window_seconds" in body and "agents" in body
+        # Don't assert this specific agent is present: the endpoint caps at the
+        # top 50 by request volume, and in a full suite run many other agents
+        # may have made more requests within the same 60s window. Assert the
+        # shape/content is real instead of relying on suite-wide ordering.
+        assert isinstance(body["agents"], list) and len(body["agents"]) >= 1
+        row = body["agents"][0]
+        assert {"agent_id", "agent_name", "requests_in_window", "limit", "pct_of_limit"} <= row.keys()
+
+    def test_rate_limit_status_requires_admin(self, client):
+        r = client.get("/api/admin/rate-limit-status")
+        assert r.status_code in (403, 503)
+
+    def test_security_scans_list_endpoint(self, client, tmp_path):
+        import asyncio
+        import backend.utils as utils_module
+        from PIL import Image
+        import io
+
+        key = _reg(client, "SecScanListAgent")
+        agent_id = client.get("/api/agents/me/profile", headers=_headers(key)).json()["id"]
+        p = tmp_path / "a.jpg"
+        img = Image.new("RGB", (4, 4))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        p.write_bytes(buf.getvalue())
+        asyncio.run(utils_module._security_scan_and_normalize(p, "image", agent_id, artifact_ref="list-test"))
+
+        r = client.get("/api/admin/security-scans", headers=self._ah())
+        assert r.status_code == 200
+        body = r.json()
+        assert body["count"] >= 1
+        assert any(s["artifact_ref"] == "list-test" for s in body["scans"])
+
+    def test_security_scans_list_filters_by_status(self, client):
+        r = client.get("/api/admin/security-scans?status=quarantined", headers=self._ah())
+        assert r.status_code == 200
+        assert all(s["status"] == "quarantined" for s in r.json()["scans"])
+
+    def test_security_scans_list_requires_admin(self, client):
+        r = client.get("/api/admin/security-scans")
+        assert r.status_code in (403, 503)
+
+    def test_code_scans_list_endpoint(self, client):
+        r = client.get("/api/admin/code-scans", headers=self._ah())
+        assert r.status_code == 200
+        body = r.json()
+        assert "scans" in body and "count" in body
+
+    def test_code_scans_list_requires_admin(self, client):
+        r = client.get("/api/admin/code-scans")
+        assert r.status_code in (403, 503)
+
+    def test_jobs_overview_endpoint(self, client):
+        r = client.get("/api/admin/jobs-overview", headers=self._ah())
+        assert r.status_code == 200
+        body = r.json()
+        assert "jobs_by_status" in body
+        assert "tasks_by_status" in body
+        assert "expired_leases" in body
+        assert "recent_jobs" in body
+
+    def test_jobs_overview_counts_a_real_job(self, client):
+        poster_key = _reg(client, "JobsOverviewPoster")
+        r = client.post(
+            "/api/jobs",
+            json={
+                "job_type": "code",
+                "title": "Overview test job",
+                "tasks": [{"title": "task one"}],
+            },
+            headers=_headers(poster_key),
+        )
+        assert r.status_code == 200, r.text
+        overview = client.get("/api/admin/jobs-overview", headers=self._ah()).json()
+        assert overview["jobs_by_status"].get("open", 0) >= 1
+        assert any(j["title"] == "Overview test job" for j in overview["recent_jobs"])
+
+    def test_jobs_overview_requires_admin(self, client):
+        r = client.get("/api/admin/jobs-overview")
+        assert r.status_code in (403, 503)
+
 
 # ---------------------------------------------------------------------------
 # Search & Feeds
@@ -678,7 +775,7 @@ class TestSearchAndFeeds:
     def test_search_finds_post(self, client):
         key = _reg(client, "SearchPublisher")
         _text_post(client, key, title="Quantum Entanglement Research")
-        r = client.get("/api/agents/search?q=Quantum+Entanglement")
+        r = client.get("/api/agents/search?q=Quantum+Entanglement", headers=_headers(key))
         assert r.status_code == 200
         results = r.json()
         assert any("Quantum" in b.get("title", "") for b in results)
@@ -686,13 +783,14 @@ class TestSearchAndFeeds:
     def test_feed_content_type_filter(self, client):
         key = _reg(client, "FilterPub")
         _text_post(client, key, title="Text Only Post")
-        r = client.get("/api/agents/feed?content_type=text")
+        r = client.get("/api/agents/feed?content_type=text", headers=_headers(key))
         assert r.status_code == 200
         for item in r.json():
             assert item["content_type"] == "text"
 
     def test_trending_feed(self, client):
-        r = client.get("/api/agents/feed/trending")
+        key = _reg(client, "TrendingFeedAgent")
+        r = client.get("/api/agents/feed/trending", headers=_headers(key))
         assert r.status_code == 200
         assert isinstance(r.json(), list)
 
@@ -734,7 +832,7 @@ class TestFork:
             headers=_headers(key_b),
         )
         fork_id = r.json()["broadcast_id"]
-        feed = client.get("/api/agents/feed").json()
+        feed = client.get("/api/agents/feed", headers=_headers(key_b)).json()
         fork = next((b for b in feed if b["id"] == fork_id), None)
         assert fork is not None
         assert fork.get("forked_from") == bid
@@ -772,7 +870,8 @@ class TestPlatform:
         assert r.json()["db"] == "ok"
 
     def test_skills_registry_completeness(self, client):
-        r = client.get("/api/agents/skills")
+        key = _reg(client, "SkillsRegistryAgent")
+        r = client.get("/api/agents/skills", headers=_headers(key))
         assert r.status_code == 200
         data = r.json()
         assert data["platform"] == "Vantage"
@@ -788,11 +887,13 @@ class TestPlatform:
         assert len(skill_ids) >= 60
 
     def test_design_system(self, client):
-        r = client.get("/api/agents/design-system")
+        key = _reg(client, "DesignSystemAgent")
+        r = client.get("/api/agents/design-system", headers=_headers(key))
         assert r.status_code == 200
 
     def test_leaderboard(self, client):
-        r = client.get("/api/agents/leaderboard")
+        key = _reg(client, "LeaderboardAgent")
+        r = client.get("/api/agents/leaderboard", headers=_headers(key))
         assert r.status_code == 200
         data = r.json()
         assert isinstance(data["leaderboard"], list)
@@ -802,8 +903,8 @@ class TestPlatform:
         """A newly registered agent has zero broadcasts/views but should still
         show up (LEFT JOIN, not INNER JOIN) — there's no separate "register for
         the leaderboard" step, registering an agent is enough."""
-        _reg(client, "FreshLeaderboardAgent")
-        r = client.get("/api/agents/leaderboard?limit=200")
+        key = _reg(client, "FreshLeaderboardAgent")
+        r = client.get("/api/agents/leaderboard?limit=200", headers=_headers(key))
         assert r.status_code == 200
         names = [e["name"] for e in r.json()["leaderboard"]]
         assert "FreshLeaderboardAgent" in names
@@ -819,18 +920,20 @@ class TestCapabilityMatchmaking:
         # Update bio with capability tag
         fd = {"bio": "I am a finance analysis agent #finance #analysis"}
         client.patch("/api/agents/me/profile", data=fd, headers=_headers(key))
-        r = client.get("/api/agents/find-capable?capability=finance")
+        r = client.get("/api/agents/find-capable?capability=finance", headers=_headers(key))
         assert r.status_code == 200
         names = [a["name"] for a in r.json()]
         assert "CapAgent1" in names
 
     def test_find_capable_no_match(self, client):
-        r = client.get("/api/agents/find-capable?capability=unicornxyz99")
+        key = _reg(client, "CapAgentNoMatch")
+        r = client.get("/api/agents/find-capable?capability=unicornxyz99", headers=_headers(key))
         assert r.status_code == 200
         assert r.json() == []
 
     def test_find_capable_requires_capability_param(self, client):
-        r = client.get("/api/agents/find-capable")
+        key = _reg(client, "CapAgentMissingParam")
+        r = client.get("/api/agents/find-capable", headers=_headers(key))
         assert r.status_code == 422
 
 
@@ -910,7 +1013,7 @@ class TestTaskMarket:
         task_id = task["id"]
 
         # List tasks
-        r2 = client.get("/api/agents/tasks")
+        r2 = client.get("/api/agents/tasks", headers=_headers(key))
         assert r2.status_code == 200
         ids = [t["id"] for t in r2.json()]
         assert task_id in ids
@@ -923,12 +1026,13 @@ class TestTaskMarket:
             headers=_headers(key),
         )
         task_id = r.json()["id"]
-        r2 = client.get(f"/api/agents/tasks/{task_id}")
+        r2 = client.get(f"/api/agents/tasks/{task_id}", headers=_headers(key))
         assert r2.status_code == 200
         assert "bids" in r2.json()
 
     def test_task_not_found(self, client):
-        r = client.get("/api/agents/tasks/999999")
+        key = _reg(client, "TaskNotFoundAgent")
+        r = client.get("/api/agents/tasks/999999", headers=_headers(key))
         assert r.status_code == 404
 
     def test_bid_on_task(self, client):
@@ -1022,7 +1126,7 @@ class TestTaskMarket:
             json={"title": "Vision task", "required_capability": "vision"},
             headers=_headers(key),
         )
-        r = client.get("/api/agents/tasks?capability=vision")
+        r = client.get("/api/agents/tasks?capability=vision", headers=_headers(key))
         assert r.status_code == 200
         for t in r.json():
             assert "vision" in t["required_capability"].lower()
@@ -1052,7 +1156,8 @@ class TestBroadcastCertification:
         assert r.json()["ok"] is True
 
     def test_certified_feed_empty_by_default(self, client):
-        r = client.get("/api/agents/feed/certified")
+        key = _reg(client, "CertFeedEmptyAgent")
+        r = client.get("/api/agents/feed/certified", headers=_headers(key))
         assert r.status_code == 200
         assert isinstance(r.json(), list)
 
@@ -1060,7 +1165,7 @@ class TestBroadcastCertification:
         key = _reg(client, "CertFeedAgent")
         bid = _text_post(client, key, title="Certified Content")
         client.post(f"/api/admin/broadcasts/{bid}/certify", headers=self._admin_headers())
-        r = client.get("/api/agents/feed/certified")
+        r = client.get("/api/agents/feed/certified", headers=_headers(key))
         assert r.status_code == 200
         ids = [b["id"] for b in r.json()]
         assert bid in ids
@@ -1072,7 +1177,7 @@ class TestBroadcastCertification:
         r = client.delete(f"/api/admin/broadcasts/{bid}/certify", headers=self._admin_headers())
         assert r.status_code == 200
         # Should no longer be in certified feed
-        r2 = client.get("/api/agents/feed/certified")
+        r2 = client.get("/api/agents/feed/certified", headers=_headers(key))
         ids = [b["id"] for b in r2.json()]
         assert bid not in ids
 
@@ -1146,7 +1251,7 @@ class TestSealRoutes:
     def test_seal_status_on_unsealed_broadcast(self, client):
         key = _reg(client, "SealStatusAgent")
         bid = _text_post(client, key)
-        r = client.get(f"/api/agents/broadcasts/{bid}/seal-status")
+        r = client.get(f"/api/agents/broadcasts/{bid}/seal-status", headers=_headers(key))
         assert r.status_code == 200
 
     def test_seal_broadcast(self, client):
@@ -1193,21 +1298,21 @@ class TestJailMode:
     def _admin_headers(self):
         return {"X-Admin-Key": JAIL_ADMIN_KEY}
 
-    def _get_agent_id(self, client, name):
-        r = client.get(f"/api/agents/profile/{name}")
+    def _get_agent_id(self, client, name, key):
+        r = client.get(f"/api/agents/profile/{name}", headers=_headers(key))
         assert r.status_code == 200
         return r.json()["id"]
 
     def test_enable_jail_mode(self, client):
         key = _reg(client, "JailAgent1")
-        agent_id = self._get_agent_id(client, "JailAgent1")
+        agent_id = self._get_agent_id(client, "JailAgent1", key)
         r = client.post(f"/api/admin/agents/{agent_id}/jail-mode", headers=self._admin_headers())
         assert r.status_code == 200
         assert r.json()["jail_mode"] is True
 
     def test_jail_status_reflects_mode(self, client):
         key = _reg(client, "JailAgent2")
-        agent_id = self._get_agent_id(client, "JailAgent2")
+        agent_id = self._get_agent_id(client, "JailAgent2", key)
         client.post(f"/api/admin/agents/{agent_id}/jail-mode", headers=self._admin_headers())
         r = client.get(f"/api/admin/agents/{agent_id}/jail-status", headers=self._admin_headers())
         assert r.status_code == 200
@@ -1215,7 +1320,7 @@ class TestJailMode:
 
     def test_jailed_agent_cannot_post(self, client):
         key = _reg(client, "JailAgent3")
-        agent_id = self._get_agent_id(client, "JailAgent3")
+        agent_id = self._get_agent_id(client, "JailAgent3", key)
         client.post(f"/api/admin/agents/{agent_id}/jail-mode", headers=self._admin_headers())
         # Posting should be blocked
         r = client.post(
@@ -1228,7 +1333,7 @@ class TestJailMode:
 
     def test_disable_jail_mode(self, client):
         key = _reg(client, "JailAgent4")
-        agent_id = self._get_agent_id(client, "JailAgent4")
+        agent_id = self._get_agent_id(client, "JailAgent4", key)
         client.post(f"/api/admin/agents/{agent_id}/jail-mode", headers=self._admin_headers())
         r = client.delete(f"/api/admin/agents/{agent_id}/jail-mode", headers=self._admin_headers())
         assert r.status_code == 200
@@ -1236,7 +1341,7 @@ class TestJailMode:
 
     def test_released_agent_can_post(self, client):
         key = _reg(client, "JailAgent5")
-        agent_id = self._get_agent_id(client, "JailAgent5")
+        agent_id = self._get_agent_id(client, "JailAgent5", key)
         client.post(f"/api/admin/agents/{agent_id}/jail-mode", headers=self._admin_headers())
         client.delete(f"/api/admin/agents/{agent_id}/jail-mode", headers=self._admin_headers())
         r = client.post(
@@ -1249,14 +1354,14 @@ class TestJailMode:
     def test_jailed_agent_hidden_from_feed(self, client):
         key = _reg(client, "JailFeedAgent")
         bid = _text_post(client, key, title="Visible before jail")
-        agent_id = self._get_agent_id(client, "JailFeedAgent")
+        agent_id = self._get_agent_id(client, "JailFeedAgent", key)
         # Before jail: should appear
-        r = client.get("/api/agents/feed")
+        r = client.get("/api/agents/feed", headers=_headers(key))
         ids = [b["id"] for b in r.json()]
         assert bid in ids
         # After jail: should be hidden
         client.post(f"/api/admin/agents/{agent_id}/jail-mode", headers=self._admin_headers())
-        r2 = client.get("/api/agents/feed")
+        r2 = client.get("/api/agents/feed", headers=_headers(key))
         ids2 = [b["id"] for b in r2.json()]
         assert bid not in ids2
 
@@ -1302,7 +1407,7 @@ class TestPipelineOutsource:
             headers=_headers(key),
         )
         task_id = r2.json()["task_market_listing_id"]
-        r3 = client.get(f"/api/agents/tasks/{task_id}")
+        r3 = client.get(f"/api/agents/tasks/{task_id}", headers=_headers(key))
         assert r3.status_code == 200
         assert "visualizing" in r3.json()["title"].lower() or "Pipeline" in r3.json()["title"]
 
@@ -1386,7 +1491,7 @@ class TestVQL:
             json={"subject": "VQLSubject", "predicate": "knows", "object": "VQLObject", "confidence": 0.9},
             headers=_headers(key),
         )
-        r = client.post("/api/agents/knowledge/query", json={"subject": "VQLSubject"})
+        r = client.post("/api/agents/knowledge/query", json={"subject": "VQLSubject"}, headers=_headers(key))
         assert r.status_code == 200
         data = r.json()
         assert "results" in data
@@ -1405,7 +1510,7 @@ class TestVQL:
             json={"subject": "TopicA", "predicate": "unrelated", "object": "TopicC"},
             headers=_headers(key),
         )
-        r = client.post("/api/agents/knowledge/query", json={"subject": "TopicA", "predicate": "rel_to"})
+        r = client.post("/api/agents/knowledge/query", json={"subject": "TopicA", "predicate": "rel_to"}, headers=_headers(key))
         assert r.status_code == 200
         preds = [row["predicate"] for row in r.json()["results"]]
         assert all(p == "rel_to" for p in preds)
@@ -1425,6 +1530,7 @@ class TestVQL:
         r = client.post(
             "/api/agents/knowledge/query",
             json={"subject": "ConfSubject", "min_confidence": 0.5},
+            headers=_headers(key),
         )
         assert r.status_code == 200
         objects = [row["object"] for row in r.json()["results"]]
@@ -1447,6 +1553,7 @@ class TestVQL:
         r = client.post(
             "/api/agents/knowledge/query",
             json={"subject": "NodeA", "depth": 2},
+            headers=_headers(key),
         )
         assert r.status_code == 200
         subjects = {row["subject"] for row in r.json()["results"]}
@@ -1460,7 +1567,7 @@ class TestVQL:
             json={"subject": "AnySubject", "predicate": "any_pred", "object": "AnyObj"},
             headers=_headers(key),
         )
-        r = client.post("/api/agents/knowledge/query", json={"subject": "*", "predicate": "*", "object": "*"})
+        r = client.post("/api/agents/knowledge/query", json={"subject": "*", "predicate": "*", "object": "*"}, headers=_headers(key))
         assert r.status_code == 200
         assert r.json()["result_count"] >= 1
 
@@ -1480,6 +1587,7 @@ class TestVQL:
         r = client.post(
             "/api/agents/knowledge/query",
             json={"subject": "FilterSubject", "agent_filter": "VQLAgentFilter1"},
+            headers=_headers(key1),
         )
         assert r.status_code == 200
         objects = [row["object"] for row in r.json()["results"]]
@@ -1563,7 +1671,7 @@ class TestWorkspaceSnapshots:
 class TestCapabilitySchema:
     def test_get_capability_schema_basic(self, client):
         key = _reg(client, "CapSchemaAgent1", bio="Audio transcription specialist #tts #audio")
-        r = client.get("/api/agents/agents/CapSchemaAgent1/capabilities/schema")
+        r = client.get("/api/agents/agents/CapSchemaAgent1/capabilities/schema", headers=_headers(key))
         assert r.status_code == 200
         data = r.json()
         assert data["agent"] == "CapSchemaAgent1"
@@ -1581,7 +1689,8 @@ class TestCapabilitySchema:
         assert "vision" in data["capabilities"]["tags"]
 
     def test_capability_schema_404_unknown_agent(self, client):
-        r = client.get("/api/agents/agents/NoSuchAgentXYZ/capabilities/schema")
+        key = _reg(client, "CapSchema404Agent")
+        r = client.get("/api/agents/agents/NoSuchAgentXYZ/capabilities/schema", headers=_headers(key))
         assert r.status_code == 404
 
     def test_capability_schema_structured_manifest(self, client):
@@ -1598,7 +1707,7 @@ class TestCapabilitySchema:
             json={"soul_manifest": manifest},
             headers=_headers(key),
         )
-        r = client.get("/api/agents/agents/CapSchemaAgent3/capabilities/schema")
+        r = client.get("/api/agents/agents/CapSchemaAgent3/capabilities/schema", headers=_headers(key))
         assert r.status_code == 200
         caps = r.json()["capabilities"]
         assert "audio" in caps["inputs"]
@@ -1670,7 +1779,7 @@ class TestBroadcastLock:
         assert r.status_code == 200
         assert r.json()["locked_by"] == "LockAgent1"
         # Check status
-        r2 = client.get(f"/api/agents/broadcasts/{bid}/lock")
+        r2 = client.get(f"/api/agents/broadcasts/{bid}/lock", headers=_headers(key))
         assert r2.status_code == 200
         assert r2.json()["locked"] is True
         assert r2.json()["holder"] == "LockAgent1"
@@ -1698,7 +1807,7 @@ class TestBroadcastLock:
         assert r.status_code == 200
         assert r.json()["unlocked"] is True
         # Status should now show unlocked
-        r2 = client.get(f"/api/agents/broadcasts/{bid}/lock")
+        r2 = client.get(f"/api/agents/broadcasts/{bid}/lock", headers=_headers(key))
         assert r2.json()["locked"] is False
 
     def test_unlock_wrong_holder_returns_403(self, client):
@@ -1712,7 +1821,7 @@ class TestBroadcastLock:
     def test_unlocked_broadcast_shows_not_locked(self, client):
         key = _reg(client, "LockAgent6")
         bid = _text_post(client, key, title="Never Locked")
-        r = client.get(f"/api/agents/broadcasts/{bid}/lock")
+        r = client.get(f"/api/agents/broadcasts/{bid}/lock", headers=_headers(key))
         assert r.status_code == 200
         assert r.json()["locked"] is False
 
@@ -1751,7 +1860,7 @@ class TestSwarmVibe:
             json={"vibe": "LLM Latency High", "status_code": "degraded"},
             headers=_headers(key),
         )
-        r = client.get("/api/agents/status/vibe")
+        r = client.get("/api/agents/status/vibe", headers=_headers(key))
         assert r.status_code == 200
         data = r.json()
         assert "swarm_health" in data
@@ -1785,7 +1894,7 @@ class TestSwarmVibe:
             json={"vibe": "Second vibe"},
             headers=_headers(key),
         )
-        r = client.get("/api/agents/status/vibe/history/VibeAgent5")
+        r = client.get("/api/agents/status/vibe/history/VibeAgent5", headers=_headers(key))
         assert r.status_code == 200
         vibes = r.json()
         assert len(vibes) >= 2
@@ -1833,7 +1942,7 @@ class TestBroadcastTemplates:
             json={"title": "Recipe A", "stages": self.STAGES},
             headers=_headers(key),
         )
-        r = client.get("/api/agents/broadcasts/templates")
+        r = client.get("/api/agents/broadcasts/templates", headers=_headers(key))
         assert r.status_code == 200
         assert any(t["title"] == "Recipe A" for t in r.json())
 
@@ -1845,7 +1954,7 @@ class TestBroadcastTemplates:
             headers=_headers(key),
         )
         tpl_id = r.json()["id"]
-        r2 = client.get(f"/api/agents/broadcasts/templates/{tpl_id}")
+        r2 = client.get(f"/api/agents/broadcasts/templates/{tpl_id}", headers=_headers(key))
         assert r2.status_code == 200
         assert r2.json()["title"] == "Get Me"
         assert isinstance(r2.json()["template"], list)
@@ -1880,7 +1989,7 @@ class TestBroadcastTemplates:
         )
         tpl_id = r.json()["id"]
         client.post(f"/api/agents/broadcasts/templates/{tpl_id}/fork", json={}, headers=_headers(key2))
-        r2 = client.get(f"/api/agents/broadcasts/templates/{tpl_id}")
+        r2 = client.get(f"/api/agents/broadcasts/templates/{tpl_id}", headers=_headers(key))
         assert r2.json()["fork_count"] == 1
 
     def test_delete_own_template(self, client):
@@ -1893,7 +2002,7 @@ class TestBroadcastTemplates:
         tpl_id = r.json()["id"]
         r2 = client.delete(f"/api/agents/broadcasts/templates/{tpl_id}", headers=_headers(key))
         assert r2.status_code == 200
-        r3 = client.get(f"/api/agents/broadcasts/templates/{tpl_id}")
+        r3 = client.get(f"/api/agents/broadcasts/templates/{tpl_id}", headers=_headers(key))
         assert r3.status_code == 404
 
     def test_delete_others_template_returns_403(self, client):
@@ -1915,7 +2024,7 @@ class TestBroadcastTemplates:
             json={"title": "Audio Recipe", "stages": [], "content_type": "audio"},
             headers=_headers(key),
         )
-        r = client.get("/api/agents/broadcasts/templates", params={"content_type": "audio"})
+        r = client.get("/api/agents/broadcasts/templates", params={"content_type": "audio"}, headers=_headers(key))
         assert r.status_code == 200
         assert all(t["content_type"] == "audio" for t in r.json())
 
@@ -2002,8 +2111,8 @@ class TestHandshake:
 
 class TestSemanticSearch:
     def test_basic_search_returns_structure(self, client):
-        _reg(client, "SemanticAgent1", bio="I do audio synthesis #tts #audio")
-        r = client.get("/api/agents/semantic-search", params={"query": "audio"})
+        key = _reg(client, "SemanticAgent1", bio="I do audio synthesis #tts #audio")
+        r = client.get("/api/agents/semantic-search", params={"query": "audio"}, headers=_headers(key))
         assert r.status_code == 200
         data = r.json()
         assert "agents" in data
@@ -2011,8 +2120,8 @@ class TestSemanticSearch:
         assert "query" in data
 
     def test_capability_filter(self, client):
-        _reg(client, "SemanticAgent2", bio="Vision specialist #vision #image")
-        r = client.get("/api/agents/semantic-search", params={"capability": "vision"})
+        key = _reg(client, "SemanticAgent2", bio="Vision specialist #vision #image")
+        r = client.get("/api/agents/semantic-search", params={"capability": "vision"}, headers=_headers(key))
         assert r.status_code == 200
         names = [a["name"] for a in r.json()["agents"]]
         assert "SemanticAgent2" in names
@@ -2022,25 +2131,28 @@ class TestSemanticSearch:
         # Publish 2 broadcasts
         _text_post(client, key, title="Post 1")
         _text_post(client, key, title="Post 2")
-        r = client.get("/api/agents/semantic-search", params={"min_broadcasts": 2})
+        r = client.get("/api/agents/semantic-search", params={"min_broadcasts": 2}, headers=_headers(key))
         assert r.status_code == 200
         names = [a["name"] for a in r.json()["agents"]]
         assert "SemanticAgent3" in names
 
     def test_min_broadcasts_excludes_low_activity(self, client):
-        _reg(client, "SemanticAgent4")
+        key = _reg(client, "SemanticAgent4")
         r = client.get(
             "/api/agents/semantic-search",
             params={"query": "SemanticAgent4", "min_broadcasts": 100},
+            headers=_headers(key),
         )
         assert r.status_code == 200
         names = [a["name"] for a in r.json()["agents"]]
         assert "SemanticAgent4" not in names
 
     def test_search_returns_empty_for_no_match(self, client):
+        key = _reg(client, "SemanticSearchEmptyAgent")
         r = client.get(
             "/api/agents/semantic-search",
             params={"query": "XYZIMPOSSIBLEMATCH9999"},
+            headers=_headers(key),
         )
         assert r.status_code == 200
         assert r.json()["result_count"] == 0
@@ -2184,7 +2296,7 @@ class TestSwarmTrace:
     def test_public_broadcast_trace(self, client):
         key = _reg(client, "TraceAgent3")
         bid = _text_post(client, key, title="Public Trace")
-        r = client.get(f"/api/agents/broadcasts/{bid}/trace")
+        r = client.get(f"/api/agents/broadcasts/{bid}/trace", headers=_headers(key))
         assert r.status_code == 200
         data = r.json()
         assert data["broadcast"]["id"] == bid
@@ -2192,7 +2304,8 @@ class TestSwarmTrace:
         assert "credits" in data
 
     def test_public_trace_not_found_for_deleted(self, client):
-        r = client.get("/api/agents/broadcasts/88888/trace")
+        key = _reg(client, "TraceNotFoundAgent")
+        r = client.get("/api/agents/broadcasts/88888/trace", headers=_headers(key))
         assert r.status_code == 404
 
 
@@ -2372,7 +2485,7 @@ class TestTaskChain:
             json={"depends_on_task_id": task_a},
             headers=_headers(key),
         )
-        r = client.get(f"/api/agents/tasks/{task_b}/chain")
+        r = client.get(f"/api/agents/tasks/{task_b}/chain", headers=_headers(key))
         assert r.status_code == 200
         data = r.json()
         assert "chain" in data
@@ -2388,12 +2501,13 @@ class TestTaskChain:
             json={"depends_on_task_id": task_a},
             headers=_headers(key),
         )
-        r = client.get(f"/api/agents/tasks/{task_b}/chain")
+        r = client.get(f"/api/agents/tasks/{task_b}/chain", headers=_headers(key))
         chain_ids = [t["id"] for t in r.json()["chain"]]
         assert task_a in chain_ids
 
     def test_chain_not_found(self, client):
-        r = client.get("/api/agents/tasks/99999/chain")
+        key = _reg(client, "ChainNotFoundAgent")
+        r = client.get("/api/agents/tasks/99999/chain", headers=_headers(key))
         # nonexistent task returns empty chain rather than 404
         assert r.status_code in (200, 404)
 
@@ -2529,7 +2643,7 @@ class TestProofOfSkill:
         assert r.json()["ok"] is True
 
         # Badge should appear on agent profile
-        rb = client.get("/api/agents/agents/SkillAgent8/skill-badges")
+        rb = client.get("/api/agents/agents/SkillAgent8/skill-badges", headers=_headers(key))
         assert rb.status_code == 200
         badges = rb.json()["skill_badges"]
         caps = [b["capability"] for b in badges]
@@ -2564,12 +2678,13 @@ class TestProofOfSkill:
                 headers=self._ah(),
             )
 
-        rb = client.get("/api/agents/agents/SkillAgent10/skill-badges")
+        rb = client.get("/api/agents/agents/SkillAgent10/skill-badges", headers=_headers(key))
         caps = [b["capability"] for b in rb.json()["skill_badges"]]
         assert caps.count("rl_policy") == 1
 
     def test_skill_badges_404_unknown_agent(self, client):
-        r = client.get("/api/agents/agents/NoSuchAgentXYZ999/skill-badges")
+        key = _reg(client, "SkillBadges404Agent")
+        r = client.get("/api/agents/agents/NoSuchAgentXYZ999/skill-badges", headers=_headers(key))
         assert r.status_code == 404
 
 
@@ -2624,20 +2739,23 @@ class TestSwarmProfiles:
 
     def test_list_profiles(self, client):
         self._create_profile(client, "ListableProfile")
-        r = client.get("/api/agents/platform/swarm-profiles")
+        key = _reg(client, "ProfileListAgent")
+        r = client.get("/api/agents/platform/swarm-profiles", headers=_headers(key))
         assert r.status_code == 200
         names = [p["name"] for p in r.json()]
         assert "ListableProfile" in names
 
     def test_get_profile_by_name(self, client):
         self._create_profile(client, "GetProfile")
-        r = client.get("/api/agents/platform/swarm-profiles/GetProfile")
+        key = _reg(client, "ProfileGetAgent")
+        r = client.get("/api/agents/platform/swarm-profiles/GetProfile", headers=_headers(key))
         assert r.status_code == 200
         assert r.json()["name"] == "GetProfile"
         assert "settings" in r.json()
 
     def test_get_profile_not_found(self, client):
-        r = client.get("/api/agents/platform/swarm-profiles/NoSuchProfile999")
+        key = _reg(client, "SwarmProfileNotFoundAgent")
+        r = client.get("/api/agents/platform/swarm-profiles/NoSuchProfile999", headers=_headers(key))
         assert r.status_code == 404
 
     def test_sync_to_profile(self, client):
@@ -2696,10 +2814,11 @@ class TestSwarmProfiles:
 
     def test_delete_profile(self, client):
         self._create_profile(client, "DeleteableProfile")
+        key = _reg(client, "ProfileDeleteAgent")
         r = client.delete("/api/admin/platform/swarm-profiles/DeleteableProfile", headers=self._ah())
         assert r.status_code == 200
         assert r.json()["ok"] is True
-        r2 = client.get("/api/agents/platform/swarm-profiles/DeleteableProfile")
+        r2 = client.get("/api/agents/platform/swarm-profiles/DeleteableProfile", headers=_headers(key))
         assert r2.status_code == 404
 
     def test_delete_nonexistent_profile(self, client):
@@ -2865,7 +2984,7 @@ class TestSidecarProtocol:
             json={"module_name": "public_mod", "payload": "code", "version": "2.0"},
             headers=_headers(key),
         )
-        r = client.get("/api/agents/agents/SidecarAgent5/sidecar")
+        r = client.get("/api/agents/agents/SidecarAgent5/sidecar", headers=_headers(key))
         assert r.status_code == 200
         data = r.json()
         assert len(data) >= 1
@@ -3101,7 +3220,7 @@ class TestEventBus:
             json={"channel": "market.bids", "event_type": "new_bid", "payload": {}},
             headers=_headers(key),
         )
-        r = client.get("/api/agents/events/channels")
+        r = client.get("/api/agents/events/channels", headers=_headers(key))
         assert r.status_code == 200
         d = r.json()
         assert "active_channels" in d
@@ -3114,14 +3233,15 @@ class TestEventBus:
             json={"channel": "history.test", "event_type": "evt", "payload": {"x": 1}},
             headers=_headers(key),
         )
-        r = client.get("/api/agents/events/history?channel=history.test")
+        r = client.get("/api/agents/events/history?channel=history.test", headers=_headers(key))
         assert r.status_code == 200
         events = r.json()
         assert len(events) >= 1
         assert events[0]["channel"] == "history.test"
 
     def test_event_history_no_filter(self, client):
-        r = client.get("/api/agents/events/history")
+        key = _reg(client, "BusAgentNoFilter")
+        r = client.get("/api/agents/events/history", headers=_headers(key))
         assert r.status_code == 200
         assert isinstance(r.json(), list)
 
@@ -3132,7 +3252,7 @@ class TestEventBus:
             json={"channel": "persist.test", "event_type": "stored", "payload": {"v": 42}},
             headers=_headers(key),
         )
-        r = client.get("/api/agents/events/history?channel=persist.test")
+        r = client.get("/api/agents/events/history?channel=persist.test", headers=_headers(key))
         assert any(e["event_type"] == "stored" for e in r.json())
 
     def test_event_bus_requires_auth(self, client):
@@ -3149,7 +3269,7 @@ class TestEventBus:
             json={"channel": "swarm.channel.history", "event_type": "probe", "payload": {}},
             headers=_headers(key),
         )
-        r = client.get("/api/agents/events/channels")
+        r = client.get("/api/agents/events/channels", headers=_headers(key))
         history_channels = [h["channel"] for h in r.json()["channel_history"]]
         assert "swarm.channel.history" in history_channels
 
@@ -3221,7 +3341,7 @@ class TestCapabilityVersioning:
             json={"capability_name": "reasoning", "version": "3.1"},
             headers=_headers(key),
         )
-        r = client.get("/api/agents/agents/CapVerAgent5/capability-versions")
+        r = client.get("/api/agents/agents/CapVerAgent5/capability-versions", headers=_headers(key))
         assert r.status_code == 200
         d = r.json()
         assert d["agent"] == "CapVerAgent5"
@@ -3239,7 +3359,7 @@ class TestCapabilityVersioning:
             json={"capability_name": "planning", "version": "1.1"},
             headers=_headers(key),
         )
-        r = client.get("/api/agents/agents/CapVerAgent6/capability-versions")
+        r = client.get("/api/agents/agents/CapVerAgent6/capability-versions", headers=_headers(key))
         versions = r.json()["capabilities"]["planning"]
         assert len(versions) >= 2
 
@@ -3292,7 +3412,7 @@ class TestCapabilityVersioning:
                 json={"capability_name": "composing", "target_version": "2.0"},
                 headers=self._ah(),
             )
-        r = client.get("/api/agents/agents/CapVerAgent8/capability-versions")
+        r = client.get("/api/agents/agents/CapVerAgent8/capability-versions", headers=_headers(key))
         versions = [v["version"] for v in r.json()["capabilities"].get("composing", [])]
         assert "2.0" in versions
         assert "3.0" in versions

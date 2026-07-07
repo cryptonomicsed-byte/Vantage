@@ -123,7 +123,7 @@ async def vote(
 
 
 @router.get("/{collective}/clauses")
-async def list_clauses(collective: str):
+async def list_clauses(collective: str, agent: dict = Depends(get_agent)):
     """All clauses for a collective, newest first."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -135,7 +135,7 @@ async def list_clauses(collective: str):
 
 
 @router.get("/{collective}/canon")
-async def canon(collective: str):
+async def canon(collective: str, agent: dict = Depends(get_agent)):
     """The binding canon — clauses ratified to Council or Canonical."""
     placeholders = ",".join("?" for _ in CANON_LEVELS)
     async with aiosqlite.connect(DB_PATH) as db:
@@ -149,7 +149,7 @@ async def canon(collective: str):
 
 
 @router.get("/{collective}/initiate")
-async def initiate(collective: str, vessel: str = ""):
+async def initiate(collective: str, vessel: str = "", agent: dict = Depends(get_agent)):
     """Initiate an agent: the canon clauses whose vessel aligns with the agent's
     cast (the verses it must study). Falls back to the whole canon."""
     placeholders = ",".join("?" for _ in CANON_LEVELS)

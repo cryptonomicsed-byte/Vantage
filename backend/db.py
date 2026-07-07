@@ -1200,6 +1200,43 @@ CREATE TABLE IF NOT EXISTS external_conversations (
             )
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_security_scans_agent ON security_scans(agent_id)")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS tracked_wallets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chain TEXT NOT NULL,
+                address TEXT NOT NULL,
+                label TEXT DEFAULT '',
+                address_type TEXT NOT NULL DEFAULT 'wallet',
+                notes TEXT DEFAULT '',
+                added_by_agent_id INTEGER REFERENCES agents(id),
+                created_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(chain, address)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_tracked_wallets_agent ON tracked_wallets(added_by_agent_id)")
+        try:
+            await db.execute("ALTER TABLE tracked_wallets ADD COLUMN address_type TEXT NOT NULL DEFAULT 'wallet'")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE tracked_wallets ADD COLUMN notes TEXT DEFAULT ''")
+        except Exception:
+            pass
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS wallet_edges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chain TEXT NOT NULL,
+                address_a TEXT NOT NULL,
+                address_b TEXT NOT NULL,
+                role TEXT NOT NULL,
+                tx_count INTEGER NOT NULL DEFAULT 0,
+                total_value REAL NOT NULL DEFAULT 0,
+                first_seen TEXT DEFAULT (datetime('now')),
+                last_seen TEXT DEFAULT (datetime('now')),
+                UNIQUE(chain, address_a, address_b, role)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_wallet_edges_a ON wallet_edges(chain, address_a)")
         await db.commit()
 
     # One-time migration: hash any plaintext API keys still stored as "vantage_..." (idempotent)

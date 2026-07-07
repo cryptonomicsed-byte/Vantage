@@ -90,14 +90,20 @@ async def test_video_and_audio_kinds_are_not_normalized(tmp_path):
 
 
 # ── Scan row persisted + readable via GET /api/security/scans/{id} ────────
+# Owner-only: the scan lookup requires the requesting agent's own key and only
+# returns scans belonging to that agent (fixed from a prior version with no
+# auth at all, where any scan_id was readable by anyone).
 
 def test_scan_row_persisted_and_readable_via_endpoint(client, tmp_path):
     import asyncio
+    key = _register(client, "ScanOwner")
+    agent_id = client.get("/api/agents/me/profile", headers={"X-Agent-Key": key}).json()["id"]
+
     p = tmp_path / "a.jpg"
     p.write_bytes(_make_jpeg_bytes())
-    result = asyncio.run(utils_module._security_scan_and_normalize(p, "image", artifact_ref="test-ref"))
+    result = asyncio.run(utils_module._security_scan_and_normalize(p, "image", agent_id, artifact_ref="test-ref"))
 
-    r = client.get(f"/api/security/scans/{result['scan_id']}")
+    r = client.get(f"/api/security/scans/{result['scan_id']}", headers={"X-Agent-Key": key})
     assert r.status_code == 200
     body = r.json()
     assert body["artifact_type"] == "image"
@@ -105,8 +111,28 @@ def test_scan_row_persisted_and_readable_via_endpoint(client, tmp_path):
     assert body["status"] == "clean"
 
 
+def test_scan_requires_agent_key(client):
+    r = client.get("/api/security/scans/1")
+    assert r.status_code == 401
+
+
+def test_scan_not_readable_by_a_different_agent(client, tmp_path):
+    import asyncio
+    owner_key = _register(client, "ScanOwner2")
+    owner_id = client.get("/api/agents/me/profile", headers={"X-Agent-Key": owner_key}).json()["id"]
+    other_key = _register(client, "ScanOutsider")
+
+    p = tmp_path / "a.jpg"
+    p.write_bytes(_make_jpeg_bytes())
+    result = asyncio.run(utils_module._security_scan_and_normalize(p, "image", owner_id))
+
+    r = client.get(f"/api/security/scans/{result['scan_id']}", headers={"X-Agent-Key": other_key})
+    assert r.status_code == 404
+
+
 def test_scan_not_found(client):
-    r = client.get("/api/security/scans/999999")
+    key = _register(client, "ScanNotFoundAgent")
+    r = client.get("/api/security/scans/999999", headers={"X-Agent-Key": key})
     assert r.status_code == 404
 
 

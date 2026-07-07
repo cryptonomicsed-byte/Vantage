@@ -190,20 +190,7 @@ async def token_creator(mint: str = Query(...), x_agent_key: str = Header(...)):
     """Token creator from Pump.fun frontend API."""
     get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
     try:
-        d = {}
-        # Fallback: use Helius token metadata
-        try:
-            from urllib.request import Request, urlopen
-            payload = json.dumps({"jsonrpc":"2.0","id":1,"method":"getAsset","params":{"id":mint}}).encode()
-            req = Request(f"https://mainnet.helius-rpc.com/?api-key={HELIUS}",data=payload,headers={"Content-Type":"application/json"})
-            asset = json.loads(urlopen(req,timeout=10).read().decode()).get("result",{})
-            d = {
-                "creator": asset.get("creators",[{}])[0].get("address","") if asset.get("creators") else "",
-                "name": asset.get("content",{}).get("metadata",{}).get("name",""),
-                "symbol": asset.get("content",{}).get("metadata",{}).get("symbol","")[:8] if asset.get("content",{}).get("metadata",{}).get("symbol") else "",
-                "description": (asset.get("content",{}).get("metadata",{}).get("description","") or ""),
-            }
-        except: pass
+        d = _fetch(f"https://frontend-api.pump.fun/coins/{mint}",{"accept":"application/json"})
         return {"mint":mint,"creator":d.get("creator",d.get("creatorAddress","")),"name":d.get("name",""),"symbol":d.get("symbol",""),"description":d.get("description","")[:200],"twitter":d.get("twitter",""),"website":d.get("website",""),"created_at":d.get("created_timestamp","")}
     except:
         return {"mint":mint,"creator":"","error":"Pump.fun API unavailable"}

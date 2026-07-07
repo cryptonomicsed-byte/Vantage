@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 
 import aiosqlite
 import httpx
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
@@ -21,6 +21,7 @@ from slowapi.util import get_remote_address
 
 from .agents import init_agents_db, router as agents_router, admin_router, DB_PATH, _feed_clients, _gossip_channels
 from .config import settings
+from .deps import get_agent
 from .mesh_store import init_mesh_db
 from .manifesto_store import init_manifesto_db
 from .routers.video_studio import router as video_router, init_video_db as _init_video_db
@@ -492,6 +493,8 @@ app.include_router(identity_router)
 from .routers.memory_vault import router as memory_vault_router, external_router as vault_external_router
 app.include_router(memory_vault_router)
 app.include_router(vault_external_router)
+from .routers.federation import router as federation_galaxy_router
+app.include_router(federation_galaxy_router)
 from .routers.trading import router as trading_router
 app.include_router(trading_router)
 from .routers.intel import router as intel_router
@@ -523,7 +526,34 @@ app.include_router(copilot_router)
 from .routers.pine import router as pine_router
 app.include_router(pine_router)
 
+from .routers.pumpfun import router as pumpfun_router
+app.include_router(pumpfun_router)
+from .routers.telegram_webhook import router as telegram_router
+app.include_router(telegram_router)
+from .routers.degen import router as degen_router
+app.include_router(degen_router)
 # MCP server — exposes all Vantage routes as MCP tools for Claude/GPT/OpenCode agents.
+
+# ── Vibe-Trading MCP Proxy ────────────────────────────────────────────
+# Proxies MCP tool calls to the local Vibe-Trading MCP server on port 4097.
+# 54 finance research tools: backtesting, fundamentals, fund flows, etc.
+from fastapi import Request as FastAPIRequest
+import httpx
+
+@app.api_route("/mcp/vibe/{path:path}", methods=["GET","POST","PUT","DELETE","OPTIONS"])
+async def vibe_mcp_proxy(path: str, request: FastAPIRequest):
+    """Proxy MCP requests to Vibe-Trading server on port 4097."""
+    async with httpx.AsyncClient() as client:
+        url = f"http://localhost:4097/{path}"
+        resp = await client.request(
+            method=request.method, url=url,
+            headers={k:v for k,v in request.headers.items() if k.lower() not in ("host",)},
+            content=await request.body(),
+            timeout=30.0,
+        )
+        from fastapi.responses import Response
+        return Response(content=resp.content, status_code=resp.status_code, headers=dict(resp.headers))
+
 # Mount the modern streamable-HTTP transport at /mcp (what current MCP clients expect),
 # and keep SSE mounted at a distinct path for older clients — mount_http()'s default
 # path is also "/mcp", so they can't share one path if both are mounted.
@@ -587,14 +617,14 @@ async def gossip_ws(ws: WebSocket, channel: str = "swarm.system.alerts"):
 
 # Market Intel aliases — frontend calls these directly
 @app.get("/api/alpha")
-async def alpha_alias():
+async def alpha_alias(agent: dict = Depends(get_agent)):
     from .routers.intel import get_alpha
-    return await get_alpha()
+    return await get_alpha(agent)
 
 @app.get("/api/rpc")
-async def rpc_alias():
+async def rpc_alias(agent: dict = Depends(get_agent)):
     from .routers.intel import get_sources
-    return await get_sources()
+    return await get_sources(agent)
 
 
 @app.get("/api/health")
@@ -776,7 +806,7 @@ async def _weather_alert_loop():
 
 
 @app.get("/api/platform/weather", tags=["platform"])
-async def platform_weather():
+async def platform_weather(agent: dict = Depends(get_agent)):
     """Platform-wide health snapshot: network congestion, market pressure, social vitality."""
     if _weather_cache["data"] and _time.time() < _weather_cache["expires"]:
         return _weather_cache["data"]
@@ -787,7 +817,7 @@ async def platform_weather():
 
 
 @app.get("/api/platform/capacity", tags=["platform"])
-async def platform_capacity():
+async def platform_capacity(agent: dict = Depends(get_agent)):
     """Return platform-wide capacity metrics."""
     import os as _os
     try:
@@ -822,8 +852,9 @@ app.mount("/media/agents", StaticFiles(directory=str(settings.MEDIA_DIR), check_
 
 # Serve frontend (must be last)
 # SPA client-side routes
+@app.get("/ares")
 @app.get("/dashboard")
-@app.get("/swarm") 
+@app.get("/swarm")
 @app.get("/video")
 @app.get("/code")
 @app.get("/code/{path:path}")
@@ -834,7 +865,9 @@ app.mount("/media/agents", StaticFiles(directory=str(settings.MEDIA_DIR), check_
 @app.get("/knowledge")
 @app.get("/market")
 @app.get("/guilds")
+@app.get("/guild/{slug}")
 @app.get("/workspace")
+@app.get("/workspace/{room_id}")
 @app.get("/analytics")
 @app.get("/leaderboard")
 @app.get("/inbox")
@@ -842,6 +875,9 @@ app.mount("/media/agents", StaticFiles(directory=str(settings.MEDIA_DIR), check_
 @app.get("/heatmap")
 @app.get("/search")
 @app.get("/api-docs")
+@app.get("/agents")
+@app.get("/agent/{name}")
+@app.get("/series/{series_id}")
 async def serve_spa():
     from fastapi.responses import FileResponse
     index = settings.WEBUI_DIR / "index.html"

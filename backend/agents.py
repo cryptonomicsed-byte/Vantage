@@ -40,7 +40,10 @@ limiter = Limiter(key_func=get_remote_address)
 from .config import settings
 from .db import DB_PATH, MEDIA_ROOT, init_agents_db
 from .memory_enrichment import MemoryIntelligence
-from .deps import get_agent, get_admin, _parse_body, _update_last_seen, _log_agent_activity
+from .deps import (
+    get_agent, get_admin, _parse_body, _update_last_seen, _log_agent_activity,
+    _agent_rate_buckets, _AGENT_RATE_LIMIT, _AGENT_RATE_WINDOW,
+)
 from .utils import (
     _log_buffer, _BufferHandler,
     _feed_clients, _gossip_channels, _broadcast_gossip, notify_feed_clients,
@@ -509,7 +512,7 @@ async def publish(
 
 @router.get("/feed")
 @limiter.limit("60/minute")
-async def get_feed(request: Request, limit: int = 50, offset: int = 0, content_type: Optional[str] = None):
+async def get_feed(request: Request, limit: int = 50, offset: int = 0, content_type: Optional[str] = None, agent: dict = Depends(get_agent)):
     type_clause = "AND b.content_type = ?" if (content_type and content_type != "all") else ""
     params: list = [content_type] if type_clause else []
     params.extend([limit, offset])
@@ -608,7 +611,7 @@ async def publish_now(broadcast_id: int, agent: dict = Depends(get_agent)):
 
 
 @router.get("/broadcasts/{broadcast_id}/contributors")
-async def get_contributors(broadcast_id: int):
+async def get_contributors(broadcast_id: int, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -766,7 +769,7 @@ async def update_broadcast(
 
 
 @router.get("/stream/{broadcast_id}/index.m3u8")
-async def stream_playlist(broadcast_id: int):
+async def stream_playlist(broadcast_id: int, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -1110,7 +1113,7 @@ async def delete_series(series_id: int, agent: dict = Depends(get_agent)):
 
 
 @router.get("/series/{series_id}")
-async def get_series(series_id: int):
+async def get_series(series_id: int, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -1133,7 +1136,7 @@ async def get_series(series_id: int):
 
 
 @router.get("/{name}/series")
-async def agent_series(name: str):
+async def agent_series(name: str, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id FROM agents WHERE name=?", (name,)) as cur:
@@ -1213,7 +1216,7 @@ async def list_following(agent: dict = Depends(get_agent)):
 
 
 @router.get("/{name}/followers")
-async def agent_followers(name: str):
+async def agent_followers(name: str, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id FROM agents WHERE name=?", (name,)) as cur:
@@ -1232,7 +1235,7 @@ async def agent_followers(name: str):
 
 @router.get("/feed/trending")
 @limiter.limit("60/minute")
-async def trending_feed(request: Request, limit: int = 50):
+async def trending_feed(request: Request, limit: int = 50, agent: dict = Depends(get_agent)):
     """Returns broadcasts sorted by weighted engagement velocity.
 
     Weighting (P0 fix — resists bot farming):
@@ -1551,7 +1554,7 @@ async def add_comment(
 
 
 @router.get("/broadcasts/{broadcast_id}/comments")
-async def get_comments(broadcast_id: int):
+async def get_comments(broadcast_id: int, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -1636,7 +1639,7 @@ async def toggle_reaction(
 
 
 @router.get("/broadcasts/{broadcast_id}/reactions")
-async def get_reactions(broadcast_id: int):
+async def get_reactions(broadcast_id: int, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -1937,6 +1940,19 @@ async def notifications_read_all(agent: dict = Depends(get_agent)):
     return {"ok": True}
 
 
+@router.post("/me/notifications/{notification_id}/read")
+async def notification_read(notification_id: int, agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE notifications SET read=1 WHERE id=? AND agent_id=?",
+            (notification_id, agent["id"]),
+        )
+        await db.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Notification not found")
+    return {"ok": True}
+
+
 @router.get("/me/notifications/unread-count")
 async def notifications_unread_count(agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1989,7 +2005,7 @@ async def sse_event_stream(agent: dict = Depends(get_agent)):
 
 
 @router.get("/agents/{agent_name}/reputation")
-async def get_agent_reputation(agent_name: str):
+async def get_agent_reputation(agent_name: str, agent: dict = Depends(get_agent)):
     """Return computed reputation badges for an agent based on platform activity."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -2115,7 +2131,7 @@ async def list_my_personas(agent=Depends(get_agent)):
 
 
 @router.get("/agents/{agent_name}/personas")
-async def get_agent_personas(agent_name: str):
+async def get_agent_personas(agent_name: str, agent: dict = Depends(get_agent)):
     """List public personas for an agent (no auth)."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -2415,7 +2431,7 @@ async def debate_reply(
 
 
 @router.get("/broadcasts/{broadcast_id}/debate")
-async def get_debate_rounds(broadcast_id: int):
+async def get_debate_rounds(broadcast_id: int, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -2537,8 +2553,22 @@ async def accept_debate_challenge(challenge_id: int, agent: dict = Depends(get_a
     return {"series_id": series_id, "for_broadcast_id": b1_id, "against_broadcast_id": b2_id}
 
 
+@router.post("/me/debate-challenges/{challenge_id}/reject", tags=["debates"])
+async def reject_debate_challenge(challenge_id: int, agent: dict = Depends(get_agent)):
+    """Decline a pending debate challenge."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE debate_challenges SET status='rejected' WHERE id=? AND target_name=? AND status='pending'",
+            (challenge_id, agent["name"]),
+        )
+        await db.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Challenge not found or already resolved")
+    return {"rejected": True, "challenge_id": challenge_id}
+
+
 @router.get("/debates", tags=["debates"])
-async def list_debates(limit: int = Query(20, ge=1, le=100)):
+async def list_debates(limit: int = Query(20, ge=1, le=100), agent: dict = Depends(get_agent)):
     """List active debate series."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -2790,8 +2820,7 @@ async def search(
     model_provider: Optional[str] = None,
     tags: Optional[str] = None,
     limit: int = 50,
-    offset: int = 0,
-):
+    offset: int = 0, agent: dict = Depends(get_agent)):
     conditions = ["b.status = 'ready'"]
     params: list = []
 
@@ -2918,7 +2947,7 @@ async def seal_broadcast(
 
 
 @router.get("/broadcasts/{broadcast_id}/seal-status")
-async def get_seal_status(broadcast_id: int):
+async def get_seal_status(broadcast_id: int, agent: dict = Depends(get_agent)):
     """Return seal status and policy for a broadcast."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -3611,7 +3640,7 @@ async def delete_creation_job(job_id: int, agent: dict = Depends(get_agent)):
 # ---------------------------------------------------------------------------
 
 @router.get("/design-system")
-async def get_design_system():
+async def get_design_system(agent: dict = Depends(get_agent)):
     """Returns the Omo-koda2 brand design system for agent ASCII/terminal/visual outputs."""
     return {
         "version": "1.0",
@@ -3658,7 +3687,7 @@ async def get_design_system():
 # ---------------------------------------------------------------------------
 
 @router.get("/skills")
-async def list_skills():
+async def list_skills(agent: dict = Depends(get_agent)):
     """Returns available API skills/capabilities for agent integration."""
     return {
         "version": "1.0",
@@ -4697,8 +4726,7 @@ async def post_tro(request: Request, agent: dict = Depends(get_agent)):
 @router.get("/tro", tags=["platform"])
 async def list_tros(
     service_type: str = Query("", description="Filter by service type"),
-    limit: int = Query(50, ge=1, le=100),
-):
+    limit: int = Query(50, ge=1, le=100), agent: dict = Depends(get_agent)):
     """List open/bidding, non-expired TROs with response counts."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -4798,7 +4826,7 @@ async def respond_to_tro(tro_id: int, request: Request, agent: dict = Depends(ge
 
 
 @router.get("/tro/{tro_id}/responses", tags=["platform"])
-async def list_tro_responses(tro_id: int):
+async def list_tro_responses(tro_id: int, agent: dict = Depends(get_agent)):
     """All bids submitted for a TRO."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -5108,7 +5136,7 @@ async def create_room(request: Request, agent: dict = Depends(get_agent)):
 
 
 @router.get("/rooms/{room_id}", tags=["platform"])
-async def get_room(room_id: str):
+async def get_room(room_id: str, agent: dict = Depends(get_agent)):
     """Get room metadata, members, and scratchpad contents."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -5264,7 +5292,7 @@ async def commit_room(room_id: str, request: Request, agent: dict = Depends(get_
 
 
 @router.get("/rooms", tags=["platform"])
-async def list_rooms():
+async def list_rooms(agent: dict = Depends(get_agent)):
     """List all open rooms with member counts."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -5282,7 +5310,7 @@ async def list_rooms():
 
 
 @router.get("/rooms/{room_id}/scratchpad", tags=["platform"])
-async def get_room_scratchpad(room_id: str):
+async def get_room_scratchpad(room_id: str, agent: dict = Depends(get_agent)):
     """Return all scratchpad entries for a room as key→value dict."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -5336,7 +5364,7 @@ async def push_trace(request: Request, agent: dict = Depends(get_agent)):
 
 
 @router.get("/agents/activity-log", tags=["platform"])
-async def get_activity_log(limit: int = 50):
+async def get_activity_log(limit: int = 50, agent: dict = Depends(get_agent)):
     """Recent thought traces from all agents — powers Observer Mode feed."""
     limit = min(limit, 200)
     async with aiosqlite.connect(DB_PATH) as db:
@@ -5359,7 +5387,7 @@ async def get_activity_log(limit: int = 50):
 # ── Activity heatmap (Intent Heatmap) ──────────────────────────────────────
 
 @router.get("/activity/heatmap", tags=["platform"])
-async def get_activity_heatmap():
+async def get_activity_heatmap(agent: dict = Depends(get_agent)):
     """
     Returns platform activity counts used to power the Intent Heatmap.
     Covers: broadcasts by content_type (last 60 min), top active tags,
@@ -5438,7 +5466,7 @@ async def get_activity_heatmap():
 # ── Agent status (Diagnostic Overlays) ─────────────────────────────────────
 
 @router.get("/agents/{agent_name}/status", tags=["platform"])
-async def get_agent_status(agent_name: str):
+async def get_agent_status(agent_name: str, agent: dict = Depends(get_agent)):
     """Quick status snapshot for diagnostic hover overlays."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -5668,8 +5696,7 @@ async def query_knowledge(
     subject: Optional[str] = None,
     predicate: Optional[str] = None,
     agent: Optional[str] = None,
-    limit: int = 50,
-):
+    limit: int = 50, _caller: dict = Depends(get_agent)):
     """Query the global knowledge graph."""
     conditions = []
     params: list = []
@@ -5699,7 +5726,7 @@ async def query_knowledge(
 
 
 @router.get("/knowledge/{agent_name}", tags=["platform"])
-async def get_agent_knowledge(agent_name: str):
+async def get_agent_knowledge(agent_name: str, agent: dict = Depends(get_agent)):
     """Return all knowledge snippets from one agent."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -5734,7 +5761,7 @@ async def delete_knowledge_snippet(snippet_id: int, agent: dict = Depends(get_ag
 
 
 @router.post("/knowledge/query", tags=["platform"])
-async def vql_query(request: Request):
+async def vql_query(request: Request, agent: dict = Depends(get_agent)):
     """
     Vantage Query Language (VQL) — path traversal on the knowledge graph.
     Query by subject/predicate/object with wildcards (*), specify depth for hop traversal.
@@ -5995,8 +6022,7 @@ async def _execute_proposal_command(command: str, payload: dict) -> None:
 @router.get("/find-capable", tags=["identity"])
 async def find_capable_agents(
     capability: str = Query(..., description="Capability to search for, e.g. 'vision' or 'finance'"),
-    limit: int = Query(20, ge=1, le=100),
-):
+    limit: int = Query(20, ge=1, le=100), agent: dict = Depends(get_agent)):
     """Find agents with a specific capability tag in their bio or soul_manifest."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -6156,8 +6182,7 @@ async def create_task_listing(request: Request, agent=Depends(get_agent)):
 async def list_task_listings(
     capability: str = Query("", description="Filter by required_capability"),
     status: str = Query("open"),
-    limit: int = Query(50, ge=1, le=200),
-):
+    limit: int = Query(50, ge=1, le=200), agent: dict = Depends(get_agent)):
     """Browse open task listings."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -6179,7 +6204,7 @@ async def list_task_listings(
 
 
 @router.get("/tasks/{task_id}", tags=["platform"])
-async def get_task(task_id: int):
+async def get_task(task_id: int, agent: dict = Depends(get_agent)):
     """Get a task with all bids."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -6335,7 +6360,7 @@ async def my_task_bids(agent=Depends(get_agent)):
 # ── Swarm Graph (for SwarmMap visualization) ─────────────────────────────────
 
 @router.get("/swarm-graph", tags=["platform"])
-async def get_swarm_graph():
+async def get_swarm_graph(agent: dict = Depends(get_agent)):
     """
     Returns agent nodes and follow edges for the Swarm Map constellation view.
     Nodes include activity metrics; edges represent follow relationships.
@@ -6379,20 +6404,6 @@ async def get_swarm_graph():
 
 
 # ── Swarm Orchestration ───────────────────────────────────────────────────────
-
-
-@router.get("/swarm/tasks", tags=["platform"])
-async def list_swarm_tasks(limit: int = 20):
-    """List swarm tasks — what the SwarmMap frontend expects."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        rows = await (await db.execute(
-            """SELECT t.id, t.title, t.description, t.status, t.created_at, a.name as agent_name
-               FROM collective_tasks t
-               LEFT JOIN agents a ON a.id = t.created_by
-               ORDER BY t.created_at DESC LIMIT ?""", (limit,)
-        )).fetchall()
-        return [dict(r) for r in rows]
 
 
 @router.post("/me/swarm/task", tags=["platform"])
@@ -6448,8 +6459,7 @@ async def post_swarm_task(request: Request, agent: dict = Depends(get_agent)):
 async def list_swarm_tasks(
     status: str = Query("open", description="Filter by status: open|awarded|completed|all"),
     capability: str = Query("", description="Filter by required_capability keyword"),
-    limit: int = Query(50, ge=1, le=100),
-):
+    limit: int = Query(50, ge=1, le=100), agent: dict = Depends(get_agent)):
     """List swarm tasks — the live queue of work available for agent bidding."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -6481,7 +6491,7 @@ async def list_swarm_tasks(
 # ── Market Velocity Stats ─────────────────────────────────────────────────────
 
 @router.get("/market/stats", tags=["platform"])
-async def get_market_stats():
+async def get_market_stats(agent: dict = Depends(get_agent)):
     """Aggregate market velocity statistics for the ticker dashboard."""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT COUNT(*) FROM task_listings WHERE status='open'") as cur:
@@ -6527,7 +6537,7 @@ async def get_market_stats():
 # ── Tier 4: Broadcast Certification Feed ────────────────────────────────────
 
 @router.get("/feed/certified", tags=["feeds"])
-async def get_certified_feed(limit: int = Query(50, ge=1, le=200)):
+async def get_certified_feed(limit: int = Query(50, ge=1, le=200), agent: dict = Depends(get_agent)):
     """Feed of certified broadcasts only."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -6647,7 +6657,7 @@ async def load_workspace_snapshot(snapshot_id: int, agent: dict = Depends(get_ag
 # ── Feature 2: Standardized Capability Discovery ────────────────────────────
 
 @router.get("/agents/{agent_name}/capabilities/schema", tags=["identity"])
-async def get_capability_schema(agent_name: str):
+async def get_capability_schema(agent_name: str, agent: dict = Depends(get_agent)):
     """
     Return a structured JSON Schema describing exactly what this agent can handle.
     Parsed from soul_manifest structured fields and bio hashtags.
@@ -6856,7 +6866,7 @@ async def unlock_broadcast(broadcast_id: int, agent: dict = Depends(get_agent)):
 
 
 @router.get("/broadcasts/{broadcast_id}/lock", tags=["platform"])
-async def get_broadcast_lock_status(broadcast_id: int):
+async def get_broadcast_lock_status(broadcast_id: int, agent: dict = Depends(get_agent)):
     """Check the current lock status of a broadcast."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -6921,7 +6931,7 @@ async def publish_vibe(request: Request, agent: dict = Depends(get_agent)):
 
 
 @router.get("/status/vibe", tags=["platform"])
-async def get_swarm_vibe(limit: int = Query(50, ge=1, le=200)):
+async def get_swarm_vibe(limit: int = Query(50, ge=1, le=200), agent: dict = Depends(get_agent)):
     """
     Swarm-wide heartbeat dashboard. Returns the latest vibe from each agent.
     Enables Ares to detect swarm-wide infrastructure degradation patterns.
@@ -6961,7 +6971,7 @@ async def get_swarm_vibe(limit: int = Query(50, ge=1, le=200)):
 
 
 @router.get("/status/vibe/history/{agent_name}", tags=["platform"])
-async def get_agent_vibe_history(agent_name: str, limit: int = Query(20, ge=1, le=100)):
+async def get_agent_vibe_history(agent_name: str, limit: int = Query(20, ge=1, le=100), agent: dict = Depends(get_agent)):
     """Return vibe history for a specific agent (last N entries)."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -7077,7 +7087,7 @@ async def set_task_dependency(task_id: int, request: Request, agent: dict = Depe
 
 
 @router.get("/tasks/{task_id}/chain", tags=["platform"])
-async def get_task_chain(task_id: int):
+async def get_task_chain(task_id: int, agent: dict = Depends(get_agent)):
     """
     Resolve the full dependency chain for a task (up to 10 hops).
     Returns ordered list from root dependency to this task.
@@ -7157,7 +7167,7 @@ async def list_my_skill_verifications(agent: dict = Depends(get_agent)):
 
 
 @router.get("/agents/{agent_name}/skill-badges", tags=["identity"])
-async def get_agent_skill_badges(agent_name: str):
+async def get_agent_skill_badges(agent_name: str, agent: dict = Depends(get_agent)):
     """Return verified skill badges earned by an agent."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -7177,7 +7187,7 @@ async def get_agent_skill_badges(agent_name: str):
 # ── A2A Skill Exchange ────────────────────────────────────────────────────────
 
 @router.get("/agents/{agent_name}/skills", tags=["identity"])
-async def get_agent_skills(agent_name: str):
+async def get_agent_skills(agent_name: str, agent: dict = Depends(get_agent)):
     """
     Unified skill manifest for an agent: badges, sidecars, personas, and verified skills.
     Enables A2A discovery — agents can ask "what can you do?" before delegating work.
@@ -7287,7 +7297,7 @@ async def invoke_broadcast_workflow(
 # ── Feature 4: Swarm-Wide Configuration Profiles ────────────────────────────
 
 @router.get("/platform/swarm-profiles", tags=["platform"])
-async def list_swarm_profiles():
+async def list_swarm_profiles(agent: dict = Depends(get_agent)):
     """List all available swarm configuration profiles."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -7305,7 +7315,7 @@ async def list_swarm_profiles():
 
 
 @router.get("/platform/swarm-profiles/{profile_name}", tags=["platform"])
-async def get_swarm_profile(profile_name: str):
+async def get_swarm_profile(profile_name: str, agent: dict = Depends(get_agent)):
     """Get a specific swarm configuration profile by name."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -7413,8 +7423,7 @@ async def create_broadcast_template(request: Request, agent: dict = Depends(get_
 async def list_broadcast_templates(
     content_type: str = Query("", description="Filter by content type"),
     agent: str = Query("", description="Filter by agent name"),
-    limit: int = Query(50, ge=1, le=200),
-):
+    limit: int = Query(50, ge=1, le=200), _caller: dict = Depends(get_agent)):
     """Browse published Pipeline Recipes."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -7444,7 +7453,7 @@ async def list_broadcast_templates(
 
 
 @router.get("/broadcasts/templates/{template_id}", tags=["platform"])
-async def get_broadcast_template(template_id: int):
+async def get_broadcast_template(template_id: int, agent: dict = Depends(get_agent)):
     """Get a single Pipeline Recipe with full stage definition."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -7651,8 +7660,7 @@ async def semantic_agent_search(
     min_followers: int = Query(0, ge=0, description="Minimum follower count"),
     min_tasks_completed: int = Query(0, ge=0, description="Minimum completed Task Market jobs"),
     max_error_rate: float = Query(1.0, ge=0.0, le=1.0, description="Max pipeline error rate 0.0–1.0"),
-    limit: int = Query(20, ge=1, le=100),
-):
+    limit: int = Query(20, ge=1, le=100), agent: dict = Depends(get_agent)):
     """
     Behavioral semantic search across the agent registry.
     Find partners not by name, but by measured performance and capability.
@@ -7991,7 +7999,7 @@ async def swarm_trace(broadcast_id: int, _: str = Depends(get_admin)):
 
 
 @router.get("/broadcasts/{broadcast_id}/trace", tags=["platform"])
-async def public_broadcast_trace(broadcast_id: int):
+async def public_broadcast_trace(broadcast_id: int, agent: dict = Depends(get_agent)):
     """
     Public-facing unified trace for a broadcast: shows all contributing agents
     and pipeline stages (without error_text/internal fields).
@@ -8440,6 +8448,117 @@ async def admin_verify_receipt_chain(_: str = Depends(get_admin)):
     return {"ok": True, "checked": len(rows)}
 
 
+@admin_router.get("/security-scans")
+async def admin_list_security_scans(
+    limit: int = Query(100, ge=1, le=500),
+    status: Optional[str] = None,
+    artifact_type: Optional[str] = None,
+    agent_id: Optional[int] = None,
+    _: str = Depends(get_admin),
+):
+    """Parrot-security upload quarantine history — the security_scans table
+    has no admin list endpoint today, only a single-scan-by-id lookup."""
+    clauses, params = [], []
+    if status:
+        clauses.append("status=?"); params.append(status)
+    if artifact_type:
+        clauses.append("artifact_type=?"); params.append(artifact_type)
+    if agent_id:
+        clauses.append("agent_id=?"); params.append(agent_id)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"SELECT * FROM security_scans {where} ORDER BY started_at DESC LIMIT ?", params
+        ) as cur:
+            rows = await cur.fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["findings"] = _json.loads(d.pop("findings_json"))
+        except (TypeError, ValueError):
+            d["findings"] = []
+        out.append(d)
+    return {"scans": out, "count": len(out)}
+
+
+@admin_router.get("/code-scans")
+async def admin_list_code_scans(
+    limit: int = Query(100, ge=1, le=500),
+    status: Optional[str] = None,
+    engine: Optional[str] = None,
+    owner: Optional[str] = None,
+    name: Optional[str] = None,
+    _: str = Depends(get_admin),
+):
+    """Strix/regex code-scan history — the code_scans table has no admin
+    list endpoint today, only agent-scoped dispatch/poll endpoints."""
+    clauses, params = [], []
+    if status:
+        clauses.append("status=?"); params.append(status)
+    if engine:
+        clauses.append("engine=?"); params.append(engine)
+    if owner:
+        clauses.append("owner=?"); params.append(owner)
+    if name:
+        clauses.append("name=?"); params.append(name)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"SELECT * FROM code_scans {where} ORDER BY started_at DESC LIMIT ?", params
+        ) as cur:
+            rows = await cur.fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["findings"] = _json.loads(d.pop("findings_json"))
+        except (TypeError, ValueError):
+            d["findings"] = []
+        out.append(d)
+    return {"scans": out, "count": len(out)}
+
+
+@admin_router.get("/jobs-overview")
+async def admin_jobs_overview(_: str = Depends(get_admin)):
+    """Aggregate health view of the multi-agent Job Conductor (jobs/job_tasks)
+    — distinct from the older creation_jobs/task_dead_letter pipeline counted
+    in /telemetry. No existing endpoint computes counts; GET /api/jobs only
+    returns raw rows."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT status, COUNT(*) as n FROM jobs GROUP BY status"
+        ) as cur:
+            job_counts = {r["status"]: r["n"] for r in await cur.fetchall()}
+        async with db.execute(
+            "SELECT status, COUNT(*) as n FROM job_tasks GROUP BY status"
+        ) as cur:
+            task_counts = {r["status"]: r["n"] for r in await cur.fetchall()}
+        async with db.execute(
+            """SELECT COUNT(*) as n FROM job_tasks
+               WHERE status='claimed' AND claim_expires_at <= datetime('now')"""
+        ) as cur:
+            expired_leases = (await cur.fetchone())["n"]
+        async with db.execute(
+            """SELECT j.id, j.title, j.job_type, j.status, j.created_at,
+                      COUNT(t.id) as task_count
+               FROM jobs j LEFT JOIN job_tasks t ON t.job_id=j.id
+               GROUP BY j.id ORDER BY j.created_at DESC LIMIT 20"""
+        ) as cur:
+            recent_jobs = [dict(r) for r in await cur.fetchall()]
+    return {
+        "jobs_by_status": job_counts,
+        "tasks_by_status": task_counts,
+        "expired_leases": expired_leases,
+        "recent_jobs": recent_jobs,
+    }
+
+
 @admin_router.patch("/agents/{agent_id}/tier")
 async def admin_set_tier(agent_id: int, request: Request, _: str = Depends(get_admin)):
     """Manually set an agent's tier (0-5)."""
@@ -8458,7 +8577,8 @@ async def admin_list_agents(_: str = Depends(get_admin)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT id, name, bio, avatar_url, agent_status, is_admin, created_at, token_balance, sui_address
+            """SELECT id, name, bio, avatar_url, agent_status, is_admin, created_at,
+                      token_balance, sui_address, tier, jail_mode, reputation
                FROM agents ORDER BY created_at DESC"""
         ) as cur:
             rows = await cur.fetchall()
@@ -8553,6 +8673,42 @@ async def admin_rate_limits(_: str = Depends(get_admin)):
         "broadcast_activity": broadcast_activity,
         "comment_activity": comment_activity,
     }
+
+
+@admin_router.get("/rate-limit-status")
+async def admin_rate_limit_status(_: str = Depends(get_admin)):
+    """Real live view of the in-memory per-agent sliding-window rate limiter
+    (backend/deps.py::_check_agent_rate) — distinct from /rate-limits above,
+    which is actually a 5-minute broadcast/comment content-frequency count and
+    doesn't reflect the real request-rate limiter state at all."""
+    import time as _time
+    now = _time.monotonic()
+    agent_ids = [aid for aid, times in _agent_rate_buckets.items()
+                 if any(now - t < _AGENT_RATE_WINDOW for t in times)]
+    names = {}
+    if agent_ids:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            placeholders = ",".join("?" for _ in agent_ids)
+            async with db.execute(
+                f"SELECT id, name FROM agents WHERE id IN ({placeholders})", agent_ids
+            ) as cur:
+                names = {r["id"]: r["name"] for r in await cur.fetchall()}
+    rows = []
+    for aid, times in _agent_rate_buckets.items():
+        active = [t for t in times if now - t < _AGENT_RATE_WINDOW]
+        if not active:
+            continue
+        rows.append({
+            "agent_id": aid,
+            "agent_name": names.get(aid, f"agent-{aid}"),
+            "requests_in_window": len(active),
+            "limit": _AGENT_RATE_LIMIT,
+            "window_seconds": _AGENT_RATE_WINDOW,
+            "pct_of_limit": round(len(active) / _AGENT_RATE_LIMIT * 100, 1),
+        })
+    rows.sort(key=lambda r: r["requests_in_window"], reverse=True)
+    return {"limit": _AGENT_RATE_LIMIT, "window_seconds": _AGENT_RATE_WINDOW, "agents": rows[:50]}
 
 
 # 8. Admin honeypot hits
@@ -8823,7 +8979,7 @@ async def list_my_sidecars(agent: dict = Depends(get_agent)):
 
 
 @router.get("/agents/{agent_name}/sidecar", tags=["platform"])
-async def get_agent_sidecars(agent_name: str):
+async def get_agent_sidecars(agent_name: str, agent: dict = Depends(get_agent)):
     """Public list of sidecar modules for a given agent (payload excluded)."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -9055,7 +9211,7 @@ async def publish_event(request: Request, agent: dict = Depends(get_agent)):
 
 
 @router.get("/events/channels", tags=["platform"])
-async def list_event_channels():
+async def list_event_channels(agent: dict = Depends(get_agent)):
     """List all known gossip channels with live subscriber counts and recent activity."""
     active = {ch: len(subs) for ch, subs in _gossip_channels.items() if subs}
     async with aiosqlite.connect(DB_PATH) as db:
@@ -9075,8 +9231,7 @@ async def list_event_channels():
 @router.get("/events/history", tags=["platform"])
 async def get_event_history(
     channel: Optional[str] = None,
-    limit: int = Query(50, ge=1, le=200),
-):
+    limit: int = Query(50, ge=1, le=200), agent: dict = Depends(get_agent)):
     """Retrieve recent gossip bus events, optionally filtered by channel."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -9121,7 +9276,7 @@ async def declare_capability_version(request: Request, agent: dict = Depends(get
 
 
 @router.get("/agents/{agent_name}/capability-versions", tags=["platform"])
-async def get_agent_capability_versions(agent_name: str):
+async def get_agent_capability_versions(agent_name: str, agent: dict = Depends(get_agent)):
     """Get the full capability version history for an agent, grouped by capability."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -9391,7 +9546,7 @@ async def get_llm_config(agent: dict = Depends(get_agent)):
 
 
 @router.get("/info")
-async def get_instance_info():
+async def get_instance_info(agent: dict = Depends(get_agent)):
     """Public endpoint announcing this Vantage instance's identity.
     Used by federation peers for auto-discovery and name detection.
     """

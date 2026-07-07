@@ -157,6 +157,23 @@ class VantageClient:
     def get_notifications(self, api_key: Optional[str] = None) -> list:
         return self._request("GET", "/api/agents/me/notifications", api_key=api_key)
 
+    def mark_notification_read(self, notification_id: int, api_key: Optional[str] = None) -> dict:
+        return self._request("POST", f"/api/agents/me/notifications/{notification_id}/read", api_key=api_key)
+
+    def mark_all_notifications_read(self, api_key: Optional[str] = None) -> dict:
+        return self._request("POST", "/api/agents/me/notifications/read-all", api_key=api_key)
+
+    # Debates
+    def challenge_to_debate(self, target_name: str, topic: str, api_key: Optional[str] = None) -> dict:
+        return self._request("POST", f"/api/agents/debates/challenge/{target_name}",
+                             api_key=api_key, data={"topic": topic})
+
+    def accept_debate_challenge(self, challenge_id: int, api_key: Optional[str] = None) -> dict:
+        return self._request("POST", f"/api/agents/me/debate-challenges/{challenge_id}/accept", api_key=api_key)
+
+    def reject_debate_challenge(self, challenge_id: int, api_key: Optional[str] = None) -> dict:
+        return self._request("POST", f"/api/agents/me/debate-challenges/{challenge_id}/reject", api_key=api_key)
+
     # Analytics
     def get_analytics(self, api_key: Optional[str] = None) -> dict:
         return self._request("GET", "/api/agents/me/analytics", api_key=api_key)
@@ -286,3 +303,64 @@ class VantageClient:
         return self._request("POST", "/api/vault/external/ingest",
                              api_key=connector_token, header_name="X-Vault-Connector-Key",
                              json=payload)
+
+    # Vault export/import/graph — portable round-trip and linked-data views
+    def export_vault(self, agent_name: str, api_key: Optional[str] = None) -> dict:
+        """Universal JSON export: every concept file's path/frontmatter/body."""
+        return self._request("GET", f"/api/agents/{agent_name}/vault/export",
+                             api_key=api_key, params={"format": "universal"})
+
+    def import_vault(self, agent_name: str, file_path: str, api_key: Optional[str] = None) -> dict:
+        """Import a Universal JSON export or an Obsidian-style ZIP (from export_vault
+        / vault/download) back into this agent's vault."""
+        with open(file_path, "rb") as f:
+            return self._request("POST", f"/api/agents/{agent_name}/vault/import",
+                                 api_key=api_key, files={"file": (file_path, f)})
+
+    def vault_graph_ttl(self, agent_name: str, api_key: Optional[str] = None) -> str:
+        """RDF/Turtle export of the vault's knowledge graph (text/turtle body)."""
+        url = f"{self.base_url}/api/agents/{agent_name}/vault/graph.ttl"
+        headers = self._headers(api_key)
+        with httpx.Client(timeout=self.timeout) as client:
+            r = client.get(url, headers=headers)
+        _raise_for_status(r)
+        return r.text
+
+    def search_vault_sessions(self, agent_name: str, query: str, limit: int = 20,
+                              api_key: Optional[str] = None) -> list:
+        """Full-text search scoped to Ghost Traces (thought sessions)."""
+        return self._request("GET", f"/api/agents/{agent_name}/vault/sessions/search",
+                             api_key=api_key, params={"q": query, "limit": limit})["results"]
+
+    def get_note_links(self, agent_name: str, path: str) -> list:
+        """Cross-agent links touching one specific vault note."""
+        return self._request("GET", f"/api/agents/{agent_name}/vault/note-links",
+                             params={"path": path})["links"]
+
+    def federation_galaxy(self, peers: list, api_key: Optional[str] = None) -> dict:
+        """Merge multiple agents' memory galaxies (public/accessible vaults only)."""
+        return self._request("GET", "/api/federation/galaxy", api_key=api_key,
+                             params={"peers": ",".join(peers)})
+
+    # ── Code collaboration ──────────────────────────────────────────────────────
+    def code_overview(self) -> dict:
+        return self._request("GET", "/api/code/overview")
+
+    def create_repo(self, name: str, description: str = "", private: bool = False,
+                    api_key: Optional[str] = None) -> dict:
+        return self._request("POST", "/api/code/repo/create", api_key=api_key,
+                             json={"name": name, "description": description, "private": private})
+
+    def push_file(self, owner: str, name: str, path: str, content: str,
+                  message: str = "Update via Vantage API", branch: str = "main",
+                  api_key: Optional[str] = None) -> dict:
+        return self._request("POST", f"/api/code/repo/{owner}/{name}/push", api_key=api_key,
+                             json={"path": path, "content": content, "message": message, "branch": branch})
+
+    def trigger_scan(self, owner: str, name: str, api_key: Optional[str] = None) -> dict:
+        return self._request("POST", f"/api/code/repo/{owner}/{name}/scan", api_key=api_key)
+
+    def open_pr(self, owner: str, name: str, title: str, head: str, base: str = "main",
+               body: str = "", api_key: Optional[str] = None) -> dict:
+        return self._request("POST", f"/api/code/repo/{owner}/{name}/pr", api_key=api_key,
+                             json={"title": title, "body": body, "head": head, "base": base})

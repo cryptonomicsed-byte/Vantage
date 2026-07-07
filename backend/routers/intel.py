@@ -2,13 +2,18 @@
 All data geo-unrestricted, no API keys needed."""
 
 import logging, asyncio, json, time, threading
+from typing import Optional
 import httpx
-from fastapi import APIRouter, Query, Request
+import aiosqlite
+from fastapi import APIRouter, Query, Request, Depends, HTTPException
+from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from backend import market_sources as ms
 from backend import indicators as ind
+from backend.db import DB_PATH
+from backend.deps import get_agent
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/intel", tags=["intel"])
@@ -82,7 +87,7 @@ async def _fetch_prices_batch(ids: list[str]) -> dict:
 # ── Endpoints ──
 
 @router.get("/market")
-async def full_market(limit: int = Query(100, ge=1, le=500)):
+async def full_market(limit: int = Query(100, ge=1, le=500), agent: dict = Depends(get_agent)):
     """Full market rundown — all crypto tokens with prices from Pyth."""
     feeds = await _get_all_crypto_feeds()
     if not feeds:
@@ -174,7 +179,7 @@ async def _majors():
     return btc, eth, sol
 
 @router.get("")
-async def get_intel():
+async def get_intel(agent: dict = Depends(get_agent)):
     """Aggregate overview — BTC/ETH/SOL + chain health + sentiment."""
     btc, eth, sol = await _majors()
 
@@ -214,13 +219,13 @@ async def get_intel():
     }
 
 @router.get("/arbitrage")
-async def get_arbitrage():
+async def get_arbitrage(agent: dict = Depends(get_agent)):
     """Real cross-exchange spreads (Binance/OKX/KuCoin/Coinbase/Gemini)."""
     opps = await ms.real_arbitrage()
     return {"opportunities": opps, "source": "live_cex_spreads" if opps else "unavailable"}
 
 @router.get("/alpha")
-async def get_alpha():
+async def get_alpha(agent: dict = Depends(get_agent)):
     """Real alpha: top movers by 24h change/volume from the top-100."""
     movers = await ms.top_movers(8)
     lead = movers[0]["symbol"] if movers else "—"
@@ -230,47 +235,253 @@ async def get_alpha():
     }
 
 @router.get("/sentiment")
-async def get_sentiment():
+async def get_sentiment(agent: dict = Depends(get_agent)):
     """Real sentiment derived from top-100 market breadth + BTC dominance."""
     b = await ms.market_breadth()
     return {"sentiment": b, "indicators": b.get("indicators", [])}
 
 @router.get("/yields")
-async def get_yields(limit: int = Query(25, ge=1, le=100)):
+async def get_yields(limit: int = Query(25, ge=1, le=100), agent: dict = Depends(get_agent)):
     """Top DeFi yield pools by APY (DefiLlama, TVL ≥ $1M)."""
     pools = await ms.defillama_yields(limit)
     return {"pools": pools, "count": len(pools), "source": "DefiLlama"}
 
 @router.get("/dex")
-async def get_dex(q: str = Query("SOL"), limit: int = Query(20, ge=1, le=50)):
+async def get_dex(q: str = Query("SOL"), limit: int = Query(20, ge=1, le=50), agent: dict = Depends(get_agent)):
     """DEX pairs/liquidity for a token query (DexScreener)."""
     pairs = await ms.dexscreener_search(q, limit)
     return {"query": q, "pairs": pairs, "count": len(pairs), "source": "DexScreener"}
 
+@router.get("/dex/pools")
+async def get_dex_pools(
+    network: str = Query("solana"),
+    kind: str = Query("trending", pattern="^(trending|new)$"),
+    limit: int = Query(30, ge=1, le=50), agent: dict = Depends(get_agent)):
+    """Pool-level DEX feed (GeckoTerminal) — every currently-trading pair on a chain,
+    not just tokens ranked into a top-N market-cap listing. 'new' surfaces just-launched
+    pools; 'trending' surfaces established-momentum ones."""
+    pools = await ms.dex_new_pools(network, kind, limit)
+    return {"network": network, "kind": kind, "pools": pools, "count": len(pools), "source": "GeckoTerminal"}
+
 @router.get("/fx")
-async def get_fx(base: str = Query("USD")):
+async def get_fx(base: str = Query("USD"), agent: dict = Depends(get_agent)):
     """Fiat exchange rates (ExchangeRate-API)."""
     return await ms.fx_rates(base)
 
 @router.get("/whales")
-async def get_whales(limit: int = Query(10, ge=1, le=25)):
-    """Largest recent BTC mempool transactions (mempool.space)."""
-    txs = await ms.whale_txs(limit)
+async def get_whales(limit: int = Query(10, ge=1, le=25), min_value_btc: float = Query(None, ge=0), agent: dict = Depends(get_agent)):
+    """Largest recent BTC mempool transactions (mempool.space), optionally
+    filtered to only transactions at or above min_value_btc."""
+    txs = await ms.whale_txs(limit, min_value_btc)
     return {"transactions": txs, "count": len(txs), "chain": "bitcoin", "source": "mempool.space"}
+
+# ── Wallet money-flow graph — accumulated from real observed counterparties,
+# not a fabricated data source. Every /trace lookup and /watchlist/refresh
+# feeds this: nodes are wallet addresses, links are real sender/recipient
+# relationships the trace has actually surfaced. ────────────────────────────
+async def _record_wallet_edges(chain: str, address: str, transactions: list[dict]) -> None:
+    edges: dict[tuple[str, str], dict] = {}
+
+    def _accumulate(counterparties: list[dict]) -> None:
+        for c in counterparties or []:
+            cp_address, role = c.get("address"), c.get("role")
+            if not cp_address or not role:
+                continue
+            e = edges.setdefault((cp_address, role), {"value": 0.0, "count": 0})
+            e["value"] += c.get("amount") or 0.0
+            e["count"] += 1
+
+    for t in transactions or []:
+        _accumulate(t.get("counterparties"))
+        for tt in t.get("token_transfers") or []:
+            _accumulate(tt.get("counterparties"))
+
+    if not edges:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        for (cp_address, role), agg in edges.items():
+            await db.execute(
+                """INSERT INTO wallet_edges (chain, address_a, address_b, role, tx_count, total_value)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(chain, address_a, address_b, role) DO UPDATE SET
+                     tx_count = tx_count + excluded.tx_count,
+                     total_value = total_value + excluded.total_value,
+                     last_seen = datetime('now')""",
+                (chain, address, cp_address, role, agg["count"], agg["value"]),
+            )
+        await db.commit()
 
 @router.get("/trace/{chain}/{address}")
 @_limiter.limit("30/minute")
-async def get_wallet_trace(request: Request, chain: str, address: str, limit: int = Query(10, ge=1, le=25)):
+async def get_wallet_trace(request: Request, chain: str, address: str, limit: int = Query(10, ge=1, le=25), agent: dict = Depends(get_agent)):
     """Balance + recent in/out counterparties for a wallet address — bitcoin
     and solana only (mempool.space / public Solana RPC, no key required). One
     hop per call; pivoting to a counterparty address is a new call from the
     frontend, not server-side recursion. Rate-limited separately from other
     intel endpoints since its cost is driven by user clicks, not a fixed poll
     interval, against a rate-limited public RPC."""
-    return await ms.address_lookup(chain, address)
+    result = await ms.address_lookup(chain, address)
+    if result.get("supported"):
+        await _record_wallet_edges(result.get("chain"), address, result.get("transactions") or [])
+    return result
+
+# ── Wallet watchlist — persisted tracking, shared across agents (unlike the
+# one-shot /trace above). No server-side poller exists anywhere in this
+# codebase for market data — the frontend hits /watchlist/refresh on its own
+# interval, same as every other intel tab. ──────────────────────────────────
+ADDRESS_TYPES = {"wallet", "exchange", "contract", "smart_wallet"}
+
+class WatchlistAddRequest(BaseModel):
+    chain: str
+    address: str
+    label: str = ""
+    address_type: str = "wallet"
+    notes: str = ""
+
+class WatchlistUpdateRequest(BaseModel):
+    label: Optional[str] = None
+    address_type: Optional[str] = None
+    notes: Optional[str] = None
+
+@router.post("/watchlist")
+async def add_watchlist_wallet(req: WatchlistAddRequest, agent: dict = Depends(get_agent)):
+    """Add a wallet to the shared tracked-wallet watchlist (bitcoin/solana only,
+    matching /trace's chain support). Re-adding an existing (chain, address)
+    updates its label/type/notes instead of erroring — organize a personal
+    wallet, an exchange's hot wallet, a token contract (CA), or a smart
+    wallet/multisig, each with its own name and notable-info notes."""
+    chain = (req.chain or "").strip().lower()
+    if chain not in ("bitcoin", "btc", "solana", "sol"):
+        raise HTTPException(422, "chain must be 'bitcoin' or 'solana'")
+    canon = "bitcoin" if chain in ("bitcoin", "btc") else "solana"
+    address = req.address.strip()
+    if not address:
+        raise HTTPException(422, "address is required")
+    address_type = (req.address_type or "wallet").strip().lower()
+    if address_type not in ADDRESS_TYPES:
+        raise HTTPException(422, f"address_type must be one of {sorted(ADDRESS_TYPES)}")
+    notes = req.notes.strip()[:2000]
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute(
+            """INSERT INTO tracked_wallets (chain, address, label, address_type, notes, added_by_agent_id)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(chain, address) DO UPDATE SET
+                 label=CASE WHEN excluded.label != '' THEN excluded.label ELSE label END,
+                 address_type=excluded.address_type,
+                 notes=CASE WHEN excluded.notes != '' THEN excluded.notes ELSE notes END""",
+            (canon, address, req.label.strip(), address_type, notes, agent["id"]),
+        )
+        await db.commit()
+        async with db.execute(
+            "SELECT * FROM tracked_wallets WHERE chain=? AND address=?", (canon, address)
+        ) as cur:
+            row = await cur.fetchone()
+    return dict(row)
+
+@router.get("/watchlist")
+async def list_watchlist_wallets(agent: dict = Depends(get_agent)):
+    """List every tracked wallet — shared across all agents, like /trace and /whales."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM tracked_wallets ORDER BY created_at DESC") as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    return {"wallets": rows, "count": len(rows)}
+
+@router.patch("/watchlist/{wallet_id}")
+async def update_watchlist_wallet(wallet_id: int, req: WatchlistUpdateRequest, agent: dict = Depends(get_agent)):
+    """Rename a tracked wallet, re-tag its address_type, or update its notes —
+    whatever's provided. Any authenticated agent may edit any entry, same as
+    add/remove, since this is shared platform intel."""
+    fields, params = [], []
+    if req.label is not None:
+        fields.append("label=?"); params.append(req.label.strip())
+    if req.address_type is not None:
+        address_type = req.address_type.strip().lower()
+        if address_type not in ADDRESS_TYPES:
+            raise HTTPException(422, f"address_type must be one of {sorted(ADDRESS_TYPES)}")
+        fields.append("address_type=?"); params.append(address_type)
+    if req.notes is not None:
+        fields.append("notes=?"); params.append(req.notes.strip()[:2000])
+    if not fields:
+        raise HTTPException(422, "At least one field (label, address_type, notes) is required")
+    params.append(wallet_id)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(f"UPDATE tracked_wallets SET {', '.join(fields)} WHERE id=?", params)
+        await db.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Wallet not found in watchlist")
+        async with db.execute("SELECT * FROM tracked_wallets WHERE id=?", (wallet_id,)) as cur2:
+            row = await cur2.fetchone()
+    return dict(row)
+
+@router.delete("/watchlist/{wallet_id}")
+async def remove_watchlist_wallet(wallet_id: int, agent: dict = Depends(get_agent)):
+    """Remove a wallet from the shared watchlist. Any authenticated agent may
+    remove any entry — this is shared platform intel, not per-agent private data."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("DELETE FROM tracked_wallets WHERE id=?", (wallet_id,))
+        await db.commit()
+        rowcount = cur.rowcount
+    if rowcount == 0:
+        raise HTTPException(404, "Wallet not found in watchlist")
+    return {"status": "deleted"}
+
+@router.get("/watchlist/refresh")
+async def refresh_watchlist_wallets(agent: dict = Depends(get_agent)):
+    """Re-run the wallet trace for every tracked wallet at once (bounded
+    concurrency, reusing address_lookup's own 20s cache) and flag large recent
+    balance moves as whale activity."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM tracked_wallets ORDER BY created_at DESC") as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    if not rows:
+        return {"wallets": [], "count": 0}
+    refreshed = await ms.refresh_watchlist(rows)
+    for w in refreshed:
+        if w.get("supported"):
+            await _record_wallet_edges(w["chain"], w["address"], w.get("recent_transactions") or [])
+    return {"wallets": refreshed, "count": len(refreshed)}
+
+@router.get("/wallet-network")
+async def get_wallet_network(
+    chain: str = Query("solana"),
+    min_tx_count: int = Query(1, ge=1),
+    limit: int = Query(200, ge=1, le=1000), agent: dict = Depends(get_agent)):
+    """Real money-flow graph built from wallet_edges — accumulated every time
+    /trace or /watchlist/refresh surfaces a counterparty, from both manual
+    lookups and tracked-wallet refreshes. Nodes are wallet addresses, links
+    are observed sender/recipient relationships. No separate clustering
+    algorithm: force-directed physics on the frontend naturally clusters
+    densely-connected wallets into visible 'hot zones'."""
+    chain = (chain or "").strip().lower()
+    canon = "bitcoin" if chain in ("bitcoin", "btc") else "solana" if chain in ("solana", "sol") else chain
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT * FROM wallet_edges WHERE chain=? AND tx_count>=?
+               ORDER BY total_value DESC LIMIT ?""",
+            (canon, min_tx_count, limit),
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+
+    node_ids: set[str] = set()
+    links = []
+    for r in rows:
+        node_ids.add(r["address_a"])
+        node_ids.add(r["address_b"])
+        links.append({
+            "source": r["address_a"], "target": r["address_b"], "role": r["role"],
+            "tx_count": r["tx_count"], "total_value": r["total_value"],
+            "first_seen": r["first_seen"], "last_seen": r["last_seen"],
+        })
+    nodes = [{"id": a} for a in node_ids]
+    return {"chain": canon, "nodes": nodes, "links": links, "node_count": len(nodes), "link_count": len(links)}
 
 @router.get("/backtest")
-async def get_backtest(symbol: str = Query("BTC"), days: int = Query(90, ge=14, le=365)):
+async def get_backtest(symbol: str = Query("BTC"), days: int = Query(90, ge=14, le=365), agent: dict = Depends(get_agent)):
     """Backtest an SMA-crossover strategy vs buy-and-hold over real history."""
     result = await ms.backtest(symbol, days)
     if result is None:
@@ -278,13 +489,13 @@ async def get_backtest(symbol: str = Query("BTC"), days: int = Query(90, ge=14, 
     return result
 
 @router.get("/ohlc/{symbol}")
-async def get_ohlc(symbol: str, interval: str = Query("1d"), limit: int = Query(200, ge=10, le=500)):
+async def get_ohlc(symbol: str, interval: str = Query("1d"), limit: int = Query(200, ge=10, le=500), agent: dict = Depends(get_agent)):
     """OHLCV candles for charting (Binance klines → CoinGecko fallback)."""
     candles = await ms.ohlc(symbol, interval, limit)
     return {"symbol": symbol.upper(), "interval": interval, "candles": candles, "count": len(candles)}
 
 @router.get("/indicators/{symbol}")
-async def get_indicators(symbol: str, interval: str = Query("1d"), limit: int = Query(200, ge=10, le=500)):
+async def get_indicators(symbol: str, interval: str = Query("1d"), limit: int = Query(200, ge=10, le=500), agent: dict = Depends(get_agent)):
     """Built-in technical indicators (SMA/EMA/RSI/MACD/Bollinger) over live candles."""
     candles = await ms.ohlc(symbol, interval, limit)
     if not candles:
@@ -297,7 +508,7 @@ async def get_indicators(symbol: str, interval: str = Query("1d"), limit: int = 
     }
 
 @router.get("/sources-registry")
-async def get_sources_registry():
+async def get_sources_registry(agent: dict = Depends(get_agent)):
     """Transparency: the full no-auth public source registry and integration status."""
     integrated = [s for s in ms.SOURCES if s["integrated"]]
     return {
@@ -307,7 +518,7 @@ async def get_sources_registry():
     }
 
 @router.get("/health")
-async def get_health_detail():
+async def get_health_detail(agent: dict = Depends(get_agent)):
     chains = {}
     for chain in ["solana", "polygon", "base", "sui"]:
         try:
@@ -333,7 +544,7 @@ async def get_health_detail():
     return {"chains": chains}
 
 @router.get("/sources")
-async def get_sources():
+async def get_sources(agent: dict = Depends(get_agent)):
     try:
         async with httpx.AsyncClient(timeout=3) as c:
             r = await c.get(f"{ARES}/")
@@ -353,7 +564,7 @@ async def get_sources():
 _market_cache = {"data": None, "ts": 0}
 
 @router.get("/market/top")
-async def top_market(limit: int = Query(100, ge=1, le=250)):
+async def top_market(limit: int = Query(100, ge=1, le=250), agent: dict = Depends(get_agent)):
     """Top tokens by market cap with full data: price, 24h change, volume, mcap.
     Uses CoinGecko free API with 120s cache."""
     import time as _time
@@ -416,7 +627,7 @@ _signal_lock = threading.Lock()
 MAX_POOL_SIZE = 200
 
 @router.post("/signals/ingest")
-async def ingest_signal(payload: dict):
+async def ingest_signal(payload: dict, agent: dict = Depends(get_agent)):
     """Accept a signal from any source (predictor, trading agents, ingester).
     Stored in in-memory pool, returned by GET /signals alongside live data."""
     required = ["symbol", "source", "type"]
@@ -443,8 +654,7 @@ async def ingest_signal(payload: dict):
 @router.get("/signals")
 async def unified_signals(
     limit: int = Query(20, ge=1, le=100),
-    min_conviction: float = Query(0, ge=0, le=10),
-):
+    min_conviction: float = Query(0, ge=0, le=10), agent: dict = Depends(get_agent)):
     """Aggregate signals from all live sources into one ranked feed."""
     import json, os, time, asyncio
     from datetime import datetime
@@ -705,7 +915,7 @@ async def unified_signals(
 
 
 @router.get("/memory/graph")
-async def memory_graph(agent_name: str = None, limit: int = 80):
+async def memory_graph(agent_name: str = None, limit: int = 80, agent: dict = Depends(get_agent)):
     """Per-agent neural memory vault graph.
     
     Pulls from the real Vantage memory infrastructure:
@@ -927,6 +1137,33 @@ async def memory_graph(agent_name: str = None, limit: int = 80):
         "timestamp": int(_time.time()),
     }
 
+@router.get('/wallets/poison-check')
+async def poison_check_wallet(
+    address: str = Query(..., description="Wallet address to check"),
+    chain: str = Query(..., description="Chain: ethereum, solana, or bitcoin"),
+):
+    """Check a single address for poison/dust/spam activity.
+
+    Port of Cloakseed poisonRadar.js detection logic.
+    Uses Etherscan (ETH), Helius RPC (SOL), or mempool.space (BTC)."""
+    import sys as _sys, importlib.util as _iu, json as _json
+    import asyncio as _asyncio
+
+    # Load poison_radar module dynamically
+    spec = _iu.spec_from_file_location("poison_radar", "/opt/ares/poison_radar.py")
+    pr = _iu.module_from_spec(spec)
+
+    def _run_sync():
+        spec.loader.exec_module(pr)
+        return pr.check_single_address(chain, address)
+
+    try:
+        loop = _asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, _run_sync)
+        return {"address": address, "chain": chain, **result}
+    except Exception as e:
+        return {"address": address, "chain": chain, "status": "error", "message": str(e)}
+
 @router.get('/daily')
 async def daily_intel(limit: int = Query(10, ge=1, le=50)):
     import aiosqlite
@@ -938,3 +1175,66 @@ async def daily_intel(limit: int = Query(10, ge=1, le=50)):
         ) as cur:
             rows = [dict(r) for r in await cur.fetchall()]
     return {'reports': rows, 'count': len(rows)}
+
+@router.get('/wallet/generate')
+async def generate_wallet(chain: str = Query('solana'), agent: dict = Depends(get_agent)):
+    import sys as _s; _s.path.insert(0, '/opt/ares')
+    from ares_bip39 import generate_mnemonic, mnemonic_to_seed, BIPON39_WORDLIST
+    from solders.keypair import Keypair
+    import hashlib as _hl
+
+    mnemonic = generate_mnemonic(256)
+    seed = mnemonic_to_seed(mnemonic)
+    words = mnemonic.split()
+
+    # IfaScript elemental analysis
+    MACRO_GROUPS = {
+        'ESU': (0, 87), 'SANGO': (88, 143), 'OSUN': (144, 179),
+        'YEMOJA': (180, 215), 'OYA': (216, 251), 'OGUN': (252, 263),
+        'OBATALA': (264, 275),
+    }
+    macros = {'air': 0, 'earth': 0, 'fire': 0, 'water': 0}
+    macro_dist = {}
+    for w in words:
+        idx = BIPON39_WORDLIST.index(w) if w in BIPON39_WORDLIST else 0
+        for mg_name, (lo, hi) in MACRO_GROUPS.items():
+            if lo <= idx <= hi:
+                macro_dist[mg_name] = macro_dist.get(mg_name, 0) + 1
+                if mg_name in ('ESU', 'OYA'): macros['air'] += 1
+                elif mg_name in ('OGUN', 'SANGO'): macros['fire'] += 1
+                elif mg_name in ('OSUN', 'YEMOJA'): macros['water'] += 1
+                elif mg_name == 'OBATALA': macros['earth'] += 1
+                break
+    dominant = max(macro_dist, key=macro_dist.get) if macro_dist else 'ESU'
+    ifascript = {'dominant_macro': dominant, 'elemental_signature': macros, 'macro_distribution': macro_dist}
+
+    if chain == 'solana':
+        kp = Keypair.from_seed(seed[:32])
+        addr = str(kp.pubkey())
+        pk = seed[:32].hex()
+    elif chain == 'ethereum':
+        pk = seed[:32].hex()
+        addr = '0x' + _hl.sha3_256(seed[32:64]).hexdigest()[-40:]
+    elif chain == 'sui':
+        kp = Keypair.from_seed(seed[:32])
+        addr = '0x' + _hl.blake2b(str(kp.pubkey()).encode(), digest_size=32).hexdigest()
+        pk = seed[:32].hex()
+    elif chain == 'cosmos':
+        import base64 as _b64
+        pk = seed[:32].hex()
+        raw = seed[:20]; raw = _hl.sha256(raw).digest()[:20]
+        addr = 'cosmos1' + _b64.b32hex_encode(raw).lower().rstrip('=')
+    elif chain == 'aptos':
+        kp = Keypair.from_seed(seed[:32])
+        addr = '0x' + _hl.sha3_256(str(kp.pubkey()).encode()).hexdigest()[-64:]
+        pk = seed[:32].hex()
+    else:
+        addr = '0x' + seed[:20].hex()
+        pk = seed[:32].hex()
+
+    return {
+        'chain': chain, 'address': addr, 'mnemonic': mnemonic,
+        'private_key': pk, 'word_count': len(words),
+        'ifascript': ifascript,
+        'warning': 'SAVE THESE NOW. Never stored. Cannot be recovered.'
+    }
