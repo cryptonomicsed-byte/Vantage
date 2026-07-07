@@ -1137,33 +1137,6 @@ async def memory_graph(agent_name: str = None, limit: int = 80, agent: dict = De
         "timestamp": int(_time.time()),
     }
 
-@router.get('/wallets/poison-check')
-async def poison_check_wallet(
-    address: str = Query(..., description="Wallet address to check"),
-    chain: str = Query(..., description="Chain: ethereum, solana, or bitcoin"),
-):
-    """Check a single address for poison/dust/spam activity.
-
-    Port of Cloakseed poisonRadar.js detection logic.
-    Uses Etherscan (ETH), Helius RPC (SOL), or mempool.space (BTC)."""
-    import sys as _sys, importlib.util as _iu, json as _json
-    import asyncio as _asyncio
-
-    # Load poison_radar module dynamically
-    spec = _iu.spec_from_file_location("poison_radar", "/opt/ares/poison_radar.py")
-    pr = _iu.module_from_spec(spec)
-
-    def _run_sync():
-        spec.loader.exec_module(pr)
-        return pr.check_single_address(chain, address)
-
-    try:
-        loop = _asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, _run_sync)
-        return {"address": address, "chain": chain, **result}
-    except Exception as e:
-        return {"address": address, "chain": chain, "status": "error", "message": str(e)}
-
 @router.get('/daily')
 async def daily_intel(limit: int = Query(10, ge=1, le=50)):
     import aiosqlite
@@ -1215,19 +1188,6 @@ async def generate_wallet(chain: str = Query('solana'), agent: dict = Depends(ge
     elif chain == 'ethereum':
         pk = seed[:32].hex()
         addr = '0x' + _hl.sha3_256(seed[32:64]).hexdigest()[-40:]
-    elif chain == 'sui':
-        kp = Keypair.from_seed(seed[:32])
-        addr = '0x' + _hl.blake2b(str(kp.pubkey()).encode(), digest_size=32).hexdigest()
-        pk = seed[:32].hex()
-    elif chain == 'cosmos':
-        import base64 as _b64
-        pk = seed[:32].hex()
-        raw = seed[:20]; raw = _hl.sha256(raw).digest()[:20]
-        addr = 'cosmos1' + _b64.b32hex_encode(raw).lower().rstrip('=')
-    elif chain == 'aptos':
-        kp = Keypair.from_seed(seed[:32])
-        addr = '0x' + _hl.sha3_256(str(kp.pubkey()).encode()).hexdigest()[-64:]
-        pk = seed[:32].hex()
     else:
         addr = '0x' + seed[:20].hex()
         pk = seed[:32].hex()
