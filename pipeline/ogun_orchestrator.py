@@ -21,7 +21,108 @@ WALLET = "ogun"
 MAX_TRADE_SOL = 0.01   # Conservative: max 0.01 SOL per trade
 MIN_CONVICTION = 0.7   # Only trade high-conviction signals
 
-# ── Track already-traded symbols to avoid duplicates ──────────
+# ── Risk Management ──────────────────────────────────────────
+STOP_LOSS = {
+    "ogun_forge": -0.05,   # Kraken pairs: -5% SL
+    "ogun_degen": -0.30,   # Pump.fun: -30% SL
+}
+TAKE_PROFIT = {
+    "ogun_forge": 0.10,    # Kraken pairs: +10% TP
+    "ogun_degen": 0.25,    # Pump.fun: +25% TP
+}
+
+def get_token_price(symbol):
+    """Get current price for a token."""
+    # Kraken pairs
+    try:
+        k_symbol = {"BONK": "BONK/USD", "WIF": "WIF/USD", "POPCAT": "POPCAT/USD",
+                    "KET": "KET/USD", "SOL": "SOL/USD", "BTC": "BTC/USD", "ETH": "ETH/USD"}
+        if symbol in k_symbol:
+            import ccxt
+            k = ccxt.kraken({"enableRateLimit": True})
+            ticker = k.fetch_ticker(k_symbol[symbol])
+            return ticker["last"]
+    except:
+        pass
+    
+    # Solana tokens via sol-cli
+    try:
+        result = subprocess.run(["sol", "token", "price", symbol.lower()],
+                               capture_output=True, text=True, timeout=15)
+        for line in result.stdout.split("\n"):
+            if "$" in line:
+                return float(line.split("$")[-1].strip())
+    except:
+        pass
+    
+    return None
+
+def check_exits():
+    """Monitor open positions for stop-loss and take-profit."""
+    db = sqlite3.connect(DB_PATH)
+    trades = db.execute(
+        "SELECT id, strategy, symbol, amount_sol, entry_price FROM strategy_trades WHERE status='open'"
+    ).fetchall()
+    
+    closed = 0
+    for tid, strategy, symbol, amount, entry in trades:
+        if not entry or entry == 0:
+            continue
+        
+        # Get current price
+        price = get_token_price(symbol)
+        if not price:
+            continue
+        
+        pnl = (price - entry) / entry if entry > 0 else 0
+        sl = STOP_LOSS.get(strategy, -0.05)
+        tp = TAKE_PROFIT.get(strategy, 0.10)
+        
+        if pnl <= sl:
+            print(f"\n  🛑 STOP LOSS: {symbol} @ {pnl*100:.1f}%")
+            # Sell via sol-cli
+            token = symbol.lower()
+            cmd = f"sol token swap all {token} sol --wallet {WALLET}"
+            result = subprocess.run(cmd.split(), capture_output=True, text=True, timeout=60)
+            sig = None
+            for line in (result.stdout + result.stderr).split("\n"):
+                if "Signature:" in line:
+                    sig = line.split("Signature:")[-1].strip()
+            
+            db.execute(
+                "UPDATE strategy_trades SET status='closed', exit_price=?, pnl_pct=?, exit_time=?, notes=notes||? WHERE id=?",
+                (price, pnl*100, datetime.now(timezone.utc).isoformat(),
+                 f" | SL EXIT @ {pnl*100:.1f}% TX:{sig}", tid)
+            )
+            post_feed(f"🛑 SL Exit: {symbol}", f"Stop-loss triggered\n{symbol}: {pnl*100:.1f}%\nTX: {sig}")
+            closed += 1
+            
+        elif pnl >= tp:
+            print(f"\n  🎯 TAKE PROFIT: {symbol} @ +{pnl*100:.1f}%")
+            token = symbol.lower()
+            cmd = f"sol token swap all {token} sol --wallet {WALLET}"
+            result = subprocess.run(cmd.split(), capture_output=True, text=True, timeout=60)
+            sig = None
+            for line in (result.stdout + result.stderr).split("\n"):
+                if "Signature:" in line:
+                    sig = line.split("Signature:")[-1].strip()
+            
+            db.execute(
+                "UPDATE strategy_trades SET status='closed', exit_price=?, pnl_pct=?, exit_time=?, notes=notes||? WHERE id=?",
+                (price, pnl*100, datetime.now(timezone.utc).isoformat(),
+                 f" | TP EXIT @ +{pnl*100:.1f}% TX:{sig}", tid)
+            )
+            post_feed(f"🎯 TP Exit: {symbol}", f"Take-profit triggered\n{symbol}: +{pnl*100:.1f}%\nTX: {sig}")
+            print(f"  ✅ EXIT: {symbol} — {sig[:20] if sig else 'manual'}...")
+            closed += 1
+        else:
+            print(f"  [{symbol}] {pnl*100:+.1f}% (SL:{sl*100:.0f}% TP:{tp*100:.0f}%)", flush=True)
+    
+    db.commit()
+    db.close()
+    return closed
+
+# ── Track already-traded symbols ──────────────────────────────
 TRADED = set()
 
 def post_feed(title, content):
@@ -35,7 +136,9 @@ def post_feed(title, content):
         urllib.request.urlopen(req, timeout=5)
     except: pass
 
-def log_trade(symbol, side, amount, price, tx_sig, strategy):
+def log_trade(symbol, side, amount, tx_sig, strategy):
+    """Log trade with actual entry price."""
+    price = get_token_price(symbol) or 0
     db = sqlite3.connect(DB_PATH)
     db.execute("""
         INSERT INTO strategy_trades (strategy, symbol, side, amount_sol, entry_price, status, entry_time, notes)
@@ -45,6 +148,7 @@ def log_trade(symbol, side, amount, price, tx_sig, strategy):
           f"TX: {tx_sig}"))
     db.commit()
     db.close()
+    print(f"  Entry price: ${price:.8f}" if price else "  Entry price: unknown")
 
 def execute_kraken_swap(symbol, conviction):
     """Execute swap via sol-cli for Kraken-listed tokens."""
@@ -85,7 +189,7 @@ def execute_kraken_swap(symbol, conviction):
         
         if sig and "Error" not in output:
             TRADED.add(symbol)
-            log_trade(symbol, "BUY", amount, 0, sig, "ogun_forge")
+            log_trade(symbol, "BUY", amount, sig, "ogun_forge")
             post_feed(f"⚔️ Ògún Strike: {symbol}",
                      f"**Live Trade Executed**\n\nSymbol: {symbol}\nAmount: {amount} SOL\nTX: {sig}\nStrategy: Ògún's Forge v2")
             print(f"  ✅ LIVE: {symbol} — {sig[:20]}...")
@@ -124,7 +228,7 @@ def execute_pumpfun_snipe(symbol, conviction):
         
         if sig and "Error" not in output:
             TRADED.add(symbol)
-            log_trade(symbol, "BUY", amount, 0, sig, "ogun_degen")
+            log_trade(symbol, "BUY", amount, sig, "ogun_degen")
             post_feed(f"🎯 Ògún Scalp: {symbol}",
                      f"**Pump.fun Scalp Executed**\n\nToken: {symbol}\nAmount: {amount} SOL\nTX: {sig}\nTP: +20% | SL: -30%")
             print(f"  ✅ LIVE SCALP: {symbol} — {sig[:20]}...")
@@ -193,6 +297,11 @@ def run(interval=30):
             if time.time() - last_portfolio > 300:
                 show_portfolio()
                 last_portfolio = time.time()
+            
+            # Monitor open positions for SL/TP
+            closed = check_exits()
+            if closed > 0:
+                show_portfolio()
             
         except Exception as e:
             print(f"Error: {e}")
