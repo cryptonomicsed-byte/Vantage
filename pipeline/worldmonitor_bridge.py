@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """WorldMonitor → Vantage Bridge"""
-import urllib.request, json, time, sys
+import os, urllib.request, json, time, sys
 from datetime import datetime
 
 VANTAGE_URL = 'http://localhost:8001'
