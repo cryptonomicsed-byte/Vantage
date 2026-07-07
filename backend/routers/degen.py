@@ -68,8 +68,8 @@ async def smart_wallets(limit: int=20, x_agent_key: str=Header(...)):
     db = sqlite3.connect(str(DB)); db.row_factory = lambda c,r: dict(zip([col[0] for col in c.description], r))
     rows = db.execute("""
         SELECT w.address, w.label, w.chain,
-               (SELECT COUNT(*) FROM wallet_edges we WHERE we.from_addr=w.address OR we.to_addr=w.address) as edge_count,
-               (SELECT MAX(we.last_seen) FROM wallet_edges we WHERE we.from_addr=w.address OR we.to_addr=w.address) as last_active
+               (SELECT COUNT(*) FROM wallet_edges we WHERE we.address_a=w.address OR we.address_b=w.address) as edge_count,
+               (SELECT MAX(we.last_seen) FROM wallet_edges we WHERE we.address_a=w.address OR we.address_b=w.address) as last_active
         FROM tracked_wallets w
         WHERE w.chain IN ('solana','pumpfun')
         ORDER BY edge_count DESC LIMIT ?
@@ -118,6 +118,44 @@ async def volume_surge(limit: int=20, x_agent_key: str=Header(...)):
         return {"volume_surges":[],"count":0,"source":"offline"}
 
 # ════════════════════════════════════════════════════════════════
+# TOP 5 DEGEN PLAY — aggregated from alpha aggregator
+# ════════════════════════════════════════════════════════════════
+@router.get("/top5")
+async def top5_degen(limit: int=5, x_agent_key: str=Header(...)):
+    get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
+    try:
+        # Pull latest from GeckoTerminal freshly
+        d = _fetch("https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1", {"accept":"application/json"})
+        pools = d.get("data",[])
+        
+        graduated = []
+        for p in pools[:25]:
+            attrs = p.get("attributes",{})
+            name = attrs.get("name","")
+            addr = p.get("id","").split("_")[-1] if "_" in p.get("id","") else ""
+            vol = attrs.get("volume_usd",{})
+            vol_24h = float(str(vol.get("h24",0))) if isinstance(vol,dict) else 0
+            pc = attrs.get("price_change_percentage",{})
+            pc_24h = float(str(pc.get("h24",0))) if isinstance(pc,dict) else 0
+            txns = attrs.get("transactions",{})
+            buys_24h = txns.get("h24",{}).get("buys",0) if isinstance(txns.get("h24"),dict) else 0
+            sells_24h = txns.get("h24",{}).get("sells",0) if isinstance(txns.get("h24"),dict) else 0
+            symbol = name.split(" / ")[0][:12] if " / " in name else name[:12]
+            graduated_bool = "pump" in addr.lower()
+            score = 0
+            if vol_24h > 50000: score += 30
+            if vol_24h > 100000: score += 20
+            if pc_24h > 10: score += 20
+            if buys_24h > sells_24h: score += 15
+            if graduated_bool: score += 15
+            graduated.append(dict(symbol=symbol,name=name,address=addr,volume_24h=vol_24h,price_change_24h=pc_24h,buys_24h=buys_24h,sells_24h=sells_24h,graduated=graduated_bool,score=score,reason=f"{'🎓 ' if graduated_bool else ''}${vol_24h:,.0f}"))
+        
+        graduated.sort(key=lambda x:-x["score"])
+        return {"top_5":graduated[:limit],"total_scanned":len(pools),"source":"GeckoTerminal"}
+    except:
+        return {"top_5":[],"total_scanned":0,"source":"offline"}
+
+# ════════════════════════════════════════════════════════════════
 # RUG CHECK — dev wallet, mint authority, LP lock
 # ════════════════════════════════════════════════════════════════
 @router.get("/rug-check")
@@ -163,3 +201,28 @@ async def rug_check(mint: str=Query(...), x_agent_key: str=Header(...)):
         return {"mint":mint,"checks":checks,"risk_score":risk_score,"safe":safe,"supply":supply}
     except Exception as e:
         return {"mint":mint,"error":str(e)[:100],"safe":False}
+
+@router.get('/sell-rotations')
+async def sell_rotations(limit: int=5, x_agent_key: str=Header(...)):
+    get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
+    try:
+        d = _fetch('https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1', {'accept':'application/json'})
+        pools = d.get('data',[])
+        rotations = []
+        for p in pools[:25]:
+            attrs = p.get('attributes',{})
+            name = attrs.get('name','')
+            vol = attrs.get('volume_usd',{})
+            vol_24h = float(str(vol.get('h24',0))) if isinstance(vol,dict) else 0
+            txns = attrs.get('transactions',{})
+            buys_24h = txns.get('h24',{}).get('buys',0) if isinstance(txns.get('h24'),dict) else 0
+            sells_24h = txns.get('h24',{}).get('sells',0) if isinstance(txns.get('h24'),dict) else 0
+            pc = attrs.get('price_change_percentage',{})
+            pc_24h = float(str(pc.get('h24',0))) if isinstance(pc,dict) else 0
+            symbol = name.split(' / ')[0][:12] if ' / ' in name else name[:12]
+            if sells_24h > buys_24h and vol_24h > 10000:
+                rotations.append(dict(symbol=symbol,name=name,sell_buy_ratio=round(sells_24h/max(1,buys_24h),1),volume_24h=vol_24h,price_change_24h=pc_24h))
+        rotations.sort(key=lambda x:-x['sell_buy_ratio'])
+        return {'rotations':rotations[:limit],'count':len(rotations[:limit]),'source':'GeckoTerminal'}
+    except:
+        return {'rotations':[],'count':0}

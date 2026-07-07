@@ -526,10 +526,6 @@ app.include_router(copilot_router)
 from .routers.pine import router as pine_router
 app.include_router(pine_router)
 
-from .routers.pumpfun import router as pumpfun_router
-app.include_router(pumpfun_router)
-from .routers.telegram_webhook import router as telegram_router
-app.include_router(telegram_router)
 from .routers.degen import router as degen_router
 app.include_router(degen_router)
 # MCP server — exposes all Vantage routes as MCP tools for Claude/GPT/OpenCode agents.
