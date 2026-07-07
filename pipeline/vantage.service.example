@@ -1,0 +1,36 @@
+# Template ONLY. Copy to /etc/systemd/system/vantage.service on the host and
+# fill in real values there. Never commit the resolved unit or any .env file:
+# .gitignore blocks *.service and .env.* precisely so secrets stay off git.
+#
+# The prior unit embedded VANTAGE_ADMIN_KEY and GITEA_TOKEN inline in plaintext
+# and ran as root. This template fixes both: secrets load from an untracked
+# EnvironmentFile, and the service runs as a dedicated unprivileged user.
+
+[Unit]
+Description=Vantage Agent Platform
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ares/Vantage
+ExecStart=/opt/ares/venv/bin/python -m uvicorn backend.main:app --host 0.0.0.0 --port 8001
+Restart=always
+RestartSec=5
+
+# Secrets (VANTAGE_ADMIN_KEY, GITEA_TOKEN, ...) live ONLY in this file, which is
+# gitignored and owned root:ares 0640. Non-secret config can stay as Environment=.
+EnvironmentFile=/opt/ares/Vantage/.env
+Environment=VANTAGE_DATA_DIR=/opt/ares/Vantage/data
+Environment=GITEA_URL=http://localhost:3001
+
+# Do NOT run as root. Create an unprivileged 'ares' user that owns the
+# WorkingDirectory and venv, and drop privileges to it.
+User=ares
+Group=ares
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ares/Vantage/data
+
+[Install]
+WantedBy=multi-user.target

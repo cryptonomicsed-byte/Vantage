@@ -12,3 +12,12 @@ frontend/dist/
 .claude/
 backend/.seed_keys.json
 *.bak
+
+# --- secrets & credentials: never commit (see pipeline/vantage.service.example) ---
+.env.*
+*.service
+!*.service.example
+*.pem
+*.key
+*_seed.json
+hermes_soul_seed.json
