@@ -8,7 +8,7 @@ import subprocess, json, sqlite3, time, os, urllib.request
 from datetime import datetime, timezone
 
 VANTAGE_URL = "http://localhost:8001"
-VANTAGE_KEY = "vantage_94f21c43db14b76b301793bb8d8d02cd4b9442971edfbd6f"
+VANTAGE_KEY = "os.environ.get("VANTAGE_AGENT_KEY","")"
 DB_PATH = "/opt/ares/Vantage/data/vantage.db"
 WALLET = "ogun"
 

@@ -28,7 +28,7 @@ from pathlib import Path
 
 # ── Config ───────────────────────────────────────────────────
 VANTAGE_URL = "http://localhost:8001"
-VANTAGE_KEY = "vantage_94f21c43db14b76b301793bb8d8d02cd4b9442971edfbd6f"
+VANTAGE_KEY = "os.environ.get("VANTAGE_AGENT_KEY","")"
 DB_PATH = "/opt/ares/Vantage/data/vantage.db"
 SCAN_DIR = "/tmp/okf-pipeline"
 STRIX_LLM = "openai/oc/deepseek-v4-flash-free"  # via OmniRoute (FREE)

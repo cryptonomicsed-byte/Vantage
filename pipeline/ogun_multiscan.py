@@ -13,9 +13,9 @@ sys.path.insert(0, "/opt/ares")
 from ogun_forge import evaluate as forge_evaluate
 
 VANTAGE_URL = "http://localhost:8001"
-VANTAGE_KEY = "vantage_94f21c43db14b76b301793bb8d8d02cd4b9442971edfbd6f"
-HELIUS_KEY = os.environ.get("HELIUS_API_KEY", "3b16b895-d4f1-404b-8edd-f3be766830ca")
-BIRDEYE_KEY = "0e95b1a929b541929e13f53713c0f0fc"
+VANTAGE_KEY = "os.environ.get("VANTAGE_AGENT_KEY","")"
+HELIUS_KEY = os.environ.get("HELIUS_API_KEY", "os.environ.get("HELIUS_API_KEY","")")
+BIRDEYE_KEY = "os.environ.get("BIRDEYE_API_KEY","")"
 
 # ── Tier 1: Full Forge on Kraken pairs ────────────────────────
 KRAKEN_PAIRS = ["SOL/USD", "BTC/USD", "ETH/USD", "KET/USD", "BONK/USD", "WIF/USD", "POPCAT/USD"]
