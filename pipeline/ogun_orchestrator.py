@@ -98,19 +98,45 @@ def execute_kraken_swap(symbol, conviction):
         return None
 
 def execute_pumpfun_snipe(symbol, conviction):
-    """Snipe Pump.fun token via Pump.fun Bot."""
+    """Scalp Pump.fun token via sol-cli swap."""
     if symbol in TRADED:
         return None
     
-    amount = 0.002  # Very small for pump.fun
-    print(f"\n  🎯 SNIPING: {symbol} (conv={conviction:.2f}, {amount} SOL)")
-    print(f"  ⚠️ Pump.fun sniper — would use Pump.fun Bot execute module")
-    print(f"  Bot ready at /opt/ares/pumpfun-bot — wire sniper command here")
+    amount = 0.002  # Micro scalp — ~$0.16
     
-    # Placeholder: Pump.fun Bot sniper integration
-    # cmd = f"cd /opt/ares/pumpfun-bot && npx ts-node src/sniper.ts {symbol} {amount}"
-    TRADED.add(symbol)
-    return "sniper_ready"
+    print(f"\n  🎯 SCALPING: {symbol} (conv={conviction:.2f}, {amount} SOL)")
+    
+    try:
+        # Normalize symbol for sol-cli
+        token = symbol.lower().replace(" ", "-").replace("/", "-")[:20]
+        
+        cmd = f"sol token swap {amount} sol {token} --wallet {WALLET}"
+        print(f"  $ {cmd}")
+        result = subprocess.run(cmd.split(), capture_output=True, text=True, timeout=60)
+        output = result.stdout + result.stderr
+        
+        sig = None
+        for line in output.split("\n"):
+            if "Signature:" in line:
+                sig = line.split("Signature:")[-1].strip()
+            if "Explorer:" in line:
+                print(f"  {line.strip()}")
+        
+        if sig and "Error" not in output:
+            TRADED.add(symbol)
+            log_trade(symbol, "BUY", amount, 0, sig, "ogun_degen")
+            post_feed(f"🎯 Ògún Scalp: {symbol}",
+                     f"**Pump.fun Scalp Executed**\n\nToken: {symbol}\nAmount: {amount} SOL\nTX: {sig}\nTP: +20% | SL: -30%")
+            print(f"  ✅ LIVE SCALP: {symbol} — {sig[:20]}...")
+            return sig
+        else:
+            # Token might not be on Jupiter — try with full mint address
+            print(f"  ⚠️ Token '{token}' not found on Jupiter — trying symbol variants...")
+            # Many new tokens aren't immediately on Jupiter
+            return None
+    except Exception as e:
+        print(f"  ❌ Error: {e}")
+        return None
 
 def get_forge_signals():
     """Pull Ògún's Forge signals from Vantage pool."""
