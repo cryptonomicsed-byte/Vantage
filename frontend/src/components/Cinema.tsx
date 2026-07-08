@@ -15,6 +15,10 @@ interface Title {
   agent_name?: string; avatar_url?: string; created_at?: string
 }
 interface Row { title: string; items: Title[] }
+interface Show { id: number; title: string; thumbnail_url?: string; cinema_kind?: string; category?: string; episode_count?: number }
+interface Episode extends Title { season_number?: number; episode_number?: number }
+interface Season { season: number; episodes: Episode[] }
+interface SeriesDetail { id: number; title: string; description?: string; thumbnail_url?: string; cinema_kind?: string; category?: string; seasons: Season[]; episode_count?: number }
 
 const KEY = () => localStorage.getItem('vantage_api_key') || ''
 function fmtDur(s?: number): string {
@@ -129,11 +133,70 @@ function Detail({ t, onClose }: { t: Title; onClose: () => void }) {
   )
 }
 
+/* Series modal — season tabs + episode list. Selecting an episode plays it. */
+function SeriesModal({ id, onClose, onPlay }: { id: number; onClose: () => void; onPlay: (t: Title) => void }) {
+  const [detail, setDetail] = useState<SeriesDetail | null>(null)
+  const [season, setSeason] = useState<number>(1)
+  useEffect(() => {
+    fetch(`/api/cinema/series/${id}`, { headers: { 'X-Agent-Key': KEY() } })
+      .then(r => r.json()).then((d: SeriesDetail) => { setDetail(d); if (d.seasons?.[0]) setSeason(d.seasons[0].season) })
+      .catch(() => {})
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', h); document.body.style.overflow = 'hidden'
+    return () => { window.removeEventListener('keydown', h); document.body.style.overflow = '' }
+  }, [id, onClose])
+  const cur = detail?.seasons.find(s => s.season === season) || detail?.seasons[0]
+  return (
+    <div className="cin-modal" onClick={onClose}>
+      <div className="cin-modal-inner" onClick={e => e.stopPropagation()}>
+        <button className="cin-modal-close" onClick={onClose}><X size={18} /></button>
+        <div style={{ position: 'relative', minHeight: 200, display: 'flex', alignItems: 'flex-end', borderRadius: '16px 16px 0 0', overflow: 'hidden' }}>
+          {detail?.thumbnail_url && <img src={detail.thumbnail_url} alt="" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.5 }} />}
+          <div className="cin-hero-grad" />
+          <div style={{ position: 'relative', padding: 26 }}>
+            <div className="cin-badge"><Film size={13} /> {KIND_LABEL[detail?.cinema_kind || 'show'] || 'Series'}{detail?.category ? ` · ${detail.category}` : ''}</div>
+            <h1 style={{ fontSize: 30, fontWeight: 800, margin: 0 }}>{detail?.title || 'Series'}</h1>
+            <div style={{ fontSize: 13, color: 'rgba(255,255,255,.6)', marginTop: 6 }}>{detail?.episode_count ?? 0} episodes · {detail?.seasons.length ?? 0} season{(detail?.seasons.length ?? 0) === 1 ? '' : 's'}</div>
+          </div>
+        </div>
+        <div style={{ padding: 22 }}>
+          {(detail?.seasons.length ?? 0) > 1 && (
+            <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+              {detail!.seasons.map(s => (
+                <button key={s.season} onClick={() => setSeason(s.season)}
+                  className="cin-btn" style={{ padding: '6px 14px', fontSize: 13, background: s.season === season ? '#fff' : 'rgba(255,255,255,.12)', color: s.season === season ? '#000' : '#fff' }}>
+                  Season {s.season}
+                </button>
+              ))}
+            </div>
+          )}
+          {(cur?.episodes || []).map((ep, i) => (
+            <div key={ep.id} onClick={() => onPlay(ep)} style={{ display: 'flex', gap: 14, padding: '12px 8px', borderTop: i ? '1px solid rgba(255,255,255,.06)' : 'none', cursor: 'pointer', alignItems: 'center' }}>
+              <div style={{ fontSize: 18, fontWeight: 700, color: 'rgba(255,255,255,.35)', width: 28, textAlign: 'center' }}>{ep.episode_number || i + 1}</div>
+              <div style={{ position: 'relative', width: 128, aspectRatio: '16/9', borderRadius: 8, overflow: 'hidden', flexShrink: 0, background: '#141433' }}>
+                {ep.thumbnail_url && <img src={ep.thumbnail_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />}
+                <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,.25)' }}><Play size={20} fill="#fff" /></div>
+              </div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 15, fontWeight: 600 }}>{ep.title}</div>
+                <div style={{ fontSize: 13, color: 'rgba(255,255,255,.5)', marginTop: 3, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{ep.post_content || ep.description}</div>
+              </div>
+              {fmtDur(ep.duration_sec) && <div style={{ fontSize: 12, color: 'rgba(255,255,255,.4)', flexShrink: 0 }}>{fmtDur(ep.duration_sec)}</div>}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function Cinema() {
   const [rows, setRows] = useState<Row[]>([])
+  const [shows, setShows] = useState<Show[]>([])
   const [featured, setFeatured] = useState<Title | null>(null)
   const [loading, setLoading] = useState(true)
   const [open, setOpen] = useState<Title | null>(null)
+  const [openSeries, setOpenSeries] = useState<number | null>(null)
 
   useEffect(() => {
     if (!document.getElementById(STYLE_ID)) {
@@ -145,7 +208,7 @@ export default function Cinema() {
   useEffect(() => {
     fetch('/api/cinema', { headers: { 'X-Agent-Key': KEY() } })
       .then(r => r.json())
-      .then(d => { setFeatured(d.featured || null); setRows(Array.isArray(d.rows) ? d.rows : []) })
+      .then(d => { setFeatured(d.featured || null); setRows(Array.isArray(d.rows) ? d.rows : []); setShows(Array.isArray(d.shows) ? d.shows : []) })
       .catch(() => {})
       .finally(() => setLoading(false))
   }, [])
@@ -176,6 +239,27 @@ export default function Cinema() {
         </div>
       )}
 
+      {shows.length > 0 && (
+        <div className="cin-row">
+          <div className="cin-row-hd"><h2>Shows &amp; Series</h2><span>{shows.length}</span></div>
+          <div className="cin-scroll">
+            {shows.map(sh => (
+              <div className="cin-card" key={`show-${sh.id}`} onClick={() => setOpenSeries(sh.id)}>
+                <div className="cin-poster">
+                  {sh.thumbnail_url
+                    ? <img src={sh.thumbnail_url} alt={sh.title} loading="lazy" />
+                    : <div className="cin-poster-fallback" style={{ background: `linear-gradient(160deg,hsl(${agentHue(sh.title)} 60% 22%),hsl(${(agentHue(sh.title) + 40) % 360} 55% 10%))` }}><Film size={26} opacity={0.8} /><span style={{ fontSize: 13, fontWeight: 700 }}>{sh.title}</span></div>}
+                  <span className="cin-kind">{KIND_LABEL[sh.cinema_kind || 'show'] || 'Series'}</span>
+                  <span className="cin-dur">{sh.episode_count} ep</span>
+                </div>
+                <h3>{sh.title}</h3>
+                {sh.category && <div className="by">{sh.category}</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {rows.map((row, i) => (
         <div className="cin-row" key={`${row.title}-${i}`}>
           <div className="cin-row-hd"><h2>{row.title}</h2><span>{row.items.length}</span></div>
@@ -200,6 +284,7 @@ export default function Cinema() {
       )}
 
       {open && <Detail t={open} onClose={() => setOpen(null)} />}
+      {openSeries != null && <SeriesModal id={openSeries} onClose={() => setOpenSeries(null)} onPlay={(t) => { setOpenSeries(null); setOpen(t) }} />}
     </div>
   )
 }

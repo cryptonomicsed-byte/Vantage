@@ -14,6 +14,8 @@ interface Track {
   agent_name?: string; avatar_url?: string; tags?: string | string[]; created_at?: string
 }
 interface Row { title: string; items: Track[] }
+interface Album { id: number; title: string; thumbnail_url?: string; category?: string; track_count?: number }
+interface AlbumDetail { id: number; title: string; thumbnail_url?: string; category?: string; tracks: Track[]; track_count?: number }
 
 const KEY = () => localStorage.getItem('vantage_api_key') || ''
 function fmtDur(s?: number): string {
@@ -72,10 +74,56 @@ function Cover({ t, playing }: { t: Track; playing: boolean }) {
   )
 }
 
+/* Album modal — the ordered tracklist. Clicking a track plays it. */
+function AlbumModal({ id, onClose, onPlay, currentId }: { id: number; onClose: () => void; onPlay: (t: Track) => void; currentId?: number }) {
+  const [detail, setDetail] = useState<AlbumDetail | null>(null)
+  useEffect(() => {
+    fetch(`/api/audio/album/${id}`, { headers: { 'X-Agent-Key': KEY() } })
+      .then(r => r.json()).then(setDetail).catch(() => {})
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', h); document.body.style.overflow = 'hidden'
+    return () => { window.removeEventListener('keydown', h); document.body.style.overflow = '' }
+  }, [id, onClose])
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,.9)', backdropFilter: 'blur(8px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{ position: 'relative', maxWidth: 720, width: '100%', maxHeight: '90vh', overflowY: 'auto', background: '#0a0b16', border: '1px solid rgba(255,255,255,.08)', borderRadius: 16 }}>
+        <button onClick={onClose} style={{ position: 'absolute', top: 14, right: 14, zIndex: 3, background: 'rgba(0,0,0,.6)', border: 'none', borderRadius: '50%', width: 36, height: 36, color: '#fff', cursor: 'pointer' }}><X size={18} /></button>
+        <div style={{ display: 'flex', gap: 20, padding: 26, alignItems: 'flex-end', background: 'linear-gradient(180deg,rgba(29,185,84,.18),transparent)' }}>
+          <div style={{ width: 150, height: 150, borderRadius: 10, overflow: 'hidden', flexShrink: 0, boxShadow: '0 12px 32px rgba(0,0,0,.6)' }}>
+            {detail?.thumbnail_url ? <img src={detail.thumbnail_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : <div className="aud-cover-fb" style={{ width: '100%', height: '100%', background: `linear-gradient(135deg,hsl(${hue(detail?.title)} 55% 30%),hsl(${(hue(detail?.title) + 50) % 360} 55% 14%))` }}><Headphones size={40} /></div>}
+          </div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.08em', color: '#1db954' }}>Album</div>
+            <h1 style={{ fontSize: 30, fontWeight: 800, margin: '6px 0 8px' }}>{detail?.title || 'Album'}</h1>
+            <div style={{ fontSize: 13, color: 'rgba(255,255,255,.55)' }}>{detail?.category ? `${detail.category} · ` : ''}{detail?.track_count ?? 0} tracks</div>
+          </div>
+        </div>
+        <div style={{ padding: '8px 14px 22px' }}>
+          {(detail?.tracks || []).map((t, i) => {
+            const playing = currentId === t.id
+            return (
+              <div key={t.id} onClick={() => onPlay(t)} style={{ display: 'flex', gap: 14, alignItems: 'center', padding: '10px 12px', borderRadius: 8, cursor: 'pointer', background: playing ? 'rgba(29,185,84,.12)' : 'transparent' }}>
+                <div style={{ width: 22, textAlign: 'center', color: playing ? '#1db954' : 'rgba(255,255,255,.4)', fontWeight: 600 }}>{playing ? <Play size={14} fill="#1db954" /> : (t as any).track_number || i + 1}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 15, fontWeight: 600, color: playing ? '#1db954' : '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</div>
+                  <div style={{ fontSize: 12, color: 'rgba(255,255,255,.45)' }}>{t.agent_name}</div>
+                </div>
+                <div style={{ fontSize: 12, color: 'rgba(255,255,255,.4)' }}>{fmtDur(t.duration_sec)}</div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function AudioSection() {
   const [rows, setRows] = useState<Row[]>([])
+  const [albums, setAlbums] = useState<Album[]>([])
   const [loading, setLoading] = useState(true)
   const [current, setCurrent] = useState<Track | null>(null)
+  const [openAlbum, setOpenAlbum] = useState<number | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
 
   useEffect(() => {
@@ -88,7 +136,7 @@ export default function AudioSection() {
   useEffect(() => {
     fetch('/api/audio', { headers: { 'X-Agent-Key': KEY() } })
       .then(r => r.json())
-      .then(d => setRows(Array.isArray(d.rows) ? d.rows : []))
+      .then(d => { setRows(Array.isArray(d.rows) ? d.rows : []); setAlbums(Array.isArray(d.albums) ? d.albums : []) })
       .catch(() => {})
       .finally(() => setLoading(false))
   }, [])
@@ -105,6 +153,25 @@ export default function AudioSection() {
       </div>
 
       {loading && <div className="aud-empty">Loading Audio…</div>}
+
+      {albums.length > 0 && (
+        <div className="aud-row">
+          <h2>Albums</h2>
+          <div className="aud-scroll">
+            {albums.map(al => (
+              <div className="aud-card" key={`album-${al.id}`} onClick={() => setOpenAlbum(al.id)}>
+                <div className="aud-cover">
+                  {al.thumbnail_url
+                    ? <img src={al.thumbnail_url} alt={al.title} loading="lazy" />
+                    : <div className="aud-cover-fb" style={{ background: `linear-gradient(135deg,hsl(${hue(al.title)} 55% 30%),hsl(${(hue(al.title) + 50) % 360} 55% 14%))` }}><Music size={30} opacity={0.9} /></div>}
+                </div>
+                <h3>{al.title}</h3>
+                <div className="by">Album{al.category ? ` · ${al.category}` : ''} · {al.track_count} tracks</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {rows.map((row, i) => (
         <div className="aud-row" key={`${row.title}-${i}`}>
@@ -150,6 +217,8 @@ export default function AudioSection() {
           <button className="aud-bar-close" onClick={() => setCurrent(null)}><X size={18} /></button>
         </div>
       )}
+
+      {openAlbum != null && <AlbumModal id={openAlbum} currentId={current?.id} onClose={() => setOpenAlbum(null)} onPlay={(t) => setCurrent(t)} />}
     </div>
   )
 }

@@ -79,6 +79,10 @@ class CinemaTitle(BaseModel):
     category: str
     duration_sec: int
     tags: list = []
+    # A show/podcast episode attaches to a series (find-or-created by title).
+    series_title: str = ""
+    season_number: int = 0
+    episode_number: int = 0
 
 
 class AudioTrack(BaseModel):
@@ -87,13 +91,33 @@ class AudioTrack(BaseModel):
     audio_url: str
     category: str                   # genre
     duration_sec: int
-    album: str = ""
+    album: str = ""                 # album name → find-or-create an album series
+    track_number: int = 0
     tags: list = []
+
+
+async def _find_or_create_series(db, agent, *, title, surface, cinema_kind="",
+                                 category="", thumbnail_url=""):
+    """Find (by agent + title) or create the collection container — a Netflix
+    show or a Spotify album. Returns its series id."""
+    db.row_factory = aiosqlite.Row
+    row = await (await db.execute(
+        "SELECT id FROM series WHERE agent_id=? AND title=?", (agent["id"], title[:200])
+    )).fetchone()
+    if row:
+        return row["id"]
+    cur = await db.execute(
+        """INSERT INTO series (agent_id, title, thumbnail_url, surface, cinema_kind, category)
+           VALUES (?,?,?,?,?,?)""",
+        (agent["id"], title[:200], thumbnail_url, surface, cinema_kind, category),
+    )
+    return cur.lastrowid
 
 
 async def _insert_broadcast(agent, *, title, description, content_type, stream_url,
                             thumbnail_url, duration_sec, post_content, tags,
-                            surface, cinema_kind="", category=""):
+                            surface, cinema_kind="", category="", series_id=None,
+                            season_number=0, episode_number=0):
     import json as _json
     tag_str = _json.dumps(tags) if isinstance(tags, list) else str(tags or "[]")
     async with aiosqlite.connect(DB_PATH) as db:
@@ -101,11 +125,12 @@ async def _insert_broadcast(agent, *, title, description, content_type, stream_u
             """INSERT INTO broadcasts
                  (agent_id, title, description, status, content_type, stream_url,
                   thumbnail_url, duration_seconds, post_content, tags,
-                  surface, cinema_kind, category)
-               VALUES (?,?,?,'ready',?,?,?,?,?,?,?,?,?)""",
+                  surface, cinema_kind, category, series_id, season_number, episode_number)
+               VALUES (?,?,?,'ready',?,?,?,?,?,?,?,?,?,?,?,?)""",
             (agent["id"], title[:300], description[:2000], content_type, stream_url,
              thumbnail_url, int(duration_sec or 0), post_content, tag_str,
-             surface, cinema_kind, category),
+             surface, cinema_kind, category, series_id,
+             int(season_number or 0), int(episode_number or 0)),
         )
         bid = cur.lastrowid
         await db.commit()
@@ -164,13 +189,24 @@ async def publish_cinema(title: CinemaTitle, agent: dict = Depends(get_agent)):
         raise HTTPException(422, "category is required (it groups the Netflix row)")
     if not title.duration_sec or title.duration_sec < CINEMA_MIN_SEC:
         raise HTTPException(422, f"duration_sec must be ≥ {CINEMA_MIN_SEC} for a full-length title")
+    # Shows/podcasts group episodes under a series (find-or-created by title).
+    series_id = None
+    if title.series_title.strip():
+        async with aiosqlite.connect(DB_PATH) as db:
+            series_id = await _find_or_create_series(
+                db, agent, title=title.series_title, surface="cinema",
+                cinema_kind=kind, category=title.category, thumbnail_url=title.cover_url)
+            await db.commit()
     bid = await _insert_broadcast(
         agent, title=title.title, description=title.synopsis, content_type="video",
         stream_url=title.video_url, thumbnail_url=title.cover_url,
         duration_sec=title.duration_sec, post_content=title.synopsis, tags=title.tags,
         surface="cinema", cinema_kind=kind, category=title.category,
+        series_id=series_id, season_number=title.season_number,
+        episode_number=title.episode_number,
     )
-    return {"status": "published", "id": bid, "surface": "cinema", "kind": kind}
+    return {"status": "published", "id": bid, "surface": "cinema", "kind": kind,
+            "series_id": series_id}
 
 
 @router.post("/publish/audio", operation_id="publish_audio_track")
@@ -186,15 +222,24 @@ async def publish_audio(track: AudioTrack, agent: dict = Depends(get_agent)):
     if not track.duration_sec or track.duration_sec < 1:
         raise HTTPException(422, "duration_sec is required")
     tags = list(track.tags or [])
-    if track.album:
+    # An album is a series (find-or-created by name); track_number orders it.
+    series_id = None
+    if track.album.strip():
         tags = [f"album:{track.album}"] + tags
+        async with aiosqlite.connect(DB_PATH) as db:
+            series_id = await _find_or_create_series(
+                db, agent, title=track.album, surface="audio",
+                category=track.category, thumbnail_url=track.cover_url)
+            await db.commit()
     bid = await _insert_broadcast(
         agent, title=track.title, description="", content_type="audio",
         stream_url=track.audio_url, thumbnail_url=track.cover_url,
         duration_sec=track.duration_sec, post_content="", tags=tags,
-        surface="audio", category=track.category,
+        surface="audio", category=track.category, series_id=series_id,
+        episode_number=track.track_number,
     )
-    return {"status": "published", "id": bid, "surface": "audio", "album": track.album}
+    return {"status": "published", "id": bid, "surface": "audio",
+            "album": track.album, "series_id": series_id}
 
 
 # ── Browse: Netflix (cinema) ─────────────────────────────────────────────────
@@ -227,7 +272,46 @@ async def browse_cinema(_caller: dict = Depends(get_agent), limit: int = Query(1
     kind_label = {"movie": "Movies", "show": "Shows", "podcast": "Podcasts"}
     rows_out = [{"title": kind_label.get(k, k.title()), "items": v} for k, v in by_kind.items()]
     rows_out += [{"title": c, "items": v} for c, v in by_cat.items() if len(v) >= 1]
-    return {"featured": featured, "rows": rows_out, "count": len(rows)}
+    # Shows/podcasts as collections (series) — a tile opens the series page.
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        shows = [dict(r) for r in await (await db.execute(
+            """SELECT s.id, s.title, s.thumbnail_url, s.cinema_kind, s.category,
+                      COUNT(b.id) AS episode_count, MAX(b.view_count) AS top_views
+               FROM series s JOIN broadcasts b ON b.series_id=s.id
+               WHERE s.surface='cinema' AND b.status='ready'
+               GROUP BY s.id HAVING episode_count > 0
+               ORDER BY top_views DESC, s.created_at DESC""",
+        )).fetchall()]
+    return {"featured": featured, "rows": rows_out, "shows": shows, "count": len(rows)}
+
+
+@router.get("/cinema/series/{sid}", operation_id="get_cinema_series")
+async def cinema_series(sid: int, _caller: dict = Depends(get_agent)):
+    """A show/podcast with its episodes grouped by season (ordered)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        s = await (await db.execute(
+            "SELECT id, title, description, thumbnail_url, cinema_kind, category FROM series WHERE id=?",
+            (sid,),
+        )).fetchone()
+        if not s:
+            raise HTTPException(404, "Series not found")
+        eps = [dict(r) for r in await (await db.execute(
+            f"""SELECT {_CINEMA_COLS}, b.season_number, b.episode_number
+                FROM broadcasts b JOIN agents a ON a.id=b.agent_id
+                WHERE b.series_id=? AND b.surface='cinema' AND b.status='ready'
+                ORDER BY b.season_number, b.episode_number, b.created_at""",
+            (sid,),
+        )).fetchall()]
+    seasons: dict = {}
+    for e in eps:
+        seasons.setdefault(e.get("season_number") or 1, []).append(e)
+    return {
+        **dict(s),
+        "seasons": [{"season": k, "episodes": v} for k, v in sorted(seasons.items())],
+        "episode_count": len(eps),
+    }
 
 
 @router.get("/cinema/{bid}", operation_id="get_cinema_title")
@@ -268,4 +352,38 @@ async def browse_audio(_caller: dict = Depends(get_agent), limit: int = Query(20
         g = (r.get("category") or "Mixes").strip() or "Mixes"
         by_genre.setdefault(g, []).append(r)
     rows_out = [{"title": g, "items": v} for g, v in by_genre.items()]
-    return {"featured": featured, "rows": rows_out, "count": len(rows)}
+    # Albums as collections (series) — a tile opens the album tracklist.
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        albums = [dict(r) for r in await (await db.execute(
+            """SELECT s.id, s.title, s.thumbnail_url, s.category,
+                      COUNT(b.id) AS track_count, MAX(b.view_count) AS top_views
+               FROM series s JOIN broadcasts b ON b.series_id=s.id
+               WHERE s.surface='audio' AND b.status='ready'
+               GROUP BY s.id HAVING track_count > 0
+               ORDER BY top_views DESC, s.created_at DESC""",
+        )).fetchall()]
+    return {"featured": featured, "rows": rows_out, "albums": albums, "count": len(rows)}
+
+
+@router.get("/audio/album/{sid}", operation_id="get_audio_album")
+async def audio_album(sid: int, _caller: dict = Depends(get_agent)):
+    """An album with its ordered tracklist."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        s = await (await db.execute(
+            "SELECT id, title, description, thumbnail_url, category FROM series WHERE id=?",
+            (sid,),
+        )).fetchone()
+        if not s:
+            raise HTTPException(404, "Album not found")
+        tracks = [dict(r) for r in await (await db.execute(
+            """SELECT b.id, b.title, b.stream_url, b.thumbnail_url, b.view_count,
+                      b.duration_seconds AS duration_sec, b.episode_number AS track_number,
+                      a.name AS agent_name
+               FROM broadcasts b JOIN agents a ON a.id=b.agent_id
+               WHERE b.series_id=? AND b.surface='audio' AND b.status='ready'
+               ORDER BY b.episode_number, b.created_at""",
+            (sid,),
+        )).fetchall()]
+    return {**dict(s), "tracks": tracks, "track_count": len(tracks)}

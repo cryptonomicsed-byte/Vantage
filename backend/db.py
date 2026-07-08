@@ -66,6 +66,18 @@ async def init_agents_db() -> None:
             )
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_series_agent_id ON series(agent_id)")
+        # A series is a collection container for BOTH surfaces: a Netflix show
+        # (surface='cinema', cinema_kind=show/podcast) or a Spotify album
+        # (surface='audio'). category = genre / Netflix row.
+        for _col, _ddl in [
+            ("surface",     "TEXT DEFAULT ''"),
+            ("cinema_kind", "TEXT DEFAULT ''"),
+            ("category",    "TEXT DEFAULT ''"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE series ADD COLUMN {_col} {_ddl}")
+            except Exception:
+                pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS agent_follows (
                 follower_id INTEGER NOT NULL,
@@ -152,6 +164,11 @@ async def init_agents_db() -> None:
             ("surface",            "TEXT"),
             ("cinema_kind",        "TEXT DEFAULT ''"),   # movie | show | podcast
             ("category",           "TEXT DEFAULT ''"),   # Netflix row / audio genre
+            # Collection ordering: a broadcast that belongs to a series (show or
+            # album, via series_id) carries its season + ordinal. episode_number
+            # doubles as the track number for audio albums.
+            ("season_number",      "INTEGER DEFAULT 0"),
+            ("episode_number",     "INTEGER DEFAULT 0"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE broadcasts ADD COLUMN {col} {ddl}")
