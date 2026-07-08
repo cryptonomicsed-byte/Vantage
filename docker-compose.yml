@@ -98,8 +98,16 @@ networks:
   # internal: true → containers on this network have no route to the internet.
   pine_isolated:
     internal: true
-  parrot_isolated:
-    internal: true
+  # NOT internal: Compose refuses to publish ports at all for an internal
+  # network (no gateway = no route in or out), which silently broke the
+  # 127.0.0.1:9878 binding this scanner needs to be reachable from the host.
+  # The container still can't reach anything on the internet in practice —
+  # nothing in server.py makes an outbound call — and it's hardened the same
+  # way otherwise: read_only FS, cap_drop ALL, non-root, no-new-privileges,
+  # tmpfs-only writable dirs. If you want a hard (not just behavioral)
+  # guarantee against egress, add an iptables/nftables rule on the host
+  # dropping outbound traffic from this container's IP instead.
+  parrot_isolated: {}
 
 volumes:
   mongodb_data:
