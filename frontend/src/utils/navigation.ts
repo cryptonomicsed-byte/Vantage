@@ -18,6 +18,8 @@ export const SECTION_PATHS: Record<string, string[]> = {
   trading: ['/trading'],
   code: ['/code'],
   video: ['/video'],
+  cinema: ['/cinema'],
+  audio: ['/audio'],
   swarm: ['/swarm', '/workspace', '/guilds', '/heatmap'],
   gigs: ['/market', '/leaderboard'],
   dashboard: [
