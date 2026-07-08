@@ -69,6 +69,7 @@ class CreatePRRequest(BaseModel):
     body: str = ""
     head: str
     base: str = "main"
+    force: bool = False  # bypass the critical-findings scan gate
 
 class SearchRequest(BaseModel):
     query: str
@@ -392,7 +393,7 @@ async def push_file(owner: str, name: str, req: PushFileRequest, agent: dict = D
         shutil.rmtree(target, ignore_errors=True)
 
 
-async def _regex_scan(owner: str, name: str, agent_name: str) -> dict:
+async def _regex_scan(owner: str, name: str, agent_id: int, agent_name: str) -> dict:
     """Fast, synchronous secret/vuln pattern scan — the existing default engine."""
     full_name = f"{owner}/{name}"
     clone_url = f"{GITEA_URL}/{full_name}.git".replace("http://", f"http://{GITEA_TOKEN}@")
@@ -451,6 +452,15 @@ async def _regex_scan(owner: str, name: str, agent_name: str) -> dict:
         }
 
         _post_critical_findings(name, [f for f in findings if f["severity"] >= 0.90][:3])
+
+        scan_id = await _create_scan_row(agent_id, owner, name, "regex")
+        await _update_scan_row(
+            scan_id,
+            status="complete",
+            findings_json=json.dumps(findings),
+            completed_at=result["scanned_at"],
+        )
+        result["scan_id"] = scan_id
         return result
     finally:
         shutil.rmtree(target, ignore_errors=True)
@@ -504,6 +514,16 @@ async def _get_scan_row(scan_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+async def _get_latest_scan(owner: str, name: str) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        row = await (await db.execute(
+            "SELECT * FROM code_scans WHERE owner=? AND name=? ORDER BY id DESC LIMIT 1",
+            (owner, name),
+        )).fetchone()
+    return dict(row) if row else None
+
+
 @router.post("/repo/{owner}/{name}/scan")
 async def trigger_scan(
     owner: str, name: str,
@@ -520,7 +540,7 @@ async def trigger_scan(
     """
     if engine == "regex":
         try:
-            result = await _regex_scan(owner, name, agent["name"])
+            result = await _regex_scan(owner, name, agent["id"], agent["name"])
         except Exception as e:
             raise HTTPException(500, str(e))
         return result
@@ -578,7 +598,21 @@ async def scan_status(owner: str, name: str, scan_id: int, agent: dict = Depends
 @router.get("/repo/{owner}/{name}/scan-results")
 async def scan_results(owner: str, name: str):
     """Get the latest scan results for a repo (cached from trigger_scan)."""
-    return {"repo": f"{owner}/{name}", "message": "Scan results available via POST /scan endpoint. Trigger a scan to get fresh results."}
+    row = await _get_latest_scan(owner, name)
+    if not row:
+        return {"repo": f"{owner}/{name}", "scanned": False, "message": "No scan on record. Trigger one via POST /scan."}
+    findings = json.loads(row["findings_json"])
+    return {
+        "repo": f"{owner}/{name}",
+        "scanned": True,
+        "scan_id": row["id"],
+        "engine": row["engine"],
+        "status": row["status"],
+        "completed_at": row["completed_at"],
+        "total_findings": len(findings),
+        "critical": len([f for f in findings if f.get("severity", 0) >= 0.90]),
+        "findings": findings,
+    }
 
 
 @router.post("/repo/{owner}/{name}/memory")
@@ -601,15 +635,34 @@ async def ingest_memory(owner: str, name: str, req: MemoryIngestRequest, agent: 
 
 @router.post("/repo/{owner}/{name}/pr")
 async def create_pr(owner: str, name: str, req: CreatePRRequest, agent: dict = Depends(get_agent)):
-    """Open a pull request."""
+    """Open a pull request. Blocked by the scan gate unless force=true:
+    a completed scan with unresolved critical findings (severity >= 0.90)
+    stops the PR; a scan that's still running or errored also blocks
+    (wait or rescan). No scan on record is a warning, not a block."""
     full_name = f"{owner}/{name}"
+
+    latest_scan = await _get_latest_scan(owner, name)
+    if latest_scan and not req.force:
+        if latest_scan["status"] == "running":
+            raise HTTPException(409, "A security scan is still running for this repo — wait for it or pass force=true.")
+        if latest_scan["status"] == "error":
+            raise HTTPException(409, "The latest security scan errored — rescan before opening a PR, or pass force=true.")
+        findings = json.loads(latest_scan["findings_json"])
+        critical = [f for f in findings if f.get("severity", 0) >= 0.90]
+        if critical:
+            raise HTTPException(
+                409,
+                f"{len(critical)} critical finding(s) from the latest {latest_scan['engine']} scan "
+                f"(scan_id={latest_scan['id']}) block this PR. Fix them, rescan, or pass force=true to override.",
+            )
     payload = {"title": req.title, "body": req.body, "head": req.head, "base": req.base}
     async with httpx.AsyncClient(timeout=10) as cl:
         try:
             r = await cl.post(f"{GITEA_API}/repos/{full_name}/pulls", json=payload, headers=_headers)
             if r.status_code in (200, 201):
                 data = r.json()
-                _log_activity("pr_opened", full_name, req.title, agent=agent["name"])
+                note = req.title if not (req.force and latest_scan) else f"{req.title} [scan gate forced]"
+                _log_activity("pr_opened", full_name, note, agent=agent["name"])
                 return {"status": "created", "number": data.get("number"), "url": data.get("html_url")}
         except Exception as e:
             raise HTTPException(500, str(e))
