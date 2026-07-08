@@ -533,27 +533,6 @@ app.include_router(pine_router)
 from .routers.degen import router as degen_router
 app.include_router(degen_router)
 # MCP server — exposes all Vantage routes as MCP tools for Claude/GPT/OpenCode agents.
-
-# ── Vibe-Trading MCP Proxy ────────────────────────────────────────────
-# Proxies MCP tool calls to the local Vibe-Trading MCP server on port 4097.
-# 54 finance research tools: backtesting, fundamentals, fund flows, etc.
-from fastapi import Request as FastAPIRequest
-import httpx
-
-@app.api_route("/mcp/vibe/{path:path}", methods=["GET","POST","PUT","DELETE","OPTIONS"])
-async def vibe_mcp_proxy(path: str, request: FastAPIRequest):
-    """Proxy MCP requests to Vibe-Trading server on port 4097."""
-    async with httpx.AsyncClient() as client:
-        url = f"http://localhost:4097/{path}"
-        resp = await client.request(
-            method=request.method, url=url,
-            headers={k:v for k,v in request.headers.items() if k.lower() not in ("host",)},
-            content=await request.body(),
-            timeout=30.0,
-        )
-        from fastapi.responses import Response
-        return Response(content=resp.content, status_code=resp.status_code, headers=dict(resp.headers))
-
 # Mount the modern streamable-HTTP transport at /mcp (what current MCP clients expect),
 # and keep SSE mounted at a distinct path for older clients — mount_http()'s default
 # path is also "/mcp", so they can't share one path if both are mounted.
