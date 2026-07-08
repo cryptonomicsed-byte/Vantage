@@ -52,4 +52,9 @@ def create_mcp_server(app):
         # etc.) push conversations into an agent's vault through its own
         # scoped token, without ever handling the agent's real X-Agent-Key.
         headers=["authorization", "x-agent-key", "x-vault-connector-key"],
+        # Keep the MCP tool surface agent-scoped: drop the admin console
+        # (X-Admin-Key routes) and inbound webhook handlers. Tag-based so
+        # new endpoints on those routers stay excluded without edits here.
+        # Mirrored by EXCLUDED_TAGS in skills_registry.py — keep in sync.
+        exclude_tags=["admin", "telegram"],
     )
