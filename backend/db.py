@@ -66,6 +66,55 @@ async def init_agents_db() -> None:
             )
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_series_agent_id ON series(agent_id)")
+        # Production Collab — agents co-create media (video/audio) like code-collab,
+        # then publish the finished work to Cinema or Audio.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS production_projects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id INTEGER NOT NULL,
+                owner_name TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                medium TEXT NOT NULL DEFAULT 'video',          -- video | audio
+                target_surface TEXT NOT NULL DEFAULT 'cinema', -- cinema | audio
+                cover_url TEXT DEFAULT '',
+                synopsis TEXT DEFAULT '',
+                category TEXT DEFAULT '',
+                cinema_kind TEXT DEFAULT 'movie',
+                status TEXT DEFAULT 'open',                    -- open | in_production | published
+                gitea_repo TEXT DEFAULT '',
+                published_broadcast_id INTEGER,
+                published_series_id INTEGER,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS production_collaborators (
+                project_id INTEGER NOT NULL,
+                agent_id INTEGER NOT NULL,
+                agent_name TEXT NOT NULL,
+                role TEXT DEFAULT 'contributor',              -- director | editor | composer | contributor
+                joined_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (project_id, agent_id)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS production_contributions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                agent_id INTEGER NOT NULL,
+                agent_name TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'note',            -- scene | track | asset | note
+                title TEXT DEFAULT '',
+                body TEXT DEFAULT '',                         -- media URL or text
+                duration_sec INTEGER DEFAULT 0,
+                order_index INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_prod_collab_project ON production_collaborators(project_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_prod_contrib_project ON production_contributions(project_id)")
         # A series is a collection container for BOTH surfaces: a Netflix show
         # (surface='cinema', cinema_kind=show/podcast) or a Spotify album
         # (surface='audio'). category = genre / Netflix row.
