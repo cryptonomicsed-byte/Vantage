@@ -10,7 +10,7 @@ interface Thread {
 interface Comment { id: number; parent_id: number | null; agent_name: string; body: string; upvotes: number; downvotes: number; depth: number; created_at: string; is_debate_response: boolean }
 
 const API = '/api/forum'
-const AGENT_KEY = '4c7c4a063e50c2e381d8121105a6f28c4fbcaec7ae0aefaa9d16a8524afc78f5'
+const getAgentKey = () => localStorage.getItem('vantage_api_key') || ''
 
 const FLAIR_COLORS: Record<string, string> = {
   discussion: '#a855f7', research: '#06b6d4', alpha: '#f59e0b', speculation: '#ec4899',
@@ -52,25 +52,25 @@ export default function CollectiveFeed() {
   const createThread = async () => {
     if (!newTitle || !newBody) return
     const fd = new URLSearchParams({ title: newTitle, body: newBody, flair: newFlair })
-    const res = await fetch(API + '/threads', { method: 'POST', headers: { 'X-Agent-Key': AGENT_KEY, 'Content-Type': 'application/x-www-form-urlencoded' }, body: fd })
+    const res = await fetch(API + '/threads', { method: 'POST', headers: { 'X-Agent-Key': getAgentKey(), 'Content-Type': 'application/x-www-form-urlencoded' }, body: fd })
     if (res.ok) { setShowCreate(false); setNewTitle(''); setNewBody(''); load() }
   }
 
   const postComment = async () => {
     if (!activeThread || !newComment) return
     const fd = new URLSearchParams({ body: newComment, parent_id: String(replyTo || 0) })
-    const res = await fetch(API + '/threads/' + activeThread.thread.id + '/comment', { method: 'POST', headers: { 'X-Agent-Key': AGENT_KEY, 'Content-Type': 'application/x-www-form-urlencoded' }, body: fd })
+    const res = await fetch(API + '/threads/' + activeThread.thread.id + '/comment', { method: 'POST', headers: { 'X-Agent-Key': getAgentKey(), 'Content-Type': 'application/x-www-form-urlencoded' }, body: fd })
     if (res.ok) { setNewComment(''); setReplyTo(null); openThread(activeThread.thread.id) }
   }
 
   const vote = async (threadId: number, val: number) => {
     const fd = new URLSearchParams({ thread_id: String(threadId), vote_val: String(val) })
-    await fetch(API + '/vote', { method: 'POST', headers: { 'X-Agent-Key': AGENT_KEY, 'Content-Type': 'application/x-www-form-urlencoded' }, body: fd })
+    await fetch(API + '/vote', { method: 'POST', headers: { 'X-Agent-Key': getAgentKey(), 'Content-Type': 'application/x-www-form-urlencoded' }, body: fd })
     load()
   }
 
   const forkToVault = async (threadId: number) => {
-    await fetch(API + '/threads/' + threadId + '/fork', { method: 'POST', headers: { 'X-Agent-Key': AGENT_KEY } })
+    await fetch(API + '/threads/' + threadId + '/fork', { method: 'POST', headers: { 'X-Agent-Key': getAgentKey() } })
   }
 
   const buildCommentTree = (comments: Comment[]) => {

@@ -13,7 +13,7 @@ interface ImagePost {
 }
 
 const API = '/api/images'
-const AGENT_KEY = '4c7c4a063e50c2e381d8121105a6f28c4fbcaec7ae0aefaa9d16a8524afc78f5'
+const getAgentKey = () => localStorage.getItem('vantage_api_key') || ''
 
 function timeAgo(d: string) {
   const s = Math.floor((Date.now() - new Date(d).getTime()) / 1000)
@@ -46,7 +46,7 @@ export default function VisualCanvas() {
     setShowReaction({ id: imageId, type })
     setTimeout(() => setShowReaction(null), 800)
     await fetch(API + '/' + imageId + '/react', {
-      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Agent-Key': AGENT_KEY },
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Agent-Key': getAgentKey() },
       body: 'type=' + type
     })
     loadImages()
@@ -54,7 +54,7 @@ export default function VisualCanvas() {
 
   const remix = async (imageId: string, newPrompt: string) => {
     const r = await fetch(API + '/' + imageId + '/remix', {
-      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Agent-Key': AGENT_KEY },
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Agent-Key': getAgentKey() },
       body: 'prompt=' + encodeURIComponent(newPrompt || 'remix')
     })
     if (r.ok) alert('Remix prepared! Use agent tools to generate and upload.')
@@ -66,7 +66,7 @@ export default function VisualCanvas() {
     fd.append('image_url', formUrl); fd.append('prompt', formPrompt)
     fd.append('model', formModel); fd.append('seed', String(formSeed))
     fd.append('neg_prompt', formNegPrompt)
-    await fetch(API + '/upload', { method: 'POST', headers: { 'X-Agent-Key': AGENT_KEY }, body: fd })
+    await fetch(API + '/upload', { method: 'POST', headers: { 'X-Agent-Key': getAgentKey() }, body: fd })
     setShowUpload(false); loadImages()
   }
 

@@ -11,7 +11,7 @@ interface Collective { id: string; name: string; description: string; member_cou
 interface Comment { id: string; body: string; agent_name: string; path: string; conviction_score: number; created_at: string }
 
 const API = '/api/forum'
-const AGENT_KEY = '4c7c4a063e50c2e381d8121105a6f28c4fbcaec7ae0aefaa9d16a8524afc78f5'
+const getAgentKey = () => localStorage.getItem('vantage_api_key') || ''
 const FLAIR_COLORS: Record<string,string> = { RESEARCH: '#3b82f6', ALPHA: '#f59e0b', SPECULATION: '#a855f7', DEBATE: '#ef4444', NEWS: '#22c55e' }
 const FLAIR_ICONS: Record<string,any> = { RESEARCH: BookOpen, ALPHA: Zap, SPECULATION: Radio, DEBATE: MessageCircle, NEWS: TrendingUp }
 
@@ -40,7 +40,7 @@ export default function Forum() {
   }, [active, sort])
 
   const vote = (tid: string, dir: number) => {
-    fetch(API + '/threads/' + tid + '/vote', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Agent-Key': AGENT_KEY }, body: 'direction=' + dir })
+    fetch(API + '/threads/' + tid + '/vote', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Agent-Key': getAgentKey() }, body: 'direction=' + dir })
       .then(() => fetch(API + '/c/' + active + '?sort=' + sort).then(r => r.json()).then(d => setThreads(d.threads || [])))
   }
 
@@ -53,7 +53,7 @@ export default function Forum() {
     e.preventDefault()
     const fd = new FormData()
     fd.append('title', newTitle); fd.append('body', newBody); fd.append('flair', newFlair)
-    await fetch(API + '/c/' + active + '/threads', { method: 'POST', headers: { 'X-Agent-Key': AGENT_KEY }, body: fd })
+    await fetch(API + '/c/' + active + '/threads', { method: 'POST', headers: { 'X-Agent-Key': getAgentKey() }, body: fd })
     setShowNewPost(false); setNewTitle(''); setNewBody('')
     fetch(API + '/c/' + active + '?sort=' + sort).then(r => r.json()).then(d => setThreads(d.threads || []))
   }
@@ -62,7 +62,7 @@ export default function Forum() {
     if (!selectedThread || !commentText) return
     const fd = new FormData()
     fd.append('body', commentText)
-    await fetch(API + '/threads/' + selectedThread.id + '/comments', { method: 'POST', headers: { 'X-Agent-Key': AGENT_KEY }, body: fd })
+    await fetch(API + '/threads/' + selectedThread.id + '/comments', { method: 'POST', headers: { 'X-Agent-Key': getAgentKey() }, body: fd })
     setCommentText('')
     fetch(API + '/threads/' + selectedThread.id).then(r => r.json()).then(d => setComments(d.comments || []))
   }
@@ -96,7 +96,7 @@ export default function Forum() {
               <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.7)', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{selectedThread.body}</div>
               <div style={{ display: 'flex', gap: 12, marginTop: 12, fontSize: 11, color: 'var(--muted)' }}>
                 <span>{selectedThread.comment_count} comments</span>
-                <span style={{ cursor: 'pointer' }} onClick={() => fetch(API + '/threads/' + selectedThread.id + '/fork-vault', { method: 'POST', headers: { 'X-Agent-Key': AGENT_KEY } }).then(() => alert('Forked to vault!')) }><GitFork size={11} /> Fork to Vault</span>
+                <span style={{ cursor: 'pointer' }} onClick={() => fetch(API + '/threads/' + selectedThread.id + '/fork-vault', { method: 'POST', headers: { 'X-Agent-Key': getAgentKey() } }).then(() => alert('Forked to vault!')) }><GitFork size={11} /> Fork to Vault</span>
               </div>
             </div>
             {/* Comments */}

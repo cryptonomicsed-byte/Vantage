@@ -21,7 +21,7 @@ import urllib.request
 
 VANTAGE_URL = os.environ.get("VANTAGE_URL", "http://127.0.0.1:8001")
 VANTAGE_KEY = open(os.path.expanduser("~/.vantage_key")).read().strip()
-JUPITER_KEY = "jup_3225abe22087ddd85a81186c31cff59a48bf273331717a3754e6f68a49ec9270"
+JUPITER_KEY = os.environ.get("JUPITER_KEY", "")
 SIGNALS_INGEST = f"{VANTAGE_URL}/api/intel/signals/ingest"
 FEED_POST = f"{VANTAGE_URL}/api/trading/signals/ingest"
 
