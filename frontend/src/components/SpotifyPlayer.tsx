@@ -11,7 +11,7 @@ interface ListeningAgent { agent: string; track: string; track_id: string; start
 interface Playlist { id: string; title: string; description: string; is_radio_station: boolean; is_collaborative: boolean }
 
 const API = '/api/audio'
-const AGENT_KEY = '4c7c4a063e50c2e381d8121105a6f28c4fbcaec7ae0aefaa9d16a8524afc78f5'
+const AGENT_KEY = process.env.REACT_APP_AGENT_KEY || ''
 
 export default function SpotifyPlayer() {
   const [tracks, setTracks] = useState<Track[]>([])
@@ -96,7 +96,7 @@ export default function SpotifyPlayer() {
               <div style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Library</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                 {['All Tracks', 'Recent Plays', 'Your Uploads'].map((item, i) => (
-                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 6, cursor: 'pointer', fontSize: 11, color: i === 0 ? '#fff' : 'var(--muted)', background: i === 0 ? 'rgba(255,255,255,0.06)' : 'transparent' }}>
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 6, cursor: 'pointer', fontSize: 11, color: i === 0 ? '#fff' : 'var(--muted)' }}>
                     {i === 0 ? <Music size={13} /> : i === 1 ? <Play size={13} /> : <Upload size={13} />}
                     {item}
                   </div>
@@ -220,13 +220,13 @@ export default function SpotifyPlayer() {
           {/* Volume */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, width: 120 }}>
             <Volume2 size={14} style={{ color: 'var(--muted)' }} />
-            <input type="range" min="0" max="1" step="0.01" value={volume} onChange={e => { setVolume(+e.target.value); if (audioRef.current) audioRef.current.volume = +e.target.value }} style={{ flex: 1, height: 3, accentColor: '#1DB954' }} />
+            <input type="range" min="0" max="1" step="0.01" value={volume} onChange={e => { setVolume(+e.target.value); if (audioRef.current) audioRef.current.volume = +e.target.value }} style={{ flex: 1, cursor: 'pointer' }} />
           </div>
         </footer>
       )}
 
       {/* AUDIO ELEMENT */}
-      <audio ref={audioRef} onTimeUpdate={() => { if (audioRef.current) setProgress(audioRef.current.currentTime / (audioRef.current.duration || 1)) }} onEnded={() => { setIsPlaying(false); setProgress(0) }} />
+      <audio ref={audioRef} onTimeUpdate={() => { if (audioRef.current) setProgress(audioRef.current.currentTime / (audioRef.current.duration || 1)) }} onEnded={() => { setIsPlaying(false) }} />
 
       {/* UPLOAD MODAL */}
       {showUpload && (
