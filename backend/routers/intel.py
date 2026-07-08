@@ -626,10 +626,32 @@ _signal_pool: list[dict] = []
 _signal_lock = threading.Lock()
 MAX_POOL_SIZE = 200
 
+# Persistence + cache so signals survive restarts and repeated loads are instant.
+#   • signal_pool  — durable copy of every ingested signal (the in-memory pool is
+#     lost on restart; this table is not, so you never come back to an empty feed).
+#   • intel_cache  — last-good assembled /signals snapshot, for stale-while-
+#     revalidate serving (fast, and a cold start reads it instead of blocking on
+#     ~12 external APIs).
+_SIGNAL_TABLES_DDL = (
+    """CREATE TABLE IF NOT EXISTS signal_pool (
+         id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, source TEXT, type TEXT,
+         conviction REAL, direction TEXT, detail TEXT, ts INTEGER)""",
+    """CREATE TABLE IF NOT EXISTS intel_cache (
+         key TEXT PRIMARY KEY, payload TEXT, updated_at INTEGER)""",
+)
+_POOL_DB_KEEP = 500  # rows retained in the durable pool table
+
+
+async def _ensure_signal_tables(db) -> None:
+    for ddl in _SIGNAL_TABLES_DDL:
+        await db.execute(ddl)
+
+
 @router.post("/signals/ingest")
 async def ingest_signal(payload: dict, agent: dict = Depends(get_agent)):
     """Accept a signal from any source (predictor, trading agents, ingester).
-    Stored in in-memory pool, returned by GET /signals alongside live data."""
+    Stored in the in-memory pool AND persisted to signal_pool so it survives a
+    restart; returned by GET /signals alongside live data."""
     required = ["symbol", "source", "type"]
     for f in required:
         if f not in payload:
@@ -649,13 +671,54 @@ async def ingest_signal(payload: dict, agent: dict = Depends(get_agent)):
         if len(_signal_pool) > MAX_POOL_SIZE:
             _signal_pool.pop(0)
 
+    # Durable write-through (best-effort — the in-memory pool is still the fast path).
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await _ensure_signal_tables(db)
+            await db.execute(
+                "INSERT INTO signal_pool (symbol, source, type, conviction, direction, detail, ts) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (signal["symbol"], signal["source"], signal["type"], signal["conviction"],
+                 signal["direction"], signal["detail"], signal["ts"]),
+            )
+            # Trim to the most-recent _POOL_DB_KEEP rows.
+            await db.execute(
+                "DELETE FROM signal_pool WHERE id NOT IN "
+                "(SELECT id FROM signal_pool ORDER BY id DESC LIMIT ?)", (_POOL_DB_KEEP,))
+            await db.commit()
+    except aiosqlite.Error as e:
+        logger.debug("signal_pool persist failed: %s", e)
+
     return {"status": "ingested", "signal": signal["symbol"], "pool_size": len(_signal_pool)}
 
-@router.get("/signals")
-async def unified_signals(
-    limit: int = Query(20, ge=1, le=100),
-    min_conviction: float = Query(0, ge=0, le=10), agent: dict = Depends(get_agent)):
-    """Aggregate signals from all live sources into one ranked feed."""
+
+async def _durable_pool(limit: int = 50) -> list[dict]:
+    """Most-recent persisted signals, merged with the in-memory pool (deduped).
+    Lets the feed survive a restart that empties the in-memory pool."""
+    rows: list[dict] = []
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await _ensure_signal_tables(db)
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT symbol, source, type, conviction, direction, detail, ts "
+                "FROM signal_pool ORDER BY id DESC LIMIT ?", (limit,))
+            rows = [dict(r) for r in await cur.fetchall()]
+    except aiosqlite.Error as e:
+        logger.debug("durable pool read failed: %s", e)
+    with _signal_lock:
+        mem = list(_signal_pool[-limit:])
+    seen = {(r["symbol"], r["source"]) for r in rows}
+    for s in reversed(mem):  # newest-first, only add if not already from DB
+        if (s["symbol"], s["source"]) not in seen:
+            rows.append(s)
+            seen.add((s["symbol"], s["source"]))
+    return rows
+
+async def _gather_all_signals() -> dict:
+    """Assemble the full ranked signal feed from every live source + the durable
+    pool. Pure gathering (no request context) so it can run in the background for
+    the stale-while-revalidate cache."""
     import json, os, time, asyncio
     from datetime import datetime
 
@@ -897,16 +960,117 @@ async def unified_signals(
     # Sort by conviction desc, then recency
     ranked = sorted(seen.values(), key=lambda x: (x.get("conviction", 0), x.get("ts", 0)), reverse=True)
 
-    # Merge signal pool — always append after dedup so ingested signals are visible
-    with _signal_lock:
-        for ps in _signal_pool[-50:]:
-            if not any(p.get("symbol") == ps["symbol"] and p.get("source") == ps["source"] for p in ranked):
-                ranked.append(ps)
+    # Merge the durable pool (persisted + in-memory) so ingested signals are
+    # visible and survive a restart.
+    for ps in await _durable_pool(50):
+        if not any(p.get("symbol") == ps["symbol"] and p.get("source") == ps["source"] for p in ranked):
+            ranked.append(ps)
 
     return {
         "count": len(ranked),
-        "sources": list(set(s.get("source") for s in ranked)),
+        "sources": sorted(set(s.get("source") for s in ranked if s.get("source"))),
         "timestamp": now,
+        "signals": ranked,
+    }
+
+
+# ── Cache layer: stale-while-revalidate + persisted snapshot ─────────────────
+# The gather above hits ~12 external APIs, so serving it uncached made the feed
+# slow ("waiting to load") and empty on a cold start when the pool was lost. We
+# now keep the last-good full feed in memory AND in intel_cache, serve it
+# instantly, and refresh in the background once it goes stale.
+_signals_cache: dict = {"data": None, "ts": 0}
+_signals_refreshing = False
+_SIGNALS_TTL = 45  # seconds a snapshot is considered fresh
+
+
+async def _persist_signals_snapshot(data: dict, ts: int) -> None:
+    import json
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await _ensure_signal_tables(db)
+            await db.execute(
+                "INSERT INTO intel_cache (key, payload, updated_at) VALUES ('signals', ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
+                (json.dumps(data), ts))
+            await db.commit()
+    except (aiosqlite.Error, TypeError) as e:
+        logger.debug("signals snapshot persist failed: %s", e)
+
+
+async def _load_signals_snapshot() -> Optional[dict]:
+    import json
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await _ensure_signal_tables(db)
+            cur = await db.execute("SELECT payload, updated_at FROM intel_cache WHERE key='signals'")
+            row = await cur.fetchone()
+            if row and row[0]:
+                return {"data": json.loads(row[0]), "ts": int(row[1] or 0)}
+    except (aiosqlite.Error, ValueError) as e:
+        logger.debug("signals snapshot load failed: %s", e)
+    return None
+
+
+async def _refresh_signals_cache() -> None:
+    """Rebuild the feed and update both the in-memory cache and the DB snapshot.
+    Guarded so overlapping requests don't trigger a stampede of external fetches."""
+    global _signals_refreshing
+    if _signals_refreshing:
+        return
+    _signals_refreshing = True
+    try:
+        data = await _gather_all_signals()
+        ts = int(time.time())
+        _signals_cache["data"] = data
+        _signals_cache["ts"] = ts
+        await _persist_signals_snapshot(data, ts)
+    except Exception as e:
+        logger.warning("signals refresh failed: %s", e)
+    finally:
+        _signals_refreshing = False
+
+
+@router.get("/signals")
+async def unified_signals(
+    limit: int = Query(20, ge=1, le=100),
+    min_conviction: float = Query(0, ge=0, le=10), agent: dict = Depends(get_agent)):
+    """Aggregate signals from all live sources into one ranked feed.
+
+    Served from a stale-while-revalidate cache: a fresh snapshot (< TTL) is
+    returned as-is; a stale one is returned immediately while a background
+    refresh runs; a cold process first rehydrates from the persisted snapshot so
+    the feed is never empty when you come back. Only the very first call with no
+    snapshot at all blocks on a live gather."""
+    now = int(time.time())
+
+    # Cold process: rehydrate from the last persisted snapshot before deciding.
+    if _signals_cache["data"] is None:
+        snap = await _load_signals_snapshot()
+        if snap and snap.get("data"):
+            _signals_cache["data"] = snap["data"]
+            _signals_cache["ts"] = snap["ts"]
+
+    fresh = _signals_cache["data"] is not None and (now - _signals_cache["ts"] < _SIGNALS_TTL)
+    if not fresh:
+        # Never block the request on ~12 external fetches — refresh behind it.
+        asyncio.create_task(_refresh_signals_cache())
+
+    data = _signals_cache["data"]
+    if data is None:
+        # First ever call, no snapshot yet: serve the durable pool immediately so
+        # ingested signals still show while the background gather populates.
+        pool = await _durable_pool(50)
+        data = {"signals": pool, "sources": sorted(set(p.get("source") for p in pool if p.get("source"))),
+                "timestamp": now}
+    ranked = [s for s in data.get("signals", []) if s.get("conviction", 0) >= min_conviction]
+    return {
+        "count": len(ranked[:limit]),
+        "total_available": len(data.get("signals", [])),
+        "sources": data.get("sources", []),
+        "timestamp": data.get("timestamp", now),
+        "cached": fresh,
+        "age_seconds": (now - _signals_cache["ts"]) if _signals_cache["ts"] else None,
         "signals": ranked[:limit],
     }
 
