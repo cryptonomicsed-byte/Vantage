@@ -16,4 +16,7 @@ regexes = [
   '''REPLACE_WITH_[A-Z_]+''',        # .env.example placeholders
   '''your_[a-z_]+_here''',
   '''11111111111111111111111111111111''',  # Solana System Program address
+  '''So11111111111111111111111111111111111111112''',  # Wrapped SOL mint (public)
+  '''EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v''',  # USDC SPL mint (public)
+  '''Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB''',  # USDT SPL mint (public)
 ]
