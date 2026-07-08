@@ -91,6 +91,9 @@ def build_skills_registry(app: FastAPI) -> dict:
             continue
         if not route.include_in_schema:
             continue
+        # Only API endpoints — untagged non-/api routes are frontend pages.
+        if not route.path.startswith("/api"):
+            continue
         tags = [str(t) for t in (route.tags or [])]
         if any(t in EXCLUDED_TAGS for t in tags):
             continue
