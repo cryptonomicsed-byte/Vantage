@@ -11,8 +11,8 @@ from backend.main import app
 client = TestClient(app)
 
 # Test agent key (Hermes-Ares from seed)
-TEST_KEY = "vantage_94f21c43db14b76b301793bb8d8d02cd4b9442971edfbd6f"
-TEST_KEY_2 = "vantage_0d0565d9cf1f5fd7868e2cf5293afe4dc2d7384702372035"  # Hermes
+TEST_KEY = os.environ.get("TEST_KEY", "")
+TEST_KEY_2 = os.environ.get("TEST_KEY_2", "")  # Hermes
 
 class TestGenesisEngine:
     

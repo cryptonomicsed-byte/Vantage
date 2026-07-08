@@ -1,0 +1,187 @@
+import React, { useEffect, useState } from 'react'
+import { TrendingUp, Zap, Wallet, Users, AlertTriangle, DollarSign, Flame, BarChart3, Radio } from 'lucide-react'
+
+interface Token {
+  symbol: string
+  score: number
+  volume_24h?: number
+  price_change_24h?: number
+  graduated?: boolean
+  reason?: string
+}
+
+interface Theme {
+  count: number
+  tokens: string[]
+  theme?: string
+}
+
+interface Wallet {
+  wallet: string
+  label: string
+  edges?: number
+  last_seen?: string
+}
+
+export default function Top5Degen() {
+  const [mustBuy, setMustBuy] = useState<Token[]>([])
+  const [themes, setThemes] = useState<Theme[]>([])
+  const [smartMoney, setSmartMoney] = useState<Wallet[]>([])
+  const [sellRotations, setSellRotations] = useState<Token[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    const key = localStorage.getItem('vantage_api_key') || ''
+    const safeFetch = (url: string) => fetch(url, { headers: { 'X-Agent-Key': key } })
+      .then(r => r.ok ? r.json() : Promise.resolve({}))
+      .catch(() => ({}))
+    
+    Promise.all([
+      safeFetch('/api/intel/degen/top5?limit=5'),
+      safeFetch('/api/intel/degen/smart-wallets?limit=5'),
+      safeFetch('/api/intel/pumpfun/trending?limit=5'),
+      safeFetch('/api/intel/degen/sell-rotations?limit=5'),
+    ])
+      .then(([top5Data, smartData, trendData, rotateData]) => {
+        setMustBuy(top5Data.top_5 || [])
+        setSmartMoney(smartData.smart_wallets || [])
+        setSellRotations(rotateData.rotations || [])
+        // Detect themes from trending names
+        const themeMap: Record<string, { count: number; tokens: string[] }> = {}
+        ;(trendData.trending || []).forEach((t: any) => {
+          const name = (t.name || t.symbol || '').toLowerCase()
+          if (name.includes('ai') || name.includes('agent')) { themeMap['AI Agents'] = themeMap['AI Agents'] || { count: 0, tokens: [] }; themeMap['AI Agents'].count++; themeMap['AI Agents'].tokens.push(t.symbol || t.name) }
+          else if (name.includes('meme') || name.includes('pepe') || name.includes('bonk')) { themeMap['Memes'] = themeMap['Memes'] || { count: 0, tokens: [] }; themeMap['Memes'].count++; themeMap['Memes'].tokens.push(t.symbol || t.name) }
+          else if (name.includes('bull') || name.includes('moon') || name.includes('100x')) { themeMap['Degen'] = themeMap['Degen'] || { count: 0, tokens: [] }; themeMap['Degen'].count++; themeMap['Degen'].tokens.push(t.symbol || t.name) }
+          else { themeMap['Other'] = themeMap['Other'] || { count: 0, tokens: [] }; themeMap['Other'].count++; themeMap['Other'].tokens.push(t.symbol || t.name) }
+        })
+        setThemes(Object.entries(themeMap).map(([k, v]) => ({ theme: k, ...v })).sort((a, b) => b.count - a.count))
+        setLoading(false)
+      })
+      .catch(e => { setError(e.message); setLoading(false) })
+  }, [])
+
+  if (loading) return <div style={{ padding: 20, color: 'var(--muted)' }}>Loading Top 5...</div>
+  if (error) return <div style={{ padding: 20, color: '#ef4444' }}>{error}</div>
+
+  return (
+    <div style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {/* 🎯 MUST BUY */}
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+          <Flame size={14} color="#ff6b35" />
+          <span style={{ fontWeight: 700, fontSize: 13, color: '#ff6b35' }}>TOP 5 MUST BUY DEGEN</span>
+        </div>
+        <div style={{ display: 'grid', gap: 4 }}>
+          {mustBuy.map((t, i) => (
+            <div key={i} style={{
+              display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px',
+              background: `linear-gradient(90deg, rgba(255,107,53,${0.15 - i * 0.03}) 0%, transparent 100%)`,
+              borderRadius: 6, border: '1px solid rgba(255,255,255,0.04)',
+              fontSize: 11,
+            }}>
+              <span style={{ color: 'var(--muted)', minWidth: 16 }}>#{i + 1}</span>
+              <span style={{ fontWeight: 600, minWidth: 50, color: '#fff' }}>{t.symbol}</span>
+              <span style={{ flex: 1, color: 'var(--muted)', fontSize: 10 }}>{t.reason}</span>
+              <span style={{ fontWeight: 600, color: t.score > 70 ? '#22c55e' : '#f59e0b', minWidth: 24, textAlign: 'right' }}>{t.score}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* 🏦 SMART MONEY */}
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+          <Zap size={14} color="#8b5cf6" />
+          <span style={{ fontWeight: 700, fontSize: 13, color: '#8b5cf6' }}>TOP 5 SMART MONEY</span>
+        </div>
+        <div style={{ display: 'grid', gap: 4 }}>
+          {smartMoney.map((w, i) => (
+            <div key={i} style={{
+              display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px',
+              borderRadius: 4, border: '1px solid rgba(139,92,246,0.15)', fontSize: 11,
+            }}>
+              <span style={{ color: 'var(--muted)', fontSize: 10 }}>#{i + 1}</span>
+              <span style={{ fontWeight: 600, color: '#8b5cf6', flex: 1, fontSize: 10 }}>{w.wallet}</span>
+              <span style={{ color: 'var(--muted)', fontSize: 10 }}>{w.label}</span>
+              <span style={{ fontWeight: 600, fontSize: 10 }}>{w.edges || ''}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* 🎨 THEMES */}
+      {themes.length > 0 && (
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+            <Radio size={14} color="#06b6d4" />
+            <span style={{ fontWeight: 700, fontSize: 13, color: '#06b6d4' }}>TOP THEMES</span>
+          </div>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {themes.map((th, i) => (
+              <div key={i} style={{
+                padding: '4px 10px', borderRadius: 12,
+                background: `rgba(6,182,212,${0.2 - i * 0.04})`,
+                border: '1px solid rgba(6,182,212,0.2)', fontSize: 10,
+                display: 'flex', alignItems: 'center', gap: 4,
+              }}>
+                <span style={{ fontWeight: 600, color: '#06b6d4' }}>{th.theme}</span>
+                <span style={{ color: 'var(--muted)' }}>{th.count}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 📊 GRADUATED */}
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+          <TrendingUp size={14} color="#22c55e" />
+          <span style={{ fontWeight: 700, fontSize: 13, color: '#22c55e' }}>RECENTLY GRADUATED</span>
+        </div>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {mustBuy.filter(t => t.graduated).slice(0, 3).map((t, i) => (
+            <div key={i} style={{
+              padding: '4px 10px', borderRadius: 6,
+              background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.2)',
+              fontSize: 10, display: 'flex', alignItems: 'center', gap: 4,
+            }}>
+              <span>🎓</span>
+              <span style={{ fontWeight: 600, color: '#22c55e' }}>{t.symbol}</span>
+              <span style={{ color: 'var(--muted)' }}>${(t.volume_24h || 0).toLocaleString()}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* 🔴 ROTATIONS */}
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+          <AlertTriangle size={14} color="#ef4444" />
+          <span style={{ fontWeight: 700, fontSize: 13, color: '#ef4444' }}>SELL ROTATIONS</span>
+        </div>
+        {sellRotations.length > 0 ? (
+          <div style={{ display: 'grid', gap: 4 }}>
+            {sellRotations.map((t, i) => (
+              <div key={i} style={{
+                display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px',
+                borderRadius: 4, border: '1px solid rgba(239,68,68,0.15)', fontSize: 11,
+              }}>
+                <span style={{ fontWeight: 600, minWidth: 50, color: '#ef4444' }}>{t.symbol}</span>
+                <span style={{ flex: 1, color: 'var(--muted)', fontSize: 10 }}>
+                  Sell/Buy: {(t as any).sell_buy_ratio || '?'}x — ${(t.volume_24h || 0).toLocaleString()}
+                </span>
+                <span style={{ color: t.price_change_24h && t.price_change_24h < 0 ? '#ef4444' : '#22c55e', fontSize: 10 }}>
+                  {t.price_change_24h != null ? (t.price_change_24h > 0 ? '+' : '') + t.price_change_24h + '%' : ''}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div style={{ fontSize: 10, color: 'var(--muted)' }}>No significant sell rotations detected</div>
+        )}
+      </div>
+    </div>
+  )
+}

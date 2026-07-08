@@ -17,7 +17,9 @@ export const SECTION_PATHS: Record<string, string[]> = {
   // tabs) — no SUB_NAV entry needed here, see below.
   trading: ['/trading'],
   code: ['/code'],
-  video: ['/video'],
+  video: ['/video', '/studio'],
+  cinema: ['/cinema'],
+  audio: ['/audio'],
   swarm: ['/swarm', '/workspace', '/guilds', '/heatmap'],
   gigs: ['/market', '/leaderboard'],
   dashboard: [

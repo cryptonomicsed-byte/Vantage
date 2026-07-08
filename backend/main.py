@@ -497,6 +497,10 @@ from .routers.federation import router as federation_galaxy_router
 app.include_router(federation_galaxy_router)
 from .routers.trading import router as trading_router
 app.include_router(trading_router)
+from .routers.surfaces import router as surfaces_router
+app.include_router(surfaces_router)
+from .routers.production import router as production_router
+app.include_router(production_router)
 from .routers.intel import router as intel_router
 from .routers.code import router as code_router
 app.include_router(code_router)
@@ -513,8 +517,12 @@ app.include_router(collectives_router)
 app.include_router(orchestrator_router)
 from .routers.memory_enrichment import router as memory_enrichment_router
 app.include_router(memory_enrichment_router)
+from .routers.telegram_webhook import router as telegram_router
+from .routers.pumpfun import router as pumpfun_router
 from .routers.mesh import router as mesh_router
 app.include_router(mesh_router)
+app.include_router(pumpfun_router)
+app.include_router(telegram_router)
 from .routers.manifesto import router as manifesto_router
 app.include_router(manifesto_router)
 from .routers.copilot import router as copilot_router
@@ -522,6 +530,8 @@ app.include_router(copilot_router)
 from .routers.pine import router as pine_router
 app.include_router(pine_router)
 
+from .routers.degen import router as degen_router
+app.include_router(degen_router)
 # MCP server — exposes all Vantage routes as MCP tools for Claude/GPT/OpenCode agents.
 # Mount the modern streamable-HTTP transport at /mcp (what current MCP clients expect),
 # and keep SSE mounted at a distinct path for older clients — mount_http()'s default

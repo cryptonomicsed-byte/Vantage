@@ -1,0 +1,19 @@
+# gitleaks config for Vantage. Extends the built-in ruleset and allowlists
+# files that legitimately contain placeholder / public values so the CI gate
+# stays green on a clean tree but fails the moment a real secret is committed.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Templates, docs, and public identifiers are not secrets"
+paths = [
+  '''\.env\.example$''',
+  '''.*\.example$''',
+  '''\.gitleaks\.toml$''',
+  '''dist-stable/.*''',   # built frontend bundles carry public client IDs only
+]
+regexes = [
+  '''REPLACE_WITH_[A-Z_]+''',        # .env.example placeholders
+  '''your_[a-z_]+_here''',
+  '''11111111111111111111111111111111''',  # Solana System Program address
+]

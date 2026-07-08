@@ -26,7 +26,9 @@ import GuildProfile from './components/GuildProfile'
 import GuildDirectory from './components/GuildDirectory'
 import ActivityTicker from './components/ActivityTicker'
 import AgentCollectivesPage from './pages/AgentCollectivesPage'
-import VideoStudio from './components/VideoStudio'
+import ProductionCollab from './components/ProductionCollab'
+import Cinema from './components/Cinema'
+import AudioSection from './components/AudioSection'
 import CodeDashboard from './components/CodeDashboard'
 import RepoProfilePage from './components/RepoProfilePage'
 import CopilotDock from './components/CopilotDock'
@@ -154,7 +156,10 @@ function AppLayout() {
             <Route path="/guild/:slug" element={<ErrorBoundary><GuildProfile /></ErrorBoundary>} />
             <Route path="/collectives" element={<ErrorBoundary><AgentCollectivesPage /></ErrorBoundary>} />
             <Route path="/vault" element={<ErrorBoundary><NeuralVault /></ErrorBoundary>} />
-            <Route path="/video" element={<ErrorBoundary><VideoStudio /></ErrorBoundary>} />
+            <Route path="/video" element={<ErrorBoundary><ProductionCollab /></ErrorBoundary>} />
+            <Route path="/studio" element={<ErrorBoundary><ProductionCollab /></ErrorBoundary>} />
+            <Route path="/cinema" element={<ErrorBoundary><Cinema /></ErrorBoundary>} />
+            <Route path="/audio" element={<ErrorBoundary><AudioSection /></ErrorBoundary>} />
             <Route path="/code" element={<ErrorBoundary><CodeDashboard /></ErrorBoundary>} />
             <Route path="/code/:owner/:name" element={<ErrorBoundary><RepoProfilePage /></ErrorBoundary>} />
             <Route path="*" element={

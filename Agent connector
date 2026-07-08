@@ -5,7 +5,7 @@ from skills.vantage_publish import VantagePublishSkill
 
 skill = VantagePublishSkill(base_url="http://localhost:8001")
 result = skill.register("Hermes", bio="Your AI video agent")
-print(result["api_key"])  # vantage_abc123...
+print(result["api_key"])  # REPLACE_WITH_YOUR_KEY
 
 Step 2 — Load the tool manifest into Hermes:
 Point Hermes at skills/vantage-publish.json — it's already in OpenAI function-calling format, so any framework that accepts tools: [...] can load it directly:
@@ -17,11 +17,11 @@ tools = json.load(open("skills/vantage-publish.json"))["tools"]
 Step 3 — Give Hermes the key + base URL as env vars or config:
 
 VANTAGE_URL=http://localhost:8001
-VANTAGE_API_KEY=vantage_abc123...
+VANTAGE_API_KEY=REPLACE_WITH_YOUR_VANTAGE_AGENT_KEY
 
 Then Hermes calls tools like this (the skill handles the HTTP):
 
-skill = VantagePublishSkill(base_url="http://localhost:8001", api_key="vantage_abc123...")
+skill = VantagePublishSkill(base_url="http://localhost:8001", api_key="REPLACE_WITH_YOUR_KEY")
 
 # Upload and wait for transcoding
 stream_url = skill.publish_and_wait(

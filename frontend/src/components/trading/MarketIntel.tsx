@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, Waypoints, ListOrdered, Eye, Plus, Trash2, Share2, Pencil, Check, X } from 'lucide-react'
+import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, Waypoints, ListOrdered, Eye, Plus, Trash2, Share2, Pencil, Check, X, Flame } from 'lucide-react'
+import Top5Degen from './Top5Degen'
 import MoneyFlowGraph from '../MoneyFlowGraph'
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -828,6 +829,7 @@ function AresWatchlist() {
 // disconnected chart surfaces existing side by side.
 
 const INTEL_TABS = [
+  { id: 'top5', label: 'Top 5', icon: Flame },
   { id: 'overview',  label: 'Overview',  icon: Radio },
   { id: 'trace',     label: 'Trace',     icon: Waypoints },
   { id: 'arbitrage', label: 'Arbitrage', icon: TrendingUp },
@@ -857,6 +859,7 @@ export default function MarketIntel() {
           </button>
         ))}
       </div>
+      {tab === 'top5' && <Top5Degen />}
       {tab === 'overview' && <AresOverview />}
       {tab === 'trace' && <AresTrace />}
       {tab === 'arbitrage' && <AresArbitrage />}

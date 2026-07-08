@@ -35,6 +35,17 @@ function fmtUsd(n: number | null | undefined): string {
   return '$' + v.toFixed(2)
 }
 
+function fmtSol(n: number | null | undefined): string {
+  if (n === null || n === undefined || isNaN(Number(n))) return '—'
+  const v = Number(n)
+  return (v >= 0 ? '+' : '') + v.toFixed(4) + ' SOL'
+}
+
+function shortMint(m: string | null | undefined): string {
+  if (!m) return '—'
+  return m.length > 12 ? `${m.slice(0, 4)}…${m.slice(-4)}` : m
+}
+
 function timeAgo(iso: string): string {
   if (!iso) return '—'
   const diff = Date.now() - new Date(iso.includes('T') ? iso : iso.replace(' ', 'T') + 'Z').getTime()
@@ -117,6 +128,8 @@ function Overview() {
   const perf = useTrading<any>('/performance')
   const risk = useTrading<any>('/risk')
   const daily = useTrading<any[]>('/performance/daily?days=30')
+  const holdings = useTrading<any>('/holdings')
+  const networth = useTrading<any>('/networth')
   const [snap, setSnap] = useState({ portfolio_value_usd: '', daily_pnl_usd: '', daily_pnl_pct: '', notes: '' })
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState('')
@@ -150,33 +163,35 @@ function Overview() {
   async function autoSnapshot() {
     setSaving(true); setMsg('')
     try {
-      const r = await tradingApi('/snapshot/auto', { method: 'POST', body: '{}' })
-      if (r.ok) { const d = await r.json(); setMsg(`Snapshot saved: ${fmtUsd(d.portfolio_value_usd)}`); daily.reload(); perf.reload() }
+      const r = await tradingApi('/networth/snapshot', { method: 'POST', body: '{}' })
+      if (r.ok) { const d = await r.json(); setMsg(`Equity synced: ${fmtUsd(d.net_worth_usd)}`); daily.reload(); networth.reload(); holdings.reload() }
       else setMsg('Snapshot failed')
     } catch { setMsg('Snapshot failed') }
     setSaving(false)
   }
 
   const p = perf.data, r = risk.data
+  const netWorth = networth.data?.net_worth_usd ?? holdings.data?.total_value_usd
+  const realized = holdings.data?.realized_pnl_usd
   return (
     <div>
       <div className="ares-section-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <PieChart size={15} /> Performance
-        <button className="btn btn-ghost btn-sm" onClick={() => { perf.reload(); risk.reload(); daily.reload() }}><RefreshCw size={12} /></button>
+        <PieChart size={15} /> Performance (linked wallets)
+        <button className="btn btn-ghost btn-sm" onClick={() => { perf.reload(); risk.reload(); daily.reload(); holdings.reload(); networth.reload() }}><RefreshCw size={12} /></button>
       </div>
       <div className="ares-stat-grid" style={{ marginBottom: 16 }}>
-        <div className="ares-stat-tile"><div className="ares-stat-label">Portfolio Value</div><div className="ares-stat-value">{fmtUsd(p?.portfolio_value?.portfolio_value_usd)}</div></div>
-        <div className="ares-stat-tile"><div className="ares-stat-label">Filled Trades</div><div className="ares-stat-value">{p?.total_trades ?? 0}</div></div>
-        <div className="ares-stat-tile"><div className="ares-stat-label">Win Rate</div><div className="ares-stat-value" style={{ color: 'var(--green)' }}>{p?.win_rate ?? 0}%</div></div>
-        <div className="ares-stat-tile"><div className="ares-stat-label">Open Positions</div><div className="ares-stat-value">{r?.open_positions ?? 0}</div></div>
+        <div className="ares-stat-tile"><div className="ares-stat-label">Net Worth</div><div className="ares-stat-value">{fmtUsd(netWorth)}</div></div>
+        <div className="ares-stat-tile"><div className="ares-stat-label">Realized P&L</div><div className="ares-stat-value" style={{ color: (realized ?? 0) >= 0 ? 'var(--green)' : 'var(--danger)' }}>{fmtUsd(realized)}</div></div>
+        <div className="ares-stat-tile"><div className="ares-stat-label">Open Tokens</div><div className="ares-stat-value">{holdings.data?.open_tokens ?? 0}</div></div>
+        <div className="ares-stat-tile"><div className="ares-stat-label">On-chain Trades</div><div className="ares-stat-value">{p?.total_trades ?? holdings.data?.holdings?.length ?? 0}</div></div>
         <div className="ares-stat-tile"><div className="ares-stat-label">Exposure</div><div className="ares-stat-value" style={{ color: 'var(--warning)' }}>{fmtUsd(r?.total_exposure_usd)}</div></div>
         <div className="ares-stat-tile"><div className="ares-stat-label">Active Strategies</div><div className="ares-stat-value">{r?.active_strategies ?? 0}</div></div>
       </div>
 
       <div className="ares-section-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         Equity Curve (30d)
-        <button className="btn btn-ghost btn-sm" onClick={autoSnapshot} disabled={saving} title="Value live positions and record today's equity point">
-          <Plus size={12} /> Snapshot from live book
+        <button className="btn btn-ghost btn-sm" onClick={autoSnapshot} disabled={saving} title="Value your linked wallets now and record today's equity point">
+          <Plus size={12} /> Snapshot from linked wallets
         </button>
       </div>
       <div style={{ marginBottom: 20 }}><PnlChart points={points} /></div>
@@ -503,27 +518,47 @@ function Strategies() {
 // ══════════════════════════════════════════════════════════════════════════════
 
 function Journal() {
-  const journal = useTrading<any[]>('/journal')
-  const rows = journal.data || []
+  const act = useTrading<any>('/activity')
+  const d = act.data
+  const rows = d?.trades || []
+  const realizedUsd = d?.realized_pnl_usd
   return (
     <div>
-      <div className="ares-section-title"><BookOpen size={15} style={{ verticalAlign: 'middle', marginRight: 6 }} /> Trade Journal ({rows.length})</div>
+      <div className="ares-section-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <BookOpen size={15} /> Wallet Activity ({d?.count ?? rows.length})
+        {realizedUsd != null && (
+          <span style={{ fontSize: 12, fontWeight: 700, color: realizedUsd >= 0 ? 'var(--green)' : 'var(--danger)' }}>
+            realized {fmtUsd(realizedUsd)}{d?.realized_pnl_sol != null ? ` (${fmtSol(d.realized_pnl_sol)})` : ''}
+          </span>
+        )}
+        <button className="btn btn-ghost btn-sm" onClick={act.reload}><RefreshCw size={12} /></button>
+      </div>
       <table className="ares-table">
-        <thead><tr><th>Symbol</th><th>Side</th><th>Status</th><th>Conviction</th><th>Reasoning</th><th>When</th></tr></thead>
+        <thead><tr><th>When</th><th>Type</th><th>Token</th><th>Δ Token</th><th>Δ SOL</th><th>Realized P&L</th><th></th></tr></thead>
         <tbody>
-          {rows.length === 0 && <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No journal entries yet.</td></tr>}
-          {rows.map((j: any) => (
-            <tr key={j.id}>
-              <td style={{ fontWeight: 600 }}>{j.symbol}</td>
-              <td>{j.side}</td>
-              <td><OrderStatus order={j} /></td>
-              <td style={{ fontWeight: 700, color: (j.conviction_score || 0) > 0.6 ? 'var(--green)' : 'var(--muted)' }}>{(j.conviction_score || 0).toFixed(2)}</td>
-              <td style={{ fontSize: 11, color: 'var(--muted)', maxWidth: 360 }}>{j.entry_reasoning}</td>
-              <td style={{ fontSize: 11, color: 'var(--muted)' }}>{timeAgo(j.created_at)}</td>
-            </tr>
-          ))}
+          {rows.length === 0 && <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No on-chain trades yet — the wallet tracker ingests trades from your linked wallets automatically.</td></tr>}
+          {rows.map((t: any) => {
+            const rp = t.realized_pnl_sol || 0
+            const isTrade = t.realized_pnl_sol !== 0
+            return (
+              <tr key={t.signature}>
+                <td style={{ fontSize: 11, color: 'var(--muted)' }}>{t.ts_iso ? timeAgo(t.ts_iso) : '—'}</td>
+                <td style={{ fontWeight: 600 }}>{t.type}</td>
+                <td style={{ fontFamily: 'monospace', fontSize: 11 }} title={t.description || t.token_mint || ''}>{shortMint(t.token_mint)}</td>
+                <td style={{ fontFamily: 'monospace', color: (t.token_amount || 0) >= 0 ? 'var(--green)' : 'var(--danger)' }}>{t.token_amount != null ? Number(t.token_amount).toLocaleString() : '—'}</td>
+                <td style={{ fontFamily: 'monospace', color: (t.sol_change || 0) >= 0 ? 'var(--green)' : 'var(--danger)' }}>{fmtSol(t.sol_change)}</td>
+                <td style={{ fontFamily: 'monospace', fontWeight: 700, color: !isTrade ? 'var(--muted)' : rp >= 0 ? 'var(--green)' : 'var(--danger)' }}>
+                  {isTrade ? `${fmtUsd(t.realized_pnl_usd)} (${fmtSol(rp)})` : '—'}
+                </td>
+                <td style={{ textAlign: 'right' }}>
+                  {t.signature && <a className="btn btn-ghost btn-sm" href={`https://solscan.io/tx/${t.signature}`} target="_blank" rel="noreferrer" title="View on Solscan">↗</a>}
+                </td>
+              </tr>
+            )
+          })}
         </tbody>
       </table>
+      <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 10 }}>Every real on-chain trade from your linked wallets, newest first, with per-trade realized P&L (average-cost, SOL-denominated; USD at the live SOL price). Buys show no realized P&L until the position is sold.</div>
     </div>
   )
 }
@@ -537,40 +572,36 @@ function Journal() {
 // ══════════════════════════════════════════════════════════════════════════════
 
 function Positions() {
-  const pos = useTrading<any>('/positions')
-  const d = pos.data
-  const rows = d?.positions || []
-  const pnl = d?.total_unrealized_pnl_usd ?? 0
+  const h = useTrading<any>('/holdings')
+  const d = h.data
+  const rows = d?.holdings || []
+  const realized = d?.realized_pnl_usd
   return (
     <div>
       <div className="ares-section-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <Coins size={15} /> Open Positions ({rows.length})
-        <button className="btn btn-ghost btn-sm" onClick={pos.reload}><RefreshCw size={12} /></button>
+        <Coins size={15} /> Linked-Wallet Holdings ({rows.length})
+        <button className="btn btn-ghost btn-sm" onClick={h.reload}><RefreshCw size={12} /></button>
       </div>
       <div className="ares-stat-grid" style={{ marginBottom: 16 }}>
-        <div className="ares-stat-tile"><div className="ares-stat-label">Market Value</div><div className="ares-stat-value">{fmtUsd(d?.total_market_value_usd)}</div></div>
-        <div className="ares-stat-tile"><div className="ares-stat-label">Unrealized P&L</div><div className="ares-stat-value" style={{ color: pnl >= 0 ? 'var(--green)' : 'var(--danger)' }}>{fmtUsd(pnl)}</div></div>
-        <div className="ares-stat-tile"><div className="ares-stat-label">Symbols</div><div className="ares-stat-value">{rows.length}</div></div>
+        <div className="ares-stat-tile"><div className="ares-stat-label">Net Value</div><div className="ares-stat-value">{fmtUsd(d?.total_value_usd)}</div></div>
+        <div className="ares-stat-tile"><div className="ares-stat-label">Realized P&L</div><div className="ares-stat-value" style={{ color: (realized ?? 0) >= 0 ? 'var(--green)' : 'var(--danger)' }}>{fmtUsd(realized)}</div></div>
+        <div className="ares-stat-tile"><div className="ares-stat-label">Open Tokens</div><div className="ares-stat-value">{d?.open_tokens ?? rows.length}</div></div>
       </div>
       <table className="ares-table">
-        <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Live</th><th>Value</th><th>Unreal. P&L</th></tr></thead>
+        <thead><tr><th>Token</th><th>Balance</th><th>Value</th><th>Wallets</th></tr></thead>
         <tbody>
-          {rows.length === 0 && <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No filled positions yet — fill an order (paper mode) to open one.</td></tr>}
+          {rows.length === 0 && <tr><td colSpan={4} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No holdings yet — add a wallet and sync it (or let the balance daemon run) to populate this from real on-chain balances.</td></tr>}
           {rows.map((p: any) => (
-            <tr key={p.symbol}>
-              <td style={{ fontWeight: 600 }}>{p.symbol}</td>
-              <td style={{ fontFamily: 'monospace' }}>{p.net_quantity}</td>
-              <td style={{ fontFamily: 'monospace' }}>{fmtUsd(p.avg_cost)}</td>
-              <td style={{ fontFamily: 'monospace' }}>{p.live_price ? fmtUsd(p.live_price) : '—'}</td>
-              <td style={{ fontFamily: 'monospace' }}>{fmtUsd(p.market_value_usd)}</td>
-              <td style={{ fontFamily: 'monospace', fontWeight: 700, color: (p.unrealized_pnl_usd || 0) >= 0 ? 'var(--green)' : 'var(--danger)' }}>
-                {fmtUsd(p.unrealized_pnl_usd)} ({(p.unrealized_pnl_pct || 0).toFixed(1)}%)
-              </td>
+            <tr key={p.token}>
+              <td style={{ fontWeight: 600 }}>{p.token}</td>
+              <td style={{ fontFamily: 'monospace' }}>{p.balance}</td>
+              <td style={{ fontFamily: 'monospace' }}>{p.value_usd != null ? fmtUsd(p.value_usd) : '—'}</td>
+              <td style={{ fontFamily: 'monospace', color: 'var(--muted)' }}>{p.wallet_count}</td>
             </tr>
           ))}
         </tbody>
       </table>
-      <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 10 }}>Positions are derived from filled orders and valued at live quotes (Pyth → CoinGecko). In honest-ledger mode nothing fills, so open a paper fill to populate this.</div>
+      <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 10 }}>Holdings are aggregated live from your linked wallets' real on-chain balances (auto-synced by the balance daemon and on manual wallet sync). Realized P&L is computed from actual on-chain swaps (average-cost, SOL-denominated) — see Journal for per-trade P&L.</div>
     </div>
   )
 }

@@ -40,10 +40,12 @@ const GROUP = {
   audio: ['audio'],
 }
 
+// The main page is now purely the social feed (Twitter/Reddit/IG). Full-length
+// video lives in Cinema (/cinema) and music in Audio (/audio); only short clips
+// appear here as posts.
 const TABS: { id: TabId; label: string; Icon: any }[] = [
   { id: 'all', label: 'Feed', Icon: LayoutGrid },
-  { id: 'videos', label: 'Videos', Icon: PlayCircle },
-  { id: 'audio', label: 'Audio', Icon: Headphones },
+  { id: 'videos', label: 'Clips', Icon: PlayCircle },
 ]
 
 const BRAND = ['#3b82f6', '#8B5CF6', '#06b6d4', '#f59e0b', '#10b981', '#ec4899', '#6366f1']
@@ -670,7 +672,7 @@ export default function HomeFeed() {
 
   useEffect(() => {
     const headers = { 'X-Agent-Key': apiKey() }
-    fetch('/api/agents/feed?limit=100', { headers })
+    fetch('/api/agents/feed?limit=100&surface=feed', { headers })
       .then(r => r.json())
       .then(d => setFeed(Array.isArray(d) ? d : []))
       .catch(() => {})

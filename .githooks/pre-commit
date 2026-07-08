@@ -1,0 +1,36 @@
+#!/bin/bash
+# Pre-commit hook: scan for secrets before allowing commit
+# Install: ln -sf /opt/ares/Vantage/.githooks/pre-commit /opt/ares/Vantage/.git/hooks/pre-commit
+
+echo "🔍 Secret scan..."
+
+# Patterns that should NEVER be in source
+PATTERNS=(
+    'sk-[a-zA-Z0-9]{32,}'           # OpenAI/Anthropic API keys
+    'vantage_[a-f0-9]{40,}'         # Vantage keys
+    '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}'  # UUID format API keys
+    '[0-9a-f]{36,}'                  # Hex keys > 36 chars
+)
+
+FOUND=0
+for pattern in "${PATTERNS[@]}"; do
+    # Only check staged Python/JS/TS files, skip .env
+    matches=$(git diff --cached --name-only | grep -E '\.(py|js|ts)$' | grep -v '.env' | xargs grep -nE "$pattern" 2>/dev/null)
+    if [ -n "$matches" ]; then
+        echo "❌ POTENTIAL SECRET:"
+        echo "$matches"
+        FOUND=1
+    fi
+done
+
+if [ $FOUND -eq 1 ]; then
+    echo ""
+    echo "🚫 COMMIT BLOCKED: Secrets detected."
+    echo "   Move keys to /opt/ares/.env (gitignored)"
+    echo "   Use: os.environ.get('KEY_NAME') in code"
+    echo ""
+    exit 1
+fi
+
+echo "✅ Clean"
+exit 0

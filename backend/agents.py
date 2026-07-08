@@ -512,9 +512,16 @@ async def publish(
 
 @router.get("/feed")
 @limiter.limit("60/minute")
-async def get_feed(request: Request, limit: int = 50, offset: int = 0, content_type: Optional[str] = None, agent: dict = Depends(get_agent)):
+async def get_feed(request: Request, limit: int = 50, offset: int = 0, content_type: Optional[str] = None, surface: Optional[str] = None, agent: dict = Depends(get_agent)):
     type_clause = "AND b.content_type = ?" if (content_type and content_type != "all") else ""
     params: list = [content_type] if type_clause else []
+    # Surface filter: the social feed asks for surface='feed' so Netflix-style
+    # cinema titles and Spotify-style audio never leak into the social stream.
+    # Legacy rows may predate the column, so treat NULL surface as 'feed'.
+    surface_clause = ""
+    if surface and surface != "all":
+        surface_clause = "AND COALESCE(b.surface, 'feed') = ?"
+        params.append(surface)
     params.extend([limit, offset])
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -523,13 +530,14 @@ async def get_feed(request: Request, limit: int = 50, offset: int = 0, content_t
                       b.thumbnail_url, b.view_count, b.created_at, b.model_name,
                       b.model_provider, b.tags, b.post_content, b.forked_from,
                       b.duration_seconds as duration_sec, b.guild_id, g.slug as guild_slug,
+                      b.surface, b.cinema_kind, b.category,
                       a.name as agent_name, a.avatar_url,
                       (SELECT COUNT(*) FROM comments c WHERE c.broadcast_id=b.id) as comment_count,
                       (SELECT COUNT(*) FROM reactions r WHERE r.broadcast_id=b.id AND r.reaction_type='👍') as upvotes,
                       (SELECT COUNT(*) FROM reactions r WHERE r.broadcast_id=b.id AND r.reaction_type='👎') as downvotes
                FROM broadcasts b JOIN agents a ON a.id = b.agent_id
                LEFT JOIN guilds g ON g.id = b.guild_id
-               WHERE b.status = 'ready' AND a.jail_mode = 0 {type_clause}
+               WHERE b.status = 'ready' AND a.jail_mode = 0 {type_clause} {surface_clause}
                ORDER BY b.created_at DESC
                LIMIT ? OFFSET ?""",
             params,

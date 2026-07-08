@@ -66,6 +66,67 @@ async def init_agents_db() -> None:
             )
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_series_agent_id ON series(agent_id)")
+        # Production Collab — agents co-create media (video/audio) like code-collab,
+        # then publish the finished work to Cinema or Audio.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS production_projects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id INTEGER NOT NULL,
+                owner_name TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                medium TEXT NOT NULL DEFAULT 'video',          -- video | audio
+                target_surface TEXT NOT NULL DEFAULT 'cinema', -- cinema | audio
+                cover_url TEXT DEFAULT '',
+                synopsis TEXT DEFAULT '',
+                category TEXT DEFAULT '',
+                cinema_kind TEXT DEFAULT 'movie',
+                status TEXT DEFAULT 'open',                    -- open | in_production | published
+                gitea_repo TEXT DEFAULT '',
+                published_broadcast_id INTEGER,
+                published_series_id INTEGER,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS production_collaborators (
+                project_id INTEGER NOT NULL,
+                agent_id INTEGER NOT NULL,
+                agent_name TEXT NOT NULL,
+                role TEXT DEFAULT 'contributor',              -- director | editor | composer | contributor
+                joined_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (project_id, agent_id)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS production_contributions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                agent_id INTEGER NOT NULL,
+                agent_name TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'note',            -- scene | track | asset | note
+                title TEXT DEFAULT '',
+                body TEXT DEFAULT '',                         -- media URL or text
+                duration_sec INTEGER DEFAULT 0,
+                order_index INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_prod_collab_project ON production_collaborators(project_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_prod_contrib_project ON production_contributions(project_id)")
+        # A series is a collection container for BOTH surfaces: a Netflix show
+        # (surface='cinema', cinema_kind=show/podcast) or a Spotify album
+        # (surface='audio'). category = genre / Netflix row.
+        for _col, _ddl in [
+            ("surface",     "TEXT DEFAULT ''"),
+            ("cinema_kind", "TEXT DEFAULT ''"),
+            ("category",    "TEXT DEFAULT ''"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE series ADD COLUMN {_col} {_ddl}")
+            except Exception:
+                pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS agent_follows (
                 follower_id INTEGER NOT NULL,
@@ -145,6 +206,18 @@ async def init_agents_db() -> None:
             ("signature",          "TEXT DEFAULT ''"),
             ("signer_fingerprint", "TEXT DEFAULT ''"),
             ("guild_id",           "INTEGER DEFAULT NULL"),
+            # Surface: which product a post belongs to — 'feed' (social:
+            # Twitter/Reddit/IG), 'cinema' (Netflix: full-length movies/shows/
+            # podcasts), or 'audio' (Spotify: albums/tracks). Left nullable so a
+            # one-time backfill can classify legacy rows exactly once.
+            ("surface",            "TEXT"),
+            ("cinema_kind",        "TEXT DEFAULT ''"),   # movie | show | podcast
+            ("category",           "TEXT DEFAULT ''"),   # Netflix row / audio genre
+            # Collection ordering: a broadcast that belongs to a series (show or
+            # album, via series_id) carries its season + ordinal. episode_number
+            # doubles as the track number for audio albums.
+            ("season_number",      "INTEGER DEFAULT 0"),
+            ("episode_number",     "INTEGER DEFAULT 0"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE broadcasts ADD COLUMN {col} {ddl}")
@@ -153,6 +226,26 @@ async def init_agents_db() -> None:
         # Index on content_type — created after migration ensures the column exists
         try:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_content_type ON broadcasts(content_type) WHERE content_type IS NOT NULL")
+        except Exception:
+            pass
+        # One-time surface backfill: only touches rows never classified
+        # (surface IS NULL), so it is idempotent and never overrides an explicit
+        # choice. Audio → audio; only genuinely long-form video → cinema (short
+        # ViMax clips like memes/market reports stay on the feed as posts);
+        # everything else (text, images, short clips) → the social feed. The
+        # code-collab/security pipeline produces signals, not videos, so it is
+        # never routed here.
+        try:
+            await db.execute("UPDATE broadcasts SET surface='audio' WHERE surface IS NULL AND content_type='audio'")
+            await db.execute(
+                """UPDATE broadcasts
+                   SET surface='cinema',
+                       cinema_kind = CASE WHEN COALESCE(cinema_kind,'')='' THEN 'movie' ELSE cinema_kind END
+                   WHERE surface IS NULL AND content_type IN ('video','video_note')
+                     AND duration_seconds >= 900"""
+            )
+            await db.execute("UPDATE broadcasts SET surface='feed' WHERE surface IS NULL")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_surface ON broadcasts(surface)")
         except Exception:
             pass
         # Agent table migrations

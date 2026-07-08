@@ -1,0 +1,113 @@
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STYLE TRANSFER — group images by shared semantic tags
+# ═══════════════════════════════════════════════════════════════════════════════
+@router.get('/feed/style-transfer')
+async def style_transfer_feed(limit: int = Query(10)):
+    """Group images by shared semantic themes from their prompts.
+    Returns clusters like 'cyberpunk', 'mona_lisa', 'solarpunk' with
+    each agent's interpretation grouped together.
+    """
+    import aiosqlite, re
+    async with aiosqlite.connect(str(DB)) as db:
+        db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
+        async with db.execute(
+            'SELECT prompt, id, image_url, thumbnail_url, model_used, seed, agent_id, reaction_heart, reaction_fire, reaction_insight, reaction_skeptical, created_at FROM images WHERE is_flagged_nsfw = FALSE ORDER BY created_at DESC LIMIT 200'
+        ) as cur:
+            rows = await cur.fetchall()
+
+    # Extract semantic keywords (simple NLP: extract 2+ word phrases in quotes, or multi-word noun phrases)
+    themes: dict = {}
+    for row in rows:
+        prompt = (row['prompt'] or '').lower()
+        # Extract quoted phrases
+        quoted = re.findall(r'"([^"]+)"', prompt)
+        # Extract comma-separated concepts
+        concepts = [c.strip() for c in prompt.split(',') if len(c.strip().split()) >= 2 and len(c.strip()) < 50]
+        # Extract key multi-word phrases
+        words = prompt.replace(',',' ').split()
+        phrases = []
+        for i in range(len(words)-1):
+            phrase = words[i] + ' ' + words[i+1]
+            if phrase not in ['the a','in the','of the','is a','to the','and the','with a']:
+                phrases.append(phrase)
+
+        keywords = (quoted + concepts + phrases)[:8]
+        for kw in set(keywords):
+            kw = kw.strip()[:40]
+            if kw not in themes: themes[kw] = []
+            themes[kw].append({
+                'id': row['id'], 'image_url': row['image_url'],
+                'thumbnail_url': row['thumbnail_url'], 'model_used': row['model_used'],
+                'seed': row['seed'], 'reaction_heart': row['reaction_heart'],
+                'reaction_fire': row['reaction_fire'],
+            })
+
+    # Return top themes by cluster size
+    sorted_themes = sorted(themes.items(), key=lambda x: len(x[1]), reverse=True)[:limit]
+    return {
+        'themes': [
+            {'tag': tag, 'count': len(images), 'images': images[:20]}
+            for tag, images in sorted_themes
+        ]
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DAILY CHALLENGES
+# ═══════════════════════════════════════════════════════════════════════════════
+@router.get('/challenge/today')
+async def today_challenge():
+    """Get today's daily challenge theme. Auto-generates one if none exists."""
+    import aiosqlite, random
+    CHALLENGE_THEMES = [
+        'Neon Jungle', 'Cyberpunk Samurai', 'Solar Utopia',
+        'Abandoned Space Station', 'Bioluminescent Ocean', 'Steampunk City',
+        'Ethereal Forest', 'Retro-Futurism', 'Crystal Cavern',
+        'AI Dreams', 'Quantum Realm', 'Desert Nomad',
+    ]
+    async with aiosqlite.connect(str(DB)) as db:
+        db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
+        # Check if today's challenge exists
+        from datetime import date
+        today_str = date.today().isoformat()
+        async with db.execute(
+            'SELECT * FROM image_collections WHERE description = ? AND is_spot_the_ai = FALSE LIMIT 1',
+            (f'challenge:{today_str}',)
+        ) as cur:
+            existing = await cur.fetchone()
+
+        if existing:
+            # Count submissions
+            async with db.execute(
+                'SELECT COUNT(*) as cnt FROM collection_images WHERE collection_id = ?',
+                (existing['id'],)
+            ) as cur:
+                count = (await cur.fetchone())['cnt']
+            return {
+                'theme': existing['title'],
+                'date': today_str,
+                'submissions': count,
+                'ends_in_hours': 24 - date.today().hour if date.today().hour < 24 else 0,
+                'collection_id': existing['id'],
+            }
+
+        # Create new challenge
+        theme = random.choice(CHALLENGE_THEMES)
+        import uuid
+        cid = str(uuid.uuid4())[:12]
+        await db.execute(
+            'INSERT INTO image_collections (id, agent_id, title, description) VALUES (?, 1, ?, ?)',
+            (cid, theme, f'challenge:{today_str}')
+        )
+        await db.commit()
+
+    return {
+        'theme': theme,
+        'date': today_str,
+        'submissions': 0,
+        'ends_in_hours': 24,
+        'collection_id': cid,
+    }
+ENDOFROUTES
+echo 'style-transfer + challenges added'
