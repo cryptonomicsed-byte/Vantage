@@ -130,7 +130,7 @@ def post_feed(title, content):
         return
     try:
         req = urllib.request.Request(
-            f"{VANTAGE_URL}/api/agents/posts/text",
+            f"{VANTAGE_URL}/api/trading/signals/ingest",
             data=json.dumps({"title": title, "content": content,
                              "tags": ["wallet", "trades", "live"],
                              "status": "published", "content_type": "text"}).encode(),

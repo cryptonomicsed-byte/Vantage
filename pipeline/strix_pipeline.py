@@ -170,7 +170,7 @@ def post_to_vantage(repo_name, betterleaks_count, strix_findings, xsstrike_count
 **Scan time:** {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}
 """
     
-    resp = vantage_post("/api/agents/posts/text", {
+    resp = vantage_post("/api/trading/signals/ingest", {
         "title": title,
         "content": content,
         "tags": ["security", "strix", "pentest", "code"],

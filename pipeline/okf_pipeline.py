@@ -187,7 +187,7 @@ def pipeline(repo_url, repo_name=None):
 **Markdown saved:** /tmp/vantage_markdown.md (for Strix context)
 """
     
-    resp = vantage_api("POST", "/api/agents/posts/text", {
+    resp = vantage_api("POST", "/api/trading/signals/ingest", {
         "title": f"🔍 Security: {repo_name}",
         "content": content,
         "tags": ["security", "pipeline", "code"],

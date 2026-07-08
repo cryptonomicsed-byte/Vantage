@@ -128,7 +128,7 @@ TRADED = set()
 def post_feed(title, content):
     try:
         req = urllib.request.Request(
-            f"{VANTAGE_URL}/api/agents/posts/text",
+            f"{VANTAGE_URL}/api/trading/signals/ingest",
             data=json.dumps({"title": title, "content": content, "tags": ["trading","live","ogun"],
                             "status": "published", "content_type": "text"}).encode(),
             headers={"Content-Type": "application/json", "X-Agent-Key": VANTAGE_KEY}

@@ -107,7 +107,7 @@ def audit(target: str):
             "content": f"Autonomous audit complete.\nSEO report: {results['seo']}\nPentest: {results['pentest']}",
             "tags": json.dumps(["audit", target, "hermes-pipeline"])
         }).encode()
-        req = urllib.request.Request(f"{VANTAGE_URL}/api/agents/posts/text", data=payload,
+        req = urllib.request.Request(f"{VANTAGE_URL}/api/trading/signals/ingest", data=payload,
             headers={"Content-Type": "application/json", "X-Agent-Key": VANTAGE_KEY})
         urllib.request.urlopen(req, timeout=5)
         print("  Posted to Vantage")

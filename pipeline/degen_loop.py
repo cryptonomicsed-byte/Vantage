@@ -127,7 +127,7 @@ def execute_degen(symbol, conviction, amount_sol):
             db.close()
             
             urllib.request.urlopen(urllib.request.Request(
-                f"{VANTAGE_URL}/api/agents/posts/text",
+                f"{VANTAGE_URL}/api/trading/signals/ingest",
                 data=json.dumps({
                     "title": f"🎯 Degen #{TRADE_COUNT}: {symbol}",
                     "content": f"**Pump.fun Scalp**\n\nToken: {symbol}\nAmount: {amount_sol:.4f} SOL\nTX: {sig}\nVault: {get_vault_total():.4f} SOL",
@@ -200,7 +200,7 @@ def check_exits_and_compound():
             db.commit()
             
             urllib.request.urlopen(urllib.request.Request(
-                f"{VANTAGE_URL}/api/agents/posts/text",
+                f"{VANTAGE_URL}/api/trading/signals/ingest",
                 data=json.dumps({
                     "title": f"💰 Degen TP: {symbol} +{pnl*100:.0f}%",
                     "content": f"**Take Profit!**\n\n{symbol}: +{pnl*100:.1f}%\nVaulted: {vault_share:.4f} SOL\nCompounded: {compound_share:.4f} SOL\nNext trade: {CURRENT_BANKROLL:.4f} SOL\nTotal vault: {get_vault_total():.4f} SOL\nTX: {sig}",
