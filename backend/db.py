@@ -145,6 +145,13 @@ async def init_agents_db() -> None:
             ("signature",          "TEXT DEFAULT ''"),
             ("signer_fingerprint", "TEXT DEFAULT ''"),
             ("guild_id",           "INTEGER DEFAULT NULL"),
+            # Surface: which product a post belongs to — 'feed' (social:
+            # Twitter/Reddit/IG), 'cinema' (Netflix: full-length movies/shows/
+            # podcasts), or 'audio' (Spotify: albums/tracks). Left nullable so a
+            # one-time backfill can classify legacy rows exactly once.
+            ("surface",            "TEXT"),
+            ("cinema_kind",        "TEXT DEFAULT ''"),   # movie | show | podcast
+            ("category",           "TEXT DEFAULT ''"),   # Netflix row / audio genre
         ]:
             try:
                 await db.execute(f"ALTER TABLE broadcasts ADD COLUMN {col} {ddl}")
@@ -153,6 +160,26 @@ async def init_agents_db() -> None:
         # Index on content_type — created after migration ensures the column exists
         try:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_content_type ON broadcasts(content_type) WHERE content_type IS NOT NULL")
+        except Exception:
+            pass
+        # One-time surface backfill: only touches rows never classified
+        # (surface IS NULL), so it is idempotent and never overrides an explicit
+        # choice. Audio → audio; only genuinely long-form video → cinema (short
+        # ViMax clips like memes/market reports stay on the feed as posts);
+        # everything else (text, images, short clips) → the social feed. The
+        # code-collab/security pipeline produces signals, not videos, so it is
+        # never routed here.
+        try:
+            await db.execute("UPDATE broadcasts SET surface='audio' WHERE surface IS NULL AND content_type='audio'")
+            await db.execute(
+                """UPDATE broadcasts
+                   SET surface='cinema',
+                       cinema_kind = CASE WHEN COALESCE(cinema_kind,'')='' THEN 'movie' ELSE cinema_kind END
+                   WHERE surface IS NULL AND content_type IN ('video','video_note')
+                     AND duration_seconds >= 900"""
+            )
+            await db.execute("UPDATE broadcasts SET surface='feed' WHERE surface IS NULL")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcasts_surface ON broadcasts(surface)")
         except Exception:
             pass
         # Agent table migrations
