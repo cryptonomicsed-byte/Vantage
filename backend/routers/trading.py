@@ -42,6 +42,12 @@ class OrderCreate(BaseModel):
     signal_id: Optional[int] = None
     strategy_id: Optional[int] = None
 
+class OrderUpdate(BaseModel):
+    status: Optional[str] = None
+    tx_hash: Optional[str] = None
+    filled_quantity: Optional[float] = None
+    avg_fill_price: Optional[float] = None
+
 class StrategyCreate(BaseModel):
     name: str
     description: str = ""
@@ -405,6 +411,45 @@ async def get_order(order_id: int, agent: dict = Depends(get_agent)):
         if not row:
             raise HTTPException(404, "Order not found")
         return dict(row)
+
+@router.patch("/orders/{order_id}")
+async def update_order(order_id: int, data: OrderUpdate, agent: dict = Depends(get_agent)):
+    """Update an order's execution state — used by settlement daemons (e.g.
+    ares_jupiter_signer) reporting a real on-chain fill, as opposed to the
+    paper-fill simulation endpoint below."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        row = await (await db.execute(
+            "SELECT * FROM trading_orders WHERE id=? AND agent_id=?", (order_id, agent["id"])
+        )).fetchone()
+        if not row:
+            raise HTTPException(404, "Order not found")
+
+        sets, params = [], []
+        if data.status is not None:
+            sets.append("status=?"); params.append(data.status)
+            if data.status in ("filled", "failed", "cancelled"):
+                sets.append("settled_at=datetime('now')")
+            if data.status == "filled":
+                sets.append("executed_at=datetime('now')")
+        if data.tx_hash is not None:
+            sets.append("tx_hash=?"); params.append(data.tx_hash)
+        if data.filled_quantity is not None:
+            sets.append("filled_quantity=?"); params.append(data.filled_quantity)
+        if data.avg_fill_price is not None:
+            sets.append("avg_fill_price=?"); params.append(data.avg_fill_price)
+
+        if not sets:
+            raise HTTPException(400, "No fields to update")
+
+        params.extend([order_id, agent["id"]])
+        await db.execute(f"UPDATE trading_orders SET {', '.join(sets)} WHERE id=? AND agent_id=?", params)
+        await db.commit()
+
+        updated = await (await db.execute(
+            "SELECT * FROM trading_orders WHERE id=? AND agent_id=?", (order_id, agent["id"])
+        )).fetchone()
+        return dict(updated)
 
 @router.post("/orders/{order_id}/cancel")
 async def cancel_order(order_id: int, agent: dict = Depends(get_agent)):
