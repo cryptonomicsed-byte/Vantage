@@ -393,10 +393,17 @@ async def top_movers(limit: int = 8) -> list[dict]:
 _CG_OHLC_DAYS = {"1h": 1, "4h": 7, "1d": 30, "1w": 365}
 
 
+_KRAKEN_INTERVAL_MIN = {"1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440, "1w": 10080}
+_KRAKEN_SYMBOL = {"BTC": "XBT"}  # Kraken's legacy XBT ticker for Bitcoin
+
+
 async def ohlc(symbol: str, interval: str = "1d", limit: int = 200) -> list[dict]:
-    """OHLCV candles for a symbol. Binance klines (true OHLCV) first, CoinGecko
-    /ohlc fallback (no volume). Returns [{time, open, high, low, close, volume}],
-    time in unix seconds ascending. Cached 60s."""
+    """OHLCV candles for a symbol. Kraken first (Binance hard-geoblocks this
+    deployment's IP with a 451 — see ops notes; Kraken has no such restriction
+    and needs no auth), Binance second in case Kraken lacks a pair, CoinGecko
+    /ohlc last (no volume, and rate-limited on the free tier so it's a last
+    resort, not a primary path). Returns [{time, open, high, low, close,
+    volume}], time in unix seconds ascending. Cached 60s."""
     symbol = symbol.upper()
     interval = interval if interval in ("1m", "5m", "15m", "1h", "4h", "1d", "1w") else "1d"
     limit = max(10, min(limit, 500))
@@ -405,25 +412,47 @@ async def ohlc(symbol: str, interval: str = "1d", limit: int = 200) -> list[dict
     if cached is not None:
         return cached
 
-    # Binance: [openTime(ms), open, high, low, close, volume, ...]
-    data = await _get_json(
-        f"https://api4.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval}&limit={limit}",
+    candles: list[dict] = []
+
+    # Kraken: {"result": {"<PAIR>": [[time, open, high, low, close, vwap, volume, count], ...]}}
+    kraken_pair = f"{_KRAKEN_SYMBOL.get(symbol, symbol)}USD"
+    kr = await _get_json(
+        f"https://api.kraken.com/0/public/OHLC?pair={kraken_pair}&interval={_KRAKEN_INTERVAL_MIN[interval]}",
         timeout=8,
     )
-    candles: list[dict] = []
-    if isinstance(data, list) and data:
-        for k in data:
-            try:
-                candles.append({
-                    "time": int(k[0]) // 1000,
-                    "open": float(k[1]), "high": float(k[2]),
-                    "low": float(k[3]), "close": float(k[4]),
-                    "volume": float(k[5]),
-                })
-            except (ValueError, IndexError, TypeError):
-                continue
+    if isinstance(kr, dict) and not kr.get("error") and isinstance(kr.get("result"), dict):
+        rows = next((v for k, v in kr["result"].items() if k != "last"), None)
+        if isinstance(rows, list):
+            for r in rows[-limit:]:
+                try:
+                    candles.append({
+                        "time": int(r[0]),
+                        "open": float(r[1]), "high": float(r[2]),
+                        "low": float(r[3]), "close": float(r[4]),
+                        "volume": float(r[6]),
+                    })
+                except (ValueError, IndexError, TypeError):
+                    continue
 
-    # Fallback: CoinGecko /ohlc (no volume).
+    # Fallback: Binance klines (true OHLCV) — [openTime(ms), open, high, low, close, volume, ...]
+    if not candles:
+        data = await _get_json(
+            f"https://api4.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval}&limit={limit}",
+            timeout=8,
+        )
+        if isinstance(data, list) and data:
+            for k in data:
+                try:
+                    candles.append({
+                        "time": int(k[0]) // 1000,
+                        "open": float(k[1]), "high": float(k[2]),
+                        "low": float(k[3]), "close": float(k[4]),
+                        "volume": float(k[5]),
+                    })
+                except (ValueError, IndexError, TypeError):
+                    continue
+
+    # Last resort: CoinGecko /ohlc (no volume).
     if not candles:
         cid = CG_IDS.get(symbol, symbol.lower())
         days = _CG_OHLC_DAYS.get(interval, 30)
