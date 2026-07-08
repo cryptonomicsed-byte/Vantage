@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from backend.db import DB_PATH
 from backend.deps import get_agent
-from backend.alpha_engine import composite_alpha_score
+from backend.alpha_engine import composite_alpha_score, assemble_features
 
 router = APIRouter(prefix="/api", tags=["alpha"])
 
@@ -33,6 +33,109 @@ CREATE TABLE IF NOT EXISTS wallet_trades (
     token_mint TEXT, token_amount REAL, raw TEXT
 )
 """
+
+# social_signals is written by daemons/social_tracker.py; create it defensively
+# so the token-intel endpoint works even before that daemon has ever run.
+_SOCIAL_SIGNALS_DDL = """
+CREATE TABLE IF NOT EXISTS social_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER, platform TEXT,
+    username TEXT, ticker TEXT, contract_address TEXT, sentiment TEXT,
+    confidence REAL, post_text TEXT, post_url TEXT,
+    signal_type TEXT DEFAULT 'mention', created_at TEXT DEFAULT (datetime('now'))
+)
+"""
+
+
+async def _collect_signals(db, symbol: str, ca: str, hours: int) -> list:
+    """Gather every live intel signal that references this token, normalised to
+    the {source,type,direction,conviction,detail} shape the alpha engine reads.
+
+    Sources folded in:
+      • social_signals   — persisted Twitter/Telegram sentiment (social_tracker)
+      • intel signal pool — in-memory TG/Twitter/predictor signals (intel.py)
+      • trading_signals   — persisted pump.fun scanner rows (if the table exists)
+    """
+    sym = (symbol or "").upper().lstrip("$")
+    ca_l = (ca or "").strip()
+    out: list = []
+
+    # 1. Persisted social sentiment — matched by ticker OR contract address.
+    await db.execute(_SOCIAL_SIGNALS_DDL)
+    where = ["UPPER(ticker) = ?"]
+    params: list = [sym]
+    if ca_l:
+        where.append("contract_address = ?")
+        params.append(ca_l)
+    rows = await (await db.execute(
+        f"""SELECT platform, username, sentiment, confidence, signal_type, post_text
+            FROM social_signals WHERE ({' OR '.join(where)})
+            AND created_at >= datetime('now', ?) ORDER BY id DESC LIMIT 200""",
+        (*params, f"-{int(hours)} hours"),
+    )).fetchall()
+    for r in rows:
+        out.append({
+            "source": f"social_{r['platform'] or ''}".rstrip("_"),
+            "type": r["signal_type"] or "mention",
+            "direction": (r["sentiment"] or "NEUTRAL").upper(),
+            "conviction": float(r["confidence"] or 0.5),
+            "detail": (r["post_text"] or "")[:200],
+        })
+
+    # 2. In-memory intel pool (social_tracker + telegram + predictor ingest).
+    try:
+        from backend.routers.intel import _signal_pool, _signal_lock
+        with _signal_lock:
+            pool = list(_signal_pool)
+        for s in pool:
+            psym = str(s.get("symbol", "")).upper().lstrip("$")
+            if psym != sym and (not ca_l or psym != ca_l.upper()):
+                continue
+            out.append({
+                "source": s.get("source", "pool"),
+                "type": s.get("type", "signal"),
+                "direction": (s.get("direction") or "").upper(),
+                "conviction": float(s.get("conviction", 0.5) or 0.5),
+                "detail": str(s.get("detail", ""))[:200],
+            })
+    except Exception:
+        pass
+
+    # 3. Persisted pump.fun scanner rows (best-effort; schema varies).
+    try:
+        trows = await (await db.execute(
+            "SELECT * FROM trading_signals WHERE UPPER(symbol) = ? "
+            "ORDER BY rowid DESC LIMIT 50", (sym,))).fetchall()
+        for r in trows:
+            d = dict(r)
+            out.append({
+                "source": d.get("source", "trading_signals"),
+                "type": d.get("type", "pumpfun"),
+                "direction": str(d.get("direction", d.get("signal", ""))).upper(),
+                "conviction": float(d.get("conviction", d.get("confidence", 0.5)) or 0.5),
+                "detail": str(d.get("detail", d.get("reason", "")))[:200],
+            })
+    except aiosqlite.Error:
+        pass
+
+    return out
+
+
+async def _velocity_from_trades(db, ca: str, hours: int) -> Optional[float]:
+    """Buy-side velocity 0..1 from on-chain wallet_trades on this mint: how many
+    distinct wallets bought it inside the window, normalised (≥12 wallets → 1.0).
+    Returns None when the mint has no observed trades (no hint)."""
+    if not ca:
+        return None
+    since = int(time.time()) - hours * 3600
+    await db.execute(_WALLET_TRADES_DDL)
+    row = await (await db.execute(
+        """SELECT COUNT(DISTINCT wallet) FROM wallet_trades
+           WHERE token_mint = ? AND timestamp >= ? AND sol_change < 0""",
+        (ca, since))).fetchone()
+    buyers = int(row[0] or 0) if row else 0
+    if buyers == 0:
+        return None
+    return min(1.0, buyers / 12.0)
 
 
 class AlphaFeatures(BaseModel):
@@ -58,6 +161,55 @@ async def score_alpha(f: AlphaFeatures, _caller: dict = Depends(get_agent)):
         result["ca"] = f.ca
     if f.symbol:
         result["symbol"] = f.symbol
+    return result
+
+
+@router.get("/alpha/token/{ident}", operation_id="score_token_from_intel")
+async def score_token_from_intel(
+    ident: str,
+    _caller: dict = Depends(get_agent),
+    ca: str = Query("", description="Contract address (mint) if ident is a ticker"),
+    hours: int = Query(24, ge=1, le=336, description="Lookback window for intel"),
+    wallet_quality: Optional[float] = Query(None, ge=0, le=1),
+    velocity: Optional[float] = Query(None, ge=0, le=1),
+    concentration: Optional[float] = Query(None, ge=0, le=1),
+    social: Optional[float] = Query(None, ge=0, le=1),
+    security: Optional[float] = Query(None, ge=0, le=1),
+):
+    """Score a candidate token straight from the live incoming intel.
+
+    Assembles the five alpha features from the real signal stream the daemons
+    feed (social_signals sentiment, the intel signal pool, pump.fun rows, and
+    on-chain wallet_trades velocity), then runs the same Mandelbrot-gated
+    composite scorer as POST /alpha/score. Any feature the scanner already knows
+    on-chain (wallet_quality, concentration, …) can be pinned via query params;
+    everything else is derived here. The response echoes per-feature provenance
+    and the exact signals that contributed, so a grade is always explainable.
+    """
+    # `ident` may be a ticker (SOL address goes in ?ca=) or the mint itself.
+    is_addr = len(ident) >= 32 and not ident.isalpha()
+    symbol = "" if is_addr else ident
+    mint = ca or (ident if is_addr else "")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        signals = await _collect_signals(db, symbol or ident, mint, hours)
+        velocity_hint = await _velocity_from_trades(db, mint, hours)
+
+    overrides = {
+        "wallet_quality": wallet_quality, "velocity": velocity,
+        "concentration": concentration, "social": social, "security": security,
+    }
+    features, provenance = assemble_features(signals, overrides, velocity_hint)
+    result = composite_alpha_score(**features)
+
+    result["symbol"] = symbol or ident
+    if mint:
+        result["ca"] = mint
+    result["provenance"] = provenance
+    result["signal_count"] = len(signals)
+    result["signals"] = signals[:25]
+    result["window_hours"] = hours
     return result
 
 

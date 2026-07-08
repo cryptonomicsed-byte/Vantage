@@ -17,6 +17,7 @@ verifiable, and they mirror the AXIOM Fractal Oracle's semantics exactly):
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -171,3 +172,138 @@ def composite_alpha_score(
             "concentration": concentration, "social": social, "security": security,
         },
     }
+
+
+# ── Feature assembly from live incoming intel ────────────────────────────────
+# The scanner/wallet-profiler supplies hard on-chain axes (wallet_quality,
+# concentration) directly. The soft, chatter-driven axes (social, security) are
+# derived here from the real signals the daemons ingest: social_tracker's
+# social_signals rows, the in-memory intel signal pool (TG/Twitter), and any
+# pumpfun/poison chatter. These are pure functions over a normalised signal
+# list so they stay trivially testable, exactly like the scorer above.
+
+# A normalised signal is a dict with: source, type, direction, conviction (0..1),
+# detail (str). Helpers below are tolerant of missing keys.
+
+_BULLISH = {"BULLISH", "BUY", "LONG", "UP"}
+_BEARISH = {"BEARISH", "SELL", "SHORT", "DOWN"}
+_SOCIAL_TYPES = {"sentiment", "mention", "call", "alpha", "telegram_alpha",
+                 "trending", "social", "trending_pool"}
+_STRONG_SOCIAL = {"call", "alpha", "telegram_alpha"}
+_RUG_WORDS = ("rug", "scam", "honeypot", "mint authority", "freeze authority",
+              "poison", "insider", "bundl", "sniper", "dev sold", "dev dump")
+_CONC_PCT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+
+
+def _dir(sig: dict) -> str:
+    d = str(sig.get("direction") or sig.get("sentiment") or "").upper()
+    return d
+
+
+def _conv(sig: dict) -> float:
+    return _clamp01(float(sig.get("conviction", sig.get("confidence", 0.5) or 0.5)))
+
+
+def derive_social(signals: list) -> tuple:
+    """Social momentum 0..1 from chatter signals, weighted by conviction and
+    signal strength (a 'call'/'alpha' counts harder than a bare mention).
+    Bullish chatter lifts it, bearish chatter drags it. Neutral baseline 0.5."""
+    social_sigs = [s for s in signals
+                   if str(s.get("type", "")).lower() in _SOCIAL_TYPES
+                   or "social" in str(s.get("source", "")).lower()
+                   or "telegram" in str(s.get("source", "")).lower()]
+    if not social_sigs:
+        return 0.5, {"source": "none", "n": 0, "note": "no social signals"}
+    pos = neg = 0.0
+    for s in social_sigs:
+        w = _conv(s) * (1.5 if str(s.get("type", "")).lower() in _STRONG_SOCIAL else 1.0)
+        d = _dir(s)
+        if d in _BULLISH:
+            pos += w
+        elif d in _BEARISH:
+            neg += w
+        else:
+            pos += 0.25 * w  # neutral presence still signals attention
+    social = _clamp01(0.45 + 0.10 * pos - 0.12 * neg)
+    return social, {"source": "social_signals+pool", "n": len(social_sigs),
+                    "bull_weight": round(pos, 3), "bear_weight": round(neg, 3)}
+
+
+def derive_security(signals: list) -> tuple:
+    """Security 0..1 (HIGHER = safer). Starts mildly-safe and is dragged down by
+    rug/poison chatter and bearish structural warnings. A high-conviction poison
+    alert collapses it toward zero."""
+    hits = []
+    drag = 0.0
+    for s in signals:
+        blob = f"{s.get('type','')} {s.get('detail','')}".lower()
+        stype = str(s.get("type", "")).lower()
+        conv = _conv(s)
+        if stype in ("poison_alert", "poison") or "poison_radar" in str(s.get("source", "")):
+            drag += 0.30 + 0.30 * conv
+            hits.append(s)
+        elif any(w in blob for w in _RUG_WORDS):
+            drag += 0.12 + 0.18 * conv
+            hits.append(s)
+        elif _dir(s) in _BEARISH and ("concentrat" in blob or "holder" in blob):
+            drag += 0.10 * conv
+            hits.append(s)
+    security = _clamp01(0.70 - drag)
+    return security, {"source": "poison/rug chatter" if hits else "default",
+                      "n": len(hits), "drag": round(drag, 3)}
+
+
+def derive_concentration(signals: list) -> tuple:
+    """Holder concentration 0..1 (LOWER = better) parsed from holder-intel
+    chatter, e.g. 'Top 5 holders own 34%'. Falls back to neutral 0.5."""
+    best = None
+    for s in signals:
+        blob = f"{s.get('detail','')}".lower()
+        if "holder" in blob or "concentrat" in blob or "top 5" in blob or "top5" in blob:
+            m = _CONC_PCT.search(blob)
+            if m:
+                pct = float(m.group(1)) / 100.0
+                best = pct if best is None else max(best, pct)
+    if best is None:
+        return 0.5, {"source": "default", "note": "no holder intel"}
+    return _clamp01(best), {"source": "holder chatter", "top_holders_pct": round(best, 3)}
+
+
+def assemble_features(
+    signals: list,
+    overrides: Optional[dict] = None,
+    velocity_hint: Optional[float] = None,
+) -> tuple:
+    """Assemble the 5 alpha features from live intel + caller-supplied overrides.
+
+    `overrides` lets the scanner inject hard on-chain axes it already computed
+    (wallet_quality from wallet backtracking, concentration from the holder map,
+    an explicit velocity/security). Anything not overridden is derived from the
+    real signal stream here. Returns (features, provenance)."""
+    overrides = {k: v for k, v in (overrides or {}).items() if v is not None}
+    prov: dict = {}
+
+    social, social_prov = derive_social(signals)
+    security, sec_prov = derive_security(signals)
+    concentration, conc_prov = derive_concentration(signals)
+
+    features = {
+        "wallet_quality": 0.5,
+        "velocity": 0.5 if velocity_hint is None else _clamp01(velocity_hint),
+        "concentration": concentration,
+        "social": social,
+        "security": security,
+    }
+    prov["social"] = social_prov
+    prov["security"] = sec_prov
+    prov["concentration"] = conc_prov
+    prov["velocity"] = ({"source": "wallet_trades velocity"} if velocity_hint is not None
+                        else {"source": "default", "note": "no velocity hint"})
+    prov["wallet_quality"] = {"source": "default", "note": "supply via override"}
+
+    for k in features:
+        if k in overrides:
+            features[k] = _clamp01(float(overrides[k]))
+            prov[k] = {"source": "override"}
+
+    return features, prov
