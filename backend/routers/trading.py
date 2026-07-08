@@ -137,6 +137,23 @@ async def wallets_live(agent: dict = Depends(get_agent)):
     }
 
 @router.post("/strategies")
+async def create_strategy(data: StrategyCreate, wallet_id: int = Query(...), agent: dict = Depends(get_agent)):
+    """Create a trading strategy linked to a wallet."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO trading_strategies 
+               (agent_id, wallet_id, name, description, strategy_type, config, 
+                target_chain, target_symbols, max_position_size_usd, max_concurrent_trades,
+                risk_per_trade_pct, stop_loss_pct, take_profit_pct)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (agent["id"], wallet_id, data.name, data.description, data.strategy_type,
+             json.dumps(data.config), data.target_chain, data.target_symbols,
+             data.max_position_size_usd, data.max_concurrent_trades,
+             data.risk_per_trade_pct, data.stop_loss_pct, data.take_profit_pct)
+        )
+        sid = cur.lastrowid
+        await db.commit()
+        return {"id": sid, "name": data.name, "status": "created"}
 
 @router.patch("/wallets/{wallet_id}")
 async def update_wallet(wallet_id: int, data: WalletUpdate, agent: dict = Depends(get_agent)):
