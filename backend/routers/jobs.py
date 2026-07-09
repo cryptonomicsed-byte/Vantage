@@ -44,7 +44,7 @@ class JobTaskSpec(BaseModel):
 class CreateJobRequest(BaseModel):
     title: str
     description: str = ""
-    job_type: Literal["video", "code", "generic"] = "generic"
+    job_type: Literal["video", "code", "generic", "security"] = "generic"
     guild_slug: str = ""
     tasks: list[JobTaskSpec] = Field(default_factory=list)
 
