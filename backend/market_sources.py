@@ -9,6 +9,7 @@ Sources used here are all no-auth, geo-open public endpoints (Pyth, CoinGecko,
 CoinCap, Binance, Kraken, KuCoin, OKX, Coinbase, Gemini, mempool.space, ...). See
 SOURCES for the full registry surfaced at /api/intel/sources-registry.
 """
+import re
 import time
 import asyncio
 import logging
@@ -18,6 +19,8 @@ import httpx
 
 logger = logging.getLogger(__name__)
 UA = {"User-Agent": "Vantage/1.0"}
+# Browser-ish UA for RSS/news hosts that bot-block the default UA.
+NEWS_UA = {"User-Agent": "Mozilla/5.0 (compatible; VantageBot/1.0)"}
 
 # ── TTL cache ───────────────────────────────────────────────────────────────────
 _cache: dict[str, tuple[float, object]] = {}
@@ -887,6 +890,113 @@ async def cryptocompare_social(symbol: str) -> Optional[dict]:
         }
         return _cache_put(key, out)
     return None
+
+
+# ── Crypto news headlines (multi-outlet RSS, no key) ───────────────────────────────
+_NEWS_FEEDS = [
+    ("cryptopanic", "https://cryptopanic.com/news/rss/"),
+    ("cointelegraph", "https://cointelegraph.com/rss"),
+    ("decrypt", "https://decrypt.co/feed"),
+    ("coindesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+]
+# Cheap lexical sentiment — enough to tag a headline green/red/grey.
+_POS_WORDS = {"surge", "soar", "rally", "gain", "bullish", "breakout", "record", "high",
+              "adopt", "approve", "partnership", "upgrade", "boost", "jump", "rise", "wins", "buy"}
+_NEG_WORDS = {"crash", "plunge", "drop", "fall", "bearish", "hack", "exploit", "scam", "rug",
+              "lawsuit", "ban", "sell-off", "dump", "collapse", "warning", "fear", "liquidat", "down"}
+# Common tickers to link a headline back to a symbol.
+_NEWS_TICKERS = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "ADA", "AVAX", "LINK", "MATIC",
+                 "DOT", "SUI", "APT", "ARB", "OP", "PEPE", "BONK", "WIF", "JUP", "TIA"]
+_NAME_TO_TICKER = {"bitcoin": "BTC", "ethereum": "ETH", "solana": "SOL", "ripple": "XRP",
+                   "dogecoin": "DOGE", "cardano": "ADA", "avalanche": "AVAX", "chainlink": "LINK"}
+
+
+def _strip_html(s: str) -> str:
+    return re.sub(r"<[^>]+>", "", s or "").replace("&amp;", "&").replace("&#39;", "'").replace("&quot;", '"').strip()
+
+
+def _headline_sentiment(text: str) -> tuple[str, float]:
+    t = text.lower()
+    pos = sum(1 for w in _POS_WORDS if w in t)
+    neg = sum(1 for w in _NEG_WORDS if w in t)
+    if pos == neg:
+        return "neutral", 0.5
+    if pos > neg:
+        return "positive", min(0.95, 0.55 + 0.15 * (pos - neg))
+    return "negative", min(0.95, 0.55 + 0.15 * (neg - pos))
+
+
+def _headline_symbols(text: str) -> list[str]:
+    found: list[str] = []
+    up = f" {text.upper()} "
+    for tk in _NEWS_TICKERS:
+        if f" {tk} " in up or f"{tk}/" in up or f"${tk}" in up:
+            found.append(tk)
+    low = text.lower()
+    for name, tk in _NAME_TO_TICKER.items():
+        if name in low and tk not in found:
+            found.append(tk)
+    return found[:4]
+
+
+async def _get_text(url: str, timeout: float = 10.0) -> Optional[str]:
+    """GET → raw text (follows redirects), or None on any failure."""
+    try:
+        async with httpx.AsyncClient(timeout=timeout, headers=NEWS_UA, follow_redirects=True) as c:
+            r = await c.get(url)
+            if r.status_code == 200:
+                return r.text
+    except Exception as e:
+        logger.debug("news GET %s failed: %s", url, e)
+    return None
+
+
+async def crypto_news(limit: int = 40) -> list[dict]:
+    """Latest crypto headlines aggregated from several public RSS feeds
+    (CryptoPanic, CoinTelegraph, Decrypt, CoinDesk — no keys). Each item is
+    lexically sentiment-tagged and linked to any tickers it mentions. Deduped
+    by title, newest first. Cached 120s."""
+    cached = _cache_get("news:all", 120)
+    if cached is not None:
+        return cached[:limit]
+
+    feeds = await asyncio.gather(*[_get_text(url) for _, url in _NEWS_FEEDS], return_exceptions=True)
+    items: list[dict] = []
+    seen: set[str] = set()
+    for (source, _url), body in zip(_NEWS_FEEDS, feeds):
+        if not isinstance(body, str):
+            continue
+        for raw in re.findall(r"<item>(.*?)</item>", body, re.DOTALL | re.IGNORECASE)[:25]:
+            tm = re.search(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", raw, re.DOTALL | re.IGNORECASE)
+            lm = re.search(r"<link>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</link>", raw, re.DOTALL | re.IGNORECASE)
+            dm = re.search(r"<pubDate>(.*?)</pubDate>", raw, re.DOTALL | re.IGNORECASE)
+            if not tm:
+                continue
+            title = _strip_html(tm.group(1))
+            if not title or title.lower() in seen:
+                continue
+            seen.add(title.lower())
+            sentiment, confidence = _headline_sentiment(title)
+            items.append({
+                "title": title,
+                "source": source,
+                "url": _strip_html(lm.group(1)) if lm else "",
+                "sentiment": sentiment,
+                "confidence": confidence,
+                "symbols": _headline_symbols(title),
+                "timestamp": _strip_html(dm.group(1)) if dm else "",
+            })
+    # Newest first when pubDate parses; otherwise keep feed order (already recent).
+    def _ts(it):
+        try:
+            from email.utils import parsedate_to_datetime
+            return parsedate_to_datetime(it["timestamp"]).timestamp()
+        except Exception:
+            return 0
+    items.sort(key=_ts, reverse=True)
+    if items:
+        _cache_put("news:all", items)
+    return items[:limit]
 
 
 # ── Messari asset profile (no-key public fields only) ──────────────────────────────

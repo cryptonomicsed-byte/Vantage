@@ -274,6 +274,13 @@ async def get_social(symbol: str = Query("BTC")):
     stats = await ms.cryptocompare_social(symbol)
     return {"symbol": symbol.upper(), "social": stats or {}, "source": "CryptoCompare"}
 
+@router.get("/news")
+async def get_news(limit: int = Query(40, ge=1, le=100), agent: dict = Depends(get_agent)):
+    """Latest crypto headlines aggregated from public RSS feeds (CryptoPanic,
+    CoinTelegraph, Decrypt, CoinDesk), sentiment-tagged and symbol-linked."""
+    items = await ms.crypto_news(limit)
+    return {"items": items, "count": len(items)}
+
 @router.get("/fundamentals/{symbol}")
 async def get_fundamentals(symbol: str):
     """Messari asset profile for a symbol (public fields only, no API key needed)."""

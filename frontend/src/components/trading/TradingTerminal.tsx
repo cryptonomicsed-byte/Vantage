@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
-import { TradingProvider, useTradingStore, Signal, AlphaMover, WhaleTx, Threat, DebateSummary } from './tradingStore'
+import { TradingProvider, useTradingStore, Signal, AlphaMover, WhaleTx, Threat, DebateSummary, NewsItem } from './tradingStore'
 import TerminalTopBar from './TerminalTopBar'
 import IntelFeed from './IntelFeed'
 import ChartWorkspace from './ChartWorkspace'
@@ -104,11 +104,12 @@ function TerminalInner() {
   async function fetchIntel() {
     const headers = apiHeaders()
     try {
-      const [signalsR, alphaR, whalesR, debateR] = await Promise.all([
+      const [signalsR, alphaR, whalesR, debateR, newsR] = await Promise.all([
         fetch('/api/intel/signals', { headers }),
         fetch('/api/intel/alpha', { headers }),
         fetch('/api/intel/whales', { headers }),
         fetch('/api/agents/debates', { headers }),
+        fetch('/api/intel/news', { headers }),
       ])
 
       // Signals — normalize mixed shapes, and derive threats from them.
@@ -162,6 +163,22 @@ function TerminalInner() {
           timestamp: t.timestamp || new Date().toISOString(),
         }))
         dispatch({ type: 'SET_WHALE_TXS', txs: whales })
+      }
+
+      // News headlines
+      if (newsR.ok) {
+        const d = await newsR.json()
+        const items: any[] = d.items || (Array.isArray(d) ? d : [])
+        const news: NewsItem[] = items.map(n => ({
+          title: n.title || '',
+          source: n.source || 'news',
+          sentiment: n.sentiment === 'positive' || n.sentiment === 'negative' ? n.sentiment : 'neutral',
+          confidence: Number(n.confidence ?? 0.5),
+          url: n.url || undefined,
+          timestamp: n.timestamp || new Date().toISOString(),
+          symbols: Array.isArray(n.symbols) ? n.symbols : undefined,
+        }))
+        dispatch({ type: 'SET_NEWS', items: news })
       }
 
       // Debates
