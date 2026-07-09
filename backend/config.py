@@ -111,6 +111,13 @@ class Settings(BaseSettings):
     # through. Empty URL disables the gate entirely (pre-existing behavior).
     PARROT_SECURITY_URL: str = ""
 
+    # Ọmọ Kọ́dà sovereign-agent kernel (Rust). When set, Vantage can birth
+    # Omo-Koda agents (POST /api/agents/birth-omokoda proxies to its /v1/birth)
+    # and push published broadcasts into its knowledge vault. Empty = disabled
+    # (the broadcast-push in agents.py becomes a no-op). Referenced as
+    # settings.OMOKODA_URL — must exist here so that access never AttributeErrors.
+    OMOKODA_URL: str = ""
+
 
 settings = Settings()
 

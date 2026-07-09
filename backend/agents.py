@@ -91,6 +91,44 @@ async def _push_broadcast_to_omokoda(title: str, stream_url: str, agent_name: st
         logger.warning("omokoda vault push failed for '%s': %s", title, exc)
 
 
+@router.post("/birth-omokoda")
+async def birth_omokoda_agent(request: Request, agent: dict = Depends(get_agent)):
+    """Birth a new Ọmọ Kọ́dà sovereign agent via the kernel's /v1/birth.
+
+    The kernel forges a BIPON39 identity + If-Script Odù + Koodu resonance,
+    signs its own agent_id, then auto-registers + mesh-joins on Vantage (its
+    VANTAGE_URL points back here). We just proxy the birth request; the newborn
+    shows up in the agent roster + mesh with identity_verified=1.
+    """
+    if not settings.OMOKODA_URL:
+        raise HTTPException(503, "Omo-Koda kernel not configured (OMOKODA_URL unset)")
+    body = await _parse_body(request)
+    name = str(body.get("name", "")).strip()
+    if not name:
+        raise HTTPException(422, "name is required")
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            r = await client.post(
+                f"{settings.OMOKODA_URL.rstrip('/')}/v1/birth",
+                json={"name": name, "meta": []},
+            )
+            r.raise_for_status()
+    except Exception as exc:
+        raise HTTPException(502, f"kernel birth failed: {exc}")
+
+    # Surface the freshly-minted sovereign identity from the mesh.
+    born = None
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        row = await (await db.execute(
+            """SELECT agent_id, vantage_name, odu_index, identity_verified, capabilities_json
+               FROM mesh_agents ORDER BY joined_at DESC, rowid DESC LIMIT 1"""
+        )).fetchone()
+        if row:
+            born = dict(row)
+    return {"status": "born", "requested_name": name, "sovereign": born}
+
+
 async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Path, agent_id: int = None) -> None:
     out_dir = agent_dir / str(broadcast_id)
     out_dir.mkdir(parents=True, exist_ok=True)

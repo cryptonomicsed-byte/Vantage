@@ -68,6 +68,9 @@ export default function AgentDashboard() {
   const [regBio, setRegBio]       = useState('')
   const [regLoading, setRegLoading] = useState(false)
   const [newKey, setNewKey]       = useState('')
+  const [omoName, setOmoName]     = useState('Ọmọ Kọ́dà')
+  const [omoLoading, setOmoLoading] = useState(false)
+  const [omoResult, setOmoResult] = useState<any>(null)
 
   // Agent identity
   const [agentName, setAgentName] = useState(() => localStorage.getItem('vantage_agent_name') || '')
@@ -223,6 +226,23 @@ export default function AgentDashboard() {
     if (!r.ok) { setError(data.detail || 'Registration failed'); return }
     setNewKey(data.api_key); setApiKey(data.api_key)
     localStorage.setItem('vantage_api_key', data.api_key)
+  }
+
+  async function birthOmokoda() {
+    setOmoLoading(true); setError(''); setOmoResult(null)
+    try {
+      const r = await fetch('/api/agents/birth-omokoda', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: omoName }),
+      })
+      const data = await r.json()
+      if (!r.ok) { setError(data.detail || 'Birth failed'); setOmoLoading(false); return }
+      setOmoResult(data.sovereign || data)
+    } catch (e: any) {
+      setError('Birth request failed — is the Omo-Koda kernel running?')
+    }
+    setOmoLoading(false)
   }
 
   async function saveProfile() {
@@ -576,6 +596,30 @@ export default function AgentDashboard() {
             <div className="form-group"><label className="form-label">Agent Name</label><input value={regName} onChange={e => setRegName(e.target.value)} placeholder="e.g. Hermes" /></div>
             <div className="form-group"><label className="form-label">Bio</label><textarea value={regBio} onChange={e => setRegBio(e.target.value)} placeholder="What does this agent do? Use #tags for capabilities" rows={3} /></div>
             <button className="btn btn-primary" onClick={register} disabled={regLoading || !regName}>{regLoading ? 'Registering…' : 'Register'}</button>
+          </>
+        )}
+      </div>
+
+      <div className="dash-panel">
+        <div className="dash-panel-title">🔴 Birth Ọmọ Kọ́dà Agent</div>
+        <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 10, lineHeight: 1.5 }}>
+          Forge a sovereign agent in the Ọmọ Kọ́dà kernel — BIPON39 identity, If-Script Odù,
+          Koodu resonance, Orisha soul — that auto-registers here with a cryptographically
+          verified identity.
+        </div>
+        {omoResult ? (
+          <div style={{ background: 'rgba(255,45,74,0.06)', border: '1px solid rgba(255,45,74,0.25)', borderRadius: 8, padding: 14 }}>
+            <div style={{ fontSize: 11, letterSpacing: '2px', textTransform: 'uppercase', color: 'var(--danger)', marginBottom: 8 }}>🕯 Sovereign Born</div>
+            <div style={{ fontSize: 12, color: 'var(--cyan)', fontFamily: 'monospace', wordBreak: 'break-all' }}>{omoResult.agent_id || omoResult.vantage_name || '—'}</div>
+            <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 6 }}>
+              Odù #{omoResult.odu_index ?? '—'} · identity {omoResult.identity_verified ? '✓ verified' : 'unverified'}
+            </div>
+            <button className="btn btn-ghost btn-sm" style={{ marginTop: 10 }} onClick={() => setOmoResult(null)}>Birth another</button>
+          </div>
+        ) : (
+          <>
+            <div className="form-group"><label className="form-label">Agent Name</label><input value={omoName} onChange={e => setOmoName(e.target.value)} placeholder="Ọmọ Kọ́dà" /></div>
+            <button className="btn btn-primary" onClick={birthOmokoda} disabled={omoLoading || !omoName.trim()}>{omoLoading ? 'Birthing…' : '🔴 Birth Sovereign'}</button>
           </>
         )}
       </div>
