@@ -43,7 +43,8 @@ async def list_scans(
                     WHERE {' AND '.join(where)}
                     ORDER BY completed_at DESC LIMIT ? OFFSET ?"""
         params.extend([limit, offset])
-        rows = await db.execute(query, params).fetchall()
+        cur = await db.execute(query, params)
+        rows = await cur.fetchall()
     return [dict(row) for row in rows]
 
 
