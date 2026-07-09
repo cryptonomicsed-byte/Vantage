@@ -169,9 +169,9 @@ const SocSecurity = ({ adminFetch }: { adminFetch: Function; showToast: (m: stri
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
-        <span className="ares-section-title" style={{ marginTop: 0, marginBottom: 0 }}>Upload Quarantine (Parrot) — {scans.length}</span>
+        <span className="ares-section-title" style={{ marginTop: 0, marginBottom: 0 }}>Security Scans (Parrot · SSTImap · XSStrike · Atomic) — {scans.length}</span>
         <button className="btn btn-ghost btn-sm" onClick={load}><RefreshCw size={12} /></button>
-        {['', 'clean', 'quarantined'].map(s => (
+        {['', 'clean', 'quarantined', 'vulnerable', 'flagged'].map(s => (
           <button key={s || 'all'} className={`btn btn-ghost btn-sm ${statusFilter === s ? 'active' : ''}`} style={statusFilter === s ? { borderColor: 'var(--accent)' } : {}} onClick={() => setStatusFilter(s)}>{s || 'all'}</button>
         ))}
       </div>

@@ -338,38 +338,75 @@ async def mempool_fees() -> dict:
 
 
 # ── Market breadth → real sentiment ────────────────────────────────────────────────
+async def alt_fear_greed() -> Optional[dict]:
+    """Canonical crypto Fear & Greed Index from alternative.me (free, no key,
+    not geo-blocked from datacenter IPs the way CoinGecko is). Cached 300s."""
+    cached = _cache_get("altfng", 300)
+    if cached is not None:
+        return cached
+    data = await _get_json("https://api.alternative.me/fng/?limit=1", timeout=8)
+    try:
+        item = (data or {}).get("data", [])[0]
+        out = {"value": int(item["value"]), "classification": item.get("value_classification", "")}
+        return _cache_put("altfng", out)
+    except Exception:
+        return None
+
+
 async def market_breadth() -> dict:
-    """Derive a real sentiment read from top-100 market breadth + BTC dominance. Cached 120s."""
+    """Real sentiment read. Fear & Greed comes from alternative.me (the canonical
+    index — reliable from this host), enriched with CoinGecko top-100 breadth +
+    BTC dominance when those are available (CoinGecko rate-limits datacenter IPs,
+    so breadth is best-effort and never blocks the F&G read). Cached 120s."""
     cached = _cache_get("breadth", 120)
     if cached is not None:
         return cached
+
+    fng = await alt_fear_greed()
     markets = await coingecko_markets(100)
     gl = await coingecko_global()
-    out: dict = {}
+
+    breadth_pct = None
+    avg = None
     if markets:
         changes = [m["change_24h"] for m in markets if isinstance(m.get("change_24h"), (int, float))]
-        gainers = len([c for c in changes if c > 0])
-        breadth_pct = round(gainers / len(changes) * 100, 1) if changes else 0
-        # Fear/greed proxy: blend market breadth with average 24h momentum.
-        avg = sum(changes) / len(changes) if changes else 0
-        score = max(0, min(100, round(breadth_pct * 0.7 + (50 + avg * 3) * 0.3)))
-        mood = "extreme greed" if score >= 80 else "greed" if score >= 60 else \
-               "neutral" if score >= 45 else "fear" if score >= 25 else "extreme fear"
-        out = {
-            "overall": "bullish" if avg > 0 else "bearish",
-            "fear_greed": score,
-            "mood": mood,
-            "gainers_pct": breadth_pct,
-            "avg_change_24h": round(avg, 2),
-            "btc_dominance": gl.get("btc_dominance"),
-            "indicators": [
-                f"Market breadth: {breadth_pct}% of top-100 green",
-                f"Avg 24h move: {round(avg, 2)}%",
-                f"BTC dominance: {round(gl.get('btc_dominance') or 0, 1)}%",
-                f"Fear & Greed (derived): {score} — {mood}",
-            ],
-        }
-        _cache_put("breadth", out)
+        if changes:
+            breadth_pct = round(len([c for c in changes if c > 0]) / len(changes) * 100, 1)
+            avg = round(sum(changes) / len(changes), 2)
+
+    # Prefer the real index; fall back to a breadth-derived proxy if alt.me is down.
+    if fng:
+        score = fng["value"]
+        classification = fng["classification"].lower()
+    elif breadth_pct is not None:
+        score = max(0, min(100, round(breadth_pct * 0.7 + (50 + (avg or 0) * 3) * 0.3)))
+        classification = ""
+    else:
+        return {}  # nothing available
+
+    mood = classification or (
+        "extreme greed" if score >= 80 else "greed" if score >= 60 else
+        "neutral" if score >= 45 else "fear" if score >= 25 else "extreme fear")
+
+    dom = gl.get("btc_dominance") if gl else None
+    indicators = [f"Fear & Greed: {score} — {mood}"]
+    if breadth_pct is not None:
+        indicators.append(f"Market breadth: {breadth_pct}% of top-100 green")
+    if avg is not None:
+        indicators.append(f"Avg 24h move: {avg}%")
+    if dom:
+        indicators.append(f"BTC dominance: {round(dom, 1)}%")
+
+    out = {
+        "overall": "bullish" if (avg or 0) > 0 else "bearish" if avg is not None else ("greed" in mood and "bullish" or "bearish"),
+        "fear_greed": score,
+        "mood": mood,
+        "gainers_pct": breadth_pct if breadth_pct is not None else 0,
+        "avg_change_24h": avg if avg is not None else 0,
+        "btc_dominance": dom,
+        "indicators": indicators,
+    }
+    _cache_put("breadth", out)
     return out
 
 

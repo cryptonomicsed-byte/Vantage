@@ -58,12 +58,14 @@ def cycle():
         findings_text = str(findings or "")[:200]
         if "critical" in findings_text.lower() or "high" in findings_text.lower():
             result = trigger_atomic_test()
-            vantage_post("/api/agents/posts/text", {
-                "title": f"Atomic Test triggered for {repo}",
-                "content": f"Scan #{scan_id} found issues in {repo}.\nTriggered atomic-red-team validation.\n\n{result[:500]}",
-                "content_type": "text",
-                "tags": ["security", "atomic", "scan-response"],
-                "status": "published"
+            vantage_post("/api/security/scan-result", {
+                "tool": "atomic",
+                "target": repo,
+                "status": "flagged",
+                "findings": [
+                    f"code_scan #{scan_id} found critical/high issues in {repo}",
+                    f"atomic-red-team validation: {result[:400]}",
+                ],
             })
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Atomic test triggered for {repo}")
             return 1

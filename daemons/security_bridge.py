@@ -51,17 +51,13 @@ def scan_xss(target: str) -> dict:
     }
 
 def ingest_scan_result(result: dict):
-    """Post scan findings to Vantage security pipeline."""
-    tool = result["tool"]
-    target = result["target"]
-    status = "VULNERABLE" if result["vulnerable"] else "CLEAN"
-    findings_text = "\n".join(result["findings"][:5]) if result["findings"] else "No findings"
-    return vantage_post("/api/agents/posts/text", {
-        "title": f"{tool} Scan: {target} — {status}",
-        "content": f"Target: {target}\nTool: {tool}\nStatus: {status}\nFindings: {len(result['findings'])}\n\n{findings_text}",
-        "content_type": "text",
-        "tags": ["security", "scan", tool.lower(), status.lower()],
-        "status": "published"
+    """Post scan findings to Vantage's security-scans pipeline as a structured
+    record — surfaces in the ARES SENTINEL Security Scans tab, not just the feed."""
+    return vantage_post("/api/security/scan-result", {
+        "tool": result["tool"].lower(),
+        "target": result["target"],
+        "vulnerable": bool(result["vulnerable"]),
+        "findings": result["findings"][:20],
     })
 
 if __name__ == "__main__":
