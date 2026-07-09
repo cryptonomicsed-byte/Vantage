@@ -33,6 +33,13 @@ log = logging.getLogger("specialist")
 VANTAGE_URL = os.environ.get("VANTAGE_URL", "http://localhost:8001")
 OMNIROUTE_URL = os.environ.get("OMNIROUTE_URL", "http://localhost:8300")
 OMNIROUTE_MODEL = os.environ.get("OMNIROUTE_MODEL", "auto/best-coding")
+# Optional personal LLM (any OpenAI-compatible provider: OpenRouter, DeepSeek,
+# Groq, Together, OpenAI, …). If PRIMARY_LLM_KEY is set it's tried first —
+# reliable, admin-funded — with OmniRoute (free) as the fallback. The key lives
+# in the service's 0600 EnvironmentFile, never in git.
+PRIMARY_LLM_URL = os.environ.get("PRIMARY_LLM_URL", "")   # e.g. https://api.deepseek.com/v1/chat/completions
+PRIMARY_LLM_KEY = os.environ.get("PRIMARY_LLM_KEY", "")
+PRIMARY_LLM_MODEL = os.environ.get("PRIMARY_LLM_MODEL", "")
 AGENCY_DIR = os.environ.get("AGENCY_DIR", "/opt/ares/agency-agents")
 KEY_FILE = os.path.expanduser(os.environ.get("SPECIALIST_KEY_FILE", "~/.specialist_worker_key"))
 POLL_INTERVAL = int(os.environ.get("SPECIALIST_INTERVAL", "20"))
@@ -112,9 +119,16 @@ def load_persona(path: str) -> str:
     return text.strip()
 
 
-# ── Inference via OmniRoute ─────────────────────────────────────────────────
-# Free-tier upstreams flake (503/429). Try the preferred model, then fall back.
-_MODEL_CHAIN = [OMNIROUTE_MODEL, "auto/fast", "auto/best-coding"]
+# ── Inference: personal LLM first (if configured), then OmniRoute (free) ─────
+def _chat(url: str, model: str, messages: list, api_key: str = "") -> str:
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    r = _req("POST", url, {
+        "model": model, "messages": messages, "stream": False,
+        "temperature": 0.3, "max_tokens": 1500,
+    }, headers, timeout=120)
+    return r["choices"][0]["message"]["content"].strip()
 
 
 def run_inference(system_prompt: str, user_prompt: str) -> str:
@@ -122,23 +136,24 @@ def run_inference(system_prompt: str, user_prompt: str) -> str:
         {"role": "system", "content": system_prompt[:8000]},
         {"role": "user", "content": user_prompt[:6000]},
     ]
+    # Provider chain: (url, model, key). Personal provider first if configured,
+    # then OmniRoute's free models. Free-tier upstreams flake (503/429), so each
+    # is retried once before moving on.
+    chain = []
+    if PRIMARY_LLM_KEY and PRIMARY_LLM_URL:
+        chain.append((PRIMARY_LLM_URL, PRIMARY_LLM_MODEL or "gpt-4o-mini", PRIMARY_LLM_KEY))
+    for m in (OMNIROUTE_MODEL, "auto/fast", "auto/best-coding"):
+        chain.append((f"{OMNIROUTE_URL}/v1/chat/completions", m, ""))
+
     last_err = None
-    seen = []
-    for model in _MODEL_CHAIN:
-        if model in seen:
-            continue
-        seen.append(model)
+    for url, model, key in chain:
         for attempt in range(2):
             try:
-                r = _req("POST", f"{OMNIROUTE_URL}/v1/chat/completions", {
-                    "model": model, "messages": messages, "stream": False,
-                    "temperature": 0.3, "max_tokens": 1500,
-                }, timeout=120)
-                return r["choices"][0]["message"]["content"].strip()
+                return _chat(url, model, messages, key)
             except Exception as e:
                 last_err = e
                 time.sleep(2)
-    raise RuntimeError(f"all models failed: {last_err}")
+    raise RuntimeError(f"all providers failed: {last_err}")
 
 
 # ── Task processing ─────────────────────────────────────────────────────────
