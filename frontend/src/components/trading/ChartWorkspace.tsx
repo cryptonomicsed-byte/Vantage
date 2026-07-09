@@ -17,7 +17,7 @@ function num(v: any): number | null {
 }
 
 export default function ChartWorkspace() {
-  const { state } = useTradingStore()
+  const { state, navigateTo } = useTradingStore()
   const priceRef = useRef<HTMLDivElement>(null)
   const subRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
@@ -207,7 +207,6 @@ export default function ChartWorkspace() {
           timeRange={{ start: 0, end: 0 }}
           top={4}
           onMarkerClick={(s) => {
-            const { navigateTo } = useTradingStore()
             navigateTo(`${s.symbol}/USDT`, state.activeTimeframe, s.time)
           }}
         />

@@ -495,12 +495,22 @@ bgcolor(bullish ? color.new(color.green, 90) : bearish ? color.new(color.red, 90
 
 const styles: Record<string, React.CSSProperties> = {
   container: {
+    // Docked to the right edge of the chart area as a solid overlay panel.
+    // Absolute + high z-index so it sits ABOVE the lightweight-charts canvas
+    // (which has a fixed height and would otherwise leak over it and swallow
+    // clicks on the inputs). The chart stays visible to the left.
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    width: 'min(440px, 60%)',
     display: 'flex',
     flexDirection: 'column',
-    borderTop: '1px solid rgba(255,255,255,0.08)',
-    background: 'rgba(10,10,20,0.95)',
-    maxHeight: 420,
+    borderLeft: '1px solid rgba(255,255,255,0.12)',
+    background: '#0b0b18',
+    boxShadow: '-12px 0 32px rgba(0,0,0,0.5)',
     overflowY: 'auto',
+    zIndex: 40,
   },
   modeBar: {
     display: 'flex',

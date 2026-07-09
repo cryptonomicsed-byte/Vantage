@@ -152,6 +152,8 @@ interface TradingState {
   alertModalOpen: boolean
   searchQuery: string
   sourcesStatus: Record<string, { active: boolean; lastCall: string; errorRate: number }>
+  leftCollapsed: boolean
+  rightCollapsed: boolean
 }
 
 type TradingAction =
@@ -178,6 +180,8 @@ type TradingAction =
   | { type: 'SET_PINE_SCRIPTS'; scripts: PineScript[] }
   | { type: 'TOGGLE_ALERT_MODAL' }
   | { type: 'SET_SEARCH'; query: string }
+  | { type: 'TOGGLE_LEFT_PANEL' }
+  | { type: 'TOGGLE_RIGHT_PANEL' }
 
 const initialState: TradingState = {
   activePair: 'BTC/USDT',
@@ -204,6 +208,8 @@ const initialState: TradingState = {
   alertModalOpen: false,
   searchQuery: '',
   sourcesStatus: {},
+  leftCollapsed: false,
+  rightCollapsed: false,
 }
 
 function tradingReducer(state: TradingState, action: TradingAction): TradingState {
@@ -257,6 +263,10 @@ function tradingReducer(state: TradingState, action: TradingAction): TradingStat
       return { ...state, alertModalOpen: !state.alertModalOpen }
     case 'SET_SEARCH':
       return { ...state, searchQuery: action.query }
+    case 'TOGGLE_LEFT_PANEL':
+      return { ...state, leftCollapsed: !state.leftCollapsed }
+    case 'TOGGLE_RIGHT_PANEL':
+      return { ...state, rightCollapsed: !state.rightCollapsed }
     default:
       return state
   }

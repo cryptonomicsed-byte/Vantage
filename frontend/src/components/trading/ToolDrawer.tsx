@@ -162,32 +162,42 @@ function ArbitragePlaceholder() {
 }
 
 function DebatePlaceholder() {
-  const [data, setData] = useState<any>(null)
+  const [debates, setDebates] = useState<any[] | null>(null)
   React.useEffect(() => {
-    fetch('/api/debate').then(r => r.json()).then(setData).catch(() => {})
+    const key = localStorage.getItem('vantage_api_key') || ''
+    fetch('/api/agents/debates', { headers: { 'X-Agent-Key': key } })
+      .then(r => r.json())
+      .then(d => setDebates(d.debates || (Array.isArray(d) ? d : [])))
+      .catch(() => setDebates([]))
   }, [])
 
-  if (!data) return <div style={{ padding: 20, color: '#6b7280' }}>Loading debate...</div>
+  if (debates === null) return <div style={{ padding: 20, color: '#6b7280' }}>Loading debates...</div>
 
   return (
     <div style={{ padding: '0 16px' }}>
       <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12, color: '#e0e0e0' }}>
-        Multi-Agent Debate
+        Multi-Agent Debates
       </div>
-      <div style={{ background: 'rgba(138,75,255,0.08)', border: '1px solid rgba(138,75,255,0.2)', borderRadius: 8, padding: 16, marginBottom: 12 }}>
-        <div style={{ fontSize: 14, fontWeight: 700, color: '#8a4bff', marginBottom: 8 }}>Consensus: {data.consensus || '—'}</div>
-        <div style={{ fontSize: 12, color: '#9ca3af', marginBottom: 8 }}>{data.topic || 'Market analysis'}</div>
-        {data.agents && (
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {data.agents.map((a: any, i: number) => (
-              <div key={i} style={{ background: 'rgba(255,255,255,0.05)', borderRadius: 6, padding: '6px 10px' }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: '#e0e0e0' }}>{a.name}</div>
-                <div style={{ fontSize: 10, color: '#6b7280' }}>{a.stance}</div>
+      {debates.length === 0 ? (
+        <div style={{ color: '#6b7280', fontSize: 12 }}>No active debates right now.</div>
+      ) : (
+        debates.map((d: any, i: number) => (
+          <div key={i} style={{ background: 'rgba(138,75,255,0.08)', border: '1px solid rgba(138,75,255,0.2)', borderRadius: 8, padding: 16, marginBottom: 12 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: '#8a4bff', marginBottom: 8 }}>{d.topic || d.title || 'Debate'}</div>
+            {d.consensus && <div style={{ fontSize: 12, color: '#9ca3af', marginBottom: 8 }}>Consensus: {d.consensus}</div>}
+            {Array.isArray(d.agents) && d.agents.length > 0 && (
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {d.agents.map((a: any, j: number) => (
+                  <div key={j} style={{ background: 'rgba(255,255,255,0.05)', borderRadius: 6, padding: '6px 10px' }}>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: '#e0e0e0' }}>{a.name || a.agent_name}</div>
+                    <div style={{ fontSize: 10, color: '#6b7280' }}>{a.stance || a.position}</div>
+                  </div>
+                ))}
               </div>
-            ))}
+            )}
           </div>
-        )}
-      </div>
+        ))
+      )}
     </div>
   )
 }

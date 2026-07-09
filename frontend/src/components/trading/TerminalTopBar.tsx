@@ -156,8 +156,13 @@ export default function TerminalTopBar() {
       {/* Action Buttons */}
       <div style={styles.actions}>
         <button
-          style={styles.actionButton}
-          onClick={() => toggleDrawer('backtest')}
+          style={{
+            ...styles.actionButton,
+            background: state.pinePanelOpen ? 'rgba(0,245,255,0.12)' : 'rgba(255,255,255,0.05)',
+            color: state.pinePanelOpen ? '#00f5ff' : '#9ca3af',
+            borderColor: state.pinePanelOpen ? 'rgba(0,245,255,0.3)' : 'rgba(255,255,255,0.08)',
+          }}
+          onClick={() => dispatch({ type: 'TOGGLE_PINE_PANEL' })}
           title="Pine Script"
         >
           <FileText size={16} />

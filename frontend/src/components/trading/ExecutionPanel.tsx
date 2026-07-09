@@ -211,32 +211,6 @@ export default function ExecutionPanel() {
         )}
       </div>
 
-      {/* Freqtrade Status */}
-      <div style={styles.freqtradeSection}>
-        <div style={styles.sectionHeader}>
-          <Activity size={13} style={{ color: '#00f5ff' }} />
-          <span style={styles.sectionTitle}>Paper Trader (Freqtrade)</span>
-        </div>
-        <div style={styles.freqtradeStatus}>
-          <div style={styles.freqtradeRow}>
-            <span style={{ fontSize: 11, color: '#6b7280' }}>Status</span>
-            <span style={{ fontSize: 11, color: '#39ff14', fontWeight: 700 }}>● Running</span>
-          </div>
-          <div style={styles.freqtradeRow}>
-            <span style={{ fontSize: 11, color: '#6b7280' }}>Pairs</span>
-            <span style={{ fontSize: 11, color: '#e0e0e0', fontFamily: 'monospace' }}>14</span>
-          </div>
-          <div style={styles.freqtradeRow}>
-            <span style={{ fontSize: 11, color: '#6b7280' }}>Open Trades</span>
-            <span style={{ fontSize: 11, color: '#ffaa00', fontFamily: 'monospace' }}>{state.positions.length || 0}</span>
-          </div>
-          <div style={styles.freqtradeRow}>
-            <span style={{ fontSize: 11, color: '#6b7280' }}>Strategy</span>
-            <span style={{ fontSize: 10, color: '#9ca3af' }}>VantageSignalStrategy</span>
-          </div>
-        </div>
-      </div>
-
       {/* Bottom Actions */}
       <div style={styles.bottomActions}>
         <button style={styles.actionBtn} onClick={() => toggleDrawer('journal')}>

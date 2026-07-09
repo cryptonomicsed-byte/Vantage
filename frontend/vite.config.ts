@@ -52,9 +52,11 @@ export default defineConfig({
         target: 'http://localhost:8001',
         changeOrigin: true,
       },
-      // Ares intelligence endpoints (port 8879)
+      // /api/intel and /api/alpha are real routers mounted in the main
+      // Vantage backend (backend/routers/intel.py, backend/routers/alpha.py)
+      // — port 8001, not the legacy standalone Ares dashboard on 8879.
       '/api/intel': {
-        target: 'http://localhost:8879',
+        target: 'http://localhost:8001',
         changeOrigin: true,
       },
       '/api/debate': {
@@ -62,7 +64,7 @@ export default defineConfig({
         changeOrigin: true,
       },
       '/api/alpha': {
-        target: 'http://localhost:8879',
+        target: 'http://localhost:8001',
         changeOrigin: true,
       },
       '/api/backtest': {
