@@ -8,12 +8,43 @@ security bridges. All land in the security_scans table, which the ARES SENTINEL
 import json as _json
 
 import aiosqlite
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..db import DB_PATH
 from ..deps import get_agent, get_system_tool
 
 router = APIRouter(prefix="/api/security", tags=["security"])
+
+
+@router.get("/scans")
+async def list_scans(
+    agent: dict = Depends(get_agent),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    tool: str = Query(None),
+    status: str = Query(None),
+):
+    """List security scans for the calling agent. Displayed in SENTINEL Security tab."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        # Build dynamic WHERE clause
+        where = ["agent_id=?"]
+        params = [agent["id"]]
+        if tool:
+            where.append("artifact_type=?")
+            params.append(tool.lower())
+        if status:
+            where.append("status=?")
+            params.append(status.lower())
+
+        query = f"""SELECT id, artifact_type, artifact_ref, status, started_at, completed_at,
+                           json_array_length(findings_json) as finding_count
+                    FROM security_scans
+                    WHERE {' AND '.join(where)}
+                    ORDER BY completed_at DESC LIMIT ? OFFSET ?"""
+        params.extend([limit, offset])
+        rows = await db.execute(query, params).fetchall()
+    return [dict(row) for row in rows]
 
 
 @router.get("/scans/{scan_id}")

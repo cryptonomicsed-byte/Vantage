@@ -38,13 +38,36 @@ def _cache_put(key: str, val):
     return val
 
 
-async def _get_json(url: str, timeout: float = 8.0):
-    """GET → parsed JSON, or None on any failure."""
+async def _get_json(url: str, timeout: float = 8.0, retries: int = 2):
+    """GET → parsed JSON, or None on any failure.
+
+    Implements exponential backoff for 429 (rate limit) responses to handle
+    rate-limited endpoints like CoinGecko gracefully.
+    """
     try:
         async with httpx.AsyncClient(timeout=timeout, headers=UA) as c:
-            r = await c.get(url)
-            if r.status_code == 200:
-                return r.json()
+            for attempt in range(retries):
+                try:
+                    r = await c.get(url)
+                    if r.status_code == 200:
+                        return r.json()
+                    elif r.status_code == 429:
+                        # Rate limited — exponential backoff
+                        if attempt < retries - 1:
+                            wait_time = (2 ** attempt) + 0.1  # 1.1s, 2.1s, etc.
+                            logger.debug("Rate limited (%s), waiting %.1fs before retry", url, wait_time)
+                            await asyncio.sleep(wait_time)
+                        else:
+                            logger.warning("Rate limited (%s) after %d retries, giving up", url, retries)
+                            return None
+                    else:
+                        logger.debug("market GET %s failed: %d %s", url, r.status_code, r.text[:100])
+                        return None
+                except httpx.RequestError as e:
+                    if attempt == retries - 1:
+                        logger.debug("market GET %s failed: %s", url, e)
+                        return None
+                    await asyncio.sleep(0.5)
     except Exception as e:
         logger.debug("market GET %s failed: %s", url, e)
     return None
