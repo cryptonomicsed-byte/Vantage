@@ -338,6 +338,45 @@ async def mempool_fees() -> dict:
 
 
 # ── Market breadth → real sentiment ────────────────────────────────────────────────
+async def coinpaprika_markets(limit: int = 100) -> list[dict]:
+    """Top coins with 24h change/volume from CoinPaprika (no key, and — unlike
+    CoinGecko — not rate-limited from datacenter IPs). Cached 60s. Shape matches
+    coingecko_markets so callers can use either interchangeably."""
+    limit = max(1, min(limit, 250))
+    key = f"cp_markets:{limit}"
+    cached = _cache_get(key, 60)
+    if cached is not None:
+        return cached
+    data = await _get_json(f"https://api.coinpaprika.com/v1/tickers?quotes=USD&limit={limit}", timeout=10)
+    rows: list[dict] = []
+    if isinstance(data, list):
+        for c in data:
+            q = (c.get("quotes") or {}).get("USD") or {}
+            rows.append({
+                "rank": c.get("rank"),
+                "symbol": (c.get("symbol") or "").upper(),
+                "name": c.get("name"),
+                "price": q.get("price"),
+                "change_24h": q.get("percent_change_24h"),
+                "market_cap": q.get("market_cap"),
+                "volume_24h": q.get("volume_24h"),
+            })
+    if rows:
+        _cache_put(key, rows)
+    return rows
+
+
+async def coinpaprika_global() -> dict:
+    """BTC dominance from CoinPaprika. Cached 300s."""
+    cached = _cache_get("cp_global", 300)
+    if cached is not None:
+        return cached
+    data = await _get_json("https://api.coinpaprika.com/v1/global", timeout=8)
+    if isinstance(data, dict):
+        return _cache_put("cp_global", {"btc_dominance": data.get("bitcoin_dominance_percentage")})
+    return {}
+
+
 async def alt_fear_greed() -> Optional[dict]:
     """Canonical crypto Fear & Greed Index from alternative.me (free, no key,
     not geo-blocked from datacenter IPs the way CoinGecko is). Cached 300s."""
@@ -363,8 +402,13 @@ async def market_breadth() -> dict:
         return cached
 
     fng = await alt_fear_greed()
-    markets = await coingecko_markets(100)
-    gl = await coingecko_global()
+    # CoinPaprika for breadth (not rate-limited from datacenter IPs); CoinGecko
+    # as a fallback only if Paprika is unavailable.
+    markets = await coinpaprika_markets(100)
+    gl = await coinpaprika_global()
+    if not markets:
+        markets = await coingecko_markets(100)
+        gl = gl or await coingecko_global()
 
     breadth_pct = None
     avg = None
@@ -411,8 +455,9 @@ async def market_breadth() -> dict:
 
 
 async def top_movers(limit: int = 8) -> list[dict]:
-    """Real alpha proxy: top gainers from the top-100 by 24h change + volume."""
-    markets = await coingecko_markets(100)
+    """Real alpha proxy: top gainers from the top-100 by 24h change + volume.
+    CoinPaprika primary (datacenter-friendly), CoinGecko fallback."""
+    markets = await coinpaprika_markets(100) or await coingecko_markets(100)
     ranked = [m for m in markets if isinstance(m.get("change_24h"), (int, float))]
     ranked.sort(key=lambda m: -(m["change_24h"] or 0))
     out = []
