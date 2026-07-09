@@ -13,7 +13,7 @@ from slowapi.util import get_remote_address
 from backend import market_sources as ms
 from backend import indicators as ind
 from backend.db import DB_PATH
-from backend.deps import get_agent
+from backend.deps import get_agent, get_system_tool
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/intel", tags=["intel"])
@@ -695,10 +695,21 @@ async def _ensure_signal_tables(db) -> None:
 
 
 @router.post("/signals/ingest")
-async def ingest_signal(payload: dict, agent: dict = Depends(get_agent)):
-    """Accept a signal from any source (predictor, trading agents, ingester).
-    Stored in the in-memory pool AND persisted to signal_pool so it survives a
-    restart; returned by GET /signals alongside live data."""
+async def ingest_signal(payload: dict, tool: dict = Depends(get_system_tool)):
+    """System-only signal ingestion (worldmonitor, data feeds, external intel sources).
+
+    Stores signals in the in-memory pool AND persists to signal_pool for durability.
+    Returned by GET /signals alongside live market data.
+
+    Body: {symbol, source, type, conviction?, direction?, detail?}
+      - symbol: asset (BTC, ETH, SOL, etc.)
+      - source: origin (e.g. "worldmonitor", "sentiment-api", "news-feed")
+      - type: signal category (trend, sentiment, event, etc.)
+      - conviction: 0–1 confidence (default 1.0)
+
+    Only X-Vantage-Tool (intel) + X-Vantage-Tool-Key can call this.
+    Agents cannot post signals directly; signals come from infrastructure only.
+    """
     required = ["symbol", "source", "type"]
     for f in required:
         if f not in payload:

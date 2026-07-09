@@ -68,6 +68,21 @@ class Settings(BaseSettings):
             raise ValueError("VANTAGE_ADMIN_KEY must be at least 32 characters")
         return v
 
+    # System tool tokens: narrowly-scoped auth for infrastructure daemons posting signals.
+    # Each tool can ONLY POST to its own signal ingest endpoint.
+    # Set via VANTAGE_TOOL_TRADING, VANTAGE_TOOL_SECURITY, VANTAGE_TOOL_INTEL env vars.
+    TOOL_TRADING: str = ""  # freqtrade_bridge → /api/trading/signals/ingest
+    TOOL_SECURITY: str = ""  # security_bridge, strix_runner, atomic_daemon → /api/security/scan-result
+    TOOL_INTEL: str = ""     # worldmonitor_bridge, data feeds → /api/intel/signals/ingest
+
+    @field_validator("TOOL_TRADING", "TOOL_SECURITY", "TOOL_INTEL")
+    @classmethod
+    def validate_tool_keys(cls, v: str, info) -> str:
+        if v and len(v) < 32:
+            field_name = info.field_name
+            raise ValueError(f"VANTAGE_{field_name} must be at least 32 characters if set")
+        return v
+
     @property
     def ADMIN_KEY_HASH(self) -> Optional[str]:
         """SHA-256 of admin key, computed once. None if admin key is not set."""
