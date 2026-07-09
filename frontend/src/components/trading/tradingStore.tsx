@@ -39,6 +39,12 @@ export interface WhaleTx {
   direction: 'inflow' | 'outflow'
   exchange?: string
   timestamp: string
+  // Tracked-wallet entries (from the watchlist) carry a label/address/chain
+  // instead of a tx amount; `kind` distinguishes them from mempool txs.
+  kind?: 'tx' | 'wallet'
+  label?: string
+  address?: string
+  chain?: string
 }
 
 export interface Threat {
@@ -154,6 +160,15 @@ interface TradingState {
   sourcesStatus: Record<string, { active: boolean; lastCall: string; errorRate: number }>
   leftCollapsed: boolean
   rightCollapsed: boolean
+  pulse: MarketPulse | null
+}
+
+export interface MarketPulse {
+  overall: string
+  fear_greed: number
+  mood: string
+  gainers_pct: number
+  avg_change_24h: number
 }
 
 type TradingAction =
@@ -182,6 +197,7 @@ type TradingAction =
   | { type: 'SET_SEARCH'; query: string }
   | { type: 'TOGGLE_LEFT_PANEL' }
   | { type: 'TOGGLE_RIGHT_PANEL' }
+  | { type: 'SET_PULSE'; pulse: MarketPulse | null }
 
 const initialState: TradingState = {
   activePair: 'BTC/USDT',
@@ -210,6 +226,7 @@ const initialState: TradingState = {
   sourcesStatus: {},
   leftCollapsed: false,
   rightCollapsed: false,
+  pulse: null,
 }
 
 function tradingReducer(state: TradingState, action: TradingAction): TradingState {
@@ -267,6 +284,8 @@ function tradingReducer(state: TradingState, action: TradingAction): TradingStat
       return { ...state, leftCollapsed: !state.leftCollapsed }
     case 'TOGGLE_RIGHT_PANEL':
       return { ...state, rightCollapsed: !state.rightCollapsed }
+    case 'SET_PULSE':
+      return { ...state, pulse: action.pulse }
     default:
       return state
   }

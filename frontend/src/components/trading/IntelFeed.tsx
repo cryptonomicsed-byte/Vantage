@@ -134,6 +134,23 @@ function AlphaCard({ mover, onClick }: { mover: AlphaMover; onClick: () => void 
 
 // ── Whale Card ─────────────────────────────────────────────────────────────────
 function WhaleCard({ tx, onClick }: { tx: WhaleTx; onClick: () => void }) {
+  // Tracked smart-money wallet (from the watchlist).
+  if (tx.kind === 'wallet') {
+    const short = tx.address ? `${tx.address.slice(0, 4)}…${tx.address.slice(-4)}` : ''
+    return (
+      <div style={styles.whaleCard} onClick={onClick}>
+        <div style={styles.whaleHeader}>
+          <span style={{ fontSize: 13 }}>🐋</span>
+          <span style={styles.whaleSymbol}>{tx.label}</span>
+          <span style={{ marginLeft: 'auto', fontSize: 9, color: '#00f5ff', background: 'rgba(0,245,255,0.1)', border: '1px solid rgba(0,245,255,0.25)', borderRadius: 4, padding: '1px 5px', textTransform: 'uppercase' }}>
+            {tx.chain || tx.symbol}
+          </span>
+        </div>
+        <div style={{ fontSize: 10, color: '#6b7280', fontFamily: 'monospace' }}>{short}</div>
+      </div>
+    )
+  }
+  // Mempool transaction.
   const isIn = tx.direction === 'inflow'
   const color = isIn ? '#ff2d4a' : '#39ff14'
   return (
@@ -144,7 +161,7 @@ function WhaleCard({ tx, onClick }: { tx: WhaleTx; onClick: () => void }) {
         <span style={styles.whaleAmt}>{tx.amount.toLocaleString()}</span>
       </div>
       <div style={{ fontSize: 10, color: '#6b7280' }}>
-        ${tx.amount_usd.toLocaleString()} {tx.exchange ? `· ${tx.exchange}` : ''}
+        {tx.amount_usd > 0 ? `$${tx.amount_usd.toLocaleString()} ` : ''}{tx.exchange ? `· ${tx.exchange}` : ''}
       </div>
     </div>
   )

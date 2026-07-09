@@ -104,12 +104,14 @@ function TerminalInner() {
   async function fetchIntel() {
     const headers = apiHeaders()
     try {
-      const [signalsR, alphaR, whalesR, debateR, newsR] = await Promise.all([
+      const [signalsR, alphaR, whalesR, watchR, debateR, newsR, sentR] = await Promise.all([
         fetch('/api/intel/signals', { headers }),
         fetch('/api/intel/alpha', { headers }),
         fetch('/api/intel/whales', { headers }),
+        fetch('/api/intel/watchlist', { headers }),
         fetch('/api/agents/debates', { headers }),
         fetch('/api/intel/news', { headers }),
+        fetch('/api/intel/sentiment', { headers }),
       ])
 
       // Signals — normalize mixed shapes, and derive threats from them.
@@ -149,20 +151,59 @@ function TerminalInner() {
         dispatch({ type: 'SET_ALPHA_MOVERS', movers })
       }
 
-      // Whale transactions (BTC mempool)
+      // Whales = tracked smart-money wallets (watchlist, e.g. "Wintermute SOL")
+      // first, then recent large BTC mempool txs. Tracked wallets are the
+      // richer signal — named addresses, not anonymous txs.
+      const whales: WhaleTx[] = []
+      if (watchR.ok) {
+        const d = await watchR.json()
+        const wallets: any[] = d.wallets || (Array.isArray(d) ? d : [])
+        for (const w of wallets.slice(0, 40)) {
+          whales.push({
+            kind: 'wallet',
+            hash: w.address || String(w.id),
+            symbol: (w.chain || 'sol').toUpperCase(),
+            amount: 0,
+            amount_usd: 0,
+            direction: 'inflow',
+            label: w.label || 'Tracked wallet',
+            address: w.address || '',
+            chain: w.chain || '',
+            timestamp: w.created_at || new Date().toISOString(),
+          })
+        }
+      }
       if (whalesR.ok) {
         const d = await whalesR.json()
         const txs: any[] = d.transactions || (Array.isArray(d) ? d : [])
-        const whales: WhaleTx[] = txs.map(t => ({
-          hash: t.txid || t.hash || '',
-          symbol: 'BTC',
-          amount: Number(t.value_btc ?? t.amount ?? 0),
-          amount_usd: Number(t.value_usd ?? t.amount_usd ?? 0),
-          direction: t.direction || 'inflow',
-          exchange: t.exchange || 'mempool',
-          timestamp: t.timestamp || new Date().toISOString(),
-        }))
-        dispatch({ type: 'SET_WHALE_TXS', txs: whales })
+        for (const t of txs) {
+          whales.push({
+            kind: 'tx',
+            hash: t.txid || t.hash || '',
+            symbol: 'BTC',
+            amount: Number(t.value_btc ?? t.amount ?? 0),
+            amount_usd: Number(t.value_usd ?? t.amount_usd ?? 0),
+            direction: t.direction || 'inflow',
+            exchange: t.exchange || 'mempool',
+            timestamp: t.timestamp || new Date().toISOString(),
+          })
+        }
+      }
+      dispatch({ type: 'SET_WHALE_TXS', txs: whales })
+
+      // Market pulse (fear/greed + breadth) for the top-bar strip
+      if (sentR.ok) {
+        const d = await sentR.json()
+        const s = d.sentiment || d
+        if (s && (s.fear_greed != null || s.overall)) {
+          dispatch({ type: 'SET_PULSE', pulse: {
+            overall: s.overall || 'neutral',
+            fear_greed: Number(s.fear_greed ?? 50),
+            mood: s.mood || '',
+            gainers_pct: Number(s.gainers_pct ?? 0),
+            avg_change_24h: Number(s.avg_change_24h ?? 0),
+          }})
+        }
       }
 
       // News headlines

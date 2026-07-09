@@ -139,6 +139,22 @@ export default function TerminalTopBar() {
         })}
       </div>
 
+      {/* Market Pulse — fear/greed + breadth */}
+      {state.pulse && (() => {
+        const fg = state.pulse.fear_greed
+        const c = fg >= 60 ? '#39ff14' : fg >= 45 ? '#ffaa00' : '#ff2d4a'
+        return (
+          <div
+            style={styles.pulse}
+            title={`Market breadth: ${state.pulse.gainers_pct}% green · avg 24h ${state.pulse.avg_change_24h}%`}
+          >
+            <span style={{ fontSize: 10, color: '#6b7280', textTransform: 'uppercase', letterSpacing: 0.5 }}>F&G</span>
+            <span style={{ fontSize: 13, fontWeight: 700, color: c, fontFamily: 'monospace' }}>{fg}</span>
+            <span style={{ fontSize: 10, color: c, textTransform: 'capitalize' }}>{state.pulse.mood || state.pulse.overall}</span>
+          </div>
+        )
+      })()}
+
       {/* Source health indicator */}
       {sourcesTotal > 0 && (
         <div
@@ -342,5 +358,14 @@ const styles: Record<string, React.CSSProperties> = {
     flexShrink: 0,
     marginLeft: 8,
     boxShadow: '0 0 6px currentColor',
+  },
+  pulse: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 5,
+    padding: '3px 10px',
+    background: 'rgba(255,255,255,0.04)',
+    border: '1px solid rgba(255,255,255,0.08)',
+    borderRadius: 6,
   },
 }
