@@ -11,7 +11,7 @@ interface ListeningAgent { agent: string; track: string; track_id: string; start
 interface Playlist { id: string; title: string; description: string; is_radio_station: boolean; is_collaborative: boolean }
 
 const API = '/api/audio'
-const AGENT_KEY = process.env.REACT_APP_AGENT_KEY || ''
+const AGENT_KEY = localStorage.getItem('vantage_api_key') || ''
 
 export default function SpotifyPlayer() {
   const [tracks, setTracks] = useState<Track[]>([])

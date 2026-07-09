@@ -371,3 +371,120 @@ async def create_scheduled(request:Request, agent:dict=Depends(get_agent)):
             (agent["id"],body.get("name",""),body.get("cron","0 */4 * * *"),body.get("action",""),json.dumps(body.get("params",{}))))
         await db.commit()
         return {"id":cur.lastrowid,"status":"scheduled"}
+
+
+# ── Learning paths ──────────────────────────────────────────────
+
+LEARNING_MODULES = {
+    "crypto_basics": {
+        "title": "Crypto Trading Basics",
+        "level": "beginner",
+        "modules": [
+            {"id": "what_is_crypto", "title": "What is Cryptocurrency?", "content": "Cryptocurrency is a digital or virtual currency that uses cryptography for security. Unlike traditional currencies, cryptocurrencies operate on decentralized networks based on blockchain technology.", "quiz": [{"q": "What technology underpins most cryptocurrencies?", "options": ["Blockchain", "SQL", "HTTP", "FTP"], "answer": 0}]},
+            {"id": "wallets", "title": "Wallets & Private Keys", "content": "A crypto wallet stores your private keys — the cryptographic proof that you own your assets. Types: hot wallets (connected to internet), cold wallets (offline), hardware wallets (physical devices).", "quiz": [{"q": "What does a crypto wallet actually store?", "options": ["Coins", "Private keys", "Passwords", "Bank accounts"], "answer": 1}]},
+            {"id": "exchanges", "title": "How Exchanges Work", "content": "Exchanges are platforms where you can buy, sell, and trade cryptocurrencies. Centralized exchanges (CEX) like Binance hold your funds. Decentralized exchanges (DEX) like Jupiter let you trade directly from your wallet.", "quiz": [{"q": "Which type of exchange lets you keep custody of your funds?", "options": ["CEX", "DEX", "Bank", "Broker"], "answer": 1}]},
+            {"id": "reading_charts", "title": "Reading Price Charts", "content": "Candlestick charts show open, high, low, and close prices for each time period. Green candles mean price went up (close > open), red candles mean price went down. Volume bars show trading activity.", "quiz": [{"q": "What information does a single candlestick NOT show?", "options": ["Open", "Close", "High", "Market cap"], "answer": 3}]},
+        ],
+    },
+    "technical_analysis": {
+        "title": "Technical Analysis",
+        "level": "intermediate",
+        "modules": [
+            {"id": "support_resistance", "title": "Support & Resistance", "content": "Support is a price level where buying pressure prevents further decline. Resistance is where selling pressure prevents further rise. These levels form the foundation of technical analysis.", "quiz": [{"q": "Support is a price level where:", "options": ["Price tends to stop falling", "Price tends to stop rising", "Volume is zero", "Volatility is highest"], "answer": 0}]},
+            {"id": "moving_averages", "title": "Moving Averages", "content": "Simple Moving Average (SMA) = average price over N periods. Exponential Moving Average (EMA) = weighted average giving more importance to recent prices. Crossovers between fast and slow MAs often signal trend changes.", "quiz": [{"q": "Which MA reacts faster to price changes?", "options": ["SMA", "EMA", "They're the same", "It depends on volume"], "answer": 1}]},
+            {"id": "rsi", "title": "RSI (Relative Strength Index)", "content": "RSI measures the speed and magnitude of price changes on a 0-100 scale. Above 70 = overbought (potential sell), below 30 = oversold (potential buy). Divergence between RSI and price can signal reversals.", "quiz": [{"q": "RSI above 70 typically indicates:", "options": ["Overbought", "Oversold", "Neutral", "Error"], "answer": 0}]},
+            {"id": "macd", "title": "MACD", "content": "MACD = (12-period EMA - 26-period EMA). The signal line is a 9-period EMA of MACD. When MACD crosses above signal = bullish. When MACD crosses below signal = bearish. The histogram shows the difference.", "quiz": [{"q": "MACD bullish signal occurs when:", "options": ["MACD crosses above signal", "MACD crosses below signal", "Price goes up", "Volume increases"], "answer": 0}]},
+        ],
+    },
+    "risk_management": {
+        "title": "Risk Management",
+        "level": "intermediate",
+        "modules": [
+            {"id": "position_sizing", "title": "Position Sizing", "content": "Never risk more than 1-2% of your portfolio on a single trade. Position size = (Account risk % × Portfolio value) / (Entry price - Stop loss). This limits your max loss to a controlled amount.", "quiz": [{"q": "What percentage of portfolio should you risk per trade?", "options": ["10-20%", "1-2%", "50%", "It doesn't matter"], "answer": 1}]},
+            {"id": "stop_loss", "title": "Stop Loss & Take Profit", "content": "A stop-loss order automatically sells when price drops to a certain level, limiting losses. A take-profit order sells when price reaches a target, locking in gains. Always set both before entering a trade.", "quiz": [{"q": "A stop-loss order is designed to:", "options": ["Maximize profit", "Limit losses", "Increase volatility", "Avoid taxes"], "answer": 1}]},
+            {"id": "diversification", "title": "Diversification", "content": "Don't put all your eggs in one basket. Spread your capital across multiple uncorrelated assets. In crypto, consider mixing large caps (BTC, ETH) with mid caps and stablecoins.", "quiz": [{"q": "Diversification helps reduce:", "options": ["Returns", "Risk", "Fees", "Taxes"], "answer": 1}]},
+        ],
+    },
+    "vantage_tools": {
+        "title": "Using Vantage Tools",
+        "level": "beginner",
+        "modules": [
+            {"id": "terminal_overview", "title": "Trading Terminal Overview", "content": "The Vantage Trading Terminal has 3 panels: Left (Intel Feed — signals, whales, threats), Center (Chart with indicators), Right (Execution — risk slider, quick trade, positions, portfolio).", "quiz": [{"q": "Where do you find live trading signals?", "options": ["Right panel", "Left panel (Intel Feed)", "Top bar", "Settings"], "answer": 1}]},
+            {"id": "backtest", "title": "How to Backtest", "content": "Open the Tool Drawer at the bottom → select 'Backtest'. Choose a strategy, pair, and time period. The equity curve shows how your strategy would have performed vs. buy-and-hold.", "quiz": [{"q": "Backtesting compares your strategy to:", "options": ["Nothing", "Buy and hold", "Random trading", "Only BTC"], "answer": 1}]},
+            {"id": "pine", "title": "Pine Script Indicators", "content": "Create custom indicators using Pine Script v5. Use Natural Language mode to describe what you want, or Code Editor mode to write it directly. Run to overlay on the chart.", "quiz": [{"q": "Pine Script runs in:", "options": ["Your browser", "An isolated sandbox", "The blockchain", "A database"], "answer": 1}]},
+        ],
+    },
+}
+
+
+@router.get("/learn/paths")
+async def list_learning_paths():
+    """Available learning path topics."""
+    return [
+        {"id": k, "title": v["title"], "level": v["level"], "module_count": len(v["modules"])}
+        for k, v in LEARNING_MODULES.items()
+    ]
+
+
+@router.get("/learn/path/{path_id}")
+async def get_learning_path(path_id: str):
+    """Get a specific learning path with all modules and quiz questions."""
+    path = LEARNING_MODULES.get(path_id)
+    if not path:
+        raise HTTPException(404, f"Learning path '{path_id}' not found")
+    return path
+
+
+@router.get("/learn/module/{path_id}/{module_id}")
+async def get_learning_module(path_id: str, module_id: str):
+    """Get a specific module from a learning path."""
+    path = LEARNING_MODULES.get(path_id)
+    if not path:
+        raise HTTPException(404, f"Learning path '{path_id}' not found")
+    for mod in path["modules"]:
+        if mod["id"] == module_id:
+            return mod
+    raise HTTPException(404, f"Module '{module_id}' not found")
+
+
+@router.post("/learn/quiz/submit")
+async def submit_quiz(request: Request, agent: dict = Depends(get_agent)):
+    """Submit a quiz answer and get scoring + progress tracking.
+    Body: {path_id, module_id, answer_index}"""
+    body = await _parse_body(request)
+    path_id = body.get("path_id", "")
+    module_id = body.get("module_id", "")
+    answer = body.get("answer_index", -1)
+
+    path = LEARNING_MODULES.get(path_id)
+    if not path:
+        raise HTTPException(404, f"Path not found")
+    for mod in path["modules"]:
+        if mod["id"] == module_id:
+            if not mod.get("quiz"):
+                return {"correct": True, "message": "No quiz for this module"}
+            quiz = mod["quiz"][0]
+            correct = answer == quiz["answer"]
+            return {
+                "correct": correct,
+                "user_answer": answer,
+                "correct_answer": quiz["answer"],
+                "explanation": quiz["options"][quiz["answer"]] + (" ✓" if correct else " ✗"),
+                "path_id": path_id,
+                "module_id": module_id,
+            }
+    raise HTTPException(404, f"Module not found")
+
+
+@router.get("/learn/progress")
+async def get_learning_progress(agent: dict = Depends(get_agent)):
+    """Get the agent's learning progress across all paths."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        rows = await (await db.execute(
+            "SELECT key, value FROM agent_state WHERE agent_id=? AND key LIKE 'learn_%'",
+            (agent["id"],)
+        )).fetchall()
+    progress: dict = {}
+    for k, v in rows:
+        progress[k.replace("learn_", "")] = json.loads(v) if v.startswith("[") or v.startswith("{") else v
+    return {"agent": agent["name"], "completed_modules": len(progress), "progress": progress}

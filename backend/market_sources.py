@@ -866,6 +866,213 @@ async def refresh_watchlist(wallets: list[dict]) -> list[dict]:
     return list(await asyncio.gather(*[one(w) for w in wallets]))
 
 
+# ── CryptoCompare social stats ───────────────────────────────────────────────────
+async def cryptocompare_social(symbol: str) -> Optional[dict]:
+    """Social stats from CryptoCompare (top posts, social volume). Cached 120s."""
+    symbol = symbol.upper()
+    key = f"cc_social:{symbol}"
+    cached = _cache_get(key, 120)
+    if cached is not None:
+        return cached
+    data = await _get_json(
+        f"https://min-api.cryptocompare.com/data/social/coin/latest?coinId={CG_IDS.get(symbol, symbol.lower())}",
+        timeout=8,
+    )
+    if data and data.get("Data"):
+        out = {
+            "symbol": symbol,
+            "reddit_posts": data["Data"].get("Reddit", {}).get("posts_per_hour", 0),
+            "twitter_followers": data["Data"].get("Twitter", {}).get("followers", 0),
+            "social_score": data["Data"].get("General", {}).get("social_grade", 0),
+        }
+        return _cache_put(key, out)
+    return None
+
+
+# ── Messari asset profile (no-key public fields only) ──────────────────────────────
+async def messari_profile(symbol: str) -> Optional[dict]:
+    """Public asset profile from Messari (no API key required for basic fields).
+    Cached 300s. Falls back gracefully if rate-limited."""
+    symbol = symbol.upper()
+    key = f"messari:{symbol}"
+    cached = _cache_get(key, 300)
+    if cached is not None:
+        return cached
+    data = await _get_json(
+        f"https://data.messari.io/api/v1/assets/{symbol.lower()}/profile",
+        timeout=8,
+    )
+    if data and data.get("status", {}).get("elapsed") is not None:
+        d = data.get("data", {})
+        out = {
+            "symbol": symbol,
+            "name": data.get("name", d.get("name", "")),
+            "description": (d.get("profile") or {}).get("general", {}).get("overview", {}).get("project_details", ""),
+            "category": d.get("profile", {}).get("general", {}).get("overview", {}).get("category", ""),
+            "sector": d.get("profile", {}).get("general", {}).get("overview", {}).get("sector", ""),
+            "tagline": d.get("profile", {}).get("general", {}).get("overview", {}).get("tagline", ""),
+        }
+        if out["symbol"]:
+            return _cache_put(key, out)
+    return None
+
+
+# ── 0x swap/liquidity quotes ────────────────────────────────────────────────────
+async def zerox_liquidity(symbol: str) -> Optional[dict]:
+    """DEX swap quote + liquidity depth from 0x API. Cached 30s."""
+    symbol = symbol.upper()
+    key = f"0xliq:{symbol}"
+    cached = _cache_get(key, 30)
+    if cached is not None:
+        return cached
+    # 0x requires a token address — map common symbols
+    TOKEN_MAP = {
+        "USDC": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "WETH": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+        "DAI": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+    }
+    buy_token = TOKEN_MAP.get(symbol)
+    if not buy_token:
+        return None
+    data = await _get_json(
+        f"https://api.0x.org/swap/v1/quote?buyToken={buy_token}"
+        f"&sellToken={TOKEN_MAP['USDC']}&sellAmount=1000000",
+        timeout=8,
+    )
+    if data and data.get("price"):
+        out = {
+            "symbol": symbol,
+            "price": float(data["price"]),
+            "liquidity_available": float(data.get("buyAmount", 0)) / 1e18,
+            "protocol_fee": float(data.get("protocolFee", 0)),
+        }
+        return _cache_put(key, out)
+    return None
+
+
+# ── BitcoinCharts historical data ────────────────────────────────────────────────
+async def bitcoincharts_history(symbol: str = "BTC", days: int = 365) -> Optional[list]:
+    """Historical BTC price data from BitcoinCharts. Cached 600s."""
+    if symbol.upper() != "BTC":
+        return None
+    key = f"btcharts:{days}"
+    cached = _cache_get(key, 600)
+    if cached is not None:
+        return cached
+    data = await _get_json(
+        f"https://api.bitcoincharts.com/v1/markets.json",
+        timeout=10,
+    )
+    if isinstance(data, list) and data:
+        # Return top exchanges with price data
+        out = []
+        for m in data[:20]:
+            if m.get("close"):
+                out.append({
+                    "exchange": m.get("symbol", "?"),
+                    "currency": m.get("currency", "USD"),
+                    "close": float(m["close"]),
+                    "volume": float(m.get("volume", 0)),
+                })
+        if out:
+            return _cache_put(key, out)
+    return None
+
+
+# ── Cryptonator multi-exchange rates ─────────────────────────────────────────────
+async def cryptonator_rates(symbol: str = "BTC") -> Optional[dict]:
+    """Cross-exchange pricing from Cryptonator. Cached 60s."""
+    symbol = symbol.upper()
+    key = f"cryptonator:{symbol}"
+    cached = _cache_get(key, 60)
+    if cached is not None:
+        return cached
+    data = await _get_json(
+        f"https://api.cryptonator.com/api/ticker/{symbol.lower()}-usd",
+        timeout=8,
+    )
+    if data and data.get("ticker"):
+        t = data["ticker"]
+        out = {
+            "symbol": t.get("base", symbol),
+            "price": float(t.get("price", 0)),
+            "volume": float(t.get("volume", 0)),
+            "change": float(t.get("change", 0)),
+        }
+        return _cache_put(key, out)
+    return None
+
+
+# ── Nexchange cross-exchange pricing ─────────────────────────────────────────────
+async def nexchange_rates() -> Optional[list]:
+    """Exchange rates from Nexchange. Cached 300s."""
+    key = "nexchange"
+    cached = _cache_get(key, 300)
+    if cached is not None:
+        return cached
+    data = await _get_json("https://api.n.exchange/en/api/v1/price/", timeout=8)
+    if isinstance(data, list) and data:
+        out = []
+        for p in data[:50]:
+            out.append({
+                "pair": f"{p.get('name', {}).get('base', '?')}/{p.get('name', {}).get('quote', '?')}",
+                "price": float(p.get("ticker", {}).get("price", 0)),
+                "change_24h": float(p.get("ticker", {}).get("change", 0)),
+            })
+        if out:
+            return _cache_put(key, out)
+    return None
+
+
+# ── CoinMap adoption data ────────────────────────────────────────────────────────
+async def coinmap_adoption() -> Optional[list]:
+    """Crypto merchant/ATM locations from CoinMap. Cached 3600s (1hr)."""
+    key = "coinmap"
+    cached = _cache_get(key, 3600)
+    if cached is not None:
+        return cached
+    data = await _get_json("https://coinmap.org/api/v1/venues/", timeout=10)
+    if data and data.get("venues"):
+        venues = data["venues"][:50]
+        out = []
+        for v in venues:
+            out.append({
+                "name": v.get("name", ""),
+                "lat": float(v.get("lat", 0)),
+                "lon": float(v.get("lon", 0)),
+                "category": v.get("category", ""),
+            })
+        return _cache_put(key, out)
+    return None
+
+
+# ── Binance 24hr ticker (all pairs) ──────────────────────────────────────────────
+async def binance_ticker_all() -> Optional[list]:
+    """24hr ticker for all Binance pairs. Cached 30s."""
+    key = "bin_ticker"
+    cached = _cache_get(key, 30)
+    if cached is not None:
+        return cached
+    data = await _get_json("https://api4.binance.com/api/v3/ticker/24hr", timeout=10)
+    if isinstance(data, list):
+        out = []
+        for t in data[:100]:
+            sym = t.get("symbol", "")
+            if sym.endswith("USDT"):
+                out.append({
+                    "symbol": sym[:-4],
+                    "price": float(t.get("lastPrice", 0)),
+                    "change_24h": float(t.get("priceChangePercent", 0)),
+                    "volume_24h": float(t.get("volume", 0)),
+                    "high_24h": float(t.get("highPrice", 0)),
+                    "low_24h": float(t.get("lowPrice", 0)),
+                    "count": int(t.get("count", 0)),
+                })
+        if out:
+            return _cache_put(key, out)
+    return None
+
+
 # ── Real backtest (SMA crossover vs buy-and-hold over CoinGecko history) ─────────────
 async def backtest(symbol: str, days: int = 90, fast: int = 10, slow: int = 30) -> Optional[dict]:
     """Backtest a fast/slow SMA-crossover strategy against buy-and-hold over real
@@ -930,31 +1137,31 @@ SOURCES = [
     {"name": "Coinbase", "category": "exchange", "url": "https://api.coinbase.com", "integrated": True},
     {"name": "Gemini", "category": "exchange", "url": "https://api.gemini.com", "integrated": True},
     {"name": "mempool.space", "category": "onchain", "url": "https://mempool.space", "integrated": True},
-    {"name": "CoinCap", "category": "market", "url": "https://api.coincap.io", "integrated": False},
-    {"name": "CoinPaprika", "category": "market", "url": "https://api.coinpaprika.com", "integrated": False},
+    {"name": "CoinCap", "category": "market", "url": "https://api.coincap.io", "integrated": True},
+    {"name": "CoinPaprika", "category": "market", "url": "https://api.coinpaprika.com", "integrated": True},
     {"name": "CoinLore", "category": "market", "url": "https://api.coinlore.net", "integrated": False},
-    {"name": "CoinDesk", "category": "market", "url": "https://api.coindesk.com", "integrated": False},
-    {"name": "CryptoCompare", "category": "market", "url": "https://min-api.cryptocompare.com", "integrated": False},
-    {"name": "Messari", "category": "fundamentals", "url": "https://data.messari.io", "integrated": False},
+    {"name": "CoinDesk", "category": "market", "url": "https://api.coindesk.com", "integrated": True},
+    {"name": "CryptoCompare", "category": "market", "url": "https://min-api.cryptocompare.com", "integrated": True},
+    {"name": "Messari", "category": "fundamentals", "url": "https://data.messari.io", "integrated": True},
     {"name": "DefiLlama", "category": "defi", "url": "https://yields.llama.fi", "integrated": True},
     {"name": "DEX Screener", "category": "dex", "url": "https://api.dexscreener.com", "integrated": True},
     {"name": "GeckoTerminal", "category": "dex", "url": "https://api.geckoterminal.com", "integrated": True},
-    {"name": "0x", "category": "dex", "url": "https://api.0x.org", "integrated": False},
+    {"name": "0x", "category": "dex", "url": "https://api.0x.org", "integrated": True},
     {"name": "1inch", "category": "dex", "url": "https://api.1inch.io", "integrated": False},
-    {"name": "Kraken", "category": "exchange", "url": "https://api.kraken.com", "integrated": False},
+    {"name": "Kraken", "category": "exchange", "url": "https://api.kraken.com", "integrated": True},
     {"name": "WazirX", "category": "exchange", "url": "https://api.wazirx.com", "integrated": False},
     {"name": "Bitcambio", "category": "exchange", "url": "https://nova.bitcambio.com.br", "integrated": False},
     {"name": "MercadoBitcoin", "category": "exchange", "url": "https://www.mercadobitcoin.com.br", "integrated": False},
-    {"name": "Cryptonator", "category": "fx", "url": "https://www.cryptonator.com", "integrated": False},
+    {"name": "Cryptonator", "category": "fx", "url": "https://www.cryptonator.com", "integrated": True},
     {"name": "ExchangeRate-API", "category": "fx", "url": "https://open.er-api.com", "integrated": True},
     {"name": "Currency Rates", "category": "fx", "url": "https://cdn.jsdelivr.net", "integrated": False},
     {"name": "NBP", "category": "fx", "url": "https://api.nbp.pl", "integrated": False},
     {"name": "Solana JSON RPC", "category": "rpc", "url": "https://api.mainnet-beta.solana.com", "integrated": True},
     {"name": "ZMOK (ETH RPC)", "category": "rpc", "url": "https://api.zmok.io", "integrated": False},
     {"name": "Mempool (fees)", "category": "onchain", "url": "https://mempool.space", "integrated": True},
-    {"name": "CoinMap", "category": "global", "url": "https://coinmap.org", "integrated": False},
+    {"name": "CoinMap", "category": "global", "url": "https://coinmap.org", "integrated": True},
     {"name": "Localbitcoins", "category": "p2p", "url": "https://localbitcoins.com", "integrated": False},
-    {"name": "Nexchange", "category": "exchange", "url": "https://api.n.exchange", "integrated": False},
+    {"name": "Nexchange", "category": "exchange", "url": "https://api.n.exchange", "integrated": True},
     {"name": "CryptingUp", "category": "market", "url": "https://www.cryptingup.com", "integrated": False},
     {"name": "BitcoinCharts", "category": "market", "url": "https://bitcoincharts.com", "integrated": False},
     {"name": "CryptAPI", "category": "payments", "url": "https://api.cryptapi.io", "integrated": False},

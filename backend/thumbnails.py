@@ -1,8 +1,10 @@
 """Vantage thumbnail generation — ffmpeg frame extraction + SVG fallbacks."""
 import os, re, subprocess
 
-THUMBNAIL_DIR = "/opt/ares/media/thumbnails"
-FFMPEG = "/usr/bin/ffmpeg"
+import pathlib
+_THUMB_BASE = os.environ.get("VANTAGE_MEDIA_DIR") or os.environ.get("VANTAGE_DATA_DIR") or str(pathlib.Path(__file__).resolve().parent.parent / "media")
+THUMBNAIL_DIR = os.path.join(_THUMB_BASE, "thumbnails")
+FFMPEG = os.environ.get("FFMPEG_PATH", "/usr/bin/ffmpeg")
 os.makedirs(THUMBNAIL_DIR, exist_ok=True)
 
 DEFAULT_THUMBS = {

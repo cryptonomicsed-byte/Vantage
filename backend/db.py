@@ -1332,6 +1332,26 @@ CREATE TABLE IF NOT EXISTS external_conversations (
         await db.execute("CREATE INDEX IF NOT EXISTS idx_wallet_edges_a ON wallet_edges(chain, address_a)")
         await db.commit()
 
+    # ── Pine Script library ─────────────────────────────────
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS pine_scripts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL REFERENCES agents(id),
+                name TEXT NOT NULL,
+                code TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                category TEXT DEFAULT 'custom',
+                is_public INTEGER DEFAULT 0,
+                usage_count INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_pine_agent ON pine_scripts(agent_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_pine_public ON pine_scripts(is_public)")
+        await db.commit()
+
     # One-time migration: hash any plaintext API keys still stored as "vantage_..." (idempotent)
     import hashlib as _hlib_key
     async with aiosqlite.connect(DB_PATH) as db:

@@ -28,6 +28,30 @@ export default defineConfig({
         target: 'http://localhost:8001',
         changeOrigin: true,
       },
+      '/api/trading': {
+        target: 'http://localhost:8001',
+        changeOrigin: true,
+      },
+      '/api/pine': {
+        target: 'http://localhost:8001',
+        changeOrigin: true,
+      },
+      '/api/copilot': {
+        target: 'http://localhost:8001',
+        changeOrigin: true,
+      },
+      '/api/code': {
+        target: 'http://localhost:8001',
+        changeOrigin: true,
+      },
+      '/api/video': {
+        target: 'http://localhost:8001',
+        changeOrigin: true,
+      },
+      '/api/mesh': {
+        target: 'http://localhost:8001',
+        changeOrigin: true,
+      },
       // Ares intelligence endpoints (port 8879)
       '/api/intel': {
         target: 'http://localhost:8879',

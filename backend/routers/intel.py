@@ -268,6 +268,46 @@ async def get_fx(base: str = Query("USD"), agent: dict = Depends(get_agent)):
     """Fiat exchange rates (ExchangeRate-API)."""
     return await ms.fx_rates(base)
 
+@router.get("/social")
+async def get_social(symbol: str = Query("BTC")):
+    """CryptoCompare social stats for a symbol."""
+    stats = await ms.cryptocompare_social(symbol)
+    return {"symbol": symbol.upper(), "social": stats or {}, "source": "CryptoCompare"}
+
+@router.get("/fundamentals/{symbol}")
+async def get_fundamentals(symbol: str):
+    """Messari asset profile for a symbol (public fields only, no API key needed)."""
+    profile = await ms.messari_profile(symbol)
+    if profile is None:
+        return {"symbol": symbol.upper(), "profile": None, "message": "No profile data available"}
+    return {"symbol": symbol.upper(), "profile": profile, "source": "Messari"}
+
+@router.get("/liquidity")
+async def get_liquidity(symbol: str = Query("BTC")):
+    """Aggregated DEX liquidity from 0x + DexScreener."""
+    liq = await ms.zerox_liquidity(symbol)
+    return {"symbol": symbol.upper(), "liquidity": liq or {}, "source": "0x API"}
+
+@router.get("/adoption")
+async def get_adoption():
+    """Global crypto adoption data from CoinMap."""
+    venues = await ms.coinmap_adoption()
+    return {"venues": venues or [], "count": len(venues) if venues else 0, "source": "CoinMap"}
+
+@router.get("/ticker")
+async def get_ticker(limit: int = Query(50, ge=1, le=100)):
+    """Binance 24hr ticker for all USDT pairs."""
+    pairs = await ms.binance_ticker_all()
+    if not pairs:
+        return {"pairs": [], "count": 0, "source": "Binance"}
+    return {"pairs": pairs[:limit], "count": len(pairs[:limit]), "source": "Binance"}
+
+@router.get("/bitcoincharts")
+async def get_bitcoincharts(days: int = Query(365, ge=1, le=3650)):
+    """Historical BTC data from BitcoinCharts."""
+    data = await ms.bitcoincharts_history("BTC", days)
+    return {"symbol": "BTC", "exchanges": data or [], "count": len(data) if data else 0, "source": "BitcoinCharts"}
+
 @router.get("/whales")
 async def get_whales(limit: int = Query(10, ge=1, le=25), min_value_btc: float = Query(None, ge=0), agent: dict = Depends(get_agent)):
     """Largest recent BTC mempool transactions (mempool.space), optionally

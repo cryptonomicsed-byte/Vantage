@@ -1185,3 +1185,69 @@ async def snapshot_networth(agent: dict = Depends(get_agent)):
         result = await _upsert_networth_snapshot(db, agent["id"])
         await db.commit()
     return {"status": "snapshot_saved", **result}
+
+
+# ── Export ──────────────────────────────────────────────────
+
+@router.get("/export")
+async def export_data(
+    agent: dict = Depends(get_agent),
+    format: str = Query("json", pattern="^(json|csv)$"),
+    scope: str = Query("all", pattern="^(all|positions|orders|journal|snapshots)$"),
+):
+    """Export trading data as JSON or CSV for external analysis."""
+    import csv as _csv, io as _io
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        result: dict = {"agent": agent["name"], "exported_at": datetime.utcnow().isoformat()}
+
+        if scope in ("all", "positions"):
+            book = await _load_book(agent["id"])
+            valued = await _value_positions(book)
+            result["positions"] = valued
+
+        if scope in ("all", "orders"):
+            rows = await (await db.execute(
+                "SELECT * FROM trading_orders WHERE agent_id=? ORDER BY created_at DESC",
+                (agent["id"],)
+            )).fetchall()
+            result["orders"] = [dict(r) for r in rows]
+
+        if scope in ("all", "journal"):
+            rows = await (await db.execute(
+                """SELECT j.*, o.symbol, o.side, o.quantity, o.status
+                   FROM trading_trade_journal j
+                   JOIN trading_orders o ON o.id = j.order_id
+                   WHERE j.agent_id=? ORDER BY j.created_at DESC""",
+                (agent["id"],)
+            )).fetchall()
+            result["journal"] = [dict(r) for r in rows]
+
+        if scope in ("all", "snapshots"):
+            rows = await (await db.execute(
+                "SELECT * FROM trading_pnl_snapshots WHERE agent_id=? ORDER BY snapshot_date DESC",
+                (agent["id"],)
+            )).fetchall()
+            result["snapshots"] = [dict(r) for r in rows]
+
+    if format == "csv":
+        output = _io.StringIO()
+        writer = _csv.writer(output)
+        # Write each section as a CSV block
+        for section in ["positions", "orders", "journal", "snapshots"]:
+            data = result.get(section)
+            if isinstance(data, dict) and "positions" in data:
+                data_list = data["positions"]
+            elif isinstance(data, list):
+                data_list = data
+            else:
+                data_list = []
+            if data_list:
+                writer.writerow([f"--- {section.upper()} ---"])
+                if isinstance(data_list[0], dict):
+                    writer.writerow(list(data_list[0].keys()))
+                    for row in data_list:
+                        writer.writerow([str(v) for v in row.values()])
+        return {"format": "csv", "data": output.getvalue()}
+
+    return result
