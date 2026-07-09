@@ -106,11 +106,17 @@ async def birth_omokoda_agent(request: Request, agent: dict = Depends(get_agent)
     name = str(body.get("name", "")).strip()
     if not name:
         raise HTTPException(422, "name is required")
+    # Optional passphrase — a second factor NOT derivable from the seed. The
+    # kernel uses it to seed CloakSeed (display obfuscation of the mnemonic) +
+    # a duress panic-phrase (stored only as a hash → decoy on entry). Passed
+    # through the birth metadata channel; never stored on the Vantage side.
+    passphrase = str(body.get("passphrase", "")).strip()
+    meta = [{"key": "passphrase", "value": passphrase}] if passphrase else []
     try:
         async with httpx.AsyncClient(timeout=45) as client:
             r = await client.post(
                 f"{settings.OMOKODA_URL.rstrip('/')}/v1/birth",
-                json={"name": name, "meta": []},
+                json={"name": name, "meta": meta},
             )
             r.raise_for_status()
     except Exception as exc:

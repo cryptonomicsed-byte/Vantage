@@ -69,6 +69,7 @@ export default function AgentDashboard() {
   const [regLoading, setRegLoading] = useState(false)
   const [newKey, setNewKey]       = useState('')
   const [omoName, setOmoName]     = useState('Ọmọ Kọ́dà')
+  const [omoPass, setOmoPass]     = useState('')
   const [omoLoading, setOmoLoading] = useState(false)
   const [omoResult, setOmoResult] = useState<any>(null)
 
@@ -234,7 +235,7 @@ export default function AgentDashboard() {
       const r = await fetch('/api/agents/birth-omokoda', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: omoName }),
+        body: JSON.stringify({ name: omoName, passphrase: omoPass || undefined }),
       })
       const data = await r.json()
       if (!r.ok) { setError(data.detail || 'Birth failed'); setOmoLoading(false); return }
@@ -619,6 +620,11 @@ export default function AgentDashboard() {
         ) : (
           <>
             <div className="form-group"><label className="form-label">Agent Name</label><input value={omoName} onChange={e => setOmoName(e.target.value)} placeholder="Ọmọ Kọ́dà" /></div>
+            <div className="form-group">
+              <label className="form-label">Passphrase <span style={{ color: 'var(--muted)', fontWeight: 400 }}>(optional — soul protection)</span></label>
+              <input value={omoPass} onChange={e => setOmoPass(e.target.value)} type="password" placeholder="a secret only you know" />
+              <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 4 }}>Seeds a display-cloak on the seed + a duress panic-phrase (decoy on entry). Not derivable from the seed; never stored in plaintext.</div>
+            </div>
             <button className="btn btn-primary" onClick={birthOmokoda} disabled={omoLoading || !omoName.trim()}>{omoLoading ? 'Birthing…' : '🔴 Birth Sovereign'}</button>
           </>
         )}
