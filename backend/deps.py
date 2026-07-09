@@ -127,6 +127,52 @@ async def get_vault_connector(x_vault_connector_key: Optional[str] = Header(None
     if not row or row["revoked"]:
         raise HTTPException(status_code=401, detail="Invalid or revoked connector key")
     connector = dict(row)
+
+
+# ── System tool authentication (infrastructure daemons posting signals) ────────
+# Each system tool (freqtrade_bridge, security_bridge, atomic_daemon, etc.) gets
+# a narrowly-scoped token via env var (VANTAGE_TOOL_TRADING, VANTAGE_TOOL_SECURITY,
+# VANTAGE_TOOL_INTEL). These tools can ONLY POST to their specific signal endpoints.
+
+async def get_system_tool(
+    x_vantage_tool: Optional[str] = Header(None),
+    x_vantage_tool_key: Optional[str] = Header(None)
+) -> dict:
+    """Auth for system infrastructure tools (freqtrade_bridge, security_bridge, etc.)
+    that post signals. Separate from agent auth: system tools post on behalf of
+    Vantage itself, not as an agent.
+
+    Headers:
+      X-Vantage-Tool: 'trading' | 'security' | 'intel'
+      X-Vantage-Tool-Key: the tool's secret key
+
+    Returns: {'tool': str, 'name': str} if valid, raises 401 otherwise.
+    """
+    if not x_vantage_tool or not x_vantage_tool_key:
+        raise HTTPException(
+            status_code=401,
+            detail="X-Vantage-Tool and X-Vantage-Tool-Key headers required"
+        )
+
+    tool_name = x_vantage_tool.lower().strip()
+    if tool_name not in ("trading", "security", "intel"):
+        raise HTTPException(status_code=401, detail="Unknown X-Vantage-Tool")
+
+    # Lookup tool token from config settings (TOOL_TRADING, TOOL_SECURITY, TOOL_INTEL)
+    attr_name = f"TOOL_{tool_name.upper()}"
+    expected_token = getattr(settings, attr_name, None)
+
+    if not expected_token:
+        logger.warning(f"System tool '{tool_name}' not configured (missing VANTAGE_{attr_name})")
+        raise HTTPException(status_code=503, detail="System tool not configured")
+
+    # Constant-time comparison to prevent timing attacks
+    if not hmac.compare_digest(x_vantage_tool_key, expected_token):
+        logger.warning(f"Invalid system tool key for '{tool_name}'")
+        raise HTTPException(status_code=401, detail="Invalid tool key")
+
+    return {"tool": tool_name, "name": f"vantage-{tool_name}-ingest"}
+
     _check_connector_rate(connector["id"])
     return connector
 

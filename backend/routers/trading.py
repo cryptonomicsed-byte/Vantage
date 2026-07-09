@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from backend.db import DB_PATH
-from backend.deps import get_agent
+from backend.deps import get_agent, get_system_tool
 from backend.config import settings
 from backend.crypto_utils import encrypt_key_for_agent, decrypt_key_for_agent
 
@@ -732,15 +732,29 @@ async def get_price(symbol: str):
 # ── Signals ─────────────────────────────────────────────────
 
 @router.post("/signals/ingest")
-async def ingest_signal(request: Request, agent: dict = Depends(get_agent)):
-    """External signal ingestion — auto-creates orders from high-conviction signals."""
+async def ingest_signal(request: Request, tool: dict = Depends(get_system_tool)):
+    """System-only signal ingestion (freqtrade_bridge, worldmonitor, etc.).
+
+    Body: {symbol, direction, conviction, source, agent_id, quantity?, chain?}
+      - agent_id: which agent should receive this signal
+      - conviction: 0–1 confidence (>0.7 auto-executes if wallet exists)
+      - source: origin (e.g. "freqtrade", "worldmonitor")
+
+    Only X-Vantage-Tool (trading) + X-Vantage-Tool-Key can call this.
+    Regular agents cannot post signals directly; signals come from daemons only.
+    """
     body = await request.json()
+
+    agent_id = body.get("agent_id")
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="agent_id required in payload")
+
     symbol = body.get("symbol", body.get("pair", "UNKNOWN"))
     direction = body.get("direction", body.get("signal", "NEUTRAL"))
     conviction = float(body.get("conviction", body.get("confidence", 0)))
     chain = body.get("chain", "solana")
     source = body.get("source", "unknown")
-    
+
     direction_upper = direction.upper()
     if conviction > 0.7 and direction_upper in ("BUY", "LONG", "BULLISH"):
         side = "BUY"
@@ -748,29 +762,29 @@ async def ingest_signal(request: Request, agent: dict = Depends(get_agent)):
         side = "SELL"
     else:
         side = None
-    
+
     result = {
         "status": "ingested", "symbol": symbol,
         "direction": direction, "conviction": conviction,
-        "chain": chain, "source": source,
+        "chain": chain, "source": source, "agent_id": agent_id,
     }
-    
+
     # Auto-create order for high-conviction signals
     if side:
         async with aiosqlite.connect(DB_PATH) as db:
             wallet = await (await db.execute(
                 "SELECT id, address FROM trading_wallets WHERE agent_id=? AND chain=? ORDER BY created_at LIMIT 1",
-                (agent["id"], chain)
+                (agent_id, chain)
             )).fetchone()
-        
+
         if wallet:
             quantity = body.get("quantity", 0.1)
             async with aiosqlite.connect(DB_PATH) as db:
                 cur = await db.execute(
-                    """INSERT INTO trading_orders (agent_id, wallet_id, order_type, side, symbol, chain, 
+                    """INSERT INTO trading_orders (agent_id, wallet_id, order_type, side, symbol, chain,
                        quantity, trigger_reason, signal_id, status)
                        VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                    (agent["id"], wallet[0], "market", side, symbol, chain, quantity,
+                    (agent_id, wallet[0], "market", side, symbol, chain, quantity,
                      f"{source}_conviction_{conviction:.1f}", body.get("signal_id"), "pending")
                 )
                 await db.commit()
@@ -778,11 +792,11 @@ async def ingest_signal(request: Request, agent: dict = Depends(get_agent)):
                 result["action"] = side
                 result["wallet_address"] = wallet[1]
         else:
-            result["warning"] = f"No {chain} wallet configured. Create one first."
+            result["warning"] = f"No {chain} wallet configured for agent {agent_id}."
     else:
         result["action"] = "HOLD"
         result["note"] = "Conviction too low for auto-execution"
-    
+
     return result
 
 # ── Trade Journal ───────────────────────────────────────────

@@ -11,7 +11,7 @@ import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..db import DB_PATH
-from ..deps import get_agent
+from ..deps import get_agent, get_system_tool
 
 router = APIRouter(prefix="/api/security", tags=["security"])
 
@@ -33,19 +33,27 @@ async def get_scan(scan_id: int, agent: dict = Depends(get_agent)):
 
 
 @router.post("/scan-result")
-async def ingest_scan_result(request: Request, agent: dict = Depends(get_agent)):
-    """Record an external scanner result (SSTImap, XSStrike, atomic-red-team, …)
-    so it surfaces in the SENTINEL Security Scans tab as a structured record
-    instead of a plain feed post.
+async def ingest_scan_result(request: Request, tool: dict = Depends(get_system_tool)):
+    """System-only security scan result ingestion (Strix, SSTImap, XSStrike, Parrot, atomic-red-team).
 
-    Body: {tool, target, status?, vulnerable?, findings?[]}
-      - tool   → artifact_type (e.g. "sstimap", "xsstrike", "atomic")
-      - target → artifact_ref (URL / repo / technique id)
-      - status → 'clean' | 'vulnerable' | 'flagged' (or derived from `vulnerable`)
-      - findings → list of strings or objects
+    Results surface in the SENTINEL Security Scans tab as structured records.
+    Only daemons (strix_runner, security_bridge, atomic_daemon, parrot) can POST here.
+    Agents cannot report scan results directly.
+
+    Body: {tool, target, agent_id, status?, vulnerable?, findings?[]}
+      - tool       → artifact_type (e.g. "strix", "sstimap", "xsstrike", "atomic", "parrot")
+      - target     → artifact_ref (URL / repo / technique id / scan scope)
+      - agent_id   → which agent is receiving this scan result
+      - status     → 'clean' | 'vulnerable' | 'flagged' (or derived from `vulnerable`)
+      - findings   → list of strings or objects
     """
     body = await request.json()
-    tool = str(body.get("tool", "scan")).strip().lower() or "scan"
+
+    agent_id = body.get("agent_id")
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="agent_id required in payload")
+
+    scanner = str(body.get("tool", "scan")).strip().lower() or "scan"
     target = str(body.get("target", "")).strip()
     findings = body.get("findings") or []
     if not isinstance(findings, list):
@@ -53,13 +61,22 @@ async def ingest_scan_result(request: Request, agent: dict = Depends(get_agent))
     status = body.get("status")
     if not status:
         status = "vulnerable" if body.get("vulnerable") else "clean"
+
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """INSERT INTO security_scans
                (agent_id, artifact_type, artifact_ref, status, normalized, findings_json, completed_at)
                VALUES (?, ?, ?, ?, 0, ?, datetime('now'))""",
-            (agent["id"], tool, target, str(status), _json.dumps(findings)),
+            (agent_id, scanner, target, str(status), _json.dumps(findings)),
         )
         await db.commit()
         scan_id = cur.lastrowid
-    return {"scan_id": scan_id, "tool": tool, "target": target, "status": status, "findings": len(findings)}
+
+    return {
+        "scan_id": scan_id,
+        "tool": scanner,
+        "target": target,
+        "agent_id": agent_id,
+        "status": status,
+        "findings": len(findings)
+    }
