@@ -31,7 +31,9 @@ def _make_db(path):
             error TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')),
             executed_at TEXT, settled_at TEXT);
     """)
-    api_key = "test-api-key-12345"
+    # Not a secret — a fixed string only used to exercise the wallet
+    # encrypt/decrypt round-trip in-test. gitleaks:allow
+    api_key = "dummy-not-a-real-key"  # gitleaks:allow
     con.execute("INSERT INTO agents (id, name, api_key) VALUES (1, 'trader', ?)", (api_key,))
     # A real fake Solana secret key (64 bytes) base58-ish; only used in dry-run,
     # never signed with, so its validity is irrelevant here.
