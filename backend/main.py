@@ -405,8 +405,26 @@ async def lifespan(app: FastAPI):
     gossip_task = asyncio.create_task(_federation_gossip_loop())
     watch_task = asyncio.create_task(_platform_subscription_loop())
     weather_task = asyncio.create_task(_weather_alert_loop())
+
+    background_tasks = [task, gossip_task, watch_task, weather_task]
+
+    # Trading execution engine — polls pending orders and runs them through
+    # per-chain adapters. Gated by TRADING_ENGINE_ENABLED; actual on-chain
+    # submission is separately gated by TRADING_LIVE_ENABLED (else dry-run).
+    if settings.TRADING_ENGINE_ENABLED:
+        from .execution_engine import execution_loop
+        background_tasks.append(asyncio.create_task(execution_loop()))
+        logger.info("Trading execution engine enabled (live=%s)", settings.TRADING_LIVE_ENABLED)
+
+    # Pump.fun scan → signal → order pipeline. Gated by PUMPFUN_SCAN_ENABLED
+    # and requires PUMPFUN_SCAN_AGENT_ID to attribute signals/orders.
+    if settings.PUMPFUN_SCAN_ENABLED:
+        from .routers.pumpfun import pumpfun_scan_loop
+        background_tasks.append(asyncio.create_task(pumpfun_scan_loop()))
+        logger.info("Pump.fun scan pipeline enabled (agent=%s)", settings.PUMPFUN_SCAN_AGENT_ID)
+
     yield
-    for t in (task, gossip_task, watch_task, weather_task):
+    for t in background_tasks:
         t.cancel()
         try:
             await t

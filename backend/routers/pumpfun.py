@@ -97,7 +97,7 @@ async def graduations(limit: int=20, x_agent_key: str=Header(...)):
 async def trades(mint: str, limit: int=20, x_agent_key: str=Header(...)):
     get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
     try:
-        d = _fetch(f"https://quote-api.jup.ag/v6/quote?inputMint={mint}&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=1000000&slippageBps=50")
+        d = _fetch(f"https://api.jup.ag/swap/v1/quote?inputMint={mint}&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=1000000&slippageBps=50")
         return {"mint":mint,"in_amount":d.get("inAmount",0),"out_amount":d.get("outAmount",0),"price_impact_pct":float(d.get("priceImpactPct",0)),"routes":len(d.get("routePlan",[])),"source":"Jupiter"}
     except:
         return {"mint":mint,"source":"Jupiter:offline"}
@@ -218,3 +218,153 @@ async def token_traders(mint: str = Query(...), x_agent_key: str = Header(...)):
         return {"mint":mint,"traders":[{"wallet":w,"txn_count":c} for w,c in top],"unique_traders":len(trader_vol)}
     except:
         return {"mint":mint,"traders":[],"error":"RPC unavailable"}
+
+
+# ════════════════════════════════════════════════════════════════
+# AUTOMATED SCAN → SIGNAL → ORDER PIPELINE
+# ════════════════════════════════════════════════════════════════
+# Background loop (started from main.py when settings.PUMPFUN_SCAN_ENABLED):
+# every PUMPFUN_SCAN_INTERVAL seconds it polls GeckoTerminal trending pools,
+# applies a safety filter, and for tokens that pass it records a pumpfun signal
+# and — at conviction > 0.7 — a pending order for the configured agent's wallet.
+# The execution engine picks those orders up. Disabled by default; requires
+# PUMPFUN_SCAN_AGENT_ID so signals/orders attribute to a real agent + wallet.
+import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def _passes_safety(pool_attrs: dict, min_volume: float, max_top5_pct: float) -> tuple[bool, str]:
+    """Cheap, data-only safety gate over a GeckoTerminal pool row. Deeper
+    on-chain checks (mint authority, holder concentration) run in the execution
+    engine's adapter just before a live trade — this filter only decides whether
+    a token is worth signaling at all."""
+    vol = pool_attrs.get("volume_usd", {})
+    vol_24h = float(vol.get("h24", 0)) if isinstance(vol, dict) else 0.0
+    if vol_24h < min_volume:
+        return False, f"volume ${vol_24h:.0f} < ${min_volume:.0f}"
+    resv = pool_attrs.get("reserve_in_usd")
+    if resv is not None and float(resv) < 500:
+        return False, f"reserve ${float(resv):.0f} < $500 (illiquid)"
+    txns = pool_attrs.get("transactions", {}).get("h24", {})
+    if isinstance(txns, dict):
+        buys, sells = txns.get("buys", 0), txns.get("sells", 0)
+        if buys + sells < 20:
+            return False, "too few 24h txns (<20)"
+    return True, "ok"
+
+
+def _conviction_from_pool(pool_attrs: dict) -> float:
+    """Map trending momentum to a 0–1 conviction. Positive 24h move + healthy
+    buy/sell ratio lifts conviction toward the auto-order threshold."""
+    pc = pool_attrs.get("price_change_percentage", {})
+    pc_24h = float(pc.get("h24", 0)) if isinstance(pc, dict) else 0.0
+    txns = pool_attrs.get("transactions", {}).get("h24", {})
+    buys = txns.get("buys", 0) if isinstance(txns, dict) else 0
+    sells = txns.get("sells", 0) if isinstance(txns, dict) else 0
+    ratio = buys / max(buys + sells, 1)
+    momentum = max(0.0, min(pc_24h / 100.0, 1.0))  # +100% caps momentum term
+    return round(min(0.5 + 0.3 * momentum + 0.2 * (ratio - 0.5) * 2, 0.99), 3)
+
+
+def _ensure_signal_table(db):
+    db.execute("""CREATE TABLE IF NOT EXISTS trading_signals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT DEFAULT 'pumpfun',
+        symbol TEXT, mint TEXT, direction TEXT, conviction REAL, source TEXT,
+        reason TEXT, timestamp TEXT DEFAULT (datetime('now')))""")
+
+
+def _record_pumpfun_signal(agent_id: int, symbol: str, mint: str, conviction: float,
+                           reason: str, conviction_threshold: float,
+                           max_sol: float) -> dict:
+    """Persist a pumpfun signal and, above threshold, a pending order for the
+    agent's Solana wallet. Mirrors /api/trading/signals/ingest's auto-order
+    behavior but runs in-process (no self-HTTP, no system-tool key needed)."""
+    from backend.config import settings
+    db = sqlite3.connect(str(DB))
+    _ensure_signal_table(db)
+    db.execute("""INSERT INTO trading_signals (type, symbol, mint, direction, conviction, source, reason)
+                  VALUES ('pumpfun', ?, ?, 'BUY', ?, 'pumpfun_scan', ?)""",
+               (symbol, mint, conviction, reason))
+    result = {"symbol": symbol, "mint": mint, "conviction": conviction, "signaled": True}
+    if conviction > 0.7:
+        wallet = db.execute(
+            "SELECT id, address FROM trading_wallets WHERE agent_id=? AND chain='solana' "
+            "ORDER BY created_at LIMIT 1", (agent_id,)).fetchone()
+        if wallet:
+            # Position size in SOL, capped by the per-order safety limit.
+            qty = min(max_sol, settings.TRADING_MAX_SOL_PER_ORDER)
+            cur = db.execute(
+                """INSERT INTO trading_orders (agent_id, wallet_id, order_type, side, symbol,
+                   chain, quantity, trigger_reason, status)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (agent_id, wallet[0], "market", "BUY", mint or symbol, "solana", qty,
+                 f"pumpfun_scan_conviction_{conviction:.2f}", "pending"))
+            result["order_created"] = cur.lastrowid
+            result["quantity_sol"] = qty
+        else:
+            result["warning"] = f"no solana wallet for agent {agent_id}"
+    db.commit()
+    db.close()
+    return result
+
+
+async def pumpfun_scan_once() -> dict:
+    """One scan pass. Returns a summary dict; safe to call manually for testing."""
+    from backend.config import settings
+    agent_id = settings.PUMPFUN_SCAN_AGENT_ID
+    if not agent_id:
+        return {"status": "skipped", "reason": "PUMPFUN_SCAN_AGENT_ID not set"}
+    try:
+        d = await asyncio.to_thread(
+            _fetch, "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1",
+            {"accept": "application/json"})
+    except Exception as e:
+        return {"status": "error", "reason": f"GeckoTerminal fetch failed: {e}"}
+
+    pools = d.get("data", [])
+    included = {i.get("id"): i for i in d.get("included", [])}
+    signaled, skipped = [], 0
+    for p in pools[:20]:
+        attrs = p.get("attributes", {})
+        name = attrs.get("name", "")
+        sym = name.split(" / ")[0][:12] if " / " in name else name[:12]
+        # Resolve the base token mint from the relationships/included section.
+        mint = ""
+        rel = p.get("relationships", {}).get("base_token", {}).get("data", {})
+        tok = included.get(rel.get("id"))
+        if tok:
+            mint = tok.get("attributes", {}).get("address", "")
+        ok, why = _passes_safety(attrs, settings.PUMPFUN_MIN_VOLUME_USD,
+                                 settings.PUMPFUN_MAX_TOP5_HOLDER_PCT)
+        if not ok:
+            skipped += 1
+            continue
+        conviction = max(_conviction_from_pool(attrs), settings.PUMPFUN_SCAN_CONVICTION)
+        res = await asyncio.to_thread(
+            _record_pumpfun_signal, agent_id, sym, mint, conviction,
+            f"trending: {why}", settings.PUMPFUN_SCAN_CONVICTION,
+            settings.TRADING_MAX_SOL_PER_ORDER)
+        signaled.append(res)
+    return {"status": "ok", "signaled": len(signaled), "skipped": skipped,
+            "orders": [s for s in signaled if s.get("order_created")]}
+
+
+async def pumpfun_scan_loop():
+    """Background scan loop. Started from main.py's lifespan when enabled."""
+    from backend.config import settings
+    interval = settings.PUMPFUN_SCAN_INTERVAL
+    logger.info(f"Pump.fun scan loop started (interval={interval}s, agent={settings.PUMPFUN_SCAN_AGENT_ID})")
+    while True:
+        try:
+            summary = await pumpfun_scan_once()
+            if summary.get("signaled"):
+                logger.info(f"[pumpfun-scan] {summary['signaled']} signals, "
+                            f"{len(summary.get('orders', []))} orders, {summary.get('skipped')} filtered")
+        except asyncio.CancelledError:
+            logger.info("Pump.fun scan loop stopping")
+            raise
+        except Exception as e:
+            logger.error(f"[pumpfun-scan] error: {e}")
+        await asyncio.sleep(interval)

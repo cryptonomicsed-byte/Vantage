@@ -57,6 +57,41 @@ class Settings(BaseSettings):
     # the /api/glyphs router. Sovereign mode — client-sealed blobs — needs no key.)
     GLYPH_MASTER_SECRET: str = ""
 
+    # ── Trading execution engine ──────────────────────────────────────────
+    # The execution engine polls trading_orders for pending rows and runs them
+    # through per-chain adapters. Two independent gates so wiring can be live
+    # while real fund movement stays off until deliberately enabled:
+    #   TRADING_ENGINE_ENABLED — run the background execution loop at all
+    #   TRADING_LIVE_ENABLED   — actually sign+submit on-chain (else dry-run:
+    #                            orders are marked 'ready' with the built intent)
+    TRADING_ENGINE_ENABLED: bool = False
+    TRADING_LIVE_ENABLED: bool = False
+    TRADING_ENGINE_INTERVAL: int = 5  # seconds between pending-order polls
+
+    # Solana / Jupiter execution
+    HELIUS_API_KEY: str = ""  # Helius RPC key for quotes/submit/confirm
+    JUPITER_BASE_URL: str = "https://api.jup.ag/swap/v1"
+
+    # Per-order and per-day safety caps (SOL). Deliberately conservative.
+    TRADING_MAX_SOL_PER_ORDER: float = 0.01
+    TRADING_DAILY_SOL_CAP: float = 0.1
+    TRADING_MAX_CONCURRENT_PENDING: int = 5
+    TRADING_MIN_LIQUIDITY_USD: float = 500.0
+    TRADING_DEFAULT_SLIPPAGE_BPS: int = 300
+    TRADING_COOLDOWN_SECONDS: int = 30  # min gap between two on-chain trades
+
+    # ── Pump.fun scan → signal → order pipeline ───────────────────────────
+    # When enabled, a loop polls GeckoTerminal trending, safety-filters, and
+    # posts high-conviction signals to the ingest endpoint (which auto-creates
+    # orders). Requires PUMPFUN_SCAN_AGENT_ID so signals attribute to a real
+    # agent + wallet. Off by default — no autonomous trading without opt-in.
+    PUMPFUN_SCAN_ENABLED: bool = False
+    PUMPFUN_SCAN_AGENT_ID: int = 0
+    PUMPFUN_SCAN_INTERVAL: int = 60  # seconds between trending scans
+    PUMPFUN_SCAN_CONVICTION: float = 0.72  # >0.7 → auto-order in ingest
+    PUMPFUN_MIN_VOLUME_USD: float = 5000.0
+    PUMPFUN_MAX_TOP5_HOLDER_PCT: float = 40.0
+
     # Cross-instance federation (optional)
     FEDERATION_ENABLED: bool = True
 
