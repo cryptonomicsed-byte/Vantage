@@ -1099,7 +1099,7 @@ async def get_performance(agent: dict = Depends(get_agent)):
         
         # Win rate from orders
         total = await (await db.execute(
-            "SELECT COUNT(*) as c FROM trading_orders WHERE agent_id=? AND status='filled'", (agent["id"],)
+            "SELECT COUNT(*) as c FROM trading_orders WHERE agent_id=? AND status IN ('filled','submitted')", (agent["id"],)
         )).fetchone()
         
         winning = await (await db.execute(
@@ -1326,7 +1326,7 @@ async def _load_book(agent_id: int) -> dict:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             """SELECT symbol, side, filled_quantity, quantity, avg_fill_price, price
-               FROM trading_orders WHERE agent_id=? AND status='filled'
+               FROM trading_orders WHERE agent_id=? AND status IN ('filled','submitted')
                ORDER BY COALESCE(executed_at, created_at), id""",
             (agent_id,)
         )).fetchall()
@@ -1411,7 +1411,7 @@ async def get_portfolio(agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         filled = await (await db.execute(
-            "SELECT COUNT(*) c FROM trading_orders WHERE agent_id=? AND status='filled'",
+            "SELECT COUNT(*) c FROM trading_orders WHERE agent_id=? AND status IN ('filled','submitted')",
             (agent["id"],)
         )).fetchone()
 
