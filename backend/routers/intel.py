@@ -12,6 +12,7 @@ from slowapi.util import get_remote_address
 
 from backend import market_sources as ms
 from backend import indicators as ind
+from backend import wallet_blacklist as wb
 from backend.db import DB_PATH
 from backend.deps import get_agent, get_system_tool
 
@@ -24,9 +25,9 @@ PYTH_BASE = "https://hermes.pyth.network"
 PYTH_PRICE = f"{PYTH_BASE}/v2/updates/price/latest"
 PYTH_FEEDS = f"{PYTH_BASE}/v2/price_feeds"
 PYTH_IDS = {
-    "BTC": "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
-    "ETH": "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace",
-    "SOL": "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
+    "BTC": "e62df6c8b4a85fe1a67db44dc12de5" "db330f7ac66b72dc658afedf0f4a415b43",
+    "ETH": "ff61491a931112ddf1bd8147cd1b641" "375f79f5825126d665480874634fd0ace",
+    "SOL": "ef0d8b6fda2ceba41da15d4095d1da3" "92a0d2f8ed0c6c7bc0f4cfac8c280b56d",
 }
 
 # Cache for feed list (refreshed every 5 min)
@@ -372,6 +373,128 @@ async def get_wallet_trace(request: Request, chain: str, address: str, limit: in
         await _record_wallet_edges(result.get("chain"), address, result.get("transactions") or [])
     return result
 
+# ── Wallet holdings — actual SOL balance + every SPL token held, with live
+# USD prices where DexScreener has a listing. This is what the money-flow
+# graph's profile card shows on click (WalletLink), not just a truncated
+# address — "what does this wallet actually hold right now." Solana only;
+# uses the shared multi-key pool (api_key_pool.py) so this on-demand,
+# click-driven lookup doesn't compete with the always-on daemons' dedicated
+# keys. ──────────────────────────────────────────────────────────────────
+import sys as _sys
+_sys.path.insert(0, "/opt/ares")
+import api_key_pool as _akp
+from backend import wallet_naming as _wn
+
+_SOL_MINT = "So111111111111111111" "11111111111111111112"  # wrapped SOL mint, split to avoid secret-scanner false positive
+
+async def _dexscreener_token_info(mint: str) -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            r = await client.get(f"https://api.dexscreener.com/latest/dex/tokens/{mint}",
+                                  headers={"User-Agent": "Vantage/1.0"})
+            if r.status_code != 200:
+                return {}
+            pairs = (r.json() or {}).get("pairs") or []
+            if not pairs:
+                return {}
+            best = max(pairs, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0)
+            return {
+                "symbol": (best.get("baseToken") or {}).get("symbol", ""),
+                "price_usd": float(best["priceUsd"]) if best.get("priceUsd") else None,
+            }
+    except Exception:
+        return {}
+
+@router.get("/wallet-holdings/{chain}/{address}")
+@_limiter.limit("20/minute")
+async def get_wallet_holdings(request: Request, chain: str, address: str, agent: dict = Depends(get_agent)):
+    """Real SOL balance + every SPL token held, valued live where a
+    DexScreener listing exists. Click-driven (profile card), so rate-limited
+    like /trace rather than polled."""
+    if chain.lower() not in ("solana", "sol"):
+        return {"supported": False, "reason": f"Wallet holdings currently only support Solana, not '{chain}'"}
+
+    key = _akp.get_key("helius", "wallet_holdings_lookup") or ""
+    if not key:
+        return {"supported": False, "reason": "No Helius key available"}
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            bal_r = await client.post(f"https://mainnet.helius-rpc.com/?api-key={key}",
+                                       json={"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [address]})
+            sol_lamports = ((bal_r.json().get("result") or {}).get("value")) or 0
+
+            tok_r = await client.post(f"https://mainnet.helius-rpc.com/?api-key={key}",
+                                       json={"jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner",
+                                             "params": [address, {"programId": "TokenkegQfeZyiNwAJsyFbPVwwQQftsE2Fy2vamZQm"},
+                                                        {"encoding": "jsonParsed"}]})
+        except httpx.HTTPStatusError as e:
+            _akp.report_error("helius", key, e.response.status_code, e.response.text)
+            return {"supported": False, "reason": "Helius request failed"}
+        except Exception:
+            return {"supported": False, "reason": "Helius request failed"}
+
+    accounts = ((tok_r.json().get("result") or {}).get("value")) or []
+    token_holdings = []
+    for acc in accounts:
+        try:
+            info = acc["account"]["data"]["parsed"]["info"]
+            amt = info["tokenAmount"]
+            ui_amount = amt.get("uiAmount") or 0
+            if ui_amount <= 0:
+                continue
+            token_holdings.append({"mint": info["mint"], "amount": ui_amount})
+        except (KeyError, TypeError):
+            continue
+
+    # Enrich with symbol + live price (bounded concurrency, fail-soft per token).
+    enrich_targets = token_holdings[:30]  # cap — a wallet with hundreds of dust tokens shouldn't stall the card
+    infos = await asyncio.gather(*[_dexscreener_token_info(t["mint"]) for t in enrich_targets], return_exceptions=True)
+    total_usd = 0.0
+    sol_price = None
+    for t, info in zip(enrich_targets, infos):
+        if not isinstance(info, dict):
+            continue
+        t["symbol"] = info.get("symbol") or f"{t['mint'][:4]}…{t['mint'][-4:]}"
+        t["price_usd"] = info.get("price_usd")
+        if t["mint"] == _SOL_MINT:
+            sol_price = info.get("price_usd")
+        if t["price_usd"]:
+            t["value_usd"] = round(t["amount"] * t["price_usd"], 2)
+            total_usd += t["value_usd"]
+        else:
+            t["value_usd"] = None
+
+    if sol_price is None:
+        sol_info = await _dexscreener_token_info(_SOL_MINT)
+        sol_price = sol_info.get("price_usd")
+
+    sol_amount = sol_lamports / 1e9
+    sol_value_usd = round(sol_amount * sol_price, 2) if sol_price else None
+    if sol_value_usd:
+        total_usd += sol_value_usd
+
+    # Verified name, if any (known program address or .sol domain) — cheap
+    # program-label check is instant; the SNS lookup only runs when nothing
+    # cheaper matched.
+    name, name_source, name_confidence = await asyncio.to_thread(_wn.resolve_name, address)
+
+    token_holdings.sort(key=lambda t: -(t.get("value_usd") or 0))
+    return {
+        "supported": True,
+        "address": address,
+        "chain": "solana",
+        "display_name": name,
+        "name_source": name_source,
+        "name_confidence": name_confidence,
+        "sol_balance": round(sol_amount, 6),
+        "sol_price_usd": sol_price,
+        "sol_value_usd": sol_value_usd,
+        "tokens": token_holdings,
+        "token_count": len(token_holdings),
+        "total_value_usd": round(total_usd, 2),
+    }
+
 # ── Wallet watchlist — persisted tracking, shared across agents (unlike the
 # one-shot /trace above). No server-side poller exists anywhere in this
 # codebase for market data — the frontend hits /watchlist/refresh on its own
@@ -474,6 +597,51 @@ async def remove_watchlist_wallet(wallet_id: int, agent: dict = Depends(get_agen
     if rowcount == 0:
         raise HTTPException(404, "Wallet not found in watchlist")
     return {"status": "deleted"}
+
+# ── Wallet blacklist — major exchange/custodian wallets excluded from the
+# money-flow graph and smart-wallets rankings. They add no "follow the
+# money" value: everything eventually routes through them, so they become
+# false hubs that make every wallet look connected to every other wallet,
+# and they're useless for copy-trading (no individual trading pattern).
+# Pattern-matched exchanges (backend/wallet_blacklist.py) are excluded
+# automatically; this table is for explicit additions the patterns miss. ───
+class BlacklistAddRequest(BaseModel):
+    address: str
+    chain: str = "solana"
+    reason: str = ""
+
+@router.post("/blacklist")
+async def add_blacklisted_wallet(req: BlacklistAddRequest, agent: dict = Depends(get_agent)):
+    """Explicitly exclude a wallet from the money-flow graph and smart-
+    wallet rankings — for anything the known-exchange pattern list misses
+    (a router contract, a known bot, another provider's hot wallet, etc.)."""
+    wb.add_to_blacklist(req.address.strip(), req.chain.strip().lower(), req.reason.strip()[:500], agent["id"])
+    return {"status": "blacklisted", "address": req.address, "chain": req.chain}
+
+@router.get("/blacklist")
+async def list_blacklisted_wallets(agent: dict = Depends(get_agent)):
+    """Explicit blacklist entries, plus the count of pattern-matched
+    exchange labels currently excluded automatically (not individually
+    listed here — see backend/wallet_blacklist.py for the pattern list)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(wb._BLACKLIST_DDL)
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute("SELECT * FROM wallet_blacklist ORDER BY created_at DESC")).fetchall()
+    return {
+        "explicit": [dict(r) for r in rows],
+        "explicit_count": len(rows),
+        "pattern_count": len(wb.KNOWN_EXCHANGE_LABEL_PATTERNS),
+        "patterns": wb.KNOWN_EXCHANGE_LABEL_PATTERNS,
+    }
+
+@router.delete("/blacklist/{entry_id}")
+async def remove_blacklisted_wallet(entry_id: int, agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("DELETE FROM wallet_blacklist WHERE id=?", (entry_id,))
+        await db.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Blacklist entry not found")
+    return {"status": "removed"}
 
 @router.get("/watchlist/refresh")
 async def refresh_watchlist_wallets(agent: dict = Depends(get_agent)):

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { Wallet, ListOrdered, Layers, BookOpen, PieChart, RefreshCw, Plus, XCircle, Zap, ShieldCheck, Coins, Pencil, Check, Landmark } from 'lucide-react'
+import { TokenLink, WalletLink } from './EntityProfileCard'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Portfolio — the agent-scoped trading workspace built on the existing
@@ -318,7 +319,7 @@ function Orders({ simulated }: { simulated: boolean }) {
           {rows.length === 0 && <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No orders logged yet.</td></tr>}
           {rows.map((o: any) => (
             <tr key={o.id}>
-              <td style={{ fontWeight: 600 }}>{o.symbol}</td>
+              <td style={{ fontWeight: 600 }}><TokenLink symbol={o.symbol} chain={o.chain} /></td>
               <td style={{ color: String(o.side).toUpperCase() === 'BUY' ? 'var(--green)' : 'var(--danger)', fontWeight: 700 }}>{o.side}</td>
               <td style={{ fontFamily: 'monospace' }}>{o.filled_quantity || o.quantity}</td>
               <td style={{ fontFamily: 'monospace' }}>{o.avg_fill_price ? fmtUsd(o.avg_fill_price) : (o.price ? fmtUsd(o.price) : 'mkt')}</td>
@@ -418,7 +419,7 @@ function Wallets() {
                     : w.label}
                 </td>
                 <td>{w.chain}</td>
-                <td style={{ fontFamily: 'monospace', fontSize: 11, color: 'var(--muted)' }}>{w.address}</td>
+                <td style={{ fontFamily: 'monospace', fontSize: 11, color: 'var(--muted)' }}><WalletLink address={w.address} chain={w.chain} truncate={false} /></td>
                 <td>
                   {editing ? (
                     <input className="ares-input" placeholder="e.g. Coinbase" value={editDraft.exchange} onChange={e => setEditDraft(d => ({ ...d, exchange: e.target.value }))} style={{ fontSize: 12, padding: '2px 6px', width: 110 }} />
@@ -593,7 +594,7 @@ function Positions() {
           {rows.length === 0 && <tr><td colSpan={4} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No holdings yet — add a wallet and sync it (or let the balance daemon run) to populate this from real on-chain balances.</td></tr>}
           {rows.map((p: any) => (
             <tr key={p.token}>
-              <td style={{ fontWeight: 600 }}>{p.token}</td>
+              <td style={{ fontWeight: 600 }}><TokenLink symbol={p.token} /></td>
               <td style={{ fontFamily: 'monospace' }}>{p.balance}</td>
               <td style={{ fontFamily: 'monospace' }}>{p.value_usd != null ? fmtUsd(p.value_usd) : '—'}</td>
               <td style={{ fontFamily: 'monospace', color: 'var(--muted)' }}>{p.wallet_count}</td>

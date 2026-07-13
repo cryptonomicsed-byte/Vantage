@@ -11,16 +11,19 @@ Pre-migration alpha API — the sniper's scoring + money-flow surfaces.
 
 Both are auto-exposed as MCP tools (fastapi-mcp), so agents call them directly.
 """
+import asyncio
 import time
 from typing import Optional
 
 import aiosqlite
+import httpx
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
 from backend.db import DB_PATH
 from backend.deps import get_agent
 from backend.alpha_engine import composite_alpha_score, assemble_features
+from backend import wallet_blacklist as wb
 
 router = APIRouter(prefix="/api", tags=["alpha"])
 
@@ -213,74 +216,441 @@ async def score_token_from_intel(
     return result
 
 
+# ── Token lifecycle tiers — market-cap + age bucketing for the money-flow
+# galaxy's token nodes. DexScreener's per-mint pairs endpoint returns fdv/
+# marketCap directly (no supply lookup needed), cached 60s like the rest of
+# market_sources. Best-effort: a token with no DexScreener listing yet (fresh
+# pump.fun mint, pre-liquidity) just has no market_cap/tier and the frontend
+# treats it as "just_launch" from age alone. ──────────────────────────────────
+_TIER_BOUNDARIES = [
+    (1_000_000, "migrated_1m"), (10_000_000, "migrated_10m"),
+    (20_000_000, "migrated_20m"), (100_000_000, "migrated_100m"),
+    (500_000_000, "migrated_500m"), (1_000_000_000, "migrated_1b"),
+]
+
+
+def _classify_tier(market_cap: Optional[float], first_seen_ts: int, now: int) -> str:
+    age_h = (now - first_seen_ts) / 3600 if first_seen_ts else 999
+    if age_h < 1:
+        return "just_launch"
+    if not market_cap or market_cap <= 0:
+        return "pumpfun_10k_20k" if age_h < 24 else "pre_migration"
+    for cap, tier in _TIER_BOUNDARIES:
+        if market_cap < cap:
+            return tier
+    return "billion_club"
+
+
+async def _dexscreener_mcap(mint: str) -> Optional[float]:
+    """Best-effort market cap for a single mint via DexScreener's token
+    endpoint (fdv/marketCap on the highest-liquidity pair). None on any
+    failure — never blocks the graph on a flaky/missing listing."""
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            r = await client.get(f"https://api.dexscreener.com/latest/dex/tokens/{mint}",
+                                  headers={"User-Agent": "Vantage/1.0"})
+            if r.status_code != 200:
+                return None
+            pairs = (r.json() or {}).get("pairs") or []
+            if not pairs:
+                return None
+            best = max(pairs, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0)
+            return best.get("marketCap") or best.get("fdv")
+    except Exception:
+        return None
+
+
 @router.get("/moneyflow", operation_id="money_flow_graph")
 async def money_flow(
     _caller: dict = Depends(get_agent),
     hours: int = Query(24, ge=1, le=720, description="Activity window for brightness"),
     limit: int = Query(400, le=2000, description="Max trades to fold in"),
+    tier_lookups: int = Query(15, ge=0, le=40, description="Top-N tokens by volume to fetch live market-cap tiers for"),
+    include_counterparties: bool = Query(True, description="Fold in wallet_edges (all /trace + watchlist counterparty activity, not just on-chain trades)"),
+    edge_limit: int = Query(600, le=2000, description="Max wallet_edges rows to fold in"),
+    exclude_exchanges: bool = Query(True, description="Exclude major exchange/custodian wallets — they're false hubs (everything routes through them) with no follow-the-money value"),
 ):
-    """Money Flow Galaxy graph: wallets + tokens as nodes, capital flows as edges.
+    """Money Flow Galaxy graph: wallets + tokens + social accounts as nodes,
+    capital flows and mentions as edges.
+
+    Two wallet data sources feed this, merged into one graph:
+      1. wallet_trades — on-chain Solana swaps for the small set of wallets
+         wallet_tracker.py actively polls via Helius (rich: SOL amounts, token
+         mints, timestamps).
+      2. wallet_edges — every counterparty any /trace lookup or
+         /watchlist/refresh has ever surfaced, across all 259+ tracked_wallets
+         (broader coverage, coarser data: tx_count + total_value only). This is
+         the ONLY source for most tracked wallets, so it's included by default
+         — without it the graph silently drops to just the ~2 wallets with
+         on-chain trade history and looks like tracked wallets vanished.
 
     Node `brightness` (0..1) is recent-activity share; `size` (0..1) is capital
-    weight. The frontend maps brightness→glow and size→radius; inactive nodes
-    fade toward the background nebulae exactly as specified.
+    weight — this is the Mandelbrot fade: dormant nodes drop toward 0 brightness
+    and sink toward the background nebulae, active ones glow and stay large.
+    Wallet nodes carry `degen_score`/`trade_count`/`unique_tokens` from the
+    watchlist. Token nodes carry `tier` (lifecycle/market-cap bucket) for the
+    top `tier_lookups` tokens by volume. Social nodes (Twitter/Telegram
+    handles that mentioned a token) link into the token they mentioned, from
+    the same social_signals table social_tracker.py's daemon already fills.
     """
-    since = int(time.time()) - hours * 3600
+    now = int(time.time())
+    since = now - hours * 3600
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(_WALLET_TRADES_DDL)
+        await db.execute(_SOCIAL_SIGNALS_DDL)
         db.row_factory = aiosqlite.Row
         rows = [dict(r) for r in await (await db.execute(
             """SELECT wallet, token_mint, sol_change, token_amount, timestamp, type
                FROM wallet_trades ORDER BY timestamp DESC LIMIT ?""",
             (limit,),
         )).fetchall()]
-        # Human labels for known wallets.
-        labels: dict = {}
+
+        counterparty_rows: list[dict] = []
+        if include_counterparties:
+            try:
+                counterparty_rows = [dict(r) for r in await (await db.execute(
+                    """SELECT chain, address_a, address_b, role, tx_count, total_value,
+                              first_seen, last_seen FROM wallet_edges
+                       ORDER BY total_value DESC LIMIT ?""",
+                    (edge_limit,),
+                )).fetchall()]
+            except aiosqlite.Error:
+                pass
+
+        # Every tracked wallet, even ones with zero observed edges yet — so
+        # adding a wallet via the watchlist makes it appear immediately.
+        tracked_rows: list[dict] = []
         try:
-            for r in await (await db.execute(
-                "SELECT address, label FROM tracked_wallets WHERE label != ''")).fetchall():
-                labels[r[0]] = r[1]
+            tracked_rows = [dict(r) for r in await (await db.execute(
+                "SELECT chain, address, label, address_type, degen_score, "
+                "trade_count, unique_tokens, notes FROM tracked_wallets")).fetchall()]
+        except aiosqlite.Error:
+            pass
+
+        # Wallet profile enrichment — label + degen intel already gathered by
+        # pumpfun_wallet_intel.py / degen_alpha_fusion.py into tracked_wallets.
+        wallet_meta: dict = {r["address"]: r for r in tracked_rows}
+
+        # Exchange blacklist — explicit table + pattern-matched labels
+        # (backend/wallet_blacklist.py, shared with degen.py's smart-wallets
+        # filter). Major exchanges are false hubs: everything routes through
+        # them eventually, so including them makes every wallet look
+        # connected to every other wallet and drowns out real signal.
+        blacklisted: set = set()
+        if exclude_exchanges:
+            blacklisted = wb.get_blacklisted_addresses("solana")
+            for addr, meta in wallet_meta.items():
+                if meta.get("address_type") == "exchange" or wb.is_exchange_label(meta.get("label", "")):
+                    blacklisted.add(addr)
+
+        # Social mentions — Twitter/Telegram → CA, from social_tracker.py.
+        social_rows = [dict(r) for r in await (await db.execute(
+            """SELECT platform, username, ticker, contract_address, sentiment,
+                      confidence, post_url, created_at
+               FROM social_signals
+               WHERE created_at >= datetime('now', ?)
+               ORDER BY id DESC LIMIT 500""",
+            (f"-{int(hours)} hours",),
+        )).fetchall()]
+
+        # Meaningful token wallets — deployer/top_holder/top_trader/first_buyer,
+        # from pumpfun_wallet_intel.py. These create BOTH the token node (even
+        # if it has no trade activity yet) and a typed wallet→token edge, so
+        # "every token that pops up as a top play/signal gets parsed and its
+        # deployer/first-buyers/top-holders put in the graph" holds even
+        # before any on-chain trade has been observed for it.
+        role_rows: list[dict] = []
+        try:
+            role_rows = [dict(r) for r in await (await db.execute(
+                """SELECT mint, symbol, wallet_address, role, rank, metric, metric_label
+                   FROM token_wallet_roles
+                   WHERE discovered_at >= datetime('now', ?)
+                   ORDER BY discovered_at DESC LIMIT 500""",
+                (f"-{int(hours)} hours",),
+            )).fetchall()]
+        except aiosqlite.Error:
+            pass
+
+        # Wallets a social account has claimed as its own (PnL-post address
+        # extraction) — a real social→wallet edge, "tie their wallet to
+        # their node in the graph."
+        claim_rows: list[dict] = []
+        try:
+            claim_rows = [dict(r) for r in await (await db.execute(
+                """SELECT platform, username, wallet_address, chain, post_url, post_excerpt
+                   FROM social_wallet_links
+                   WHERE extracted_at >= datetime('now', ?)
+                   ORDER BY extracted_at DESC LIMIT 300""",
+                (f"-{int(hours)} hours",),
+            )).fetchall()]
+        except aiosqlite.Error:
+            pass
+
+        # Migration gravity anchors — major exchange wallets, fetched
+        # unconditionally here regardless of exclude_exchanges (used below
+        # as physics anchors, not ranked as "smart money").
+        exchange_rows: list = []
+        try:
+            exchange_rows = (await (await db.execute(
+                """SELECT w.address, w.label,
+                          (SELECT COUNT(*) FROM wallet_edges we WHERE we.address_a=w.address OR we.address_b=w.address) as edge_count
+                   FROM tracked_wallets w WHERE w.address_type = 'exchange' AND w.chain = 'solana'
+                   ORDER BY edge_count DESC LIMIT 5"""
+            )).fetchall())
         except aiosqlite.Error:
             pass
 
     nodes: dict = {}
     edges: dict = {}
+    first_seen: dict = {}
 
-    def touch(nid: str, ntype: str, label: str, sol: float, ts: int) -> None:
+    def wallet_extra(addr: str) -> dict:
+        wm = wallet_meta.get(addr, {})
+        return {
+            "address": addr, "chain": wm.get("chain", "solana"),
+            "degen_score": wm.get("degen_score", 0),
+            "trade_count": wm.get("trade_count", 0),
+            "unique_tokens": wm.get("unique_tokens", 0),
+            "address_type": wm.get("address_type", "wallet"),
+        }
+
+    def wallet_label(addr: str) -> str:
+        wm = wallet_meta.get(addr, {})
+        return wm.get("label") or (f"{addr[:4]}…{addr[-4:]}" if len(addr) > 8 else addr)
+
+    def touch(nid: str, ntype: str, label: str, sol: float, ts: int, extra: Optional[dict] = None) -> None:
         n = nodes.setdefault(nid, {
             "id": nid, "type": ntype, "label": label,
-            "trades": 0, "recent": 0, "volume_sol": 0.0,
+            "trades": 0, "recent": 0, "volume_sol": 0.0, **(extra or {}),
         })
         n["trades"] += 1
         n["volume_sol"] += abs(sol)
         if ts >= since:
             n["recent"] += 1
+        first_seen[nid] = min(first_seen.get(nid, ts or now), ts or now)
 
+    def parse_sqlite_ts(s: Optional[str]) -> int:
+        if not s:
+            return now
+        try:
+            import datetime as _dt
+            return int(_dt.datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=_dt.timezone.utc).timestamp())
+        except Exception:
+            return now
+
+    # 1. On-chain trades (richest: real SOL amounts + token mints).
     for r in rows:
         w = r.get("wallet")
         mint = r.get("token_mint")
         sol = float(r.get("sol_change") or 0.0)
         ts = int(r.get("timestamp") or 0)
-        if not w:
+        if not w or w in blacklisted:
             continue
-        wlabel = labels.get(w) or (f"{w[:4]}…{w[-4:]}" if len(w) > 8 else w)
-        touch(f"wallet:{w}", "wallet", wlabel, sol, ts)
+        touch(f"wallet:{w}", "wallet", wallet_label(w), sol, ts, wallet_extra(w))
         if mint:
-            touch(f"token:{mint}", "token", f"{mint[:4]}…{mint[-4:]}" if len(mint) > 8 else mint, sol, ts)
+            touch(f"token:{mint}", "token", f"{mint[:4]}…{mint[-4:]}" if len(mint) > 8 else mint, sol, ts, {
+                "ca": mint, "chain": "solana",
+            })
             key = (f"wallet:{w}", f"token:{mint}")
-            e = edges.setdefault(key, {"source": key[0], "target": key[1], "trades": 0, "volume_sol": 0.0, "net_sol": 0.0})
+            e = edges.setdefault(key, {"source": key[0], "target": key[1], "type": "traded", "trades": 0, "volume_sol": 0.0, "net_sol": 0.0, "last_ts": 0})
             e["trades"] += 1
             e["volume_sol"] += abs(sol)
             e["net_sol"] += sol  # +ve = wallet received SOL (sold token), -ve = bought
+            e["last_ts"] = max(e["last_ts"], ts)
 
-    # Normalise brightness (recent activity share) and size (capital weight).
+    # 2. Wallet↔wallet counterparties from wallet_edges — every /trace and
+    # /watchlist/refresh lookup ever surfaced, across all tracked wallets.
+    # This is the primary coverage source (259+ wallets) vs. the handful with
+    # on-chain trade rows above, so it must stay on by default.
+    for r in counterparty_rows:
+        a, b = r.get("address_a"), r.get("address_b")
+        if not a or not b or a in blacklisted or b in blacklisted:
+            continue
+        ts = parse_sqlite_ts(r.get("last_seen"))
+        tx_count = int(r.get("tx_count") or 0)
+        value = float(r.get("total_value") or 0.0)
+        touch(f"wallet:{a}", "wallet", wallet_label(a), value, ts, wallet_extra(a))
+        touch(f"wallet:{b}", "wallet", wallet_label(b), 0.0, ts, wallet_extra(b))
+        key = (f"wallet:{a}", f"wallet:{b}")
+        e = edges.setdefault(key, {"source": key[0], "target": key[1], "type": "counterparty", "trades": 0, "volume_sol": 0.0, "net_sol": 0.0, "role": r.get("role"), "last_ts": 0})
+        e["trades"] += tx_count
+        e["volume_sol"] += value
+        e["last_ts"] = max(e["last_ts"], ts)
+
+    # 3. Every tracked wallet gets a node even with zero observed activity —
+    # so adding a wallet to the watchlist makes it appear immediately instead
+    # of waiting on a trace/refresh to happen first. Brightness naturally
+    # comes out 0 (dormant) until it has real activity, which is the correct
+    # Mandelbrot-fade behavior, not a bug.
+    for r in tracked_rows:
+        addr = r.get("address")
+        if not addr or addr in blacklisted:
+            continue
+        nid = f"wallet:{addr}"
+        if nid not in nodes:
+            nodes[nid] = {
+                "id": nid, "type": "wallet", "label": wallet_label(addr),
+                "trades": 0, "recent": 0, "volume_sol": 0.0, **wallet_extra(addr),
+            }
+            first_seen[nid] = now
+
+    # Fold in social mentions as nodes linked to the token they mentioned —
+    # only for tokens/tickers that also appear as trade nodes (keeps the graph
+    # to entities with real capital flow, not every drive-by tweet).
+    mint_by_ticker: dict = {}
+    for nid, n in nodes.items():
+        if n["type"] == "token":
+            mint_by_ticker.setdefault(n["label"].upper(), nid)
+    for s in social_rows:
+        ca = (s.get("contract_address") or "").strip()
+        ticker = (s.get("ticker") or "").strip().upper().lstrip("$")
+        token_nid = f"token:{ca}" if ca and f"token:{ca}" in nodes else mint_by_ticker.get(ticker)
+        if not token_nid:
+            continue
+        platform = s.get("platform") or "social"
+        username = s.get("username") or "unknown"
+        social_nid = f"social:{platform}:{username}"
+        sn = nodes.setdefault(social_nid, {
+            "id": social_nid, "type": "social", "label": f"@{username}",
+            "platform": platform, "trades": 0, "recent": 0, "volume_sol": 0.0,
+            "mentions": 0,
+        })
+        sn["mentions"] += 1
+        sn["recent"] += 1  # social rows are already window-filtered by the query
+        first_seen[social_nid] = min(first_seen.get(social_nid, now), now)
+        key = (social_nid, token_nid)
+        e = edges.setdefault(key, {"source": social_nid, "target": token_nid, "type": "mentioned", "trades": 0, "volume_sol": 0.0, "net_sol": 0.0, "sentiment": s.get("sentiment"), "last_ts": now})
+        e["trades"] += 1
+        e["last_ts"] = now
+
+    # Meaningful token wallets — deployer/top_holder/top_trader/first_buyer.
+    # Creates the token node too if it doesn't exist yet (a token can show up
+    # here from signal-driven enrichment before any trade has been observed).
+    ROLE_EDGE_STYLE = {
+        "deployer": {"color": "#f5a623"}, "top_holder": {"color": "#a855f7"},
+        "top_trader": {"color": "#4ade80"}, "first_buyer": {"color": "#22d3ee"},
+    }
+    for r in role_rows:
+        mint, wallet = r.get("mint"), r.get("wallet_address")
+        if not mint or not wallet or wallet in blacklisted:
+            continue
+        token_nid = f"token:{mint}"
+        if token_nid not in nodes:
+            nodes[token_nid] = {
+                "id": token_nid, "type": "token",
+                "label": r.get("symbol") or f"{mint[:4]}…{mint[-4:]}",
+                "ca": mint, "chain": "solana",
+                "trades": 0, "recent": 1, "volume_sol": 0.0,
+            }
+            first_seen[token_nid] = now
+        wallet_nid = f"wallet:{wallet}"
+        if wallet_nid not in nodes:
+            nodes[wallet_nid] = {"id": wallet_nid, "type": "wallet", "label": wallet_label(wallet),
+                                  **wallet_extra(wallet), "trades": 0, "recent": 1, "volume_sol": 0.0}
+            first_seen[wallet_nid] = now
+        role = r.get("role", "")
+        key = (wallet_nid, token_nid, role)
+        edges[key] = {
+            "source": wallet_nid, "target": token_nid, "type": f"role:{role}",
+            "trades": 0, "volume_sol": 0.0, "net_sol": 0.0,
+            "role": role, "rank": r.get("rank"), "metric": r.get("metric"), "metric_label": r.get("metric_label"),
+            "color": ROLE_EDGE_STYLE.get(role, {}).get("color"),
+            "last_ts": now,
+        }
+
+    # Wallets a social account has claimed as its own via PnL-style posts.
+    for r in claim_rows:
+        wallet, platform, username = r.get("wallet_address"), r.get("platform") or "social", r.get("username") or "unknown"
+        if not wallet or wallet in blacklisted:
+            continue
+        wallet_nid = f"wallet:{wallet}"
+        if wallet_nid not in nodes:
+            nodes[wallet_nid] = {"id": wallet_nid, "type": "wallet", "label": wallet_label(wallet),
+                                  **wallet_extra(wallet), "trades": 0, "recent": 1, "volume_sol": 0.0}
+            first_seen[wallet_nid] = now
+        social_nid = f"social:{platform}:{username}"
+        sn = nodes.setdefault(social_nid, {
+            "id": social_nid, "type": "social", "label": f"@{username}",
+            "platform": platform, "trades": 0, "recent": 0, "volume_sol": 0.0, "mentions": 0,
+        })
+        sn["mentions"] += 1
+        sn["recent"] += 1
+        first_seen[social_nid] = min(first_seen.get(social_nid, now), now)
+        key = (social_nid, wallet_nid)
+        edges[key] = {
+            "source": social_nid, "target": wallet_nid, "type": "claimed_wallet",
+            "trades": edges.get(key, {}).get("trades", 0) + 1, "volume_sol": 0.0, "net_sol": 0.0,
+            "post_url": r.get("post_url"), "post_excerpt": r.get("post_excerpt"),
+            "color": "#ec4899", "last_ts": now,
+        }
+
+    # Live market-cap tiers for the top N token nodes by volume (bounded,
+    # concurrent, fail-soft — a dead DexScreener listing just leaves tier unset).
+    token_nodes = sorted((n for n in nodes.values() if n["type"] == "token"),
+                         key=lambda n: -n["volume_sol"])
+    lookup_targets = token_nodes[:tier_lookups]
+    if lookup_targets:
+        mcaps = await asyncio.gather(*[_dexscreener_mcap(n["ca"]) for n in lookup_targets],
+                                      return_exceptions=True)
+        for n, mcap in zip(lookup_targets, mcaps):
+            mc = mcap if isinstance(mcap, (int, float)) else None
+            n["market_cap"] = mc
+            n["tier"] = _classify_tier(mc, first_seen.get(n["id"], now), now)
+    for n in token_nodes[tier_lookups:]:
+        n["tier"] = _classify_tier(None, first_seen.get(n["id"], now), now)
+
+    # Migration gravity — major exchange wallets are kept in the graph
+    # (unconditionally, regardless of exclude_exchanges — they're not being
+    # ranked as "smart money" here, they're the physical destination
+    # liquidity actually migrates to) as anchor nodes. Every token gets a
+    # migration_gravity edge to the busiest exchange anchor, with a
+    # migration_distance (0=migrated/connected, 1=just launched/far) the
+    # frontend uses to set the force-graph link distance directly — pre-
+    # migration tokens drift closer as they approach migration, and snap to
+    # a short link once they're actually migrated_*. Distance is derived
+    # from the same tier classification just computed above, so it's
+    # consistent with what the profile card already shows.
+    MIGRATION_DISTANCE_BY_TIER = {
+        "just_launch": 1.0, "pumpfun_10k_20k": 0.8, "pre_migration": 0.55,
+        "just_migrated": 0.15, "migrated_1m": 0.1, "migrated_10m": 0.08,
+        "migrated_20m": 0.06, "migrated_100m": 0.04, "migrated_500m": 0.02,
+        "migrated_1b": 0.01, "billion_club": 0.0,
+    }
+    if exchange_rows:
+        anchor_addr = exchange_rows[0]["address"]
+        anchor_nid = f"wallet:{anchor_addr}"
+        if anchor_nid not in nodes:
+            nodes[anchor_nid] = {
+                "id": anchor_nid, "type": "wallet", "label": exchange_rows[0]["label"] or f"{anchor_addr[:4]}…{anchor_addr[-4:]}",
+                **wallet_extra(anchor_addr), "trades": 0, "recent": 1, "volume_sol": 0.0,
+                "is_migration_anchor": True,
+            }
+            first_seen[anchor_nid] = now
+        else:
+            nodes[anchor_nid]["is_migration_anchor"] = True
+
+        for n in token_nodes:
+            dist = MIGRATION_DISTANCE_BY_TIER.get(n.get("tier"), 0.6)
+            key = (n["id"], anchor_nid)
+            edges[key] = {
+                "source": n["id"], "target": anchor_nid, "type": "migration_gravity",
+                "trades": 0, "volume_sol": 0.0, "net_sol": 0.0,
+                "migration_distance": dist, "last_ts": now,
+            }
+
+    # Normalise brightness (recent activity share) and size (capital weight) —
+    # the Mandelbrot fade: dormant nodes → brightness 0, sink into background.
     max_recent = max((n["recent"] for n in nodes.values()), default=0) or 1
     max_vol = max((n["volume_sol"] for n in nodes.values()), default=0.0) or 1.0
+    max_mentions = max((n.get("mentions", 0) for n in nodes.values()), default=0) or 1
     node_list = []
     for n in nodes.values():
         n["brightness"] = round(n["recent"] / max_recent, 4)
-        n["size"] = round((n["volume_sol"] / max_vol) ** 0.5, 4)  # sqrt for gentler spread
+        vol_component = n["volume_sol"] / max_vol
+        mention_component = n.get("mentions", 0) / max_mentions if n["type"] == "social" else 0
+        n["size"] = round(max(vol_component, mention_component) ** 0.5, 4)  # sqrt for gentler spread
         n["volume_sol"] = round(n["volume_sol"], 4)
+        n["first_seen"] = first_seen.get(n["id"], now)
         node_list.append(n)
     node_list.sort(key=lambda x: -x["size"])
     edge_list = [
@@ -293,5 +663,7 @@ async def money_flow(
         "edges": edge_list,
         "wallets": sum(1 for n in node_list if n["type"] == "wallet"),
         "tokens": sum(1 for n in node_list if n["type"] == "token"),
+        "social": sum(1 for n in node_list if n["type"] == "social"),
         "window_hours": hours,
+        "generated_at": now,
     }

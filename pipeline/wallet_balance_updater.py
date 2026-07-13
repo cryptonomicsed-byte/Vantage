@@ -9,24 +9,38 @@ wallet's SOL balance, it now:
   • upserts today's PnL snapshot per agent from linked-wallet net worth, keeping
     the equity curve auto-synced with no manual entry.
 """
-import os, urllib.request, json, sqlite3, time, sys
+import os, urllib.request, urllib.error, json, sqlite3, time, sys
 from datetime import datetime, timezone, date
 
-HELIUS_KEY = os.environ.get("HELIUS_API_KEY", "")
+sys.path.insert(0, "/opt/ares")
+import api_key_pool
+
+TASK_NAME = "wallet_balance_updater"
 DB_PATH = os.environ.get("DB_PATH", "/opt/ares/Vantage/data/vantage.db")
 INTERVAL = int(sys.argv[1]) if len(sys.argv) > 1 else int(os.environ.get("WALLET_POLL_SECONDS", "60"))
 
 
+def _helius_key():
+    return api_key_pool.get_key("helius", TASK_NAME) or os.environ.get("HELIUS_API_KEY", "")
+
+
 def get_sol_balance(address):
     """Get SOL balance (in SOL) via Helius RPC."""
+    key = _helius_key()
+    if not key:
+        return None
     payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "getBalance",
                           "params": [address]}).encode()
     req = urllib.request.Request(
-        f"https://mainnet.helius-rpc.com/?api-key={HELIUS_KEY}",
+        f"https://mainnet.helius-rpc.com/?api-key={key}",
         data=payload, headers={"Content-Type": "application/json"})
     try:
         resp = urllib.request.urlopen(req, timeout=10)
         return json.loads(resp.read().decode()).get("result", {}).get("value", 0) / 1e9
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="ignore")
+        api_key_pool.report_error("helius", key, e.code, body)
+        return None
     except Exception:
         return None
 
@@ -112,6 +126,12 @@ def update_balances():
 
 if __name__ == "__main__":
     print(f"Wallet Balance Updater — {INTERVAL}s cycle", flush=True)
+    if not _helius_key():
+        print("  WARNING: no Helius key available (pool empty and HELIUS_API_KEY unset) — idling.", flush=True)
+    else:
+        status = api_key_pool.pool_status("helius")
+        if status:
+            print(f"  helius pool: {len(status)} key(s) — {[s['key_suffix'] for s in status]}", flush=True)
     while True:
         try:
             update_balances()

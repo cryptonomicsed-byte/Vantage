@@ -7,6 +7,7 @@ import DailyIntel from './trading/DailyIntel'
 import DegenTrenches from './trading/DegenTrenches'
 import Portfolio from './trading/Portfolio'
 import TradingViewChart from './trading/TradingViewChart'
+import { ProfileCardProvider } from './trading/EntityProfileCard'
 
 const GROUPS = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -20,25 +21,27 @@ const GROUPS = [
 export default function TradingSection() {
   const [group, setGroup] = useState<'dashboard' | 'analytics' | 'daily-intel' | 'degen-trenches' | 'portfolio' | 'terminal'>('dashboard')
   return (
-    <div>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, marginBottom: 20 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <h1 className="page-title" style={{ marginBottom: 0 }}>Trading</h1>
+    <ProfileCardProvider>
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, marginBottom: 20 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <h1 className="page-title" style={{ marginBottom: 0 }}>Trading</h1>
+          </div>
+          <div className="top-nav-tabs" style={{ flex: 'initial' }}>
+            {GROUPS.map(g => (
+              <button key={g.id} type="button" className={`top-nav-tab ${group === g.id ? 'active' : ''}`} onClick={() => setGroup(g.id as any)}>
+                <g.icon size={15} /> {g.label}
+              </button>
+            ))}
+          </div>
         </div>
-        <div className="top-nav-tabs" style={{ flex: 'initial' }}>
-          {GROUPS.map(g => (
-            <button key={g.id} type="button" className={`top-nav-tab ${group === g.id ? 'active' : ''}`} onClick={() => setGroup(g.id as any)}>
-              <g.icon size={15} /> {g.label}
-            </button>
-          ))}
-        </div>
+        {group === 'dashboard' && <TradingDashboard onOpenPortfolio={() => setGroup('portfolio')} />}
+        {group === 'analytics' && <MarketIntel />}
+        {group === 'daily-intel' && <DailyIntel />}
+        {group === 'degen-trenches' && <DegenTrenches />}
+        {group === 'portfolio' && <Portfolio />}
+        {group === 'terminal' && <TradingTerminal />}
       </div>
-      {group === 'dashboard' && <TradingDashboard onOpenPortfolio={() => setGroup('portfolio')} />}
-      {group === 'analytics' && <MarketIntel />}
-      {group === 'daily-intel' && <DailyIntel />}
-      {group === 'degen-trenches' && <DegenTrenches />}
-      {group === 'portfolio' && <Portfolio />}
-      {group === 'terminal' && <TradingTerminal />}
-    </div>
+    </ProfileCardProvider>
   )
 }

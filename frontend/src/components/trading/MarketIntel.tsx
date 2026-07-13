@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react'
 import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, Waypoints, ListOrdered, Eye, Plus, Trash2, Share2, Pencil, Check, X, Flame } from 'lucide-react'
 import Top5Degen from './Top5Degen'
 import MoneyFlowGraph from '../MoneyFlowGraph'
+import { TokenLink, WalletLink } from './EntityProfileCard'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Analytics — the deep-dive lenses behind Trading's default Dashboard tab. These
@@ -20,14 +21,29 @@ function Badge({ status }: { status: string }) {
 }
 
 // ── Data fetching hook ─────────────────────────────────────────────────────────
+// Seeds from a localStorage cache so switching tabs and coming back shows the
+// last-known-good payload immediately instead of a blank "Loading…" flash —
+// this component used to start every mount from data=null with no memory of
+// what was there a moment ago, which is what "info was here, I came back and
+// it's gone" was actually caused by.
+function cacheKeyFor(path: string) { return `vantage_cache_intel_${path}` }
 function useAresApi(path: string, interval = 60000) {
-  const [data, setData] = useState<any>(null)
-  const [loading, setLoading] = useState(true)
+  const [data, setData] = useState<any>(() => {
+    try {
+      const raw = localStorage.getItem(cacheKeyFor(path))
+      return raw ? JSON.parse(raw) : null
+    } catch { return null }
+  })
+  const [loading, setLoading] = useState(data === null)
   const load = useCallback(async () => {
     try {
       const r = await fetch(path)
-      if (r.ok) setData(await r.json())
-    } catch {}
+      if (r.ok) {
+        const json = await r.json()
+        setData(json)
+        try { localStorage.setItem(cacheKeyFor(path), JSON.stringify(json)) } catch { /* quota — non-fatal */ }
+      }
+    } catch { /* offline — keep showing last-known data */ }
     setLoading(false)
   }, [path])
   useEffect(() => { load(); const t = setInterval(load, interval); return () => clearInterval(t) }, [load, interval])
@@ -107,7 +123,7 @@ function AresOverview() {
             <thead><tr><th>Route</th><th>Pair</th><th>Spread</th></tr></thead>
             <tbody>
               {arbOpps.slice(0, 5).map((o: any, i: number) => (
-                <tr key={i}><td>{o.route}</td><td>{o.pair}</td><td style={{ color: 'var(--warning)', fontWeight: 700 }}>{o.spread_pct?.toFixed(1)}%</td></tr>
+                <tr key={i}><td>{o.route}</td><td>{o.pair && o.pair.includes('/') ? <TokenLink symbol={o.pair.split('/')[0]} /> : o.pair}</td><td style={{ color: 'var(--warning)', fontWeight: 700 }}>{o.spread_pct?.toFixed(1)}%</td></tr>
               ))}
             </tbody>
           </table>
@@ -136,7 +152,7 @@ function AresArbitrage() {
           {opps.map((o: any, i: number) => (
             <tr key={i} className={o.spread_pct > 3 ? 'threat-high' : ''}>
               <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{o.route}</td>
-              <td>{o.pair}</td>
+              <td>{o.pair && o.pair.includes('/') ? <TokenLink symbol={o.pair.split('/')[0]} /> : o.pair}</td>
               <td style={{ color: o.spread_pct > 3 ? 'var(--danger)' : 'var(--warning)', fontWeight: 700 }}>{o.spread_pct?.toFixed(1)}%</td>
               <td>${o.buy_price?.toFixed(2)}</td>
               <td>${o.sell_price?.toFixed(2)}</td>
@@ -249,7 +265,7 @@ function AresAlpha() {
         <tbody>
           {items.map((i: any, idx: number) => (
             <tr key={idx}>
-              <td style={{ fontWeight: 600 }}>{i.symbol || '?'}</td>
+              <td style={{ fontWeight: 600 }}>{i.symbol ? <TokenLink symbol={i.symbol} ca={i.ca || i.address} chain={i.chain} /> : '?'}</td>
               <td style={{ color: (i.conviction||0) > 3 ? 'var(--danger)' : 'var(--warning)', fontWeight: 700 }}>{(i.conviction||0).toFixed(2)}</td>
               <td style={{ fontFamily: 'monospace' }}>${(i.price||0).toFixed(8)}</td>
               <td style={{ fontFamily: 'monospace' }}>${(i.volume_24h||0).toLocaleString()}</td>
@@ -278,7 +294,7 @@ function AresYields() {
           {pools.length === 0 && <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No pools loaded.</td></tr>}
           {pools.map((p: any, i: number) => (
             <tr key={i}>
-              <td style={{ fontWeight: 600 }}>{p.pool}{p.stablecoin && <span style={{ fontSize: 9, color: 'var(--cyan)', marginLeft: 4 }}>STABLE</span>}</td>
+              <td style={{ fontWeight: 600 }}><TokenLink symbol={p.pool} chain={p.chain} />{p.stablecoin && <span style={{ fontSize: 9, color: 'var(--cyan)', marginLeft: 4 }}>STABLE</span>}</td>
               <td style={{ fontSize: 11 }}>{p.project}</td>
               <td style={{ fontSize: 11, color: 'var(--muted)' }}>{p.chain}</td>
               <td style={{ color: 'var(--green)', fontWeight: 700 }}>{p.apy?.toFixed(1)}%</td>
@@ -315,7 +331,11 @@ function AresDex() {
           {pairs.length === 0 && <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No pairs.</td></tr>}
           {pairs.map((p: any, i: number) => (
             <tr key={i}>
-              <td style={{ fontWeight: 600 }}>{p.pair}</td>
+              <td style={{ fontWeight: 600 }}>
+                {p.pair && p.pair.includes('/')
+                  ? <><TokenLink symbol={p.pair.split('/')[0]} ca={p.base_address} chain={p.chain} />/{p.pair.split('/')[1]}</>
+                  : <TokenLink symbol={p.pair} ca={p.base_address} chain={p.chain} />}
+              </td>
               <td style={{ fontSize: 11 }}>{p.dex}</td>
               <td style={{ fontSize: 11, color: 'var(--muted)' }}>{p.chain}</td>
               <td style={{ fontFamily: 'monospace' }}>{p.price_usd != null ? '$' + Number(p.price_usd).toPrecision(4) : '—'}</td>
@@ -367,7 +387,11 @@ function AresAllTokens() {
             {pools.length === 0 && <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No pools.</td></tr>}
             {pools.map((p: any, i: number) => (
               <tr key={i}>
-                <td style={{ fontWeight: 600 }}>{p.pair}</td>
+                <td style={{ fontWeight: 600 }}>
+                  {p.pair && p.pair.includes('/')
+                    ? <><TokenLink symbol={p.pair.split('/')[0]} ca={p.base_address} chain={network} />/{p.pair.split('/')[1]}</>
+                    : <TokenLink symbol={p.pair} ca={p.base_address} chain={network} />}
+                </td>
                 <td style={{ fontFamily: 'monospace' }}>{p.price_usd != null ? '$' + Number(p.price_usd).toPrecision(4) : '—'}</td>
                 <td style={{ fontFamily: 'monospace' }}>{p.liquidity_usd ? '$' + (p.liquidity_usd / 1e3).toFixed(0) + 'K' : '—'}</td>
                 <td style={{ fontFamily: 'monospace' }}>{p.volume_24h ? '$' + (p.volume_24h / 1e3).toFixed(0) + 'K' : '—'}</td>
@@ -776,7 +800,7 @@ function AresWatchlist() {
               return (
                 <tr key={w.id} className={w.whale_activity ? 'threat-high' : ''}>
                   <td style={{ textTransform: 'capitalize' }}>{w.chain}</td>
-                  <td style={{ fontFamily: 'monospace', fontSize: 11 }} title={w.address}>{w.address.slice(0, 6)}…{w.address.slice(-4)}</td>
+                  <td style={{ fontFamily: 'monospace', fontSize: 11 }}><WalletLink address={w.address} chain={w.chain} /></td>
                   <td>
                     {editing ? (
                       <select className="ares-input" value={editDraft.address_type} onChange={e => setEditDraft(d => ({ ...d, address_type: e.target.value }))} style={{ fontSize: 11, padding: '2px 6px' }}>

@@ -18,8 +18,11 @@ Env (see .env.example):
   TRADE_WALLET        fallback wallet if trading_wallets table is empty
   WALLET_POLL_SECONDS default 60
 """
-import os, sys, json, time, sqlite3, urllib.request
+import os, sys, json, time, sqlite3, urllib.request, urllib.error
 from datetime import datetime, timezone
+
+sys.path.insert(0, "/opt/ares")
+import api_key_pool
 
 # Optional: load a local .env for manual runs (systemd already injects env).
 def _load_dotenv():
@@ -34,7 +37,14 @@ def _load_dotenv():
             return
 _load_dotenv()
 
-HELIUS_KEY = os.environ.get("HELIUS_API_KEY", "")
+TASK_NAME = "wallet_tracker"
+# Dedicated key from the shared pool (api_key_pool.py) with automatic
+# failover if it hits a quota/rate-limit error — falls back to the plain env
+# var if the pool has nothing configured yet.
+def _helius_key():
+    return api_key_pool.get_key("helius", TASK_NAME) or os.environ.get("HELIUS_API_KEY", "")
+
+HELIUS_KEY = os.environ.get("HELIUS_API_KEY", "")  # kept for the startup "not set" check below
 VANTAGE_URL = os.environ.get("VANTAGE_URL", "http://localhost:8001")
 VANTAGE_KEY = os.environ.get("VANTAGE_KEY", "")
 DB_PATH = os.environ.get("DB_PATH", "/opt/ares/Vantage/data/vantage.db")
@@ -86,15 +96,21 @@ def tracked_wallets(db):
 
 def fetch_transactions(address, limit=25):
     """Recent parsed transactions for a wallet via Helius Enhanced API."""
-    if not HELIUS_KEY:
+    key = _helius_key()
+    if not key:
         return []
     url = (f"https://api.helius.xyz/v0/addresses/{address}/transactions"
-           f"?api-key={HELIUS_KEY}&limit={limit}")
+           f"?api-key={key}&limit={limit}")
     req = urllib.request.Request(url, headers={"User-Agent": "vantage-wallet-tracker"})
     try:
         resp = urllib.request.urlopen(req, timeout=15)
         data = json.loads(resp.read().decode())
         return data if isinstance(data, list) else []
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="ignore")
+        api_key_pool.report_error("helius", key, e.code, body)
+        print(f"  fetch error ({address[:8]}…): HTTP {e.code}", flush=True)
+        return []
     except Exception as e:
         print(f"  fetch error ({address[:8]}…): {e}", flush=True)
         return []
@@ -182,8 +198,12 @@ def ingest(db, wallet):
 
 def run():
     print(f"Wallet Trade Tracker — {INTERVAL}s cycle — DB {DB_PATH}", flush=True)
-    if not HELIUS_KEY:
-        print("  WARNING: HELIUS_API_KEY not set — set it in .env; idling.", flush=True)
+    if not _helius_key():
+        print("  WARNING: no Helius key available (pool empty and HELIUS_API_KEY unset) — idling.", flush=True)
+    else:
+        status = api_key_pool.pool_status("helius")
+        if status:
+            print(f"  helius pool: {len(status)} key(s) — {[s['key_suffix'] for s in status]}", flush=True)
     db = init_db()
     while True:
         try:

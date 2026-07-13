@@ -3,6 +3,7 @@ import { Flame, ChevronRight, RefreshCw, CandlestickChart, LineChart, Code2 } fr
 import CandleChart, { PineSeries } from './CandleChart'
 import PineEditor from './PineEditor'
 import TradingViewChart from './TradingViewChart'
+import { TokenInfoIcon, TokenLink } from './EntityProfileCard'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // TradingDashboard — the "everything in one place" landing tab for Trading.
@@ -80,6 +81,7 @@ function SignalRow({ s, onSelect }: { s: Signal; onSelect: (symbol: string) => v
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <span style={{ fontWeight: 700, fontSize: 12 }}>{s.symbol}</span>
+          <TokenInfoIcon symbol={s.symbol} />
           <span style={{ fontSize: 9, color: SOURCE_COLOR[s.source] || 'var(--muted)', border: `1px solid ${SOURCE_COLOR[s.source] || 'var(--border)'}`, borderRadius: 3, padding: '0 4px', textTransform: 'uppercase', letterSpacing: 0.3 }}>{s.source}</span>
         </div>
         <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{detail}</div>
@@ -227,7 +229,7 @@ export default function TradingDashboard({ onOpenPortfolio }: { onOpenPortfolio?
               <tbody>
                 {posList.slice(0, 3).map((p: any, idx: number) => (
                   <tr key={idx}>
-                    <td style={{ fontWeight: 600 }}>{p.symbol}</td>
+                    <td style={{ fontWeight: 600 }}><TokenLink symbol={p.symbol} chain={p.chain} /></td>
                     <td style={{ fontFamily: 'monospace' }}>{p.net_quantity}</td>
                     <td style={{ fontWeight: 700, color: (p.unrealized_pnl_usd ?? 0) >= 0 ? 'var(--green)' : 'var(--danger)' }}>
                       {(p.unrealized_pnl_usd ?? 0) >= 0 ? '+' : ''}{p.unrealized_pnl_usd != null ? `$${Number(p.unrealized_pnl_usd).toFixed(2)}` : '—'}

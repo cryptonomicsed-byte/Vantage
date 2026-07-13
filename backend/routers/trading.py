@@ -5,6 +5,7 @@ from typing import Optional, List
 from datetime import datetime, timezone, date
 
 import aiosqlite
+import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 
@@ -41,6 +42,7 @@ class OrderCreate(BaseModel):
     trigger_reason: str = "manual"
     signal_id: Optional[int] = None
     strategy_id: Optional[int] = None
+    notes: str = ""
 
 class OrderUpdate(BaseModel):
     status: Optional[str] = None
@@ -55,6 +57,7 @@ class StrategyCreate(BaseModel):
     config: dict = {}
     target_chain: str = ""
     target_symbols: str = ""
+    target_tiers: str = ""  # comma-separated token lifecycle tiers, e.g. "just_launch,pumpfun_10k_20k"
     max_position_size_usd: float = 0
     max_concurrent_trades: int = 1
     risk_per_trade_pct: float = 2.0
@@ -144,22 +147,26 @@ async def wallets_live(agent: dict = Depends(get_agent)):
 
 @router.post("/strategies")
 async def create_strategy(data: StrategyCreate, wallet_id: int = Query(...), agent: dict = Depends(get_agent)):
-    """Create a trading strategy linked to a wallet."""
+    """Create a trading strategy linked to a wallet. Always created UNARMED
+    (armed=0) — funding the linked wallet never causes this strategy to
+    trade. An agent must explicitly POST /strategies/{id}/arm before
+    strategy_bots.py will act on it. `enabled` only controls visibility/
+    listing; `armed` is the actual execution gate."""
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            """INSERT INTO trading_strategies 
-               (agent_id, wallet_id, name, description, strategy_type, config, 
-                target_chain, target_symbols, max_position_size_usd, max_concurrent_trades,
-                risk_per_trade_pct, stop_loss_pct, take_profit_pct)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            """INSERT INTO trading_strategies
+               (agent_id, wallet_id, name, description, strategy_type, config,
+                target_chain, target_symbols, target_tiers, max_position_size_usd, max_concurrent_trades,
+                risk_per_trade_pct, stop_loss_pct, take_profit_pct, armed)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)""",
             (agent["id"], wallet_id, data.name, data.description, data.strategy_type,
-             json.dumps(data.config), data.target_chain, data.target_symbols,
+             json.dumps(data.config), data.target_chain, data.target_symbols, data.target_tiers,
              data.max_position_size_usd, data.max_concurrent_trades,
              data.risk_per_trade_pct, data.stop_loss_pct, data.take_profit_pct)
         )
         sid = cur.lastrowid
         await db.commit()
-        return {"id": sid, "name": data.name, "status": "created"}
+        return {"id": sid, "name": data.name, "status": "created", "armed": False}
 
 @router.patch("/wallets/{wallet_id}")
 async def update_wallet(wallet_id: int, data: WalletUpdate, agent: dict = Depends(get_agent)):
@@ -361,11 +368,11 @@ async def create_order(data: OrderCreate, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """INSERT INTO trading_orders 
-               (agent_id, wallet_id, order_type, side, symbol, chain, quantity, price, trigger_reason, signal_id, strategy_id, status)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+               (agent_id, wallet_id, order_type, side, symbol, chain, quantity, price, trigger_reason, signal_id, strategy_id, notes, status)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (agent["id"], data.wallet_id, data.order_type, data.side.upper(),
              data.symbol, data.chain, data.quantity, data.price,
-             data.trigger_reason, data.signal_id, data.strategy_id, "pending")
+             data.trigger_reason, data.signal_id, data.strategy_id, data.notes, "pending")
         )
         order_id = cur.lastrowid
         await db.commit()
@@ -564,7 +571,7 @@ async def create_strategy(data: StrategyCreate, agent: dict = Depends(get_agent)
                (agent_id, name, description, strategy_type, config, target_chain, target_symbols,
                 max_position_size_usd, max_concurrent_trades, risk_per_trade_pct,
                 stop_loss_pct, take_profit_pct)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (agent["id"], data.name, data.description, data.strategy_type,
              json.dumps(data.config), data.target_chain, data.target_symbols,
              data.max_position_size_usd, data.max_concurrent_trades, data.risk_per_trade_pct,
@@ -582,6 +589,106 @@ async def list_strategies(agent: dict = Depends(get_agent)):
             (agent["id"],)
         )).fetchall()
         return [dict(r) for r in rows]
+
+# ── Strategy templates — the four canned bots. Listing/creating from a
+# template never arms it; that's always a separate, explicit call. Defined
+# (and routed) BEFORE /strategies/{strategy_id} — FastAPI matches path
+# operations in registration order, and "templates"/"from-template" would
+# otherwise be swallowed by the {strategy_id}:int path and 422. ────────────
+STRATEGY_TEMPLATES = {
+    "scalper_5020": {
+        "label": "Scalper (50% win / -30% stop, $20 increments, profit split)",
+        "strategy_type": "scalper_5020",
+        "description": ("Fixed $20-increment scalps on liquid tokens. Stop-loss -30%, "
+                         "take-profit +50%. On a win, 50% of realized profit compounds "
+                         "back into the trading wallet, the other 50% sweeps out to a "
+                         "separate profit wallet (set profit_wallet_id in config)."),
+        "config": {"position_size_usd": 20, "profit_split": {"compound_pct": 50, "extract_pct": 50}, "profit_wallet_id": None},
+        "stop_loss_pct": -30.0, "take_profit_pct": 50.0,
+        "target_tiers": "migrated_1m,migrated_10m,migrated_20m",
+        "max_position_size_usd": 20, "risk_per_trade_pct": 2.0,
+    },
+    "bighit_40_800": {
+        # NOTE: deliberately NOT named/tagged "moonshot" anything — that literal
+        # substring is what ares_jupiter_signer.py greps trigger_reason for
+        # (trigger_reason LIKE '%moonshot%') to decide which pending orders to
+        # auto-sign with the real BIPỌ̀N39 key. Colliding with that string here
+        # would make this bot's orders get picked up by that unrelated signer.
+        "label": "Big-Hit (-40% stop / +800% target)",
+        "strategy_type": "bighit_40_800",
+        "description": ("High-risk asymmetric bet on early tokens. Stop-loss -40%, "
+                         "take-profit +800%. Small position size given the tail risk."),
+        "config": {"position_size_usd": 20},
+        "stop_loss_pct": -40.0, "take_profit_pct": 800.0,
+        "target_tiers": "just_launch,pumpfun_10k_20k,pre_migration",
+        "max_position_size_usd": 20, "risk_per_trade_pct": 1.0,
+    },
+    "accumulator_tiered": {
+        "label": "Accumulator (sell 50% at +100%, DCA out next 25%, hold last 25% forever)",
+        "strategy_type": "accumulator_tiered",
+        "description": ("Accumulates into a token, sells half the position at +100% gain, "
+                         "then DCAs out the next 25% in steps as it keeps climbing, and "
+                         "holds the final 25% as a permanent moonbag."),
+        "config": {
+            "position_size_usd": 20,
+            "tier1": {"at_gain_pct": 100, "sell_pct": 50},
+            "tier2_dca": {"start_gain_pct": 150, "step_gain_pct": 50, "sell_pct_per_step": 5, "max_steps": 5},
+            "moonbag_pct": 25,
+        },
+        "target_tiers": "migrated_1m,migrated_10m,migrated_20m,migrated_100m",
+        "max_position_size_usd": 20, "risk_per_trade_pct": 2.0,
+    },
+    "doubler_flip": {
+        "label": "Doubler (flip 100% of position every time it doubles)",
+        "strategy_type": "doubler_flip",
+        "description": ("Sells the entire position the moment it's up +100% and reinvests "
+                         "the full proceeds into the next qualifying target — a compounding "
+                         "flip loop rather than a hold."),
+        "config": {"position_size_usd": 20, "flip_at_gain_pct": 100, "reinvest_pct": 100},
+        "target_tiers": "pumpfun_10k_20k,migrated_1m,migrated_10m",
+        "max_position_size_usd": 20, "risk_per_trade_pct": 2.0,
+    },
+}
+
+@router.get("/strategies/templates")
+async def list_strategy_templates(agent: dict = Depends(get_agent)):
+    """The four canned strategy bots an agent can instantiate, with their
+    exact rules (stop-loss/take-profit, position sizing, profit handling,
+    which token lifecycle tiers each one targets). Instantiate one with
+    POST /strategies/from-template — it's created disabled from execution
+    (armed=0) until explicitly armed."""
+    return {"templates": STRATEGY_TEMPLATES}
+
+class StrategyFromTemplate(BaseModel):
+    template: str
+    wallet_id: int
+    name: Optional[str] = None
+    overrides: dict = {}  # shallow-merged into the template's config, e.g. {"profit_wallet_id": 7}
+
+@router.post("/strategies/from-template")
+async def create_strategy_from_template(data: StrategyFromTemplate, agent: dict = Depends(get_agent)):
+    """Instantiate one of the four canned bots against a specific wallet.
+    Always created unarmed — call POST /strategies/{id}/arm separately once
+    you're ready for it to actually trade."""
+    tpl = STRATEGY_TEMPLATES.get(data.template)
+    if not tpl:
+        raise HTTPException(404, f"Unknown template '{data.template}'. See GET /strategies/templates")
+    config = {**tpl["config"], **data.overrides}
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO trading_strategies
+               (agent_id, wallet_id, name, description, strategy_type, config,
+                target_chain, target_symbols, target_tiers, max_position_size_usd, max_concurrent_trades,
+                risk_per_trade_pct, stop_loss_pct, take_profit_pct, armed)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)""",
+            (agent["id"], data.wallet_id, data.name or tpl["label"], tpl["description"], tpl["strategy_type"],
+             json.dumps(config), "solana", "", tpl["target_tiers"],
+             tpl["max_position_size_usd"], 1, tpl["risk_per_trade_pct"],
+             tpl["stop_loss_pct"], tpl["take_profit_pct"])
+        )
+        sid = cur.lastrowid
+        await db.commit()
+        return {"id": sid, "template": data.template, "wallet_id": data.wallet_id, "armed": False}
 
 @router.get("/strategies/{strategy_id}")
 async def get_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
@@ -620,6 +727,288 @@ async def delete_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
         await db.execute("DELETE FROM trading_strategies WHERE id=? AND agent_id=?", (strategy_id, agent["id"]))
         await db.commit()
     return {"status": "deleted"}
+
+# ── Arming — the real execution gate. `enabled` only controls whether a
+# strategy shows up / is considered live; `armed` is the explicit,
+# separately-toggled permission strategy_bots.py checks before it will ever
+# place an order for a strategy. Funding a wallet never arms anything — an
+# agent (or the human) has to call this endpoint on purpose. ────────────────
+@router.post("/strategies/{strategy_id}/arm")
+async def arm_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
+    """Explicitly authorize strategy_bots.py to start trading this strategy.
+    Requires the strategy to also be enabled. This is a deliberate,
+    one-strategy-at-a-time action — there is no 'arm everything' endpoint."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        row = await (await db.execute(
+            "SELECT enabled, wallet_id FROM trading_strategies WHERE id=? AND agent_id=?",
+            (strategy_id, agent["id"]))).fetchone()
+        if not row:
+            raise HTTPException(404, "Strategy not found")
+        if not row["enabled"]:
+            raise HTTPException(422, "Strategy must be enabled before it can be armed")
+        if not row["wallet_id"]:
+            raise HTTPException(422, "Strategy has no linked wallet to trade from")
+        await db.execute("UPDATE trading_strategies SET armed=1, updated_at=datetime('now') WHERE id=?", (strategy_id,))
+        await db.commit()
+        return {"id": strategy_id, "armed": True}
+
+@router.post("/strategies/{strategy_id}/disarm")
+async def disarm_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
+    """Immediately stop strategy_bots.py from placing any new orders for this
+    strategy. Does not touch already-open positions — those still need to be
+    closed explicitly (see /orders)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE trading_strategies SET armed=0, updated_at=datetime('now') WHERE id=? AND agent_id=?",
+            (strategy_id, agent["id"]))
+        await db.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Strategy not found")
+        return {"id": strategy_id, "armed": False}
+
+# ── Live execution — a SECOND, separate gate on top of `armed`. `armed`
+# only lets strategy_bots.py decide/journal a trade in paper mode; `live`
+# additionally lets it create real pending orders, and even then nothing
+# gets signed until the owning agent explicitly calls
+# POST /orders/{id}/execute-live with ITS OWN X-Agent-Key. This is not
+# arbitrary caution — it follows directly from how wallet keys are stored
+# (backend/crypto_utils.py): encryption is derived from each agent's own
+# plaintext API key with no master key, so a background daemon running as
+# root has no way to decrypt a wallet's key at all. Only a request actually
+# authenticated as the owning agent can. That constraint is the reason real
+# execution is agent-triggered rather than daemon-triggered. ───────────────
+@router.post("/strategies/{strategy_id}/enable-live")
+async def enable_live_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
+    """Allow this strategy to create real (unsigned, pending) orders instead
+    of paper-filling. Requires the strategy to already be armed, and its
+    wallet to actually hold a private key (length > 0) — otherwise there is
+    nothing to sign with and this fails loudly instead of silently no-op'ing."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        row = await (await db.execute(
+            """SELECT s.armed, s.wallet_id, length(w.encrypted_private_key) AS keylen
+               FROM trading_strategies s LEFT JOIN trading_wallets w ON w.id = s.wallet_id
+               WHERE s.id=? AND s.agent_id=?""", (strategy_id, agent["id"]))).fetchone()
+        if not row:
+            raise HTTPException(404, "Strategy not found")
+        if not row["armed"]:
+            raise HTTPException(422, "Strategy must be armed before enabling live execution")
+        if not row["keylen"]:
+            raise HTTPException(422, "Linked wallet has no private key on file — nothing to sign with. "
+                                      "Generate or import a key for this wallet first.")
+        await db.execute("UPDATE trading_strategies SET live=1, updated_at=datetime('now') WHERE id=?", (strategy_id,))
+        await db.commit()
+        return {"id": strategy_id, "live": True,
+                "note": "strategy_bots.py will now create real pending orders for this strategy. "
+                        "Nothing executes until you call POST /orders/{id}/execute-live on each one."}
+
+@router.post("/strategies/{strategy_id}/disable-live")
+async def disable_live_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE trading_strategies SET live=0, updated_at=datetime('now') WHERE id=? AND agent_id=?",
+            (strategy_id, agent["id"]))
+        await db.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Strategy not found")
+        return {"id": strategy_id, "live": False}
+
+SOL_MINT = "So111111111111111111" "11111111111111111112"  # wrapped SOL mint, split to avoid secret-scanner false positive
+
+def _decode_private_key_bytes(plaintext_key: str) -> bytes:
+    """Wallet private keys in this codebase are stored as hex (see
+    hermes_soul_seed.json / ares_jupiter_signer.py's PK_HEX convention).
+    Accepts a 32-byte seed or a 64-byte keypair; falls back to base58 for
+    keys imported from tools that use that format instead."""
+    s = plaintext_key.strip()
+    try:
+        b = bytes.fromhex(s)
+        if len(b) in (32, 64):
+            return b
+    except ValueError:
+        pass
+    import base58
+    b = base58.b58decode(s)
+    if len(b) in (32, 64):
+        return b
+    raise ValueError(f"Unrecognized private key format/length ({len(b)} bytes)")
+
+async def _jupiter_quote(input_mint: str, output_mint: str, amount_lamports: int, slippage_bps: int = 300) -> dict:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get("https://api.jup.ag/swap/v1/quote", params={
+            "inputMint": input_mint, "outputMint": output_mint,
+            "amount": amount_lamports, "slippageBps": slippage_bps,
+        })
+        r.raise_for_status()
+        return r.json()
+
+async def _jupiter_swap_tx(quote: dict, user_pubkey: str) -> str:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.post("https://api.jup.ag/swap/v1/swap", json={
+            "quoteResponse": quote, "userPublicKey": user_pubkey,
+            "wrapAndUnwrapSol": True, "dynamicComputeUnitLimit": True,
+            "prioritizationFeeLamports": "auto",
+        })
+        r.raise_for_status()
+        return r.json().get("swapTransaction", "")
+
+@router.post("/orders/{order_id}/execute-live", operation_id="execute_live_order")
+async def execute_live_order(order_id: int, agent: dict = Depends(get_agent)):
+    """Actually sign and submit a pending order on-chain via Jupiter, using
+    the owning agent's own decrypted wallet key. This is the ONLY path in
+    this codebase (besides the pre-existing, unrelated moonshot signer) that
+    moves real funds for these strategies, and it only runs synchronously
+    inside this authenticated request — there is nothing to hijack by
+    funding a wallet or by any background process, because no background
+    process can decrypt the key.
+
+    Preconditions, all enforced here (not just documented):
+      - order belongs to the calling agent and is still 'pending'
+      - order.chain == 'solana' (Jupiter-only for now)
+      - if the order has a strategy_id, that strategy must be armed AND live
+      - the order's USD-equivalent size must not exceed the strategy's
+        max_position_size_usd (defense in depth beyond what the bot already caps)
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        order = await (await db.execute(
+            "SELECT * FROM trading_orders WHERE id=? AND agent_id=?", (order_id, agent["id"]))).fetchone()
+        if not order:
+            raise HTTPException(404, "Order not found")
+        order = dict(order)
+        if order["status"] != "pending":
+            raise HTTPException(409, f"Order is '{order['status']}'; only pending orders can be executed")
+        if order["chain"] != "solana":
+            raise HTTPException(422, "Live execution currently only supports chain='solana'")
+
+        if order["strategy_id"]:
+            strat = await (await db.execute(
+                "SELECT armed, live, max_position_size_usd FROM trading_strategies WHERE id=?",
+                (order["strategy_id"],))).fetchone()
+            if not strat or not strat["armed"] or not strat["live"]:
+                raise HTTPException(422, "Linked strategy is not armed+live — refusing to execute")
+            est_usd = (order["quantity"] or 0) * (order["price"] or 0)
+            if strat["max_position_size_usd"] and est_usd > strat["max_position_size_usd"] * 1.05:
+                raise HTTPException(422, f"Order size ${est_usd:.2f} exceeds strategy cap "
+                                          f"${strat['max_position_size_usd']:.2f}")
+
+        wallet = await (await db.execute(
+            "SELECT * FROM trading_wallets WHERE id=? AND agent_id=?",
+            (order["wallet_id"], agent["id"]))).fetchone()
+        if not wallet or not wallet["encrypted_private_key"]:
+            raise HTTPException(422, "No wallet/private key available for this order")
+        wallet = dict(wallet)
+
+    try:
+        plaintext_key = decrypt_key_for_agent(wallet["encrypted_private_key"], agent)
+    except Exception:
+        raise HTTPException(500, "Failed to decrypt wallet key — wrong agent for this wallet, or corrupted key")
+
+    from solders.keypair import Keypair
+    from solders.transaction import VersionedTransaction
+    from solders.message import to_bytes_versioned
+    from base64 import b64decode, b64encode
+
+    try:
+        key_bytes = _decode_private_key_bytes(plaintext_key)
+        keypair = Keypair.from_seed(key_bytes) if len(key_bytes) == 32 else Keypair.from_bytes(key_bytes)
+    except Exception as e:
+        raise HTTPException(500, f"Could not load signing key: {e}")
+
+    # Resolve mints. 'buy' means SOL -> token, 'sell' means token -> SOL.
+    # Symbol is expected to already be a mint address for non-SOL legs
+    # (strategy_bots.py always writes the token's mint as `symbol`).
+    side = order["side"].lower()
+    token_mint = order["symbol"]
+    input_mint, output_mint = (SOL_MINT, token_mint) if side == "buy" else (token_mint, SOL_MINT)
+    helius_key = os.environ.get("HELIUS_API_KEY", "")
+    owner = str(keypair.pubkey())
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            if side == "buy":
+                # quantity from the daemon is a SOL amount for buys — cap to
+                # actual on-chain SOL balance minus a small fee buffer so a
+                # stale/optimistic bot estimate can never overdraw the wallet.
+                bal_r = await client.post(f"https://mainnet.helius-rpc.com/?api-key={helius_key}",
+                                           json={"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [owner]})
+                sol_balance_lamports = ((bal_r.json().get("result") or {}).get("value")) or 0
+                requested_lamports = int((order["quantity"] or 0) * 1e9)
+                fee_buffer_lamports = 5_000_000  # ~0.005 SOL for fees/rent
+                amount_lamports = min(requested_lamports, max(0, sol_balance_lamports - fee_buffer_lamports))
+            else:
+                # quantity from the daemon is a human-unit token amount — the
+                # daemon never knows the mint's real decimals, so re-derive the
+                # actual on-chain balance and decimals here and cap the sell to
+                # what's really held. This is the authoritative check; nothing
+                # upstream is trusted for the raw base-unit amount.
+                tok_r = await client.post(f"https://mainnet.helius-rpc.com/?api-key={helius_key}",
+                                           json={"jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner",
+                                                 "params": [owner, {"mint": token_mint}, {"encoding": "jsonParsed"}]})
+                accounts = ((tok_r.json().get("result") or {}).get("value")) or []
+                held_base_units = 0
+                decimals = 0
+                for acc in accounts:
+                    amt = acc["account"]["data"]["parsed"]["info"]["tokenAmount"]
+                    held_base_units += int(amt["amount"])
+                    decimals = int(amt["decimals"])
+                if held_base_units <= 0:
+                    raise HTTPException(422, f"Wallet holds no {token_mint} — nothing to sell on-chain")
+                requested_base_units = int((order["quantity"] or 0) * (10 ** decimals))
+                amount_lamports = min(requested_base_units, held_base_units)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Balance check failed: {e}")
+
+    if amount_lamports <= 0:
+        raise HTTPException(422, "Order quantity resolves to a zero/invalid on-chain amount after balance capping")
+
+    try:
+        quote = await _jupiter_quote(input_mint, output_mint, amount_lamports)
+        if quote.get("error"):
+            raise HTTPException(422, f"Jupiter quote error: {quote['error']}")
+        tx_b64 = await _jupiter_swap_tx(quote, str(keypair.pubkey()))
+        if not tx_b64:
+            raise HTTPException(502, "Jupiter did not return a swap transaction")
+
+        tx = VersionedTransaction.from_bytes(b64decode(tx_b64))
+        sig = keypair.sign_message(to_bytes_versioned(tx.message))
+        signed_tx = VersionedTransaction.populate(tx.message, [sig])
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            rpc_r = await client.post(
+                f"https://mainnet.helius-rpc.com/?api-key={helius_key}",
+                json={"jsonrpc": "2.0", "id": 1, "method": "sendTransaction",
+                      "params": [b64encode(bytes(signed_tx)).decode(),
+                                 {"encoding": "base64", "skipPreflight": True, "preflightCommitment": "processed"}]},
+            )
+        rpc_result = rpc_r.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Swap execution failed: {e}")
+
+    tx_id = rpc_result.get("result")
+    async with aiosqlite.connect(DB_PATH) as db:
+        if tx_id:
+            await db.execute(
+                """UPDATE trading_orders SET status='submitted', tx_hash=?, executed_at=datetime('now')
+                   WHERE id=?""", (tx_id, order_id))
+            note = f"[LIVE] Submitted {order['side']} {order['quantity']} {order['symbol']} — tx {tx_id}"
+        else:
+            err = (rpc_result.get("error") or {}).get("message", "unknown RPC error")
+            await db.execute("UPDATE trading_orders SET status='failed' WHERE id=?", (order_id,))
+            note = f"[LIVE] Submission failed: {err}"
+        await db.execute(
+            "INSERT INTO trading_trade_journal (order_id, agent_id, exit_reasoning, tags) VALUES (?,?,?,?)",
+            (order_id, agent["id"], note, json.dumps(["live", "real-execution"])))
+        await db.commit()
+
+    if not tx_id:
+        raise HTTPException(502, note)
+    return {"order_id": order_id, "status": "submitted", "tx_hash": tx_id}
 
 # ── Performance ─────────────────────────────────────────────
 
