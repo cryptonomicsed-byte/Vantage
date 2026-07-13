@@ -145,8 +145,11 @@ export default function ExecutionPanel() {
       try {
         const r = await tradingApi('/strategies')
         if (r.ok) {
-          const rows = await r.json()
-          setStrategies(rows.filter((s: any) => s.armed && s.live))
+          // Show every strategy, not just armed+live — same as
+          // EntityProfileCard's TradePanel: picking a not-yet-armed one
+          // surfaces a clear backend error at trade time instead of just
+          // silently disappearing from the picker.
+          setStrategies(await r.json())
         }
       } catch { /* best-effort */ }
     })()
@@ -278,7 +281,7 @@ export default function ExecutionPanel() {
             style={{ ...styles.tradeInput, width: '100%', marginBottom: 6 }}
           >
             <option value="">Manual (no strategy)</option>
-            {strategies.map(s => <option key={s.id} value={s.id}>Autotrade: {s.name}</option>)}
+            {strategies.map(s => <option key={s.id} value={s.id}>{s.name} {s.armed && s.live ? '● live' : s.armed ? '○ armed, paper' : '○ not armed'}</option>)}
           </select>
         )}
         <div style={{ display: 'flex', gap: 6 }}>

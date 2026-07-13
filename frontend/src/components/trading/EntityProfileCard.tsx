@@ -84,6 +84,34 @@ function walletLinks(chain: string, address: string): { label: string; url: stri
   return [{ label: 'Solscan', url: `https://solscan.io/account/${address}` }]
 }
 
+// ── Top5Degen writes these same cache keys (vantage_cache_<key>) every time
+// it polls; reading them here is free (no network) and closes the "Top5's
+// cards are richer" gap without a new backend endpoint.
+function _mergeTop5Context(info: any, symbol: string, ca?: string) {
+  const matches = (row: any) => {
+    const rowSym = (row.symbol || '').toUpperCase()
+    const rowCa = row.ca || row.address || row.mint
+    return (ca && rowCa && rowCa === ca) || (symbol && rowSym === symbol.toUpperCase())
+  }
+  try {
+    const mustBuy5 = JSON.parse(localStorage.getItem('vantage_cache_top5_mustbuy') || '[]')
+    const hit5 = mustBuy5.find(matches)
+    if (hit5) Object.assign(info, { top5_score: hit5.score, top5_reason: hit5.reason, graduated: hit5.graduated })
+
+    const mustBuy20 = JSON.parse(localStorage.getItem('vantage_cache_must_buy_20') || '[]')
+    const hit20 = mustBuy20.find(matches)
+    if (hit20) Object.assign(info, { must_buy_score: hit20.score, source_types: hit20.source_count ? undefined : hit20.source_types })
+
+    const conviction = JSON.parse(localStorage.getItem('vantage_cache_high_conviction') || '[]')
+    const hitConv = conviction.find((r: any) => r.mint === ca || (r.symbol || '').toUpperCase() === symbol.toUpperCase())
+    if (hitConv && !info.smart_wallet_count) Object.assign(info, { conviction_score: hitConv.conviction_score, smart_wallet_count: hitConv.smart_wallet_count })
+
+    const rotations = JSON.parse(localStorage.getItem('vantage_cache_sell_rotations') || '[]')
+    const hitRot = rotations.find(matches)
+    if (hitRot) Object.assign(info, { sell_rotation_flag: true, sell_buy_ratio: hitRot.sell_buy_ratio })
+  } catch { /* cache miss/corrupt — non-fatal, card still shows base info */ }
+}
+
 // ── Data fetched on open — best-effort, never blocks the card from showing.
 function useEntityInfo(target: Target | null) {
   const [info, setInfo] = useState<any>(null)
@@ -118,6 +146,12 @@ function useEntityInfo(target: Target | null) {
               }
             } catch { /* best-effort */ }
           }
+          // Cross-reference Top5Degen's already-cached lists (localStorage,
+          // no extra API calls) — this is the actual gap between "Top5's
+          // cards look richer" and every other card: it's the same
+          // EntityProfileCard component everywhere, just missing the
+          // score/reasoning/source-type context Top5's list rows show.
+          _mergeTop5Context(info, target.symbol, target.ca)
           if (Object.keys(info).length > 0) setInfo(info)
         } else {
           const chain = target.chain === 'ethereum' || target.chain === 'base' ? null : (target.chain || 'solana')
@@ -164,16 +198,25 @@ function useTradeWallets(enabled: boolean) {
           fetch('/api/trading/wallets', { headers: { 'X-Agent-Key': key } }),
           fetch('/api/trading/strategies', { headers: { 'X-Agent-Key': key } }),
         ])
-        if (wr.ok) setWallets((await wr.json()).filter((w: any) => w.chain === 'solana'))
-        if (sr.ok) setStrategies((await sr.json()).filter((s: any) => s.armed && s.live))
+        if (wr.ok) {
+          const d = await wr.json()
+          setWallets((Array.isArray(d) ? d : (d.wallets || [])).filter((w: any) => w.chain === 'solana'))
+        }
+        // Show every strategy, not just armed+live — picking one that
+        // isn't armed/live yet still surfaces a clear backend error at
+        // trade time rather than silently hiding it from the picker.
+        if (sr.ok) setStrategies(await sr.json())
       } catch { /* best-effort */ }
     })()
   }, [enabled])
   return { wallets, strategies }
 }
 
+type TradeTab = 'buy' | 'sell' | 'strategy'
+
 function TradePanel({ target }: { target: TokenTarget }) {
   const { wallets, strategies } = useTradeWallets(true)
+  const [tab, setTab] = useState<TradeTab>('buy')
   const [walletId, setWalletId] = useState<string>('')
   const [amount, setAmount] = useState<string>('')
   const [strategyId, setStrategyId] = useState<string>('')
@@ -181,7 +224,12 @@ function TradePanel({ target }: { target: TokenTarget }) {
   const [result, setResult] = useState<{ ok: boolean; msg: string; tx?: string } | null>(null)
 
   const mint = target.ca
+  // Wallet is always required, full stop — this is the hard gate the rest
+  // of the UI (terminal, strategies panel) also enforces. Strategy stays
+  // optional: pick one and it's an "autotrade this trade under that
+  // strategy's rules" order; leave it on Manual and it's a plain buy/sell.
   const canTrade = !!mint && !!walletId && Number(amount) > 0 && !busy
+  const selectedStrategy = strategies.find(s => String(s.id) === strategyId)
 
   async function trade(side: 'buy' | 'sell') {
     if (!canTrade) return
@@ -210,39 +258,65 @@ function TradePanel({ target }: { target: TokenTarget }) {
     return <div style={{ fontSize: 10, color: 'rgba(255,255,255,.4)', marginTop: 10 }}>No contract address resolved yet — trading unavailable until one is found.</div>
   }
 
+  const tabBtn = (t: TradeTab, label: string, color: string) => (
+    <button onClick={() => setTab(t)} style={{
+      flex: 1, padding: '6px 0', fontSize: 11, fontWeight: 700, cursor: 'pointer',
+      background: tab === t ? `${color}22` : 'transparent',
+      border: `1px solid ${tab === t ? `${color}66` : 'rgba(255,255,255,.08)'}`,
+      color: tab === t ? color : 'rgba(255,255,255,.5)', borderRadius: 6,
+    }}>{label}</button>
+  )
+
   return (
     <div style={{ marginTop: 12, padding: '10px 12px', background: 'rgba(34,197,94,0.06)', border: '1px solid rgba(34,197,94,0.2)', borderRadius: 10 }}>
       <div style={{ fontSize: 10, color: '#22c55e', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Trade</div>
 
+      {/* Wallet — always required, shown above the tabs since it applies to any side/strategy */}
       <select value={walletId} onChange={e => setWalletId(e.target.value)}
-        style={{ width: '100%', marginBottom: 6, background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 6, color: '#fff', fontSize: 11, padding: '5px 6px' }}>
-        <option value="">Select wallet…</option>
+        style={{ width: '100%', marginBottom: 8, background: 'rgba(255,255,255,.05)', border: `1px solid ${walletId ? 'rgba(255,255,255,.1)' : 'rgba(239,68,68,0.4)'}`, borderRadius: 6, color: '#fff', fontSize: 11, padding: '5px 6px' }}>
+        <option value="">Select wallet… (required)</option>
         {wallets.map(w => <option key={w.id} value={w.id}>{w.label || w.address.slice(0, 6)} ({w.address.slice(0, 4)}…{w.address.slice(-4)})</option>)}
       </select>
 
-      <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
-        <input value={amount} onChange={e => setAmount(e.target.value)} placeholder="Amount (SOL to buy, tokens to sell)" type="number" min="0" step="any"
-          style={{ flex: 1, background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 6, color: '#fff', fontSize: 11, padding: '5px 6px' }} />
+      <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
+        {tabBtn('buy', 'Buy', '#22c55e')}
+        {tabBtn('sell', 'Sell', '#ef4444')}
+        {tabBtn('strategy', strategyId ? `Strategy: ${selectedStrategy?.name || '…'}` : 'Strategy', '#8a4bff')}
       </div>
 
-      {strategies.length > 0 && (
-        <select value={strategyId} onChange={e => setStrategyId(e.target.value)}
-          style={{ width: '100%', marginBottom: 8, background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 6, color: '#fff', fontSize: 11, padding: '5px 6px' }}>
-          <option value="">Manual (no strategy)</option>
-          {strategies.map(s => <option key={s.id} value={s.id}>Autotrade: {s.name}</option>)}
-        </select>
+      {tab === 'strategy' && (
+        <div style={{ marginBottom: 8 }}>
+          <select value={strategyId} onChange={e => { setStrategyId(e.target.value); setTab('buy') }}
+            style={{ width: '100%', marginBottom: 4, background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 6, color: '#fff', fontSize: 11, padding: '5px 6px' }}>
+            <option value="">Manual (no strategy)</option>
+            {strategies.map(s => (
+              <option key={s.id} value={s.id}>
+                {s.name} {s.armed && s.live ? '● live' : s.armed ? '○ armed, paper' : '○ not armed'}
+              </option>
+            ))}
+          </select>
+          <div style={{ fontSize: 9, color: 'rgba(255,255,255,.4)' }}>
+            Picking a strategy applies its stop-loss/take-profit/position-size rules to this trade. Not armed+live yet? It'll be rejected at execution — arm it from the Strategies tab first.
+          </div>
+        </div>
       )}
 
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button onClick={() => trade('buy')} disabled={!canTrade}
-          style={{ flex: 1, padding: '7px 0', background: canTrade ? 'rgba(34,197,94,0.2)' : 'rgba(255,255,255,.05)', border: '1px solid rgba(34,197,94,0.4)', borderRadius: 6, color: '#22c55e', fontWeight: 700, fontSize: 12, cursor: canTrade ? 'pointer' : 'not-allowed' }}>
-          {busy ? '…' : (strategyId ? 'Buy (strategy)' : 'Buy')}
-        </button>
-        <button onClick={() => trade('sell')} disabled={!canTrade}
-          style={{ flex: 1, padding: '7px 0', background: canTrade ? 'rgba(239,68,68,0.2)' : 'rgba(255,255,255,.05)', border: '1px solid rgba(239,68,68,0.4)', borderRadius: 6, color: '#ef4444', fontWeight: 700, fontSize: 12, cursor: canTrade ? 'pointer' : 'not-allowed' }}>
-          {busy ? '…' : (strategyId ? 'Sell (strategy)' : 'Sell')}
-        </button>
-      </div>
+      {(tab === 'buy' || tab === 'sell') && (
+        <>
+          <input value={amount} onChange={e => setAmount(e.target.value)} placeholder={tab === 'buy' ? 'Amount (SOL to spend)' : 'Amount (tokens to sell)'} type="number" min="0" step="any"
+            style={{ width: '100%', marginBottom: 8, background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 6, color: '#fff', fontSize: 11, padding: '5px 6px' }} />
+          <button onClick={() => trade(tab)} disabled={!canTrade}
+            style={{
+              width: '100%', padding: '8px 0',
+              background: canTrade ? (tab === 'buy' ? 'rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.2)') : 'rgba(255,255,255,.05)',
+              border: `1px solid ${tab === 'buy' ? 'rgba(34,197,94,0.4)' : 'rgba(239,68,68,0.4)'}`,
+              borderRadius: 6, color: tab === 'buy' ? '#22c55e' : '#ef4444', fontWeight: 700, fontSize: 12,
+              cursor: canTrade ? 'pointer' : 'not-allowed',
+            }}>
+            {busy ? '…' : `${tab === 'buy' ? 'Buy' : 'Sell'}${strategyId ? ` (${selectedStrategy?.name || 'strategy'})` : ''}`}
+          </button>
+        </>
+      )}
 
       {result && (
         <div style={{ marginTop: 8, fontSize: 10, color: result.ok ? '#22c55e' : '#ef4444', wordBreak: 'break-all' }}>
@@ -311,7 +385,20 @@ function ProfileCardOverlay({ target, onClose }: { target: Target; onClose: () =
               {info.volume_24h != null && <Row label="Volume 24h" value={`$${(info.volume_24h / 1e3).toFixed(0)}K`} />}
               {info.change_24h != null && <Row label="24h Change" value={`${info.change_24h > 0 ? '+' : ''}${info.change_24h.toFixed(1)}%`} color={info.change_24h >= 0 ? '#22c55e' : '#ef4444'} />}
               {info.dex && <Row label="DEX" value={info.dex} />}
+              {info.top5_score != null && <Row label="Top5 Score" value={String(info.top5_score)} color="#ff6b35" />}
+              {info.must_buy_score != null && <Row label="Must-Buy Score" value={info.must_buy_score.toFixed(0)} color="#a855f7" />}
             </div>
+            {info.top5_reason && (
+              <div style={{ marginTop: 8, fontSize: 10, color: 'rgba(255,255,255,.6)', fontStyle: 'italic' }}>{info.top5_reason}</div>
+            )}
+            {info.graduated && (
+              <div style={{ marginTop: 6, fontSize: 10, color: '#22c55e' }}>🎓 Recently graduated (migrated off bonding curve)</div>
+            )}
+            {info.sell_rotation_flag && (
+              <div style={{ marginTop: 6, padding: '6px 8px', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 6, fontSize: 10, color: '#ef4444' }}>
+                ⚠️ Sell rotation flagged{info.sell_buy_ratio ? ` — sell/buy ${info.sell_buy_ratio}x` : ''}
+              </div>
+            )}
             {info.smart_wallet_count > 0 && (
               <div style={{ marginTop: 10, padding: '8px 10px', background: 'rgba(34,211,238,0.08)', border: '1px solid rgba(34,211,238,0.2)', borderRadius: 8 }}>
                 <div style={{ fontSize: 10, color: '#22d3ee', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>
