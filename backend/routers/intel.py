@@ -850,16 +850,24 @@ MAX_POOL_SIZE = 200
 _SIGNAL_TABLES_DDL = (
     """CREATE TABLE IF NOT EXISTS signal_pool (
          id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, source TEXT, type TEXT,
-         conviction REAL, direction TEXT, detail TEXT, ts INTEGER)""",
+         conviction REAL, direction TEXT, detail TEXT, mint TEXT DEFAULT '', ts INTEGER)""",
     """CREATE TABLE IF NOT EXISTS intel_cache (
          key TEXT PRIMARY KEY, payload TEXT, updated_at INTEGER)""",
 )
+# signal_pool may already exist from before `mint` was added — ALTER isn't
+# idempotent like CREATE TABLE IF NOT EXISTS, so it's handled separately
+# with its own "column already exists" tolerance below.
+_SIGNAL_POOL_MINT_MIGRATION = "ALTER TABLE signal_pool ADD COLUMN mint TEXT DEFAULT ''"
 _POOL_DB_KEEP = 500  # rows retained in the durable pool table
 
 
 async def _ensure_signal_tables(db) -> None:
     for ddl in _SIGNAL_TABLES_DDL:
         await db.execute(ddl)
+    try:
+        await db.execute(_SIGNAL_POOL_MINT_MIGRATION)
+    except aiosqlite.Error:
+        pass  # column already exists
 
 
 @router.post("/signals/ingest")
@@ -869,11 +877,14 @@ async def ingest_signal(payload: dict, tool: dict = Depends(get_system_tool)):
     Stores signals in the in-memory pool AND persists to signal_pool for durability.
     Returned by GET /signals alongside live market data.
 
-    Body: {symbol, source, type, conviction?, direction?, detail?}
+    Body: {symbol, source, type, conviction?, direction?, detail?, mint?}
       - symbol: asset (BTC, ETH, SOL, etc.)
       - source: origin (e.g. "worldmonitor", "sentiment-api", "news-feed")
       - type: signal category (trend, sentiment, event, etc.)
       - conviction: 0–1 confidence (default 1.0)
+      - mint: real on-chain contract address, if known — required for any
+        downstream consumer to actually trade this (a ticker like "ANSEM"
+        is not resolvable/tradeable on its own; see ares_pumpfun_trader.py)
 
     Only X-Vantage-Tool (intel) + X-Vantage-Tool-Key can call this.
     Agents cannot post signals directly; signals come from infrastructure only.
@@ -890,6 +901,7 @@ async def ingest_signal(payload: dict, tool: dict = Depends(get_system_tool)):
         "conviction": float(payload.get("conviction", 1.0)),
         "direction": payload.get("direction", ""),
         "detail": payload.get("detail", ""),
+        "mint": str(payload.get("mint", ""))[:64],
         "ts": int(time.time()),
     }
     with _signal_lock:
@@ -902,10 +914,10 @@ async def ingest_signal(payload: dict, tool: dict = Depends(get_system_tool)):
         async with aiosqlite.connect(DB_PATH) as db:
             await _ensure_signal_tables(db)
             await db.execute(
-                "INSERT INTO signal_pool (symbol, source, type, conviction, direction, detail, ts) "
-                "VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO signal_pool (symbol, source, type, conviction, direction, detail, mint, ts) "
+                "VALUES (?,?,?,?,?,?,?,?)",
                 (signal["symbol"], signal["source"], signal["type"], signal["conviction"],
-                 signal["direction"], signal["detail"], signal["ts"]),
+                 signal["direction"], signal["detail"], signal["mint"], signal["ts"]),
             )
             # Trim to the most-recent _POOL_DB_KEEP rows.
             await db.execute(
