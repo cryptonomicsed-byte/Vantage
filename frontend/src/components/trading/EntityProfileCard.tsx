@@ -147,6 +147,114 @@ function useEntityInfo(target: Target | null) {
   return { info, loading }
 }
 
+// ── Trade panel — wallet picker + manual buy/sell + optional armed-strategy
+// autotrade, for token cards only. Every call goes through the same
+// server-side execute_live_order() the rest of the codebase already uses —
+// this is a thin client for POST /api/trading/quick-trade, it does not sign
+// or hold keys itself.
+function useTradeWallets(enabled: boolean) {
+  const [wallets, setWallets] = useState<any[]>([])
+  const [strategies, setStrategies] = useState<any[]>([])
+  useEffect(() => {
+    if (!enabled) return
+    const key = localStorage.getItem('vantage_api_key') || ''
+    ;(async () => {
+      try {
+        const [wr, sr] = await Promise.all([
+          fetch('/api/trading/wallets', { headers: { 'X-Agent-Key': key } }),
+          fetch('/api/trading/strategies', { headers: { 'X-Agent-Key': key } }),
+        ])
+        if (wr.ok) setWallets((await wr.json()).filter((w: any) => w.chain === 'solana'))
+        if (sr.ok) setStrategies((await sr.json()).filter((s: any) => s.armed && s.live))
+      } catch { /* best-effort */ }
+    })()
+  }, [enabled])
+  return { wallets, strategies }
+}
+
+function TradePanel({ target }: { target: TokenTarget }) {
+  const { wallets, strategies } = useTradeWallets(true)
+  const [walletId, setWalletId] = useState<string>('')
+  const [amount, setAmount] = useState<string>('')
+  const [strategyId, setStrategyId] = useState<string>('')
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<{ ok: boolean; msg: string; tx?: string } | null>(null)
+
+  const mint = target.ca
+  const canTrade = !!mint && !!walletId && Number(amount) > 0 && !busy
+
+  async function trade(side: 'buy' | 'sell') {
+    if (!canTrade) return
+    setBusy(true); setResult(null)
+    const key = localStorage.getItem('vantage_api_key') || ''
+    try {
+      const r = await fetch('/api/trading/quick-trade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Agent-Key': key },
+        body: JSON.stringify({
+          mint, side, wallet_id: Number(walletId), quantity: Number(amount),
+          strategy_id: strategyId ? Number(strategyId) : undefined,
+          trigger_reason: strategyId ? 'strategy_ui' : 'manual_ui',
+        }),
+      })
+      const d = await r.json()
+      if (r.ok) setResult({ ok: true, msg: `Submitted — tx ${String(d.tx_hash).slice(0, 8)}…`, tx: d.tx_hash })
+      else setResult({ ok: false, msg: typeof d.detail === 'string' ? d.detail : (d.detail?.error?.detail || d.detail?.error || JSON.stringify(d.detail)) })
+    } catch (e: any) {
+      setResult({ ok: false, msg: e?.message || 'Request failed' })
+    }
+    setBusy(false)
+  }
+
+  if (!mint) {
+    return <div style={{ fontSize: 10, color: 'rgba(255,255,255,.4)', marginTop: 10 }}>No contract address resolved yet — trading unavailable until one is found.</div>
+  }
+
+  return (
+    <div style={{ marginTop: 12, padding: '10px 12px', background: 'rgba(34,197,94,0.06)', border: '1px solid rgba(34,197,94,0.2)', borderRadius: 10 }}>
+      <div style={{ fontSize: 10, color: '#22c55e', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Trade</div>
+
+      <select value={walletId} onChange={e => setWalletId(e.target.value)}
+        style={{ width: '100%', marginBottom: 6, background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 6, color: '#fff', fontSize: 11, padding: '5px 6px' }}>
+        <option value="">Select wallet…</option>
+        {wallets.map(w => <option key={w.id} value={w.id}>{w.label || w.address.slice(0, 6)} ({w.address.slice(0, 4)}…{w.address.slice(-4)})</option>)}
+      </select>
+
+      <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+        <input value={amount} onChange={e => setAmount(e.target.value)} placeholder="Amount (SOL to buy, tokens to sell)" type="number" min="0" step="any"
+          style={{ flex: 1, background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 6, color: '#fff', fontSize: 11, padding: '5px 6px' }} />
+      </div>
+
+      {strategies.length > 0 && (
+        <select value={strategyId} onChange={e => setStrategyId(e.target.value)}
+          style={{ width: '100%', marginBottom: 8, background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 6, color: '#fff', fontSize: 11, padding: '5px 6px' }}>
+          <option value="">Manual (no strategy)</option>
+          {strategies.map(s => <option key={s.id} value={s.id}>Autotrade: {s.name}</option>)}
+        </select>
+      )}
+
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button onClick={() => trade('buy')} disabled={!canTrade}
+          style={{ flex: 1, padding: '7px 0', background: canTrade ? 'rgba(34,197,94,0.2)' : 'rgba(255,255,255,.05)', border: '1px solid rgba(34,197,94,0.4)', borderRadius: 6, color: '#22c55e', fontWeight: 700, fontSize: 12, cursor: canTrade ? 'pointer' : 'not-allowed' }}>
+          {busy ? '…' : (strategyId ? 'Buy (strategy)' : 'Buy')}
+        </button>
+        <button onClick={() => trade('sell')} disabled={!canTrade}
+          style={{ flex: 1, padding: '7px 0', background: canTrade ? 'rgba(239,68,68,0.2)' : 'rgba(255,255,255,.05)', border: '1px solid rgba(239,68,68,0.4)', borderRadius: 6, color: '#ef4444', fontWeight: 700, fontSize: 12, cursor: canTrade ? 'pointer' : 'not-allowed' }}>
+          {busy ? '…' : (strategyId ? 'Sell (strategy)' : 'Sell')}
+        </button>
+      </div>
+
+      {result && (
+        <div style={{ marginTop: 8, fontSize: 10, color: result.ok ? '#22c55e' : '#ef4444', wordBreak: 'break-all' }}>
+          {result.ok && result.tx ? (
+            <a href={`https://solscan.io/tx/${result.tx}`} target="_blank" rel="noreferrer" style={{ color: '#22c55e' }}>{result.msg} ↗</a>
+          ) : result.msg}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ProfileCardOverlay({ target, onClose }: { target: Target; onClose: () => void }) {
   const { info, loading } = useEntityInfo(target)
   const isToken = target.kind === 'token'
@@ -245,8 +353,10 @@ function ProfileCardOverlay({ target, onClose }: { target: Target; onClose: () =
           <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 12 }}>No live data available — use the links below.</div>
         )}
 
+        {isToken && <TradePanel target={target} />}
+
         {links.length > 0 && (
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: isToken ? 10 : 0 }}>
             {links.map(l => (
               <a key={l.url} href={l.url} target="_blank" rel="noreferrer"
                  style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 10px', background: 'rgba(139,92,246,0.15)', border: '1px solid rgba(139,92,246,0.3)', borderRadius: 6, color: '#b9a8ff', textDecoration: 'none', fontSize: 11 }}>

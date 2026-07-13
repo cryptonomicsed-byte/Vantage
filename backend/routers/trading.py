@@ -1010,6 +1010,55 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent)):
         raise HTTPException(502, note)
     return {"order_id": order_id, "status": "submitted", "tx_hash": tx_id}
 
+
+class QuickTrade(BaseModel):
+    """One-shot buy/sell from a token profile card or the terminal: creates
+    a pending order and immediately executes it live, in a single call.
+    Same two primitives as the manual flow (POST /orders then
+    POST /orders/{id}/execute-live) — this just chains them in-process so
+    the UI doesn't need two round-trips. All the safety checks in
+    execute_live_order (strategy armed+live, position size cap, real
+    on-chain balance capping) still apply unchanged."""
+    mint: str
+    side: str  # buy, sell
+    wallet_id: int
+    quantity: float  # SOL amount for buy, token amount for sell
+    price: Optional[float] = None  # only needed if strategy_id sets a $ cap
+    strategy_id: Optional[int] = None  # omit for a plain manual trade
+    trigger_reason: str = "manual_ui"
+
+
+@router.post("/quick-trade", operation_id="quick_trade")
+async def quick_trade(data: QuickTrade, agent: dict = Depends(get_agent)):
+    """Buy/Sell button on EntityProfileCard / TradingTerminal. Wraps
+    create_order + execute_live_order directly (function calls, not HTTP —
+    an HTTP self-call from inside a request handler previously caused a
+    real event-loop deadlock elsewhere in this codebase; not repeating that
+    here)."""
+    if data.side.lower() not in ("buy", "sell"):
+        raise HTTPException(422, "side must be 'buy' or 'sell'")
+    if data.quantity <= 0:
+        raise HTTPException(422, "quantity must be positive")
+
+    order = await create_order(
+        OrderCreate(
+            symbol=data.mint, side=data.side, chain="solana",
+            quantity=data.quantity, order_type="market", price=data.price,
+            wallet_id=data.wallet_id, trigger_reason=data.trigger_reason,
+            strategy_id=data.strategy_id,
+            notes=f"quick-trade from UI ({data.trigger_reason})",
+        ),
+        agent=agent,
+    )
+    try:
+        result = await execute_live_order(order["id"], agent=agent)
+    except HTTPException as e:
+        # Order row already exists (status set to 'failed' inside
+        # execute_live_order on a submission error) — surface both ids so
+        # the UI can show the failed order instead of a bare error.
+        raise HTTPException(e.status_code, detail={"order_id": order["id"], "error": e.detail})
+    return result
+
 # ── Performance ─────────────────────────────────────────────
 
 @router.get("/performance")

@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react'
+import React, { useState, useCallback, useEffect } from 'react'
 import { Wallet, TrendingUp, TrendingDown, Shield, BookOpen, PieChart, Activity } from 'lucide-react'
 import { useTradingStore } from './tradingStore'
 
@@ -19,40 +19,70 @@ export default function ExecutionPanel() {
   const { state, dispatch, tradingApi, toggleDrawer } = useTradingStore()
   const [quickTradeSide, setQuickTradeSide] = useState<'buy' | 'sell'>('buy')
   const [quickTradeSize, setQuickTradeSize] = useState('')
+  // activePair is a display pair like "BTC/USDT" — not resolvable to a
+  // Solana mint, so it can't drive real execution. Orders/positions store
+  // the mint directly in `symbol` for solana-chain rows (see
+  // trading.py execute_live_order), so this field is the actual trade
+  // target: paste a CA, or it prefills from a clicked position below.
+  const [mint, setMint] = useState('')
+  const [strategyId, setStrategyId] = useState('')
+  const [strategies, setStrategies] = useState<any[]>([])
   const [tradeMsg, setTradeMsg] = useState('')
+  const [tradeMsgOk, setTradeMsgOk] = useState(true)
+  const [busy, setBusy] = useState(false)
 
   const portfolio = state.portfolio
   const activeWallet = state.wallets.find(w => w.id === state.activeWalletId)
 
+  useEffect(() => {
+    if (!state.activeWalletId) return
+    (async () => {
+      try {
+        const r = await tradingApi('/strategies')
+        if (r.ok) {
+          const rows = await r.json()
+          setStrategies(rows.filter((s: any) => s.armed && s.live))
+        }
+      } catch { /* best-effort */ }
+    })()
+  }, [state.activeWalletId, tradingApi])
+
   const handleQuickTrade = useCallback(async () => {
     const apiKey = localStorage.getItem('vantage_api_key')
-    if (!apiKey) { setTradeMsg('Connect API key first'); return }
+    if (!apiKey) { setTradeMsgOk(false); setTradeMsg('Connect API key first'); return }
+    if (!activeWallet) { setTradeMsgOk(false); setTradeMsg('Select a wallet first'); return }
+    if (!mint.trim()) { setTradeMsgOk(false); setTradeMsg('Enter a token contract address (mint)'); return }
     const size = parseFloat(quickTradeSize)
-    if (!size || size <= 0) { setTradeMsg('Enter valid size'); return }
+    if (!size || size <= 0) { setTradeMsgOk(false); setTradeMsg('Enter valid size'); return }
 
+    setBusy(true)
     try {
-      const r = await tradingApi('/orders', {
+      const r = await tradingApi('/quick-trade', {
         method: 'POST',
         body: JSON.stringify({
-          order_type: 'market',
-          side: quickTradeSide.toUpperCase(),
-          symbol: state.activePair,
-          chain: activeWallet?.chain || 'solana',
+          mint: mint.trim(),
+          side: quickTradeSide,
+          wallet_id: activeWallet.id,
           quantity: size,
-          trigger_reason: 'manual_quick_trade',
+          strategy_id: strategyId ? Number(strategyId) : undefined,
+          trigger_reason: strategyId ? 'strategy_terminal' : 'manual_terminal',
         }),
       })
+      const d = await r.json().catch(() => ({}))
       if (r.ok) {
-        setTradeMsg(`Order placed: ${quickTradeSide.toUpperCase()} ${size} ${state.activePair}`)
+        setTradeMsgOk(true)
+        setTradeMsg(`Submitted — tx ${String(d.tx_hash || '').slice(0, 10)}…`)
         setQuickTradeSize('')
       } else {
-        const d = await r.json().catch(() => ({}))
-        setTradeMsg(d.detail || 'Order failed')
+        setTradeMsgOk(false)
+        setTradeMsg(typeof d.detail === 'string' ? d.detail : (d.detail?.error?.detail || d.detail?.error || 'Order failed'))
       }
     } catch {
+      setTradeMsgOk(false)
       setTradeMsg('Network error')
     }
-  }, [quickTradeSide, quickTradeSize, state.activePair, activeWallet, tradingApi])
+    setBusy(false)
+  }, [quickTradeSide, quickTradeSize, mint, strategyId, activeWallet, tradingApi])
 
   return (
     <div style={styles.container}>
@@ -110,26 +140,45 @@ export default function ExecutionPanel() {
             <TrendingDown size={13} /> Sell
           </button>
         </div>
+        <input
+          style={{ ...styles.tradeInput, width: '100%', marginBottom: 6 }}
+          type="text"
+          placeholder="Token contract address (mint)..."
+          value={mint}
+          onChange={e => setMint(e.target.value)}
+        />
+        {strategies.length > 0 && (
+          <select
+            value={strategyId}
+            onChange={e => setStrategyId(e.target.value)}
+            style={{ ...styles.tradeInput, width: '100%', marginBottom: 6 }}
+          >
+            <option value="">Manual (no strategy)</option>
+            {strategies.map(s => <option key={s.id} value={s.id}>Autotrade: {s.name}</option>)}
+          </select>
+        )}
         <div style={{ display: 'flex', gap: 6 }}>
           <input
             style={styles.tradeInput}
             type="number"
-            placeholder="Size..."
+            placeholder="Size (SOL to buy, tokens to sell)..."
             value={quickTradeSize}
             onChange={e => setQuickTradeSize(e.target.value)}
           />
           <button
             style={{
               ...styles.tradeExecuteBtn,
-              background: quickTradeSide === 'buy' ? '#39ff14' : '#ff2d4a',
-              color: '#0a0a14',
+              background: busy ? 'rgba(255,255,255,0.1)' : (quickTradeSide === 'buy' ? '#39ff14' : '#ff2d4a'),
+              color: busy ? '#6b7280' : '#0a0a14',
+              cursor: busy ? 'wait' : 'pointer',
             }}
             onClick={handleQuickTrade}
+            disabled={busy}
           >
-            {quickTradeSide === 'buy' ? 'BUY' : 'SELL'}
+            {busy ? '…' : (quickTradeSide === 'buy' ? 'BUY' : 'SELL')}
           </button>
         </div>
-        {tradeMsg && <div style={{ fontSize: 10, color: '#ffaa00', marginTop: 4 }}>{tradeMsg}</div>}
+        {tradeMsg && <div style={{ fontSize: 10, color: tradeMsgOk ? '#39ff14' : '#ff2d4a', marginTop: 4, wordBreak: 'break-all' }}>{tradeMsg}</div>}
       </div>
 
       {/* Wallet Selector */}
@@ -171,7 +220,12 @@ export default function ExecutionPanel() {
             <div style={{ fontSize: 11, color: '#6b7280' }}>No open positions</div>
           ) : (
             state.positions.map((p, i) => (
-              <div key={i} style={styles.positionItem}>
+              <div
+                key={i}
+                style={{ ...styles.positionItem, cursor: 'pointer' }}
+                title="Click to load into Quick Trade"
+                onClick={() => setMint(p.symbol)}
+              >
                 <span style={styles.posSymbol}>{p.symbol}</span>
                 <span style={{ ...styles.posPnl, color: p.unrealized_pnl_usd >= 0 ? '#39ff14' : '#ff2d4a' }}>
                   {p.unrealized_pnl_usd >= 0 ? '+' : ''}{p.unrealized_pnl_pct.toFixed(1)}%

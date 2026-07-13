@@ -1,10 +1,14 @@
 import React, { useMemo } from 'react'
 import { TrendingUp, TrendingDown, Activity, Zap, AlertTriangle, Newspaper, Brain, Filter } from 'lucide-react'
 import { useTradingStore, Signal, AlphaMover, WhaleTx, Threat, NewsItem, DebateSummary, FeedFilter } from './tradingStore'
+import { TokenLink, WalletLink } from './EntityProfileCard'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // IntelFeed — left panel. Scrolling feed of signals, alpha, whales, threats,
-// news, debate. Every item is clickable and navigates the chart.
+// news, debate. This is the raw material an agent should be learning from —
+// every symbol/wallet mention is a real, clickable TokenLink/WalletLink into
+// the shared profile card (price, smart-money overlap, holdings, and now a
+// direct Buy/Sell), not just a chart-navigate click on plain text.
 // ══════════════════════════════════════════════════════════════════════════════
 
 const FILTERS: { key: FeedFilter; label: string; icon: React.ReactNode }[] = [
@@ -101,7 +105,7 @@ function SignalCard({ signal, onClick }: { signal: Signal; onClick: () => void }
   return (
     <div style={styles.signalCard} onClick={onClick}>
       <div style={styles.signalHeader}>
-        <span style={{ ...styles.signalSymbol, color }}>{signal.symbol}</span>
+        <TokenLink symbol={signal.symbol} style={{ ...styles.signalSymbol, color }} />
         <span style={{ ...styles.signalDir, color }}>{arrow} {signal.direction}</span>
       </div>
       <div style={styles.signalMeta}>
@@ -122,7 +126,7 @@ function AlphaCard({ mover, onClick }: { mover: AlphaMover; onClick: () => void 
   return (
     <div style={styles.alphaCard} onClick={onClick}>
       <div style={styles.alphaHeader}>
-        <span style={{ ...styles.alphaSymbol, color }}>{mover.symbol}</span>
+        <TokenLink symbol={mover.symbol} style={{ ...styles.alphaSymbol, color }} />
         <span style={{ ...styles.alphaChange, color }}>
           {mover.change_pct >= 0 ? '+' : ''}{mover.change_pct.toFixed(1)}%
         </span>
@@ -146,7 +150,11 @@ function WhaleCard({ tx, onClick }: { tx: WhaleTx; onClick: () => void }) {
             {tx.chain || tx.symbol}
           </span>
         </div>
-        <div style={{ fontSize: 10, color: '#6b7280', fontFamily: 'monospace' }}>{short}</div>
+        {tx.address ? (
+          <WalletLink address={tx.address} chain={tx.chain || 'solana'} style={{ fontSize: 10 }} />
+        ) : (
+          <div style={{ fontSize: 10, color: '#6b7280', fontFamily: 'monospace' }}>{short}</div>
+        )}
       </div>
     )
   }
@@ -157,7 +165,7 @@ function WhaleCard({ tx, onClick }: { tx: WhaleTx; onClick: () => void }) {
     <div style={styles.whaleCard} onClick={onClick}>
       <div style={styles.whaleHeader}>
         <span style={{ color, fontSize: 14 }}>{isIn ? '⬇' : '⬆'}</span>
-        <span style={styles.whaleSymbol}>{tx.symbol}</span>
+        <TokenLink symbol={tx.symbol} style={styles.whaleSymbol} />
         <span style={styles.whaleAmt}>{tx.amount.toLocaleString()}</span>
       </div>
       <div style={{ fontSize: 10, color: '#6b7280' }}>
@@ -196,8 +204,9 @@ function NewsCard({ item, onClick }: { item: NewsItem; onClick: () => void }) {
         <span style={{ ...styles.newsDot, background: sentColor }} />
         <span style={styles.newsTitle}>{item.title.slice(0, 80)}</span>
       </div>
-      <div style={{ fontSize: 10, color: '#6b7280' }}>
-        {item.source} · {(item.confidence * 100).toFixed(0)}%
+      <div style={{ fontSize: 10, color: '#6b7280', display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+        <span>{item.source} · {(item.confidence * 100).toFixed(0)}%</span>
+        {item.symbols?.slice(0, 3).map(s => <TokenLink key={s} symbol={s} style={{ fontSize: 10 }} />)}
       </div>
     </div>
   )
