@@ -316,11 +316,30 @@ async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent)
     
     if not result:
         raise HTTPException(500, "Wallet generation failed")
-    
-    address = result.get("chains", {}).get(chain, {}).get("address",
-              result.get("address", ""))
-    private_key = result.get("chains", {}).get(chain, {}).get("privateKey", result.get("chains", {}).get(chain, {}).get("private_key", result.get("privateKey", result.get("private_key", ""))))
-    
+
+    if system == "bipon39":
+        # The `bipon39` CLI's actual output shape is keys.bip44.<chain>.private_key_hex
+        # — no "chains"/"address" key at all (that shape only matches the
+        # other, non-bipon39 generator below). This never worked before;
+        # for Solana specifically we derive the real base58 address here
+        # the same way execute_live_order() already does elsewhere in this
+        # file. Other chains (ETH/BTC) need their own curve/address logic
+        # bipon39's CLI doesn't provide either — not supported yet rather
+        # than silently deriving something wrong.
+        if chain != "solana":
+            raise HTTPException(422, f"bipon39 wallet generation currently only supports chain='solana' (got '{chain}')")
+        priv_hex = result.get("keys", {}).get("bip44", {}).get("solana", {}).get("private_key_hex", "")
+        if not priv_hex:
+            raise HTTPException(500, "bipon39 output missing keys.bip44.solana.private_key_hex")
+        from solders.keypair import Keypair as _Keypair
+        keypair = _Keypair.from_seed(bytes.fromhex(priv_hex))
+        address = str(keypair.pubkey())
+        private_key = priv_hex
+    else:
+        address = result.get("chains", {}).get(chain, {}).get("address",
+                  result.get("address", ""))
+        private_key = result.get("chains", {}).get(chain, {}).get("privateKey", result.get("chains", {}).get(chain, {}).get("private_key", result.get("privateKey", result.get("private_key", ""))))
+
     if not address or not private_key:
         raise HTTPException(422, f"Chain '{chain}' not available in generated wallet")
     

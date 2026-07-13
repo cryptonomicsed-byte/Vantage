@@ -261,8 +261,11 @@ function TerminalInner() {
         dispatch({ type: 'SET_PORTFOLIO', portfolio: d })
       }
       if (walR.ok) {
+        // GET /api/trading/wallets returns a raw array, not {wallets: [...]}
+        // — this was reading undefined and silently falling back to [],
+        // meaning state.wallets has likely never been populated at all.
         const d = await walR.json()
-        dispatch({ type: 'SET_WALLETS', wallets: d.wallets || [] })
+        dispatch({ type: 'SET_WALLETS', wallets: Array.isArray(d) ? d : (d.wallets || []) })
       }
     } catch {}
   }
