@@ -1,7 +1,8 @@
 import React, { useState } from 'react'
-import { X, BarChart3, GitBranch, Brain, Coins, Layers, Activity, Shield, Sparkles, Gauge, Layout, RotateCcw, BookOpen } from 'lucide-react'
+import { X, BarChart3, GitBranch, Brain, Coins, Layers, Activity, Shield, Sparkles, Gauge, Layout, RotateCcw, BookOpen, Zap } from 'lucide-react'
 import { useTradingStore, ToolType } from './tradingStore'
 import BacktestEngine from './BacktestEngine'
+import StrategiesPanel from './StrategiesPanel'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ToolDrawer — bottom drawer. Replaces all 15 sub-tabs. Slides up to 400px.
@@ -16,6 +17,7 @@ interface ToolDef {
 }
 
 const TOOLS: ToolDef[] = [
+  { id: 'strategies', label: 'Strategies', icon: <Zap size={13} />, primary: true },
   { id: 'backtest', label: 'Backtest', icon: <BarChart3 size={13} />, primary: true },
   { id: 'arbitrage', label: 'Arb', icon: <GitBranch size={13} />, primary: true },
   { id: 'debate', label: 'Debate', icon: <Brain size={13} />, primary: true },
@@ -97,6 +99,7 @@ export default function ToolDrawer() {
 
       {/* Tool Content */}
       <div style={styles.content}>
+        {state.drawerTool === 'strategies' && <StrategiesPanel />}
         {state.drawerTool === 'backtest' && <BacktestEngine />}
         {state.drawerTool === 'arbitrage' && <ArbitragePlaceholder />}
         {state.drawerTool === 'debate' && <DebatePlaceholder />}

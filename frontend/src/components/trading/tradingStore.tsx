@@ -6,7 +6,7 @@ import React, { createContext, useContext, useState, useCallback, useRef, useEff
 // ══════════════════════════════════════════════════════════════════════════════
 
 export type FeedFilter = 'all' | 'signals' | 'alpha' | 'whales' | 'threats' | 'news' | 'debate'
-export type ToolType = 'backtest' | 'arbitrage' | 'debate' | 'yields' | 'dex' | 'sim' | 'stress' | 'risk' | 'swarm' | 'custom' | 'journal' | 'chains' | 'eco' | 'flows' | 'retro'
+export type ToolType = 'backtest' | 'arbitrage' | 'debate' | 'yields' | 'dex' | 'sim' | 'stress' | 'risk' | 'swarm' | 'custom' | 'journal' | 'chains' | 'eco' | 'flows' | 'retro' | 'strategies'
 export type PinePanelMode = 'nl' | 'code' | 'signal' | 'backtest'
 
 export interface Signal {

@@ -64,6 +64,23 @@ class StrategyCreate(BaseModel):
     stop_loss_pct: Optional[float] = None
     take_profit_pct: Optional[float] = None
 
+class StrategyUpdate(BaseModel):
+    """All fields optional — only what's provided gets changed. Editing an
+    ARMED strategy's risk parameters takes effect on its next evaluation
+    cycle in strategy_bots.py, not retroactively on open positions."""
+    name: Optional[str] = None
+    description: Optional[str] = None
+    config: Optional[dict] = None
+    target_chain: Optional[str] = None
+    target_symbols: Optional[str] = None
+    target_tiers: Optional[str] = None
+    wallet_id: Optional[int] = None
+    max_position_size_usd: Optional[float] = None
+    max_concurrent_trades: Optional[int] = None
+    risk_per_trade_pct: Optional[float] = None
+    stop_loss_pct: Optional[float] = None
+    take_profit_pct: Optional[float] = None
+
 class JournalCreate(BaseModel):
     entry_reasoning: str = ""
     exit_reasoning: str = ""
@@ -667,6 +684,47 @@ STRATEGY_TEMPLATES = {
         "target_tiers": "pumpfun_10k_20k,migrated_1m,migrated_10m",
         "max_position_size_usd": 20, "risk_per_trade_pct": 2.0,
     },
+    # The following 4 are config definitions migrated from the now-retired
+    # standalone strategy_executor.py (a separate, hardcoded, paper-only
+    # daemon running two duplicate instances outside this table entirely).
+    # They're creatable/editable here like the originals, but strategy_bots.py
+    # does not yet have execution processors for these strategy_types —
+    # that's real follow-up work, not done in this pass. Arming one of these
+    # right now would have no executor act on it.
+    "swing_momentum": {
+        "label": "Swing (10% target / -3% stop, momentum-following)",
+        "strategy_type": "swing_momentum",
+        "description": "Momentum swing trades with a trailing-stop activation once up 5%.",
+        "config": {"position_size_usd": 20, "trailing_stop_activation_pct": 5.0},
+        "stop_loss_pct": -3.0, "take_profit_pct": 10.0,
+        "target_tiers": "migrated_1m,migrated_10m,migrated_20m",
+        "max_position_size_usd": 20, "risk_per_trade_pct": 2.0,
+    },
+    "moonbag_tiered": {
+        "label": "Moonbag (sell 25% at 5x/20x/50x, keep 25% forever)",
+        "strategy_type": "moonbag_tiered",
+        "description": "Extreme-multiple tiered exits — sells a quarter of the position at each of 5x/20x/50x, holds the rest as a permanent moonbag.",
+        "config": {"position_size_usd": 20, "tiers_x": [5, 20, 50], "sell_pct_per_tier": 25, "moonbag_pct": 25},
+        "target_tiers": "just_launch,pumpfun_10k_20k,pre_migration",
+        "max_position_size_usd": 20, "risk_per_trade_pct": 1.0,
+    },
+    "copytrade_mirror": {
+        "label": "Copy-Trade (mirror 50% of a followed smart wallet's trade size)",
+        "strategy_type": "copytrade_mirror",
+        "description": "Mirrors trades from wallets wallet_learner.py has scored above the win-rate threshold, sized as a fraction of the followed wallet's own trade.",
+        "config": {"follow_pct": 50, "min_wallet_winrate_pct": 60, "min_copy_trade_score": 30},
+        "target_tiers": "",
+        "max_position_size_usd": 20, "risk_per_trade_pct": 2.0,
+    },
+    "balanced_alloc": {
+        "label": "Balanced (40/40/20 bluechip/midcap/degen, weekly rebalance)",
+        "strategy_type": "balanced_alloc",
+        "description": "Fixed-allocation portfolio strategy with a daily drawdown circuit breaker.",
+        "config": {"allocation": {"bluechip": 0.4, "midcap": 0.4, "degen": 0.2}, "rebalance_interval_hours": 168},
+        "stop_loss_pct": -8.0, "take_profit_pct": None,
+        "target_tiers": "",
+        "max_position_size_usd": 100, "risk_per_trade_pct": 2.0,
+    },
 }
 
 @router.get("/strategies/templates")
@@ -727,6 +785,41 @@ async def get_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
         s["runs"] = [dict(r) for r in runs]
         return s
 
+@router.patch("/strategies/{strategy_id}")
+async def update_strategy(strategy_id: int, data: StrategyUpdate, agent: dict = Depends(get_agent)):
+    """Edit an existing strategy — name, config, wallet, risk parameters.
+    Does NOT change strategy_type (that determines which processor in
+    strategy_bots.py runs it; changing it out from under an armed strategy
+    would be surprising — create a new strategy from a different template
+    instead). If wallet_id is changed while armed, the strategy stays armed
+    against the new wallet — disarm first if that's not intended."""
+    fields = data.model_dump(exclude_unset=True)
+    if not fields:
+        raise HTTPException(422, "No fields provided to update")
+    if "config" in fields:
+        fields["config"] = json.dumps(fields["config"])
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        existing = await (await db.execute(
+            "SELECT id FROM trading_strategies WHERE id=? AND agent_id=?", (strategy_id, agent["id"])
+        )).fetchone()
+        if not existing:
+            raise HTTPException(404, "Strategy not found")
+        if "wallet_id" in fields and fields["wallet_id"] is not None:
+            wallet = await (await db.execute(
+                "SELECT id FROM trading_wallets WHERE id=? AND agent_id=?", (fields["wallet_id"], agent["id"])
+            )).fetchone()
+            if not wallet:
+                raise HTTPException(422, "wallet_id does not belong to this agent")
+        set_clause = ", ".join(f"{k}=?" for k in fields)
+        await db.execute(
+            f"UPDATE trading_strategies SET {set_clause}, updated_at=datetime('now') WHERE id=?",
+            (*fields.values(), strategy_id)
+        )
+        await db.commit()
+        row = await (await db.execute("SELECT * FROM trading_strategies WHERE id=?", (strategy_id,))).fetchone()
+        return dict(row)
+
 @router.post("/strategies/{strategy_id}/toggle")
 async def toggle_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -760,7 +853,7 @@ async def arm_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute(
-            "SELECT enabled, wallet_id FROM trading_strategies WHERE id=? AND agent_id=?",
+            "SELECT enabled, wallet_id, strategy_type FROM trading_strategies WHERE id=? AND agent_id=?",
             (strategy_id, agent["id"]))).fetchone()
         if not row:
             raise HTTPException(404, "Strategy not found")
@@ -770,7 +863,14 @@ async def arm_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
             raise HTTPException(422, "Strategy has no linked wallet to trade from")
         await db.execute("UPDATE trading_strategies SET armed=1, updated_at=datetime('now') WHERE id=?", (strategy_id,))
         await db.commit()
-        return {"id": strategy_id, "armed": True}
+        response = {"id": strategy_id, "armed": True}
+        # strategy_bots.py only has execution processors for BOT_TYPES —
+        # arming anything else is a no-op until an executor exists for it.
+        # Surfaced here rather than silently succeeding with no effect.
+        if row["strategy_type"] not in ("scalper_5020", "bighit_40_800", "accumulator_tiered", "doubler_flip"):
+            response["warning"] = (f"strategy_type '{row['strategy_type']}' has no execution processor yet — "
+                                    "this strategy is armed but nothing will act on it until one is built.")
+        return response
 
 @router.post("/strategies/{strategy_id}/disarm")
 async def disarm_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
