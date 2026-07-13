@@ -1059,6 +1059,31 @@ async def quick_trade(data: QuickTrade, agent: dict = Depends(get_agent)):
         raise HTTPException(e.status_code, detail={"order_id": order["id"], "error": e.detail})
     return result
 
+
+@router.get("/source-performance", operation_id="get_source_performance")
+async def get_source_performance(agent: dict = Depends(get_agent)):
+    """The actual learning signal: real pnl_pct at +1h/+24h of every 'buy'
+    order this agent has executed, aggregated by source (a strategy name,
+    or the trigger_reason like 'manual_ui'/'social_telegram'). Populated by
+    trade_outcome_learner.py — the feedback loop that was missing entirely
+    before this: nothing previously tracked whether OUR OWN trades made
+    money, only third-party wallets (wallet_learner.py) or self-reported
+    social claims (social_tracker.py's PnL backtracking)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        # Scope to this agent's own orders via a join, not a raw table read.
+        rows = await (await db.execute("""
+            SELECT sp.source, sp.window, sp.n_trades, sp.wins, sp.avg_pnl_pct, sp.updated_at
+            FROM source_performance sp
+            WHERE EXISTS (
+                SELECT 1 FROM trading_order_outcomes t
+                JOIN trading_orders o ON o.id = t.order_id
+                WHERE t.source = sp.source AND o.agent_id = ?
+            )
+            ORDER BY sp.avg_pnl_pct DESC
+        """, (agent["id"],))).fetchall()
+        return {"sources": [dict(r) for r in rows]}
+
 # ── Performance ─────────────────────────────────────────────
 
 @router.get("/performance")

@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect } from 'react'
-import { Wallet, TrendingUp, TrendingDown, Shield, BookOpen, PieChart, Activity } from 'lucide-react'
+import { Wallet, TrendingUp, TrendingDown, Shield, BookOpen, PieChart, Activity, Brain } from 'lucide-react'
 import { useTradingStore } from './tradingStore'
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -33,6 +33,7 @@ export default function ExecutionPanel() {
 
   const portfolio = state.portfolio
   const activeWallet = state.wallets.find(w => w.id === state.activeWalletId)
+  const [sourcePerf, setSourcePerf] = useState<any[]>([])
 
   useEffect(() => {
     if (!state.activeWalletId) return
@@ -46,6 +47,25 @@ export default function ExecutionPanel() {
       } catch { /* best-effort */ }
     })()
   }, [state.activeWalletId, tradingApi])
+
+  // Real learning signal: does trading source X actually make money? Backed
+  // by trade_outcome_learner.py evaluating every executed buy at +1h/+24h —
+  // not a heuristic, actual pnl on this agent's own trades.
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await tradingApi('/source-performance')
+        if (r.ok) setSourcePerf((await r.json()).sources || [])
+      } catch { /* best-effort */ }
+    })()
+    const iv = setInterval(async () => {
+      try {
+        const r = await tradingApi('/source-performance')
+        if (r.ok) setSourcePerf((await r.json()).sources || [])
+      } catch {}
+    }, 60000)
+    return () => clearInterval(iv)
+  }, [tradingApi])
 
   const handleQuickTrade = useCallback(async () => {
     const apiKey = localStorage.getItem('vantage_api_key')
@@ -262,6 +282,28 @@ export default function ExecutionPanel() {
           </div>
         ) : (
           <div style={{ fontSize: 11, color: '#6b7280' }}>Connect API key to view portfolio</div>
+        )}
+      </div>
+
+      {/* Source Performance — real pnl by strategy/trigger source, not a heuristic */}
+      <div style={styles.portfolioSection}>
+        <div style={styles.sectionHeader}>
+          <Brain size={13} style={{ color: '#8a4bff' }} />
+          <span style={styles.sectionTitle}>Learning: Source Performance</span>
+        </div>
+        {sourcePerf.length === 0 ? (
+          <div style={{ fontSize: 11, color: '#6b7280' }}>No evaluated trades yet — real pnl appears here 1h+ after your first live buy.</div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {sourcePerf.map((s, i) => (
+              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11, padding: '3px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                <span style={{ color: '#e0e0e0' }}>{s.source} <span style={{ color: '#6b7280', fontSize: 9 }}>({s.window}, n={s.n_trades})</span></span>
+                <span style={{ color: s.avg_pnl_pct >= 0 ? '#39ff14' : '#ff2d4a', fontWeight: 700, fontFamily: 'monospace' }}>
+                  {s.avg_pnl_pct >= 0 ? '+' : ''}{s.avg_pnl_pct.toFixed(1)}%
+                </span>
+              </div>
+            ))}
+          </div>
         )}
       </div>
 
