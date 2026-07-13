@@ -97,6 +97,37 @@ def parse_and_ingest_trade_signal(text, chat_title="telegram"):
                 print(f"intel signal post failed: {e}", flush=True)
             return
 
+    # No regex pattern matched — same paraphrased-call gap as
+    # social_tracker.py's _extract_mentions, same fix: only spend an LLM
+    # call on text regex already gave up on.
+    try:
+        import llm_extract
+        llm_sig = llm_extract.extract_signal_llm(text)
+    except Exception:
+        llm_sig = None
+    if llm_sig and llm_sig.ticker:
+        conviction = llm_sig.confidence
+        if llm_sig.direction == "BEARISH":
+            conviction = min(conviction, 0.5)
+        signal = dict(
+            symbol=llm_sig.ticker.upper(), source="telegram_bot_llm",
+            conviction=conviction, type="telegram_alpha",
+            detail=f"{llm_sig.direction} | From {chat_title}: {llm_sig.reasoning} — \"{text[:200]}\"",
+        )
+        try:
+            req = urllib.request.Request(
+                INTEL_INGEST_URL, data=json.dumps(signal).encode(),
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Vantage-Tool": "intel",
+                    "X-Vantage-Tool-Key": TOOL_INTEL_KEY,
+                },
+            )
+            urllib.request.urlopen(req, timeout=5)
+            print(f"intel signal (llm): {llm_sig.ticker} {llm_sig.direction} c={conviction}", flush=True)
+        except Exception as e:
+            print(f"intel signal (llm) post failed: {e}", flush=True)
+
 
 def ingest_watchlist_group_message(text, chat_username, chat_title, post_url):
     """If this message came from one of our tracked Telegram GROUPS, run it
