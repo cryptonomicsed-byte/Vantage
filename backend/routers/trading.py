@@ -7,7 +7,7 @@ from datetime import datetime, timezone, date
 import aiosqlite
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.db import DB_PATH
 from backend.deps import get_agent, get_system_tool
@@ -773,6 +773,91 @@ class StrategyFromTemplate(BaseModel):
     wallet_id: int
     name: Optional[str] = None
     overrides: dict = {}  # shallow-merged into the template's config, e.g. {"profit_wallet_id": 7}
+
+class StrategyGenerateRequest(BaseModel):
+    description: str
+
+
+@router.post("/strategies/generate")
+async def generate_strategy_from_description(data: StrategyGenerateRequest, agent: dict = Depends(get_agent)):
+    """Natural-language → strategy config, via DeepSeek (Instructor structured
+    output — same pattern already proven working in /opt/ares/llm_extract.py
+    this session). Deliberately does NOT invent a new strategy_type from
+    scratch: strategy_bots.py only has real execution logic for 4 types
+    (scalper_5020/bighit_40_800/accumulator_tiered/doubler_flip), so an
+    AI-invented 5th type would produce a config nothing can ever execute —
+    same 'no executor' trap the 4 non-executable templates already warn
+    about. Instead the model picks the best-fit REAL engine for what was
+    described and generates that engine's actual parameters. Returns a
+    preview only — nothing is created/saved here, the frontend shows it
+    for review then calls the normal /strategies/from-template (or a plain
+    POST /strategies for a from-scratch type) to actually save it.
+    """
+    try:
+        import instructor
+        from openai import OpenAI
+    except ImportError:
+        raise HTTPException(500, "instructor/openai not installed")
+
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if not api_key:
+        raise HTTPException(422, "DEEPSEEK_API_KEY not configured — AI strategy generation unavailable")
+
+    class GeneratedStrategy(BaseModel):
+        strategy_type: str = Field(description="MUST be exactly one of: scalper_5020, bighit_40_800, accumulator_tiered, doubler_flip — pick whichever real engine best matches the description")
+        name: str = Field(description="Short human-readable name for this strategy instance")
+        reasoning: str = Field(description="One sentence: why this engine fits the description")
+        position_size_usd: float = Field(20, description="USD size per position")
+        stop_loss_pct: float = Field(description="Negative number, e.g. -30 for a 30% stop")
+        take_profit_pct: float = Field(description="Positive number, e.g. 50 for a 50% target — irrelevant for accumulator_tiered/doubler_flip which use tier configs instead")
+        risk_per_trade_pct: float = Field(2.0, description="Risk % of capital per trade")
+        target_tiers: str = Field("just_launch,pumpfun_10k_20k,pre_migration", description="Comma-separated token lifecycle tiers this strategy should target")
+
+    client = instructor.from_openai(
+        OpenAI(api_key=api_key, base_url="https://api.deepseek.com"),
+        mode=instructor.Mode.MD_JSON,
+    )
+    try:
+        result = client.chat.completions.create(
+            model="deepseek-chat",
+            max_tokens=400,
+            response_model=GeneratedStrategy,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "A user wants a Solana memecoin trading strategy. Available REAL engines "
+                    "(pick exactly one, do not invent others):\n"
+                    "- scalper_5020: fixed-size scalps, symmetric-ish SL/TP, profit splits into a compound/extract pct\n"
+                    "- bighit_40_800: high-risk asymmetric bet on early/just-launched tokens, big stop, huge target\n"
+                    "- accumulator_tiered: accumulate, sell half at +100%, DCA out the rest, keep a permanent moonbag\n"
+                    "- doubler_flip: sell 100% the moment it doubles, reinvest fully into the next target\n\n"
+                    f"User's description: {data.description}"
+                ),
+            }],
+        )
+    except Exception as e:
+        raise HTTPException(502, f"Generation failed: {e}")
+
+    if result.strategy_type not in STRATEGY_TEMPLATES:
+        result.strategy_type = "scalper_5020"  # safe fallback — always a real, executable type
+
+    template = STRATEGY_TEMPLATES[result.strategy_type]
+    config = dict(template["config"])
+    config["position_size_usd"] = result.position_size_usd
+
+    return {
+        "strategy_type": result.strategy_type,
+        "template_label": template["label"],
+        "name": result.name,
+        "reasoning": result.reasoning,
+        "description": template["description"],
+        "config": config,
+        "stop_loss_pct": result.stop_loss_pct,
+        "take_profit_pct": result.take_profit_pct,
+        "risk_per_trade_pct": result.risk_per_trade_pct,
+        "target_tiers": result.target_tiers,
+        "max_position_size_usd": result.position_size_usd,
+    }
 
 @router.post("/strategies/from-template")
 async def create_strategy_from_template(data: StrategyFromTemplate, agent: dict = Depends(get_agent)):

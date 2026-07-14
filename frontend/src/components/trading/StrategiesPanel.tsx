@@ -248,7 +248,32 @@ function EditStrategyModal({ strategy, wallets, tradingApi, onClose, onSaved }: 
   )
 }
 
+type CreateMode = 'template' | 'ai' | 'custom'
+
 function CreateStrategyModal({ templates, wallets, tradingApi, onClose, onCreated }: { templates: Record<string, any>; wallets: any[]; tradingApi: TradingApiFn; onClose: () => void; onCreated: () => void }) {
+  const [mode, setMode] = useState<CreateMode>('template')
+  const solWallets = wallets.filter(w => w.chain === 'solana')
+
+  return (
+    <ModalShell title="New Strategy" onClose={onClose}>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 14, background: 'rgba(255,255,255,.04)', borderRadius: 8, padding: 3 }}>
+        {(['template', 'ai', 'custom'] as CreateMode[]).map(m => (
+          <button key={m} onClick={() => setMode(m)} style={{
+            flex: 1, padding: '6px 0', borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 11, fontWeight: 700,
+            background: mode === m ? 'rgba(0,245,255,0.15)' : 'transparent', color: mode === m ? '#00f5ff' : '#9ca3af',
+          }}>
+            {m === 'template' ? 'From Template' : m === 'ai' ? 'Describe It (AI)' : 'Full Custom'}
+          </button>
+        ))}
+      </div>
+      {mode === 'template' && <TemplateMode templates={templates} wallets={solWallets} tradingApi={tradingApi} onCreated={onCreated} />}
+      {mode === 'ai' && <AiDescribeMode templates={templates} wallets={solWallets} tradingApi={tradingApi} onCreated={onCreated} />}
+      {mode === 'custom' && <CustomMode templates={templates} wallets={solWallets} tradingApi={tradingApi} onCreated={onCreated} />}
+    </ModalShell>
+  )
+}
+
+function TemplateMode({ templates, wallets, tradingApi, onCreated }: { templates: Record<string, any>; wallets: any[]; tradingApi: TradingApiFn; onCreated: () => void }) {
   const templateKeys = Object.keys(templates)
   const [templateKey, setTemplateKey] = useState(templateKeys[0] || '')
   const [name, setName] = useState('')
@@ -275,7 +300,7 @@ function CreateStrategyModal({ templates, wallets, tradingApi, onClose, onCreate
   }
 
   return (
-    <ModalShell title="New Strategy From Template" onClose={onClose}>
+    <>
       <Field label="Template">
         <select value={templateKey} onChange={e => setTemplateKey(e.target.value)} style={inputStyle}>
           {templateKeys.map(k => <option key={k} value={k}>{templates[k].label}</option>)}
@@ -291,12 +316,206 @@ function CreateStrategyModal({ templates, wallets, tradingApi, onClose, onCreate
       <Field label="Wallet">
         <select value={walletId} onChange={e => setWalletId(e.target.value)} style={inputStyle}>
           <option value="">Select wallet…</option>
-          {wallets.filter(w => w.chain === 'solana').map(w => <option key={w.id} value={w.id}>{w.label} ({w.address.slice(0, 6)}…)</option>)}
+          {wallets.map(w => <option key={w.id} value={w.id}>{w.label} ({w.address.slice(0, 6)}…)</option>)}
         </select>
       </Field>
       {error && <div style={{ fontSize: 11, color: '#ff2d4a', marginBottom: 8 }}>{error}</div>}
       <button onClick={create} disabled={busy} style={saveBtnStyle}>{busy ? 'Creating…' : 'Create strategy'}</button>
-    </ModalShell>
+    </>
+  )
+}
+
+// ── Describe It (AI) — natural language -> best-fit REAL engine + params,
+// via POST /strategies/generate (Instructor+DeepSeek). Always maps onto one
+// of the 4 executable engines, never invents a non-executable type.
+function AiDescribeMode({ templates, wallets, tradingApi, onCreated }: { templates: Record<string, any>; wallets: any[]; tradingApi: TradingApiFn; onCreated: () => void }) {
+  const [description, setDescription] = useState('')
+  const [walletId, setWalletId] = useState<string>('')
+  const [generating, setGenerating] = useState(false)
+  const [result, setResult] = useState<any | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  async function generate() {
+    if (!description.trim()) { setError('Describe the strategy you want'); return }
+    setGenerating(true); setError(''); setResult(null)
+    try {
+      const r = await tradingApi('/strategies/generate', { method: 'POST', body: JSON.stringify({ description }) })
+      const d = await r.json()
+      if (r.ok) setResult(d)
+      else setError(d.detail || 'Generation failed')
+    } catch (e: any) {
+      setError(e?.message || 'Request failed')
+    }
+    setGenerating(false)
+  }
+
+  async function confirmCreate() {
+    if (!walletId) { setError('Pick a wallet'); return }
+    if (!result) return
+    setBusy(true); setError('')
+    try {
+      const cr = await tradingApi(`/strategies/from-template?wallet_id=${walletId}`, {
+        method: 'POST',
+        body: JSON.stringify({ template: result.strategy_type, name: result.name }),
+      })
+      const created = await cr.json()
+      if (!cr.ok) { setError(created.detail || 'Create failed'); setBusy(false); return }
+      const pr = await tradingApi(`/strategies/${created.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          config: result.config,
+          stop_loss_pct: result.stop_loss_pct,
+          take_profit_pct: result.take_profit_pct,
+          risk_per_trade_pct: result.risk_per_trade_pct,
+          max_position_size_usd: result.max_position_size_usd,
+          target_tiers: result.target_tiers,
+        }),
+      })
+      if (pr.ok) onCreated()
+      else { const d = await pr.json(); setError(d.detail || 'Save failed') }
+    } catch (e: any) {
+      setError(e?.message || 'Request failed')
+    }
+    setBusy(false)
+  }
+
+  return (
+    <>
+      <Field label="Describe the strategy you want">
+        <textarea value={description} onChange={e => setDescription(e.target.value)} rows={3}
+          placeholder="e.g. snipe brand new pump.fun tokens right at launch, take a big swing, hold a moonbag if it rips"
+          style={{ ...inputStyle, resize: 'vertical', fontFamily: 'inherit' }} />
+      </Field>
+      <button onClick={generate} disabled={generating} style={{ ...saveBtnStyle, marginBottom: 12, background: generating ? 'rgba(0,245,255,0.3)' : '#00f5ff' }}>
+        {generating ? 'Thinking…' : 'Generate'}
+      </button>
+
+      {result && (
+        <div style={{ background: 'rgba(0,245,255,0.05)', border: '1px solid rgba(0,245,255,0.2)', borderRadius: 8, padding: 10, marginBottom: 12 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#fff', marginBottom: 4 }}>{result.name}</div>
+          <div style={{ fontSize: 9, padding: '2px 6px', borderRadius: 4, background: 'rgba(255,255,255,0.06)', color: '#9ca3af', display: 'inline-block', marginBottom: 6 }}>
+            {result.strategy_type} → {result.template_label}
+          </div>
+          <div style={{ fontSize: 10, color: 'rgba(255,255,255,.6)', marginBottom: 8, fontStyle: 'italic' }}>{result.reasoning}</div>
+          <div style={{ display: 'flex', gap: 12, fontSize: 11, color: '#9ca3af', flexWrap: 'wrap' }}>
+            <span>Max: ${result.max_position_size_usd}</span>
+            <span style={{ color: '#ff2d4a' }}>SL {result.stop_loss_pct}%</span>
+            <span style={{ color: '#39ff14' }}>TP +{result.take_profit_pct}%</span>
+            <span>Risk {result.risk_per_trade_pct}%/trade</span>
+          </div>
+        </div>
+      )}
+
+      {result && (
+        <Field label="Wallet">
+          <select value={walletId} onChange={e => setWalletId(e.target.value)} style={inputStyle}>
+            <option value="">Select wallet…</option>
+            {wallets.map(w => <option key={w.id} value={w.id}>{w.label} ({w.address.slice(0, 6)}…)</option>)}
+          </select>
+        </Field>
+      )}
+      {error && <div style={{ fontSize: 11, color: '#ff2d4a', marginBottom: 8 }}>{error}</div>}
+      {result && (
+        <button onClick={confirmCreate} disabled={busy} style={saveBtnStyle}>{busy ? 'Creating…' : 'Create this strategy'}</button>
+      )}
+    </>
+  )
+}
+
+// ── Full Custom — pick a base engine (must be one of the 4 executable
+// types to actually trade), then hand-edit every parameter including raw
+// config JSON. Scaffolds via from-template then immediately PATCHes with
+// the custom values, so it reuses the exact same persistence path as
+// editing an existing strategy.
+function CustomMode({ templates, wallets, tradingApi, onCreated }: { templates: Record<string, any>; wallets: any[]; tradingApi: TradingApiFn; onCreated: () => void }) {
+  const templateKeys = Object.keys(templates)
+  const [templateKey, setTemplateKey] = useState(templateKeys[0] || '')
+  const [name, setName] = useState('')
+  const [walletId, setWalletId] = useState<string>('')
+  const [maxUsd, setMaxUsd] = useState('20')
+  const [riskPct, setRiskPct] = useState('2')
+  const [sl, setSl] = useState('')
+  const [tp, setTp] = useState('')
+  const [targetTiers, setTargetTiers] = useState('just_launch,pumpfun_10k_20k,pre_migration')
+  const [configText, setConfigText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  const tpl = templates[templateKey]
+
+  useEffect(() => {
+    if (tpl?.config) setConfigText(JSON.stringify(tpl.config, null, 2))
+  }, [templateKey])
+
+  async function create() {
+    if (!walletId) { setError('Pick a wallet'); return }
+    let config: any = undefined
+    if (configText.trim()) {
+      try { config = JSON.parse(configText) } catch { setError('Config is not valid JSON'); return }
+    }
+    setBusy(true); setError('')
+    try {
+      const cr = await tradingApi(`/strategies/from-template?wallet_id=${walletId}`, {
+        method: 'POST',
+        body: JSON.stringify({ template: templateKey, name: name || undefined }),
+      })
+      const created = await cr.json()
+      if (!cr.ok) { setError(created.detail || 'Create failed'); setBusy(false); return }
+      const pr = await tradingApi(`/strategies/${created.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          config,
+          max_position_size_usd: Number(maxUsd),
+          risk_per_trade_pct: Number(riskPct),
+          stop_loss_pct: sl === '' ? null : Number(sl),
+          take_profit_pct: tp === '' ? null : Number(tp),
+          target_tiers: targetTiers,
+        }),
+      })
+      if (pr.ok) onCreated()
+      else { const d = await pr.json(); setError(d.detail || 'Save failed') }
+    } catch (e: any) {
+      setError(e?.message || 'Request failed')
+    }
+    setBusy(false)
+  }
+
+  return (
+    <>
+      <Field label="Base engine (determines execution logic)">
+        <select value={templateKey} onChange={e => setTemplateKey(e.target.value)} style={inputStyle}>
+          {templateKeys.map(k => <option key={k} value={k}>{templates[k].label}</option>)}
+        </select>
+      </Field>
+      {tpl && !LIVE_TYPES.has(tpl.strategy_type) && (
+        <div style={{ fontSize: 10, color: '#ffaa00', marginBottom: 10, padding: '6px 8px', background: 'rgba(255,170,0,0.08)', borderRadius: 6 }}>
+          ⚠️ No execution processor yet for this type — editable/creatable, but arming it won't trade until one is built.
+        </div>
+      )}
+      <Field label="Name"><input value={name} onChange={e => setName(e.target.value)} placeholder={tpl?.label} style={inputStyle} /></Field>
+      <Field label="Wallet">
+        <select value={walletId} onChange={e => setWalletId(e.target.value)} style={inputStyle}>
+          <option value="">Select wallet…</option>
+          {wallets.map(w => <option key={w.id} value={w.id}>{w.label} ({w.address.slice(0, 6)}…)</option>)}
+        </select>
+      </Field>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <Field label="Max position ($)"><input type="number" value={maxUsd} onChange={e => setMaxUsd(e.target.value)} style={inputStyle} /></Field>
+        <Field label="Risk % / trade"><input type="number" value={riskPct} onChange={e => setRiskPct(e.target.value)} style={inputStyle} /></Field>
+      </div>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <Field label="Stop-loss %"><input type="number" value={sl} onChange={e => setSl(e.target.value)} placeholder="none" style={inputStyle} /></Field>
+        <Field label="Take-profit %"><input type="number" value={tp} onChange={e => setTp(e.target.value)} placeholder="none" style={inputStyle} /></Field>
+      </div>
+      <Field label="Target tiers (comma-separated)"><input value={targetTiers} onChange={e => setTargetTiers(e.target.value)} style={inputStyle} /></Field>
+      <Field label="Config (raw JSON — engine-specific)">
+        <textarea value={configText} onChange={e => setConfigText(e.target.value)} rows={6}
+          style={{ ...inputStyle, resize: 'vertical', fontFamily: 'monospace', fontSize: 11 }} />
+      </Field>
+      {error && <div style={{ fontSize: 11, color: '#ff2d4a', marginBottom: 8 }}>{error}</div>}
+      <button onClick={create} disabled={busy} style={saveBtnStyle}>{busy ? 'Creating…' : 'Create custom strategy'}</button>
+    </>
   )
 }
 
