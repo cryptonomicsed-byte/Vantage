@@ -97,9 +97,22 @@ function externalLinks(n: FlowNode): { label: string; url: string }[] {
   return []
 }
 
-function buildGraph(data: MoneyFlowData, activeTiers: Set<string> | null): { nodes: GNode[]; links: GLink[] } {
+function buildGraph(data: MoneyFlowData, activeTiers: Set<string> | null, trackedAddresses: Set<string> | null): { nodes: GNode[]; links: GLink[] } {
   let filteredNodes = data.nodes
-  if (activeTiers && activeTiers.size > 0) {
+  if (trackedAddresses && trackedAddresses.size > 0) {
+    // "My Tracked Wallets" — narrow to only wallet nodes whose address is
+    // in tracked_wallets (same set the Portfolio/watch-only forms write
+    // to), plus whatever they're directly connected to (tokens, social
+    // accounts) so it's not just isolated dots.
+    const keep = new Set<string>()
+    for (const n of data.nodes) {
+      if (n.type === 'wallet' && n.address && trackedAddresses.has(n.address.toLowerCase())) keep.add(n.id)
+    }
+    for (const e of data.edges) {
+      if (keep.has(e.source) || keep.has(e.target)) { keep.add(e.source); keep.add(e.target) }
+    }
+    filteredNodes = data.nodes.filter(n => keep.has(n.id))
+  } else if (activeTiers && activeTiers.size > 0) {
     const keep = new Set<string>()
     for (const n of data.nodes) {
       if (n.type === 'token' && n.tier && activeTiers.has(n.tier)) keep.add(n.id)
@@ -152,6 +165,21 @@ export default function MoneyFlowGraph() {
   const [loading, setLoading] = useState(true)
   const [selected, setSelected] = useState<FlowNode | null>(null)
   const [activeTiers, setActiveTiers] = useState<Set<string>>(new Set())
+  const [showTrackedOnly, setShowTrackedOnly] = useState(false)
+  const [trackedAddresses, setTrackedAddresses] = useState<Set<string>>(new Set())
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const key = localStorage.getItem('vantage_api_key') || ''
+        const r = await fetch('/api/intel/watchlist', { headers: { 'X-Agent-Key': key } })
+        if (r.ok) {
+          const d = await r.json()
+          setTrackedAddresses(new Set((d.wallets || []).map((w: any) => (w.address || '').toLowerCase())))
+        }
+      } catch { /* best-effort */ }
+    })()
+  }, [])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -192,7 +220,7 @@ export default function MoneyFlowGraph() {
       ])
       if (disposed || !mountRef.current) return
 
-      const { nodes, links } = buildGraph(network, activeTiers)
+      const { nodes, links } = buildGraph(network, activeTiers, showTrackedOnly ? trackedAddresses : null)
 
       const cv = document.createElement('canvas'); cv.width = cv.height = 64
       const cx = cv.getContext('2d')!
@@ -262,7 +290,7 @@ export default function MoneyFlowGraph() {
       }
     })()
     return () => { disposed = true }
-  }, [network, activeTiers])
+  }, [network, activeTiers, showTrackedOnly, trackedAddresses])
 
   /* Resize + teardown */
   useEffect(() => {
@@ -292,6 +320,14 @@ export default function MoneyFlowGraph() {
           </select>
         </label>
         <button className="btn btn-ghost btn-sm" onClick={load}><RefreshCw size={12} className={loading ? 'spin' : ''} /> Refresh</button>
+        <button
+          className="btn btn-sm"
+          onClick={() => setShowTrackedOnly(v => !v)}
+          title={trackedAddresses.size === 0 ? 'No tracked wallets yet — add some from Portfolio → Wallets or Add External Wallet' : `${trackedAddresses.size} tracked wallet(s)`}
+          style={showTrackedOnly ? { background: 'rgba(59,130,246,0.25)', border: '1px solid rgba(59,130,246,0.5)', color: '#3b82f6' } : undefined}
+        >
+          My Tracked Wallets{trackedAddresses.size > 0 ? ` (${trackedAddresses.size})` : ''}
+        </button>
         {activeTiers.size > 0 && (
           <button className="btn btn-ghost btn-sm" onClick={() => setActiveTiers(new Set())}>Clear tier filter</button>
         )}

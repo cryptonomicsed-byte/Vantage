@@ -17,6 +17,30 @@ from backend.crypto_utils import encrypt_key_for_agent, decrypt_key_for_agent
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/trading", tags=["trading"])
 
+
+async def _sync_to_tracked_wallets(db, agent_id: int, chain: str, address: str, label: str):
+    """Every trading_wallets row (whatever agent, whatever chain) also flows
+    into tracked_wallets — the shared table wallet_learner.py, the
+    money-flow graph, and Top5's smart-money sections all actually read
+    from. Without this a wallet you're trading from is invisible to your
+    own intel/graph. Only 'bitcoin'/'solana' are supported chains there
+    (matches /trace's chain support) — silently no-ops for others rather
+    than erroring, since this is a best-effort side-effect, not the main
+    operation the caller is performing."""
+    canon = {"bitcoin": "bitcoin", "btc": "bitcoin", "solana": "solana", "sol": "solana"}.get((chain or "").lower())
+    if not canon or not address:
+        return
+    try:
+        await db.execute(
+            """INSERT INTO tracked_wallets (chain, address, label, address_type, notes, added_by_agent_id)
+               VALUES (?, ?, ?, 'wallet', 'auto-tracked from trading_wallets', ?)
+               ON CONFLICT(chain, address) DO UPDATE SET
+                 label = CASE WHEN excluded.label != '' AND label = '' THEN excluded.label ELSE label END""",
+            (canon, address, label or "", agent_id),
+        )
+    except Exception:
+        pass  # best-effort side-effect — never blocks the actual wallet-creation response
+
 # ── Models ──────────────────────────────────────────────────
 
 class WalletCreate(BaseModel):
@@ -108,11 +132,17 @@ class PnLSnapshotCreate(BaseModel):
 @router.post("/wallets")
 async def create_wallet(data: WalletCreate, agent: dict = Depends(get_agent)):
     async with aiosqlite.connect(DB_PATH) as db:
+        # This handler now does 2 writes (trading_wallets + tracked_wallets)
+        # instead of 1 — with many daemons hitting this DB concurrently and
+        # no busy_timeout set, a real transient "database is locked" showed
+        # up in testing. WAL mode alone doesn't queue concurrent writers.
+        await db.execute("PRAGMA busy_timeout=5000")
         try:
             cur = await db.execute(
                 "INSERT INTO trading_wallets (agent_id, label, chain, address, encrypted_private_key, exchange) VALUES (?,?,?,?,?,?)",
                 (agent["id"], data.label, data.chain, data.address, data.encrypted_key, data.exchange)
             )
+            await _sync_to_tracked_wallets(db, agent["id"], data.chain, data.address, data.label)
             await db.commit()
             return {"id": cur.lastrowid, "label": data.label, "chain": data.chain, "address": data.address, "exchange": data.exchange}
         except aiosqlite.IntegrityError:
@@ -361,12 +391,14 @@ async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent)
         raise HTTPException(422, f"Chain '{chain}' not available in generated wallet")
     
     encrypted = encrypt_key_for_agent(private_key, agent)
-    
+
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA busy_timeout=5000")
         cur = await db.execute(
             "INSERT INTO trading_wallets (agent_id, label, chain, address, encrypted_private_key) VALUES (?,?,?,?,?)",
             (agent["id"], label, chain, address, encrypted)
         )
+        await _sync_to_tracked_wallets(db, agent["id"], chain, address, label)
         await db.commit()
         wallet_id = cur.lastrowid
     

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { Wallet, ListOrdered, Layers, BookOpen, PieChart, RefreshCw, Plus, XCircle, Zap, ShieldCheck, Coins, Pencil, Check, Landmark } from 'lucide-react'
 import { TokenLink, WalletLink } from './EntityProfileCard'
+import GenerateWalletModal from './GenerateWalletModal'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Portfolio — the agent-scoped trading workspace built on the existing
@@ -345,6 +346,72 @@ function Orders({ simulated }: { simulated: boolean }) {
 // WALLETS
 // ══════════════════════════════════════════════════════════════════════════════
 
+// Add-External-Wallet writes directly to the shared tracked_wallets/intel
+// watchlist (POST /api/intel/watchlist) — for wallets that AREN'T yours:
+// a whale you want to watch, an exchange hot wallet, a token contract, a
+// smart-money multisig. This is the same underlying system that used to
+// live behind Analytics' separate Watchlist tab (now removed) — feeds
+// wallet_learner.py, the money-flow graph, and Top5's smart-money lists,
+// same as before, just from one place instead of two.
+async function intelApi(path: string, opts: RequestInit = {}): Promise<Response> {
+  return fetch(`/api/intel${path}`, {
+    ...opts,
+    headers: { 'X-Agent-Key': agentKey(), 'Content-Type': 'application/json', ...(opts.headers || {}) },
+  })
+}
+
+function AddExternalWallet({ onAdded }: { onAdded: () => void }) {
+  const [chain, setChain] = useState('solana')
+  const [address, setAddress] = useState('')
+  const [label, setLabel] = useState('')
+  const [addressType, setAddressType] = useState('wallet')
+  const [notes, setNotes] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState('')
+
+  async function add() {
+    if (!address.trim()) { setMsg('Address required'); return }
+    setBusy(true); setMsg('')
+    try {
+      const r = await intelApi('/watchlist', {
+        method: 'POST',
+        body: JSON.stringify({ chain, address: address.trim(), label: label.trim(), address_type: addressType, notes: notes.trim() }),
+      })
+      if (r.ok) { setAddress(''); setLabel(''); setNotes(''); setAddressType('wallet'); onAdded() }
+      else { const e = await r.json().catch(() => ({})); setMsg(e.detail || 'Failed') }
+    } catch { setMsg('Failed') }
+    setBusy(false)
+  }
+
+  return (
+    <div style={{ background: 'rgba(12,12,22,0.9)', border: '1px solid var(--border)', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: '#e0e0e0', marginBottom: 4 }}>Add External Wallet (Watch-Only)</div>
+      <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 10 }}>
+        For wallets that aren't yours — a whale, an exchange hot wallet, a token contract, a smart-money multisig you want visible in the money-flow graph and smart-money scoring. Not a trading wallet; nothing here can ever execute a trade.
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginBottom: 10 }}>
+        <select className="ares-input" value={chain} onChange={e => setChain(e.target.value)}>
+          <option value="solana">Solana</option>
+          <option value="bitcoin">Bitcoin</option>
+        </select>
+        <input className="ares-input" placeholder="Address" value={address} onChange={e => setAddress(e.target.value)} />
+        <input className="ares-input" placeholder="Label" value={label} onChange={e => setLabel(e.target.value)} />
+        <select className="ares-input" value={addressType} onChange={e => setAddressType(e.target.value)}>
+          <option value="wallet">Wallet</option>
+          <option value="exchange">Exchange</option>
+          <option value="contract">Contract</option>
+          <option value="smart_wallet">Smart Wallet</option>
+        </select>
+        <input className="ares-input" placeholder="Notes (optional)" value={notes} onChange={e => setNotes(e.target.value)} />
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <button className="btn btn-primary btn-sm" onClick={add} disabled={busy}><Plus size={12} /> Track Address</button>
+        {msg && <span style={{ fontSize: 12, color: 'var(--muted)' }}>{msg}</span>}
+      </div>
+    </div>
+  )
+}
+
 function Wallets() {
   const wallets = useTrading<any[]>('/wallets')
   const [form, setForm] = useState({ label: '', chain: 'solana', address: '', exchange: '' })
@@ -353,6 +420,7 @@ function Wallets() {
   const [syncingId, setSyncingId] = useState<number | null>(null)
   const [editingId, setEditingId] = useState<number | null>(null)
   const [editDraft, setEditDraft] = useState({ label: '', exchange: '' })
+  const [showGenerate, setShowGenerate] = useState(false)
 
   async function add() {
     if (!form.label || !form.address) { setMsg('Label and address required'); return }
@@ -391,7 +459,10 @@ function Wallets() {
   const rows = wallets.data || []
   return (
     <div>
-      <div className="ares-section-title"><Wallet size={15} style={{ verticalAlign: 'middle', marginRight: 6 }} /> Wallets ({rows.length})</div>
+      <div className="ares-section-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span><Wallet size={15} style={{ verticalAlign: 'middle', marginRight: 6 }} /> Wallets ({rows.length})</span>
+        <button className="btn btn-primary btn-sm" onClick={() => setShowGenerate(true)}><Plus size={12} /> Generate Wallet</button>
+      </div>
       <div style={{ background: 'rgba(12,12,22,0.9)', border: '1px solid var(--border)', borderRadius: 12, padding: 16, marginBottom: 16 }}>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginBottom: 10 }}>
           <input className="ares-input" placeholder="Label" value={form.label} onChange={e => setForm({ ...form, label: e.target.value })} />
@@ -400,11 +471,18 @@ function Wallets() {
           <input className="ares-input" placeholder="Exchange (optional — e.g. Coinbase)" value={form.exchange} onChange={e => setForm({ ...form, exchange: e.target.value })} />
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <button className="btn btn-primary btn-sm" onClick={add} disabled={busy}><Plus size={12} /> Add Wallet</button>
+          <button className="btn btn-primary btn-sm" onClick={add} disabled={busy}><Plus size={12} /> Track Wallet</button>
           {msg && <span style={{ fontSize: 12, color: 'var(--muted)' }}>{msg}</span>}
         </div>
-        <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 10 }}>Track-only: store public addresses for bookkeeping, no private keys used. Sync fetches a real balance for bitcoin/solana addresses (mempool.space / Solana RPC) — other chains aren't live-synced yet. Leave Exchange blank for a self-custody wallet, or name the exchange it's held on (Coinbase, Binance, …) to organize which wallets are custodial.</div>
+        <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 10 }}>Track-only: store public addresses for bookkeeping, no private keys used. Sync fetches a real balance for bitcoin/solana addresses (mempool.space / Solana RPC) — other chains aren't live-synced yet. Leave Exchange blank for a self-custody wallet, or name the exchange it's held on (Coinbase, Binance, …) to organize which wallets are custodial. Every wallet added here also flows into the money-flow graph automatically.</div>
       </div>
+
+      <AddExternalWallet onAdded={() => wallets.reload()} />
+
+      {showGenerate && (
+        <GenerateWalletModal onClose={() => setShowGenerate(false)} onCreated={() => wallets.reload()} tradingApi={tradingApi} />
+      )}
+
       <table className="ares-table">
         <thead><tr><th>Label</th><th>Chain</th><th>Address</th><th>Held On</th><th>Balance</th><th>Synced</th><th></th></tr></thead>
         <tbody>
