@@ -1203,6 +1203,60 @@ async def get_source_performance(agent: dict = Depends(get_agent)):
         """, (agent["id"],))).fetchall()
         return {"sources": [dict(r) for r in rows]}
 
+
+# ── Daemon settings — a real settings surface for standalone Python
+# daemons (ares_pumpfun_trader.py, degen_alpha_fusion.py's snipe_token)
+# that run outside this FastAPI process and previously only took their
+# wallet via a static env var nobody could change without editing a
+# systemd unit file by hand. Daemons poll GET /daemon-settings/{key} each
+# cycle instead. Not agent-scoped (these are system daemons, not
+# per-agent) — uses the same system-tool auth as the rest of the
+# infra-facing endpoints for reads from daemons, but writes go through
+# normal agent auth since that's the UI's job. ─────────────────────────
+DAEMON_SETTING_KEYS = {"pumpfun_trader_wallet_id", "snipe_wallet_id"}
+
+@router.get("/daemon-settings")
+async def list_daemon_settings(agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute("SELECT key, value, updated_at FROM daemon_settings")).fetchall()
+        existing = {r["key"]: dict(r) for r in rows}
+        return {k: existing.get(k, {"key": k, "value": None, "updated_at": None}) for k in DAEMON_SETTING_KEYS}
+
+class DaemonSettingUpdate(BaseModel):
+    value: str
+
+@router.put("/daemon-settings/{key}")
+async def set_daemon_setting(key: str, data: DaemonSettingUpdate, agent: dict = Depends(get_agent)):
+    if key not in DAEMON_SETTING_KEYS:
+        raise HTTPException(422, f"Unknown daemon setting '{key}'")
+    # Sanity-check it's actually a wallet the agent owns before letting a
+    # standalone root daemon spend from it.
+    async with aiosqlite.connect(DB_PATH) as db:
+        wallet = await (await db.execute(
+            "SELECT id FROM trading_wallets WHERE id=? AND agent_id=?", (data.value, agent["id"])
+        )).fetchone()
+        if not wallet:
+            raise HTTPException(422, "value must be a wallet_id belonging to this agent")
+        await db.execute(
+            "INSERT INTO daemon_settings (key, value, updated_at) VALUES (?,?,datetime('now')) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (key, data.value)
+        )
+        await db.commit()
+        return {"key": key, "value": data.value}
+
+@router.get("/daemon-settings/{key}", operation_id="get_daemon_setting_for_daemon")
+async def get_daemon_setting(key: str, tool: dict = Depends(get_system_tool)):
+    """Read path for the daemons themselves — system-tool auth (they run
+    as root, outside any agent session), no UI dependency."""
+    if key not in DAEMON_SETTING_KEYS:
+        raise HTTPException(422, f"Unknown daemon setting '{key}'")
+    async with aiosqlite.connect(DB_PATH) as db:
+        row = await (await db.execute("SELECT value FROM daemon_settings WHERE key=?", (key,))).fetchone()
+        return {"key": key, "value": row[0] if row else None}
+
+
 # ── Performance ─────────────────────────────────────────────
 
 @router.get("/performance")

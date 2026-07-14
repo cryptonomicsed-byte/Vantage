@@ -14,6 +14,66 @@ import { useTradingStore } from './tradingStore'
 
 const LIVE_TYPES = new Set(['scalper_5020', 'bighit_40_800', 'accumulator_tiered', 'doubler_flip'])
 
+// ── Daemon Settings — wallet pickers for the two standalone daemons
+// (ares_pumpfun_trader.py, degen_alpha_fusion.py's snipe_token) that run
+// outside this app entirely. They poll GET /daemon-settings/{key} each
+// cycle, so a change here takes effect within one cycle — no SSH, no
+// systemd restart, no env file editing.
+const DAEMON_SETTINGS = [
+  { key: 'pumpfun_trader_wallet_id', label: 'Pumpfun Trader', desc: 'ares_pumpfun_trader.py — auto-buys pump.fun tokens flagged safe by degen_alpha_fusion/ogun_multiscan' },
+  { key: 'snipe_wallet_id', label: 'Degen Snipe', desc: "degen_alpha_fusion.py's moonshot auto-snipe (score > 60)" },
+]
+
+function DaemonSettingsPanel({ wallets }: { wallets: any[] }) {
+  const { tradingApi } = useTradingStore()
+  const [values, setValues] = useState<Record<string, string>>({})
+  const [saved, setSaved] = useState<Record<string, boolean>>({})
+
+  useEffect(() => {
+    (async () => {
+      const r = await tradingApi('/daemon-settings')
+      if (r.ok) {
+        const d = await r.json()
+        const next: Record<string, string> = {}
+        for (const k of Object.keys(d)) next[k] = d[k].value || ''
+        setValues(next)
+      }
+    })()
+  }, [tradingApi])
+
+  async function save(key: string, value: string) {
+    setValues(v => ({ ...v, [key]: value }))
+    setSaved(s => ({ ...s, [key]: false }))
+    if (!value) return
+    const r = await tradingApi(`/daemon-settings/${key}`, { method: 'PUT', body: JSON.stringify({ value }) })
+    setSaved(s => ({ ...s, [key]: r.ok }))
+  }
+
+  return (
+    <div style={{ marginBottom: 16, padding: 12, background: 'rgba(138,75,255,0.05)', border: '1px solid rgba(138,75,255,0.15)', borderRadius: 10 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: '#8a4bff', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
+        Auto-Trading Daemon Wallets
+      </div>
+      <div style={{ display: 'grid', gap: 8 }}>
+        {DAEMON_SETTINGS.map(ds => (
+          <div key={ds.key}>
+            <div style={{ fontSize: 11, color: '#e0e0e0', fontWeight: 600, marginBottom: 2 }}>{ds.label}</div>
+            <div style={{ fontSize: 9, color: 'rgba(255,255,255,.4)', marginBottom: 4 }}>{ds.desc}</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <select value={values[ds.key] || ''} onChange={e => save(ds.key, e.target.value)}
+                style={{ flex: 1, background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 6, color: '#fff', fontSize: 11, padding: '5px 6px' }}>
+                <option value="">No wallet — execution disabled</option>
+                {wallets.map(w => <option key={w.id} value={w.id}>{w.label} ({w.address.slice(0, 4)}…{w.address.slice(-4)})</option>)}
+              </select>
+              {saved[ds.key] && <span style={{ fontSize: 10, color: '#39ff14' }}>✓ saved</span>}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export default function StrategiesPanel() {
   const { tradingApi } = useTradingStore()
   const [strategies, setStrategies] = useState<any[]>([])
@@ -63,6 +123,8 @@ export default function StrategiesPanel() {
 
   return (
     <div style={{ padding: '0 16px' }}>
+      <DaemonSettingsPanel wallets={wallets.filter(w => w.chain === 'solana')} />
+
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: '#e0e0e0' }}>Strategies</div>
         <button onClick={() => setShowCreate(true)}
