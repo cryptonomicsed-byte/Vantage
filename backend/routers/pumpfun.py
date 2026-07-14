@@ -253,3 +253,43 @@ async def token_traders(mint: str = Query(...), x_agent_key: str = Header(...)):
         return {"mint":mint,"traders":[{"wallet":w,"txn_count":c} for w,c in top],"unique_traders":len(trader_vol)}
     except:
         return {"mint":mint,"traders":[],"error":"RPC unavailable"}
+
+# ════════════════════════════════════════════════════════════════
+# TRACE BY TOKEN — the on-demand version of what pumpfun_wallet_intel.py's
+# background daemon already does on its own 10-min cycle for whatever
+# tokens surface in top5/must-buy-20/social mentions. This lets the Trace
+# tab run the exact same deployer + top-holder + top-trader + first-buyer
+# extraction immediately for ANY token, not just whatever the daemon
+# happened to already reach. Same persistence (token_wallet_roles +
+# tracked_wallets) — a wallet found here is a real graph node right away,
+# same as the daemon's own output, not a separate/throwaway preview.
+#
+# Runs the daemon's actual enrich_token() via asyncio.to_thread — that
+# function uses blocking urllib + time.sleep() internally (shared-quota
+# throttling against Helius/Birdeye), which would deadlock this process's
+# event loop if awaited directly inside an async def (the same class of
+# bug found and fixed elsewhere this session, e.g. telegram_webhook.py).
+# ════════════════════════════════════════════════════════════════
+@router.post("/trace-token/{mint}")
+async def trace_token(mint: str, symbol: str = Query(""), x_agent_key: str = Header(...)):
+    get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
+    import asyncio, sys
+    sys.path.insert(0, "/opt/ares")
+    import pumpfun_wallet_intel as pwi
+    try:
+        result = await asyncio.to_thread(pwi.enrich_token, mint, symbol)
+    except Exception as e:
+        raise HTTPException(502, f"Enrichment failed: {e}")
+    holders = result.get("holders", {}).get("holders", [])
+    traders = result.get("traders", {}).get("traders", [])
+    first_buyers = result.get("traders", {}).get("first_buyers", [])
+    creator = result.get("creator", {}).get("creator", "")
+    return {
+        "mint": mint, "symbol": symbol,
+        "deployer": creator,
+        "top_holders": holders,
+        "top_traders": traders,
+        "first_buyers": first_buyers,
+        "concentrated": result.get("holders", {}).get("concentrated", False),
+        "wallets_tracked": len({w for w in [creator] + [h["wallet"] for h in holders] + [t["wallet"] for t in traders] + [b["wallet"] for b in first_buyers] if w}),
+    }

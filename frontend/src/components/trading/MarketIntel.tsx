@@ -510,7 +510,102 @@ function AresBacktest() {
 // trace onto it, there is no automatic multi-hop crawling. ─────────────────────
 type TraceHop = { chain: string; address: string }
 
+// ── Trace by Token — runs pumpfun_wallet_intel.py's own deployer/top-holder/
+// top-trader/first-buyer extraction on demand for any token, instead of
+// waiting for its background daemon cycle to reach it. Every wallet found
+// is persisted the same way the daemon does (token_wallet_roles +
+// tracked_wallets), so it's a real node in the money-flow graph
+// immediately — this is the actual "high signal token → back-track
+// investors → find wallets to track" loop, just triggerable on demand.
+function TraceByToken() {
+  const [mint, setMint] = useState('')
+  const [symbol, setSymbol] = useState('')
+  const [result, setResult] = useState<any>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  async function run() {
+    if (!mint.trim()) return
+    setLoading(true); setError(''); setResult(null)
+    try {
+      const key = localStorage.getItem('vantage_api_key') || ''
+      const r = await fetch(`/api/intel/pumpfun/trace-token/${encodeURIComponent(mint.trim())}?symbol=${encodeURIComponent(symbol.trim())}`, {
+        method: 'POST', headers: { 'X-Agent-Key': key },
+      })
+      const d = await r.json()
+      if (r.ok) setResult(d)
+      else setError(d.detail || 'Trace failed')
+    } catch (e: any) {
+      setError(e?.message || 'Request failed')
+    }
+    setLoading(false)
+  }
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+        <input className="ares-input" placeholder="Token contract address (mint)" value={mint}
+          onChange={e => setMint(e.target.value)} onKeyDown={e => e.key === 'Enter' && run()}
+          style={{ minWidth: 320, flex: 1, fontFamily: 'monospace' }} />
+        <input className="ares-input" placeholder="Symbol (optional)" value={symbol}
+          onChange={e => setSymbol(e.target.value)} style={{ maxWidth: 140 }} />
+        <button className="btn btn-primary btn-sm" onClick={run} disabled={loading}>{loading ? 'Tracing… (real Helius/Birdeye calls, ~5-10s)' : 'Trace Token'}</button>
+      </div>
+
+      {!result && !loading && (
+        <div style={{ color: 'var(--muted)', padding: 20 }}>
+          Paste any token's contract address — pulls its real deployer, top holders, top traders, and first buyers via Helius/Birdeye, and persists every wallet found into the money-flow graph (same pipeline pumpfun_wallet_intel.py's background daemon already runs for tokens in Top5/must-buy-20 — this just runs it immediately for a token you pick).
+        </div>
+      )}
+      {error && <div style={{ color: 'var(--danger)', padding: 12 }}>{error}</div>}
+
+      {result && (
+        <div>
+          <div className="ares-stat-grid" style={{ marginBottom: 16 }}>
+            <div className="ares-stat-tile"><div className="ares-stat-label">Wallets Tracked</div><div className="ares-stat-value">{result.wallets_tracked}</div></div>
+            <div className="ares-stat-tile"><div className="ares-stat-label">Top Holders</div><div className="ares-stat-value">{result.top_holders.length}</div></div>
+            <div className="ares-stat-tile"><div className="ares-stat-label">Top Traders</div><div className="ares-stat-value">{result.top_traders.length}</div></div>
+            {result.concentrated && <div className="ares-stat-tile"><div className="ares-stat-label">⚠️ Concentration</div><div className="ares-stat-value" style={{ color: 'var(--danger)' }}>Top 5 holders own 20%+</div></div>}
+          </div>
+
+          {result.deployer && (
+            <div style={{ marginBottom: 12, fontSize: 12 }}>Deployer: <WalletLink address={result.deployer} chain="solana" /></div>
+          )}
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 16 }}>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', marginBottom: 6, textTransform: 'uppercase' }}>Top Holders</div>
+              {result.top_holders.map((h: any, i: number) => (
+                <div key={i} style={{ fontSize: 12, padding: '4px 0', display: 'flex', justifyContent: 'space-between' }}>
+                  <WalletLink address={h.wallet} chain="solana" />
+                  <span style={{ color: 'var(--muted)', fontFamily: 'monospace' }}>{h.amount?.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                </div>
+              ))}
+            </div>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', marginBottom: 6, textTransform: 'uppercase' }}>Top Traders</div>
+              {result.top_traders.map((t: any, i: number) => (
+                <div key={i} style={{ fontSize: 12, padding: '4px 0', display: 'flex', justifyContent: 'space-between' }}>
+                  <WalletLink address={t.wallet} chain="solana" />
+                  <span style={{ color: 'var(--muted)' }}>{t.txn_count} txns</span>
+                </div>
+              ))}
+            </div>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', marginBottom: 6, textTransform: 'uppercase' }}>First Buyers</div>
+              {result.first_buyers.map((b: any, i: number) => (
+                <div key={i} style={{ fontSize: 12, padding: '4px 0' }}><WalletLink address={b.wallet} chain="solana" /></div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function AresTrace() {
+  const [mode, setMode] = useState<'wallet' | 'token'>('wallet')
   const [chain, setChain] = useState('bitcoin')
   const [addressInput, setAddressInput] = useState('')
   const [path, setPath] = useState<TraceHop[]>([])
@@ -552,6 +647,12 @@ function AresTrace() {
 
   return (
     <div>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+        <button className={`btn btn-sm ${mode === 'wallet' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setMode('wallet')}>By Wallet</button>
+        <button className={`btn btn-sm ${mode === 'token' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setMode('token')}>By Token</button>
+      </div>
+
+      {mode === 'token' ? <TraceByToken /> : <>
       <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
         <select className="ares-input" value={chain} onChange={e => setChain(e.target.value)} style={{ maxWidth: 120 }}>
           <option value="bitcoin">Bitcoin</option>
@@ -653,6 +754,7 @@ function AresTrace() {
           )}
         </div>
       )}
+      </>}
     </div>
   )
 }
