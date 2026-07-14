@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { Zap, Wallet, ShieldCheck, ShieldOff, Trash2, Plus, X, Edit3 } from 'lucide-react'
-import { useTradingStore } from './tradingStore'
+
+type TradingApiFn = (path: string, opts?: RequestInit) => Promise<Response>
 
 // ══════════════════════════════════════════════════════════════════════════════
 // StrategiesPanel — full CRUD over trading_strategies. Every strategy is
@@ -24,8 +25,7 @@ const DAEMON_SETTINGS = [
   { key: 'snipe_wallet_id', label: 'Degen Snipe', desc: "degen_alpha_fusion.py's moonshot auto-snipe (score > 60)" },
 ]
 
-function DaemonSettingsPanel({ wallets }: { wallets: any[] }) {
-  const { tradingApi } = useTradingStore()
+function DaemonSettingsPanel({ wallets, tradingApi }: { wallets: any[]; tradingApi: TradingApiFn }) {
   const [values, setValues] = useState<Record<string, string>>({})
   const [saved, setSaved] = useState<Record<string, boolean>>({})
 
@@ -74,8 +74,7 @@ function DaemonSettingsPanel({ wallets }: { wallets: any[] }) {
   )
 }
 
-export default function StrategiesPanel() {
-  const { tradingApi } = useTradingStore()
+export default function StrategiesPanel({ tradingApi }: { tradingApi: TradingApiFn }) {
   const [strategies, setStrategies] = useState<any[]>([])
   const [templates, setTemplates] = useState<Record<string, any>>({})
   const [wallets, setWallets] = useState<any[]>([])
@@ -123,7 +122,7 @@ export default function StrategiesPanel() {
 
   return (
     <div style={{ padding: '0 16px' }}>
-      <DaemonSettingsPanel wallets={wallets.filter(w => w.chain === 'solana')} />
+      <DaemonSettingsPanel wallets={wallets.filter(w => w.chain === 'solana')} tradingApi={tradingApi} />
 
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: '#e0e0e0' }}>Strategies</div>
@@ -180,10 +179,10 @@ export default function StrategiesPanel() {
       )}
 
       {editing && (
-        <EditStrategyModal strategy={editing} wallets={wallets} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load() }} />
+        <EditStrategyModal strategy={editing} wallets={wallets} tradingApi={tradingApi} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load() }} />
       )}
       {showCreate && (
-        <CreateStrategyModal templates={templates} wallets={wallets} onClose={() => setShowCreate(false)} onCreated={() => { setShowCreate(false); load() }} />
+        <CreateStrategyModal templates={templates} wallets={wallets} tradingApi={tradingApi} onClose={() => setShowCreate(false)} onCreated={() => { setShowCreate(false); load() }} />
       )}
     </div>
   )
@@ -194,8 +193,7 @@ const iconBtnStyle: React.CSSProperties = {
   color: '#9ca3af', cursor: 'pointer', padding: '4px 6px', display: 'flex', alignItems: 'center',
 }
 
-function EditStrategyModal({ strategy, wallets, onClose, onSaved }: { strategy: any; wallets: any[]; onClose: () => void; onSaved: () => void }) {
-  const { tradingApi } = useTradingStore()
+function EditStrategyModal({ strategy, wallets, tradingApi, onClose, onSaved }: { strategy: any; wallets: any[]; tradingApi: TradingApiFn; onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState(strategy.name)
   const [walletId, setWalletId] = useState<string>(strategy.wallet_id ? String(strategy.wallet_id) : '')
   const [maxUsd, setMaxUsd] = useState(String(strategy.max_position_size_usd || 0))
@@ -250,8 +248,7 @@ function EditStrategyModal({ strategy, wallets, onClose, onSaved }: { strategy: 
   )
 }
 
-function CreateStrategyModal({ templates, wallets, onClose, onCreated }: { templates: Record<string, any>; wallets: any[]; onClose: () => void; onCreated: () => void }) {
-  const { tradingApi } = useTradingStore()
+function CreateStrategyModal({ templates, wallets, tradingApi, onClose, onCreated }: { templates: Record<string, any>; wallets: any[]; tradingApi: TradingApiFn; onClose: () => void; onCreated: () => void }) {
   const templateKeys = Object.keys(templates)
   const [templateKey, setTemplateKey] = useState(templateKeys[0] || '')
   const [name, setName] = useState('')

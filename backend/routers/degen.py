@@ -70,6 +70,15 @@ def _trending_pools_cached():
             return stale, True
         return [], False
 
+def _mint_from_pool(p: dict) -> str:
+    """p['id'] is the POOL address, not the token mint — same bug found
+    and fixed today in degen_alpha_fusion.py/ogun_multiscan.py/pumpfun.py.
+    The real mint is relationships.base_token.data.id ('solana_<mint>').
+    Without this, cards built from these endpoints have no CA, so
+    EntityProfileCard can't show its trade panel at all."""
+    base_token_id = p.get("relationships",{}).get("base_token",{}).get("data",{}).get("id","")
+    return base_token_id.split("_",1)[-1] if "_" in base_token_id else ""
+
 # ════════════════════════════════════════════════════════════════
 # EARLY CALLS — tokens <1h old with rising volume + smart money
 # ════════════════════════════════════════════════════════════════
@@ -171,7 +180,7 @@ async def volume_surge(limit: int=20, x_agent_key: str=Header(...)):
             name = attrs.get("name","")
             sym = name.split(" / ")[0][:12] if " / " in name else name[:12]
             if surge_ratio > 3:
-                results.append({"symbol":sym,"name":name,"volume_5m":vol_5m,"volume_1h":vol_1h,"surge_ratio":round(surge_ratio,1),"signal":"🔥 SURGE" if surge_ratio>10 else "⚡ SPIKE"})
+                results.append({"symbol":sym,"name":name,"address":_mint_from_pool(p),"volume_5m":vol_5m,"volume_1h":vol_1h,"surge_ratio":round(surge_ratio,1),"signal":"🔥 SURGE" if surge_ratio>10 else "⚡ SPIKE"})
         results.sort(key=lambda x:-x.get("surge_ratio",0))
         resp = {"volume_surges":results,"count":len(results),"source":"GeckoTerminal","cached":from_cache}
         return _cache_put("volume_surge", resp) if results else (_cache_get_stale("volume_surge") or resp)
@@ -190,7 +199,7 @@ async def top5_degen(limit: int=5, x_agent_key: str=Header(...)):
         for p in pools[:25]:
             attrs = p.get("attributes",{})
             name = attrs.get("name","")
-            addr = p.get("id","").split("_")[-1] if "_" in p.get("id","") else ""
+            addr = _mint_from_pool(p)
             vol = attrs.get("volume_usd",{})
             vol_24h = float(str(vol.get("h24",0))) if isinstance(vol,dict) else 0
             pc = attrs.get("price_change_percentage",{})

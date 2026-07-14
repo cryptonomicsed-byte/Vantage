@@ -26,6 +26,16 @@ def _fetch(url, headers=None, timeout=10):
 # ════════════════════════════════════════════════════════════════
 # NEW LAUNCHES — GeckoTerminal Solana new pools
 # ════════════════════════════════════════════════════════════════
+def _mint_from_pool(p: dict) -> str:
+    """p['id'] is the POOL address, not the token mint — same bug found and
+    fixed today in degen_alpha_fusion.py/ogun_multiscan.py. The real mint
+    is relationships.base_token.data.id ('solana_<mint>'). Without this,
+    every card built from these endpoints has no CA, so EntityProfileCard
+    can't show the trade panel at all — that's the actual root cause of
+    "trending/new-launches show a different/limited card"."""
+    base_token_id = p.get("relationships",{}).get("base_token",{}).get("data",{}).get("id","")
+    return base_token_id.split("_",1)[-1] if "_" in base_token_id else ""
+
 @router.get("/new-launches")
 async def new_launches(limit: int=20, x_agent_key: str=Header(...)):
     get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
@@ -39,7 +49,7 @@ async def new_launches(limit: int=20, x_agent_key: str=Header(...)):
             sym = name.split(" / ")[0][:12] if " / " in name else name[:12]
             vol = attrs.get("volume_usd",{}).get("h24",0) if isinstance(attrs.get("volume_usd"),dict) else 0
             pc = attrs.get("price_change_percentage",{}).get("h24",0) if isinstance(attrs.get("price_change_percentage"),dict) else 0
-            r.append({"symbol":sym,"name":name,"price":attrs.get("base_token_price_usd",0),"volume_24h":vol,"price_change_24h":pc,"created_at":attrs.get("pool_created_at","")})
+            r.append({"symbol":sym,"name":name,"address":_mint_from_pool(p),"price":attrs.get("base_token_price_usd",0),"volume_24h":vol,"price_change_24h":pc,"created_at":attrs.get("pool_created_at","")})
         return {"launches":r,"count":len(r),"source":"GeckoTerminal"}
     except:
         return {"launches":[],"count":0,"source":"GeckoTerminal:offline"}
@@ -63,7 +73,7 @@ async def trending(limit: int=20, x_agent_key: str=Header(...)):
             txns = attrs.get("transactions",{}).get("h24",{})
             buys = txns.get("buys",0) if isinstance(txns,dict) else 0
             sells = txns.get("sells",0) if isinstance(txns,dict) else 0
-            r.append({"symbol":sym,"name":name,"price":attrs.get("base_token_price_usd",0),"volume_24h":vol,"price_change_24h":pc,"buys_24h":buys,"sells_24h":sells})
+            r.append({"symbol":sym,"name":name,"address":_mint_from_pool(p),"price":attrs.get("base_token_price_usd",0),"volume_24h":vol,"price_change_24h":pc,"buys_24h":buys,"sells_24h":sells})
         return {"trending":r,"count":len(r),"source":"GeckoTerminal"}
     except:
         return {"trending":[],"count":0,"source":"GeckoTerminal:offline"}
@@ -84,14 +94,39 @@ async def bonding_curve(mint: str=Query(...), x_agent_key: str=Header(...)):
         return {"mint":mint,"price":0,"curve_target_usd":69000,"progress_pct":0,"source":"Birdeye:offline"}
 
 # ════════════════════════════════════════════════════════════════
-# GRADUATIONS + WATCHLIST + SIGNALS — DB-backed
+# GRADUATIONS — was querying trading_signals WHERE type='pumpfun': that
+# table has no 'type' column and no 'timestamp' column either — this has
+# 500'd on every single call since it was written, nothing has ever landed
+# in the "Recently Graduated" section. Rewritten to real data: any pool
+# GeckoTerminal indexes necessarily already has a live DEX liquidity pair,
+# which for a pump.fun-origin token (mint ends in the program's "pump"
+# vanity suffix) can only be true post-migration — GeckoTerminal doesn't
+# see bonding-curve-only tokens at all. Recency + real liquidity is the
+# actual "just graduated" signal here, not a DB flag nothing ever set.
 # ════════════════════════════════════════════════════════════════
 @router.get("/graduations")
 async def graduations(limit: int=20, x_agent_key: str=Header(...)):
     get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
-    db = sqlite3.connect(str(DB)); db.row_factory = lambda c,r: dict(zip([col[0] for col in c.description], r))
-    rows = db.execute("SELECT * FROM trading_signals WHERE type='pumpfun' ORDER BY timestamp DESC LIMIT ?", (limit,)).fetchall(); db.close()
-    return {"graduations":[dict(r) for r in rows],"count":len(rows)}
+    try:
+        d = _fetch("https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1", {"accept":"application/json"})
+        pools = d.get("data",[])
+        r = []
+        for p in pools:
+            mint = _mint_from_pool(p)
+            if not mint.endswith("pump"):
+                continue  # not a pump.fun-origin token — not a "graduation" in the sense this section means
+            attrs = p.get("attributes",{})
+            name = attrs.get("name","")
+            sym = name.split(" / ")[0][:12] if " / " in name else name[:12]
+            vol = attrs.get("volume_usd",{}).get("h24",0) if isinstance(attrs.get("volume_usd"),dict) else 0
+            liq = attrs.get("reserve_in_usd", 0)
+            r.append({"symbol":sym,"name":name,"address":mint,"volume_24h":vol,"liquidity_usd":float(liq or 0),"pool_created_at":attrs.get("pool_created_at","")})
+            if len(r) >= limit:
+                break
+        r.sort(key=lambda x: x.get("pool_created_at") or "", reverse=True)
+        return {"graduations":r,"count":len(r),"source":"GeckoTerminal"}
+    except Exception:
+        return {"graduations":[],"count":0,"source":"GeckoTerminal:offline"}
 
 @router.get("/trades/{mint}")
 async def trades(mint: str, limit: int=20, x_agent_key: str=Header(...)):

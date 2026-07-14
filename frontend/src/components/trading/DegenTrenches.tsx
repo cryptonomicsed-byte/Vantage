@@ -166,7 +166,7 @@ export default function DegenTrenches() {
             {surges.items.map((s, i) => (
               <div key={i} style={cardStyle}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span style={{ fontWeight: 600, fontSize: 13 }}><TokenLink symbol={s.symbol} /></span>
+                  <span style={{ fontWeight: 600, fontSize: 13 }}><TokenLink symbol={s.symbol} ca={(s as any).address} /></span>
                   <span style={{ fontSize: 11, color: '#a855f7', fontWeight: 700 }}>{s.surge_ratio?.toFixed(1)}x</span>
                 </div>
                 <div style={{ fontSize: 10, color: 'var(--muted)' }}>{s.signal}</div>
@@ -187,10 +187,10 @@ export default function DegenTrenches() {
           <div style={{ fontSize: 11, color: 'var(--muted)' }}>No graduations recorded yet.</div>
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 8 }}>
-            {graduations.items.map((g, i) => (
+            {graduations.items.map((g: any, i) => (
               <div key={i} style={cardStyle}>
-                <span style={{ fontWeight: 600, fontSize: 13 }}><TokenLink symbol={g.symbol || g.detail || 'token'} /></span>
-                <div style={{ fontSize: 10, color: 'var(--muted)' }}>{g.detail}</div>
+                <span style={{ fontWeight: 600, fontSize: 13 }}>🎓 <TokenLink symbol={g.symbol || 'token'} ca={g.address} /></span>
+                <div style={{ fontSize: 10, color: 'var(--muted)' }}>Vol 24h: ${Number(g.volume_24h || 0).toLocaleString()} · Liq: ${Number(g.liquidity_usd || 0).toLocaleString()}</div>
               </div>
             ))}
           </div>

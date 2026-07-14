@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react'
 import { Wallet, ListOrdered, Layers, BookOpen, PieChart, RefreshCw, Plus, XCircle, Zap, ShieldCheck, Coins, Pencil, Check, Landmark } from 'lucide-react'
 import { TokenLink, WalletLink } from './EntityProfileCard'
 import GenerateWalletModal from './GenerateWalletModal'
+import StrategiesPanel from './StrategiesPanel'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Portfolio — the agent-scoped trading workspace built on the existing
@@ -542,55 +543,6 @@ function Wallets() {
 // STRATEGIES
 // ══════════════════════════════════════════════════════════════════════════════
 
-function Strategies() {
-  const strategies = useTrading<any[]>('/strategies')
-  const [form, setForm] = useState({ name: '', strategy_type: 'manual', description: '' })
-  const [busy, setBusy] = useState(false)
-
-  async function add() {
-    if (!form.name) return
-    setBusy(true)
-    try {
-      const r = await tradingApi('/strategies', { method: 'POST', body: JSON.stringify(form) })
-      if (r.ok) { setForm({ name: '', strategy_type: 'manual', description: '' }); strategies.reload() }
-    } catch {}
-    setBusy(false)
-  }
-
-  async function toggle(id: number) {
-    await tradingApi(`/strategies/${id}/toggle`, { method: 'POST', body: '{}' })
-    strategies.reload()
-  }
-
-  const rows = strategies.data || []
-  return (
-    <div>
-      <div className="ares-section-title"><Layers size={15} style={{ verticalAlign: 'middle', marginRight: 6 }} /> Strategies ({rows.length})</div>
-      <div style={{ background: 'rgba(12,12,22,0.9)', border: '1px solid var(--border)', borderRadius: 12, padding: 16, marginBottom: 16 }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginBottom: 10 }}>
-          <input className="ares-input" placeholder="Name" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
-          <input className="ares-input" placeholder="Type" value={form.strategy_type} onChange={e => setForm({ ...form, strategy_type: e.target.value })} />
-          <input className="ares-input" placeholder="Description" value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} />
-        </div>
-        <button className="btn btn-primary btn-sm" onClick={add} disabled={busy}><Plus size={12} /> Add Strategy</button>
-      </div>
-      <table className="ares-table">
-        <thead><tr><th>Name</th><th>Type</th><th>Enabled</th><th></th></tr></thead>
-        <tbody>
-          {rows.length === 0 && <tr><td colSpan={4} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No strategies yet.</td></tr>}
-          {rows.map((s: any) => (
-            <tr key={s.id}>
-              <td style={{ fontWeight: 600 }}>{s.name}</td>
-              <td>{s.strategy_type}</td>
-              <td>{s.enabled ? <span style={{ color: 'var(--green)' }}>on</span> : <span style={{ color: 'var(--muted)' }}>off</span>}</td>
-              <td style={{ textAlign: 'right' }}><button className="btn btn-ghost btn-sm" onClick={() => toggle(s.id)}>{s.enabled ? 'Disable' : 'Enable'}</button></td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )
-}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // JOURNAL
@@ -743,7 +695,7 @@ export default function Portfolio() {
       {tab === 'positions' && <Positions />}
       {tab === 'orders' && <Orders simulated={simulated} />}
       {tab === 'wallets' && <Wallets />}
-      {tab === 'strategies' && <Strategies />}
+      {tab === 'strategies' && <StrategiesPanel tradingApi={tradingApi} />}
       {tab === 'journal' && <Journal />}
     </div>
   )

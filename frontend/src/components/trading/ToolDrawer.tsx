@@ -33,7 +33,7 @@ const TOOLS: ToolDef[] = [
 ]
 
 export default function ToolDrawer() {
-  const { state, dispatch, toggleDrawer } = useTradingStore()
+  const { state, dispatch, toggleDrawer, tradingApi } = useTradingStore()
   const [showMore, setShowMore] = useState(false)
 
   const primaryTools = TOOLS.filter(t => t.primary)
@@ -99,7 +99,7 @@ export default function ToolDrawer() {
 
       {/* Tool Content */}
       <div style={styles.content}>
-        {state.drawerTool === 'strategies' && <StrategiesPanel />}
+        {state.drawerTool === 'strategies' && <StrategiesPanel tradingApi={tradingApi} />}
         {state.drawerTool === 'backtest' && <BacktestEngine />}
         {state.drawerTool === 'arbitrage' && <ArbitragePlaceholder />}
         {state.drawerTool === 'debate' && <DebatePlaceholder />}
