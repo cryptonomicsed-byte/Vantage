@@ -323,7 +323,7 @@ async def money_flow(
         try:
             tracked_rows = [dict(r) for r in await (await db.execute(
                 "SELECT chain, address, label, address_type, degen_score, "
-                "trade_count, unique_tokens, notes FROM tracked_wallets")).fetchall()]
+                "trade_count, unique_tokens, notes, balance_usd FROM tracked_wallets")).fetchall()]
         except aiosqlite.Error:
             pass
 
@@ -386,23 +386,25 @@ async def money_flow(
         except aiosqlite.Error:
             pass
 
-        # Migration gravity anchors — major exchange wallets, fetched
-        # unconditionally here regardless of exclude_exchanges (used below
-        # as physics anchors, not ranked as "smart money").
-        exchange_rows: list = []
+        # Migration state — has this mint ever crossed the real pump.fun
+        # graduation threshold, and what was its mcap at that moment? Used
+        # below to tell "still climbing toward migration" apart from "was
+        # migrated, then rugged/collapsed back" — those need very different
+        # graph treatment (drifting closer vs. fading into the dormant void).
+        migration_state: dict = {}
         try:
-            exchange_rows = (await (await db.execute(
-                """SELECT w.address, w.label,
-                          (SELECT COUNT(*) FROM wallet_edges we WHERE we.address_a=w.address OR we.address_b=w.address) as edge_count
-                   FROM tracked_wallets w WHERE w.address_type = 'exchange' AND w.chain = 'solana'
-                   ORDER BY edge_count DESC LIMIT 5"""
-            )).fetchall())
+            migration_state = {
+                r["mint"]: dict(r) for r in await (await db.execute(
+                    "SELECT mint, migration_mcap, peak_mcap FROM token_migration_state"
+                )).fetchall()
+            }
         except aiosqlite.Error:
             pass
 
     nodes: dict = {}
     edges: dict = {}
     first_seen: dict = {}
+    last_seen: dict = {}  # max activity ts per node — dormancy fade uses this, not first_seen
 
     def wallet_extra(addr: str) -> dict:
         wm = wallet_meta.get(addr, {})
@@ -412,6 +414,7 @@ async def money_flow(
             "trade_count": wm.get("trade_count", 0),
             "unique_tokens": wm.get("unique_tokens", 0),
             "address_type": wm.get("address_type", "wallet"),
+            "balance_usd": wm.get("balance_usd") or 0,
         }
 
     def wallet_label(addr: str) -> str:
@@ -428,6 +431,7 @@ async def money_flow(
         if ts >= since:
             n["recent"] += 1
         first_seen[nid] = min(first_seen.get(nid, ts or now), ts or now)
+        last_seen[nid] = max(last_seen.get(nid, ts or 0), ts or 0)
 
     def parse_sqlite_ts(s: Optional[str]) -> int:
         if not s:
@@ -599,44 +603,123 @@ async def money_flow(
     for n in token_nodes[tier_lookups:]:
         n["tier"] = _classify_tier(None, first_seen.get(n["id"], now), now)
 
-    # Migration gravity — major exchange wallets are kept in the graph
-    # (unconditionally, regardless of exclude_exchanges — they're not being
-    # ranked as "smart money" here, they're the physical destination
-    # liquidity actually migrates to) as anchor nodes. Every token gets a
-    # migration_gravity edge to the busiest exchange anchor, with a
-    # migration_distance (0=migrated/connected, 1=just launched/far) the
-    # frontend uses to set the force-graph link distance directly — pre-
-    # migration tokens drift closer as they approach migration, and snap to
-    # a short link once they're actually migrated_*. Distance is derived
-    # from the same tier classification just computed above, so it's
-    # consistent with what the profile card already shows.
-    MIGRATION_DISTANCE_BY_TIER = {
+    # ── Migration gravity — Raydium, not a CEX wallet, is the real anchor.
+    # Pump.fun graduations move their bonding-curve LP to Raydium specifically
+    # (the on-chain destination) — Jupiter is a swap router with no fixed
+    # liquidity venue of its own, and DexScreener is an analytics site with
+    # no on-chain presence at all, so neither is a real "place tokens migrate
+    # to." CEX wallets (Binance/OKX/etc, still in tracked_wallets) are a
+    # different, legitimate thing — where profit-taking flows go — kept as
+    # ordinary wallet nodes, just no longer used as the physics anchor.
+    #
+    # Distance is now continuous by real market cap for anything that has
+    # crossed the actual pump.fun graduation threshold (~$69k, same value
+    # /pumpfun/bonding-curve already uses), log-interpolated between the
+    # graduation floor (0.15) and $1B (0.01) — replacing the old discrete
+    # per-tier snap, which bucketed a $70k token and a $900k token
+    # identically. Below that floor, the old discrete pre-migration
+    # distances still apply (that phase is about launch/curve progress, not
+    # market cap, so continuous mcap distance doesn't mean anything there).
+    #
+    # Dormant void: a token that DID cross the graduation floor at some
+    # point (has a token_migration_state row) but has since fallen back
+    # under the rug floor ($7k) gets pushed far out and flagged rugged —
+    # distinct from a token that simply hasn't migrated yet.
+    MIGRATION_MCAP_FLOOR = 69_000.0   # pump.fun's real graduation threshold
+    RUG_MCAP_FLOOR = 7_000.0          # user-specified "fell back under this = dead"
+    PRE_MIGRATION_DISTANCE_BY_TIER = {
         "just_launch": 1.0, "pumpfun_10k_20k": 0.8, "pre_migration": 0.55,
-        "just_migrated": 0.15, "migrated_1m": 0.1, "migrated_10m": 0.08,
-        "migrated_20m": 0.06, "migrated_100m": 0.04, "migrated_500m": 0.02,
-        "migrated_1b": 0.01, "billion_club": 0.0,
     }
-    if exchange_rows:
-        anchor_addr = exchange_rows[0]["address"]
-        anchor_nid = f"wallet:{anchor_addr}"
-        if anchor_nid not in nodes:
-            nodes[anchor_nid] = {
-                "id": anchor_nid, "type": "wallet", "label": exchange_rows[0]["label"] or f"{anchor_addr[:4]}…{anchor_addr[-4:]}",
-                **wallet_extra(anchor_addr), "trades": 0, "recent": 1, "volume_sol": 0.0,
-                "is_migration_anchor": True,
-            }
-            first_seen[anchor_nid] = now
-        else:
-            nodes[anchor_nid]["is_migration_anchor"] = True
+    RAYDIUM_ANCHOR_ADDRESS = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"  # Raydium AMM V4 program
 
-        for n in token_nodes:
-            dist = MIGRATION_DISTANCE_BY_TIER.get(n.get("tier"), 0.6)
-            key = (n["id"], anchor_nid)
-            edges[key] = {
-                "source": n["id"], "target": anchor_nid, "type": "migration_gravity",
-                "trades": 0, "volume_sol": 0.0, "net_sol": 0.0,
-                "migration_distance": dist, "last_ts": now,
-            }
+    import math
+
+    def _migration_distance_and_state(n: dict) -> tuple[float, bool]:
+        """Returns (distance, is_dormant_void)."""
+        mint = n.get("ca")
+        mc = n.get("market_cap")
+        prior = migration_state.get(mint) if mint else None
+        if mc and mc >= MIGRATION_MCAP_FLOOR:
+            t = (math.log10(mc) - math.log10(MIGRATION_MCAP_FLOOR)) / (math.log10(1_000_000_000) - math.log10(MIGRATION_MCAP_FLOOR))
+            t = min(1.0, max(0.0, t))
+            return round(0.15 - t * (0.15 - 0.01), 4), False
+        if prior and mc is not None and mc < RUG_MCAP_FLOOR:
+            # Previously graduated, now collapsed — dormant void, not just "far".
+            return 2.0, True
+        return PRE_MIGRATION_DISTANCE_BY_TIER.get(n.get("tier"), 0.6), False
+
+    anchor_nid = f"exchange:raydium"
+    nodes[anchor_nid] = {
+        "id": anchor_nid, "type": "exchange", "label": "Raydium",
+        "address": RAYDIUM_ANCHOR_ADDRESS, "chain": "solana",
+        "trades": 0, "recent": 1, "volume_sol": 0.0, "is_migration_anchor": True,
+    }
+    first_seen[anchor_nid] = now
+    last_seen[anchor_nid] = now
+
+    migration_updates = []
+    for n in token_nodes:
+        dist, dormant_void = _migration_distance_and_state(n)
+        n["migration_distance"] = dist
+        n["dormant_void"] = dormant_void
+        mc = n.get("market_cap")
+        mint = n.get("ca")
+        if mc and mc >= MIGRATION_MCAP_FLOOR and mint:
+            prior = migration_state.get(mint)
+            migration_updates.append((mint, mc, prior))
+        key = (n["id"], anchor_nid)
+        edges[key] = {
+            "source": n["id"], "target": anchor_nid, "type": "migration_gravity",
+            "trades": 0, "volume_sol": 0.0, "net_sol": 0.0,
+            "migration_distance": dist, "last_ts": now,
+        }
+
+    if migration_updates:
+        async with aiosqlite.connect(DB_PATH) as db2:
+            await db2.execute("PRAGMA busy_timeout=15000")  # real contention from ~15 concurrent daemons, not a stuck lock — verified 3.5s typical wait
+            for mint, mc, prior in migration_updates:
+                if prior is None:
+                    await db2.execute(
+                        "INSERT INTO token_migration_state (mint, migration_mcap, peak_mcap) VALUES (?,?,?) "
+                        "ON CONFLICT(mint) DO NOTHING",
+                        (mint, mc, mc),
+                    )
+                elif mc > (prior.get("peak_mcap") or 0):
+                    await db2.execute(
+                        "UPDATE token_migration_state SET peak_mcap=?, updated_at=datetime('now') WHERE mint=?",
+                        (mc, mint),
+                    )
+            await db2.commit()
+
+    # ── Wallet dormancy — "don't hoard wallets." Active (touched within 3
+    # days) wallets are untouched. Dormant + balance >= $10k dim (low
+    # brightness) but stay, so real whale positions don't disappear just
+    # because they're between trades. Dormant + low/unknown balance are
+    # dropped entirely — every tracked wallet used to get a permanent node
+    # the moment it was added regardless of activity, which is exactly the
+    # hoarding this removes. Never drops the Raydium anchor or any node with
+    # real capital weight already established this render (size uses
+    # volume_sol, computed after this filter, so this only looks at raw
+    # activity/balance signals, not the derived score).
+    DORMANT_AFTER_SECONDS = 3 * 86400
+    DORMANT_SURVIVE_BALANCE_USD = 10_000.0
+    excluded_ids: set = set()
+    for nid, n in nodes.items():
+        if n["type"] != "wallet" or n.get("is_migration_anchor"):
+            continue
+        last_active = last_seen.get(nid, 0)
+        is_dormant = (now - last_active) > DORMANT_AFTER_SECONDS
+        if not is_dormant:
+            continue
+        balance = n.get("balance_usd") or 0
+        if balance >= DORMANT_SURVIVE_BALANCE_USD:
+            n["dormant_dim"] = True  # frontend caps brightness for these
+        else:
+            excluded_ids.add(nid)
+    if excluded_ids:
+        for nid in excluded_ids:
+            nodes.pop(nid, None)
+        edges = {k: e for k, e in edges.items() if e["source"] not in excluded_ids and e["target"] not in excluded_ids}
 
     # Normalise brightness (recent activity share) and size (capital weight) —
     # the Mandelbrot fade: dormant nodes → brightness 0, sink into background.
@@ -646,11 +729,14 @@ async def money_flow(
     node_list = []
     for n in nodes.values():
         n["brightness"] = round(n["recent"] / max_recent, 4)
+        if n.get("dormant_dim"):
+            n["brightness"] = min(n["brightness"], 0.12)  # visible, but clearly not active
         vol_component = n["volume_sol"] / max_vol
         mention_component = n.get("mentions", 0) / max_mentions if n["type"] == "social" else 0
         n["size"] = round(max(vol_component, mention_component) ** 0.5, 4)  # sqrt for gentler spread
         n["volume_sol"] = round(n["volume_sol"], 4)
         n["first_seen"] = first_seen.get(n["id"], now)
+        n["last_seen"] = last_seen.get(n["id"], n["first_seen"])
         node_list.append(n)
     node_list.sort(key=lambda x: -x["size"])
     edge_list = [

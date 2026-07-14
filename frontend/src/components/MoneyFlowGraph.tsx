@@ -22,15 +22,16 @@ import { RefreshCw, Share2, ExternalLink } from 'lucide-react'
  */
 
 interface FlowNode {
-  id: string; type: 'wallet' | 'token' | 'social'; label: string
+  id: string; type: 'wallet' | 'token' | 'social' | 'exchange'; label: string
   trades: number; recent: number; volume_sol: number
-  brightness: number; size: number; first_seen: number
+  brightness: number; size: number; first_seen: number; last_seen?: number
   // wallet-only
   address?: string; chain?: string; degen_score?: number
   trade_count?: number; unique_tokens?: number; address_type?: string
-  is_migration_anchor?: boolean
+  is_migration_anchor?: boolean; balance_usd?: number; dormant_dim?: boolean
   // token-only
   ca?: string; market_cap?: number | null; tier?: string
+  migration_distance?: number; dormant_void?: boolean
   // social-only
   platform?: string; mentions?: number
 }
@@ -72,7 +73,33 @@ const TIER_LABEL: Record<string, string> = {
 const TIER_ORDER = ['just_launch', 'pumpfun_10k_20k', 'pre_migration', 'just_migrated',
   'migrated_1m', 'migrated_10m', 'migrated_20m', 'migrated_100m', 'migrated_500m', 'migrated_1b', 'billion_club']
 
-const TYPE_COLOR: Record<string, string> = { wallet: '#3b82f6', token: '#ff2d4a', social: '#39ff14' }
+const TYPE_COLOR: Record<string, string> = { wallet: '#3b82f6', token: '#ff2d4a', social: '#39ff14', exchange: '#f5a623' }
+
+// 9 wallet balance tiers, dimmest (smallest) to brightest (whale). Under
+// $100k is a dim slate blue through to >$250M, a hot white-gold — meant to
+// read at a glance which wallets in the galaxy are actually worth watching.
+const WALLET_TIERS: { max: number; color: string; label: string }[] = [
+  { max: 100_000, color: '#475569', label: '<$100K' },
+  { max: 250_000, color: '#3b82f6', label: '<$250K' },
+  { max: 500_000, color: '#22d3ee', label: '<$500K' },
+  { max: 1_000_000, color: '#22c55e', label: '<$1M' },
+  { max: 10_000_000, color: '#eab308', label: '<$10M' },
+  { max: 50_000_000, color: '#f97316', label: '<$50M' },
+  { max: 100_000_000, color: '#ef4444', label: '<$100M' },
+  { max: 250_000_000, color: '#ec4899', label: '<$250M' },
+  { max: Infinity, color: '#f8fafc', label: '$250M+' },
+]
+
+function walletTierColor(balanceUsd: number | undefined): string {
+  const b = balanceUsd || 0
+  for (const t of WALLET_TIERS) if (b < t.max) return t.color
+  return WALLET_TIERS[WALLET_TIERS.length - 1].color
+}
+function walletTierLabel(balanceUsd: number | undefined): string {
+  const b = balanceUsd || 0
+  for (const t of WALLET_TIERS) if (b < t.max) return t.label
+  return WALLET_TIERS[WALLET_TIERS.length - 1].label
+}
 
 function externalLinks(n: FlowNode): { label: string; url: string }[] {
   if (n.type === 'wallet' && n.address) {
@@ -93,6 +120,9 @@ function externalLinks(n: FlowNode): { label: string; url: string }[] {
     const handle = n.label.replace(/^@/, '')
     const url = n.platform === 'telegram' ? `https://t.me/${handle}` : `https://twitter.com/${handle}`
     return [{ label: n.platform === 'telegram' ? 'Telegram' : 'Twitter/X', url }]
+  }
+  if (n.type === 'exchange' && n.address) {
+    return [{ label: 'Solscan (program)', url: `https://solscan.io/account/${n.address}` }]
   }
   return []
 }
@@ -126,7 +156,13 @@ function buildGraph(data: MoneyFlowData, activeTiers: Set<string> | null, tracke
   const nodeIds = new Set(filteredNodes.map(n => n.id))
 
   const nodes: GNode[] = filteredNodes.map(n => {
-    const base = TYPE_COLOR[n.type]
+    // Wallets are colored by balance tier (9 buckets, dim slate → hot
+    // white for $250M+) rather than a flat "all wallets are blue" —
+    // that's the actual point of tracking balance at all: at a glance,
+    // which wallets in the galaxy are worth paying attention to.
+    const base = n.type === 'wallet' ? walletTierColor(n.balance_usd)
+      : (n.type === 'token' && n.dormant_void) ? '#4b5563'  // rugged/collapsed — faded slate, not the live token red
+      : TYPE_COLOR[n.type]
     return {
       id: n.id,
       name: n.label,
@@ -401,6 +437,12 @@ export default function MoneyFlowGraph() {
 
             {selected.type === 'wallet' && (
               <>
+                <div style={{ fontSize: 12, color: walletTierColor(selected.balance_usd), fontWeight: 700 }}>
+                  Balance: {selected.balance_usd ? `$${selected.balance_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : 'unknown'} · {walletTierLabel(selected.balance_usd)}
+                </div>
+                {selected.dormant_dim && (
+                  <div style={{ fontSize: 11, color: '#f59e0b', marginBottom: 4 }}>Dormant (no activity 3+ days) — kept visible only because balance ≥ $10K</div>
+                )}
                 <div style={{ fontSize: 12, color: 'rgba(255,255,255,.7)' }}>Degen score: <b>{selected.degen_score ?? 0}</b></div>
                 <div style={{ fontSize: 12, color: 'rgba(255,255,255,.7)' }}>Trade count: <b>{selected.trade_count ?? selected.trades}</b></div>
                 <div style={{ fontSize: 12, color: 'rgba(255,255,255,.7)' }}>Unique tokens: <b>{selected.unique_tokens ?? 0}</b></div>
@@ -409,10 +451,16 @@ export default function MoneyFlowGraph() {
             )}
             {selected.type === 'token' && (
               <>
+                {selected.dormant_void && (
+                  <div style={{ fontSize: 11, color: '#ef4444', fontWeight: 700, marginBottom: 4 }}>⚠ Graduated then collapsed back under $7K — faded into the dormant void</div>
+                )}
                 <div style={{ fontSize: 12, color: 'rgba(255,255,255,.7)' }}>Market cap: <b>{selected.market_cap ? `$${selected.market_cap.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : 'unlisted'}</b></div>
                 <div style={{ fontSize: 12, color: 'rgba(255,255,255,.7)' }}>Trades observed: <b>{selected.trades}</b></div>
                 <div style={{ fontSize: 12, color: 'rgba(255,255,255,.7)' }}>Volume: <b>{selected.volume_sol.toLocaleString(undefined, { maximumFractionDigits: 4 })} SOL</b></div>
               </>
+            )}
+            {selected.type === 'exchange' && (
+              <div style={{ fontSize: 12, color: 'rgba(255,255,255,.7)' }}>The real on-chain destination pump.fun-origin tokens migrate their liquidity to.</div>
             )}
             {selected.type === 'social' && (
               <>
