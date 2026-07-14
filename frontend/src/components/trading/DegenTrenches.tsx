@@ -157,7 +157,7 @@ export default function DegenTrenches() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
           <Rocket size={14} color="#a855f7" />
           <span style={{ fontSize: 13, fontWeight: 600 }}>Volume Surges</span>
-          <span style={{ fontSize: 9, color: 'var(--muted)' }}>&gt;3x 6h average</span>
+          <span style={{ fontSize: 9, color: 'var(--muted)' }}>&gt;1.4x 6h average</span>
         </div>
         {surges.items.length === 0 ? (
           <div style={{ fontSize: 11, color: 'var(--muted)' }}>No surges detected this cycle.</div>

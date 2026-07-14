@@ -179,8 +179,12 @@ async def volume_surge(limit: int=20, x_agent_key: str=Header(...)):
             surge_ratio = vol_1h / max(1, vol_6h/6) if vol_6h > 0 else 0
             name = attrs.get("name","")
             sym = name.split(" / ")[0][:12] if " / " in name else name[:12]
-            if surge_ratio > 3:
-                results.append({"symbol":sym,"name":name,"address":_mint_from_pool(p),"volume_5m":vol_5m,"volume_1h":vol_1h,"surge_ratio":round(surge_ratio,1),"signal":"🔥 SURGE" if surge_ratio>10 else "⚡ SPIKE"})
+            # 3x was calibrated against nothing — checked real GeckoTerminal
+            # data live and the highest ratio among current trending pools
+            # was 1.85x, so this threshold returned zero results basically
+            # always. Lowered to something actual market conditions clear.
+            if surge_ratio > 1.4:
+                results.append({"symbol":sym,"name":name,"address":_mint_from_pool(p),"volume_5m":vol_5m,"volume_1h":vol_1h,"surge_ratio":round(surge_ratio,1),"signal":"🔥 SURGE" if surge_ratio>3 else "⚡ SPIKE"})
         results.sort(key=lambda x:-x.get("surge_ratio",0))
         resp = {"volume_surges":results,"count":len(results),"source":"GeckoTerminal","cached":from_cache}
         return _cache_put("volume_surge", resp) if results else (_cache_get_stale("volume_surge") or resp)
