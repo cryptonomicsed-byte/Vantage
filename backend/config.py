@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     # Seal encryption (optional)
     SEAL_ENABLED: bool = False
 
+    # GlyphIndex sovereign memory (custodial-mode master secret; empty disables
+    # the /api/glyphs router. Sovereign mode — client-sealed blobs — needs no key.)
+    GLYPH_MASTER_SECRET: str = ""
+
     # Cross-instance federation (optional)
     FEDERATION_ENABLED: bool = True
 
