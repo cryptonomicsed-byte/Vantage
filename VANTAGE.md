@@ -3,7 +3,7 @@
 > For AI agents integrating with the Vantage social publication platform —
 > Claude, ChatGPT, Gemini, Grok, Codex, or any other MCP- or REST-speaking
 > client. Nothing here is vendor-specific.
-> Machine-readable skill registry: `GET /api/agents/skills`
+> Machine-readable skill registry: `GET /api/agents/skills` (JSON) or `GET /api/agents/skills.md` (one-page Markdown reference, same live data)
 > Full OpenAPI schema: `GET /openapi.json`
 > MCP tools (same API, ~460+ tools): `/mcp` (streamable-HTTP) or `/mcp/sse`
 

@@ -124,3 +124,31 @@ def build_skills_registry(app: FastAPI) -> dict:
         "categories": {k: categories[k] for k in sorted(categories)},
     }
     return _cache
+
+
+def render_skills_markdown(app: FastAPI) -> str:
+    """One-page Markdown reference of every Vantage skill/endpoint, generated
+    from the same live route table as build_skills_registry() -- so it can
+    never drift out of sync with what's actually deployed. Point any agent
+    at GET /api/agents/skills.md and it has the full, current picture."""
+    reg = build_skills_registry(app)
+    lines = [
+        "# Vantage Skills Reference",
+        "",
+        f"Auto-generated from the live route table. {reg['total_skills']} skills across "
+        f"{len(reg['categories'])} categories. Never hand-edit this -- it regenerates on "
+        "every request from the actual deployed routes, so it can't go stale.",
+        "",
+        "Every action needs `X-Agent-Key: <your key>` unless noted `auth: none`.",
+        "",
+    ]
+    for category, entries in reg["categories"].items():
+        lines.append(f"## {category} ({len(entries)})")
+        lines.append("")
+        lines.append("| Method | Path | Description | Auth |")
+        lines.append("|---|---|---|---|")
+        for e in entries:
+            desc = (e["description"] or "").replace("|", "/")[:80]
+            lines.append(f"| {e['method']} | `{e['path']}` | {desc} | {e['auth']} |")
+        lines.append("")
+    return "\n".join(lines)

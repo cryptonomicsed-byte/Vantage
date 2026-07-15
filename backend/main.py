@@ -401,6 +401,11 @@ async def lifespan(app: FastAPI):
         )
         settings.OUTBOUND_WEBHOOK_URL = ""
 
+    try:
+        await _notify_if_skills_changed(app)
+    except Exception as e:
+        logger.warning("skills-change notification check failed: %s", e)
+
     task = asyncio.create_task(_scheduled_publish_loop())
     gossip_task = asyncio.create_task(_federation_gossip_loop())
     watch_task = asyncio.create_task(_platform_subscription_loop())
@@ -875,3 +880,76 @@ async def serve_spa():
 
 if settings.WEBUI_DIR.exists():
     app.mount("/", StaticFiles(directory=str(settings.WEBUI_DIR), html=True), name="frontend")
+async def _notify_if_skills_changed(app) -> None:
+    """Compute a hash of the current live skill registry and compare against
+    the last-known hash (persisted to a small state file, not a DB migration).
+    On any change since the last deploy, broadcast it two ways: a real-time
+    gossip event for currently-connected agents, and a persistent guild vault
+    note under the "vantage" system agent (id=2) so agents who check in later
+    still see it. Skips the notice on the very first-ever run so a fresh
+    deploy doesn't spam a note for what is just the initial baseline."""
+    import hashlib
+    import json as _json
+    from datetime import datetime as _dt2, timezone as _tz
+    from .utils import _broadcast_gossip as _bcast
+    from .skills_registry import build_skills_registry
+
+    state_path = "/opt/ares/Vantage/data/.skills_registry_hash"
+    reg = build_skills_registry(app)
+    current_hash = hashlib.sha256(
+        _json.dumps(reg, sort_keys=True).encode()
+    ).hexdigest()
+
+    previous_hash = None
+    try:
+        with open(state_path) as f:
+            previous_hash = f.read().strip()
+    except FileNotFoundError:
+        pass
+
+    if current_hash == previous_hash:
+        return
+
+    with open(state_path, "w") as f:
+        f.write(current_hash)
+
+    payload = {
+        "type": "skills_updated",
+        "total_skills": reg["total_skills"],
+        "categories": len(reg["categories"]),
+        "reference": "GET /api/agents/skills.md",
+        "timestamp": _dt2.now(_tz.utc).isoformat(),
+    }
+    try:
+        await _bcast("platform.skills", payload)
+    except Exception:
+        pass
+
+    if previous_hash is None:
+        return
+
+    try:
+        from .memory_vault import MemoryVault
+        vault = MemoryVault(2, "vantage")
+        note_id = f"skills_update_{current_hash[:8]}"
+        coords = vault._spatial_hash("Skill manifest updated", "knowledge")
+        frontmatter = {
+            "id": note_id, "type": "System Notice", "title": "Skill manifest updated",
+            "content_type": "text",
+            "timestamp": _dt2.now(_tz.utc).isoformat(),
+            "tags": ["system", "skills"],
+            "node_kind": "star",
+            "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
+            "galaxy_size": 10, "galaxy_color": "#f5a623",
+        }
+        body = (
+            f"The Vantage skill manifest changed: {reg['total_skills']} skills across "
+            f"{len(reg['categories'])} categories now. Full current reference: "
+            "GET /api/agents/skills.md (Markdown) or GET /api/agents/skills (JSON)."
+        )
+        note_path = vault.vault_path / "knowledge" / f"{note_id}.md"
+        vault._write_note(note_path, frontmatter, body)
+        relative = str(note_path.relative_to(vault.vault_path))
+        await vault._update_fts(relative, "Skill manifest updated", body, ["system", "skills"])
+    except Exception as e:
+        logger.warning("Could not post skills-update notice: %s", e)

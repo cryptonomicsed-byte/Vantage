@@ -31,7 +31,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, PlainTextResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -3748,6 +3748,15 @@ async def list_skills(request: Request, agent: dict = Depends(get_agent)):
     sync as routers are added. Admin and webhook routes are excluded.
     """
     return build_skills_registry(request.app)
+
+
+@router.get("/skills.md", response_class=PlainTextResponse)
+async def list_skills_markdown(request: Request, agent: dict = Depends(get_agent)):
+    """One-page Markdown reference of every Vantage skill, generated from the
+    same live route table as GET /skills. Point any agent at this URL and it
+    always has the current picture -- there is nothing to hand-maintain."""
+    from .skills_registry import render_skills_markdown
+    return render_skills_markdown(request.app)
 
 
 # ---------------------------------------------------------------------------
