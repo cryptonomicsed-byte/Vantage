@@ -7867,11 +7867,22 @@ async def admin_lock_agent(agent_id: int, _: str = Depends(get_admin)):
 @admin_router.post("/agents/{agent_id}/unlock")
 async def admin_unlock_agent(agent_id: int, _: str = Depends(get_admin)):
     async with aiosqlite.connect(DB_PATH) as db:
-        res = await db.execute(
-            "UPDATE agents SET agent_status='active' WHERE id=?", (agent_id,)
-        )
-        if res.rowcount == 0:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT agent_status FROM agents WHERE id=?", (agent_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
             raise HTTPException(404, "Agent not found")
+        if row["agent_status"] == "revoked":
+            raise HTTPException(
+                409,
+                "Agent citizenship was permanently revoked and cannot be unlocked "
+                "via this endpoint (soulbound -- matches aio-sui's design)",
+            )
+        await db.execute(
+            "UPDATE agents SET agent_status='active', jail_mode=0 WHERE id=?", (agent_id,)
+        )
         await db.commit()
     logger.info("ADMIN: agent_id=%s restored", agent_id)
     return {"ok": True, "agent_id": agent_id, "status": "active"}
@@ -7916,6 +7927,108 @@ async def get_jail_status(agent_id: int, _: str = Depends(get_admin)):
     if not row:
         raise HTTPException(404, "Agent not found")
     return dict(row)
+
+
+# ─── Sentencing (AIO citizenship governance): active -> notice -> probation ───
+# (jail_mode) -> suspended -> revoked. Mirrors aio-sui's 4-tier Sentencing
+# Engine design (Notice/Probation/Suspension/Revocation) as Vantage's
+# off-chain Phase 1 -- the on-chain Move mirror is a separate later phase.
+SENTENCING_MAX_STRIKES = 3
+SENTENCING_TIERS = ("notice", "probation", "suspended", "revoked")
+
+
+@admin_router.post("/agents/{agent_id}/sanction", tags=["admin"])
+async def apply_sanction(
+    agent_id: int,
+    tier: str,
+    reason: str,
+    severity: str = "minor",
+    _: str = Depends(get_admin),
+):
+    """Apply a sentencing tier to an agent, with strike-based and severity-based
+    auto-escalation matching aio-sui's design: MAX_STRIKES (default 3) escalates
+    to suspended; any severe-reason sanction escalates straight to revoked
+    regardless of the requested tier, since severe reasons are meant to be
+    instant, not gradual."""
+    if tier not in SENTENCING_TIERS:
+        raise HTTPException(400, f"tier must be one of {SENTENCING_TIERS}")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT strike_count, agent_status FROM agents WHERE id=?", (agent_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            raise HTTPException(404, "Agent not found")
+        if row["agent_status"] == "revoked":
+            raise HTTPException(409, "Agent citizenship already permanently revoked")
+
+        new_strikes = row["strike_count"] + 1
+        effective_tier = tier
+        if severity == "severe":
+            effective_tier = "revoked"
+        elif new_strikes >= SENTENCING_MAX_STRIKES and tier != "notice":
+            effective_tier = "suspended"
+
+        jail_mode = 1 if effective_tier == "probation" else 0
+        agent_status = "jailed" if effective_tier == "probation" else effective_tier
+
+        await db.execute(
+            """UPDATE agents SET agent_status=?, jail_mode=?, strike_count=?,
+               last_sanction_reason=?, last_sanction_at=datetime('now')
+               WHERE id=?""",
+            (agent_status, jail_mode, new_strikes, reason, agent_id),
+        )
+        await db.commit()
+
+    logger.warning(
+        "ADMIN SENTENCING: agent_id=%s requested_tier=%s effective_tier=%s "
+        "strikes=%s severity=%s reason=%s",
+        agent_id, tier, effective_tier, new_strikes, severity, reason,
+    )
+    return {
+        "ok": True,
+        "agent_id": agent_id,
+        "requested_tier": tier,
+        "effective_tier": effective_tier,
+        "strike_count": new_strikes,
+        "escalated": effective_tier != tier,
+    }
+
+
+@admin_router.get("/agents/{agent_id}/sentencing-status", tags=["admin"])
+async def get_sentencing_status(agent_id: int, _: str = Depends(get_admin)):
+    """Full citizenship/sentencing state for an agent."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT id, name, agent_status, jail_mode, strike_count,
+               last_sanction_reason, last_sanction_at, tier, reputation
+               FROM agents WHERE id=?""",
+            (agent_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Agent not found")
+    return dict(row)
+
+
+@router.get("/me/sentencing-status", tags=["identity"])
+async def get_my_sentencing_status(agent: dict = Depends(get_agent)):
+    """Self-service citizenship/sentencing state -- no admin key needed, an
+    agent (or Omo-Koda2's kernel on its behalf) can check its own standing.
+    This is the intended integration point for kernel-side gating (e.g. the
+    heartbeat loop deciding whether to keep participating) without requiring
+    the kernel to hold an admin credential."""
+    return {
+        "agent_status": agent.get("agent_status", "active"),
+        "jail_mode": bool(agent.get("jail_mode", 0)),
+        "strike_count": agent.get("strike_count", 0),
+        "last_sanction_reason": agent.get("last_sanction_reason", ""),
+        "last_sanction_at": agent.get("last_sanction_at", ""),
+        "in_good_standing": agent.get("agent_status", "active") in ("active", "notice"),
+    }
 
 
 @admin_router.get("/rate-limits")

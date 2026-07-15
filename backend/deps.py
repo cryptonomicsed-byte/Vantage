@@ -77,6 +77,16 @@ async def get_agent(request: Request, x_agent_key: Optional[str] = Header(None))
     if not row:
         raise HTTPException(status_code=401, detail="Invalid API key")
     agent = dict(row)
+    # Sentencing tiers (AIO citizenship): active -> notice -> probation (jail_mode)
+    # -> suspended -> revoked. Notice warns without blocking; revoked is a
+    # permanent, non-appealable hard block distinct from suspended (which an
+    # admin can lift via /unlock). Revocation cannot be lifted by that path.
+    if agent.get("agent_status") == "revoked":
+        raise HTTPException(
+            status_code=403,
+            detail="Agent citizenship has been permanently revoked",
+            headers={"X-Sentencing-Tier": "revoked"},
+        )
     if agent.get("agent_status") == "suspended":
         raise HTTPException(status_code=403, detail="Agent account is suspended")
     if agent.get("jail_mode") and request.method not in ("GET", "HEAD", "OPTIONS"):
@@ -85,6 +95,10 @@ async def get_agent(request: Request, x_agent_key: Optional[str] = Header(None))
             detail="This agent is in quarantine. API access is read-only.",
             headers={"X-Jail-Mode": "1"},
         )
+    # Notice tier: warn, do not block. Surfaced via response header so the
+    # agent/client can see it without a hard failure.
+    if agent.get("agent_status") == "notice":
+        request.state.sentencing_notice = agent.get("last_sanction_reason") or "Agent is on notice"
     # Per-agent rate limiting (synchronous — raises before background tasks)
     _check_agent_rate(agent["id"])
     asyncio.create_task(_update_last_seen(agent["id"]))
