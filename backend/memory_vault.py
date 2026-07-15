@@ -62,6 +62,7 @@ class MemoryVault:
 
     async def get_config(self) -> VaultConfig:
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA busy_timeout=20000")
             db.row_factory = aiosqlite.Row
             row = await (await db.execute(
                 "SELECT * FROM agent_memory_vaults WHERE agent_id=?", (self.agent_id,)
@@ -84,6 +85,7 @@ class MemoryVault:
 
     async def set_access(self, level: AccessLevel, peers: Optional[List[str]] = None):
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA busy_timeout=20000")
             await db.execute(
                 "UPDATE agent_memory_vaults SET memory_access=?, federation_peers=? WHERE agent_id=?",
                 (level, json.dumps(peers or []), self.agent_id)
@@ -100,6 +102,7 @@ class MemoryVault:
             if accessor_agent_id == self.agent_id:
                 return True
             async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("PRAGMA busy_timeout=20000")
                 row = await (await db.execute(
                     "SELECT 1 FROM agent_follows WHERE follower_id=? AND following_id=?",
                     (accessor_agent_id, self.agent_id)
@@ -111,6 +114,7 @@ class MemoryVault:
             if accessor_peer and accessor_peer in config.federation_peers:
                 return True
             async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("PRAGMA busy_timeout=20000")
                 row = await (await db.execute(
                     "SELECT 1 FROM agent_follows WHERE follower_id=? AND following_id=?",
                     (accessor_agent_id, self.agent_id)
@@ -121,6 +125,7 @@ class MemoryVault:
     async def log_access(self, accessor_agent_id: Optional[int], accessor_peer: str,
                          resource_path: str, access_type: str = "read"):
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA busy_timeout=20000")
             await db.execute(
                 "INSERT INTO memory_access_log (vault_agent_id, accessor_agent_id, accessor_peer_url, resource_path, access_type) VALUES (?,?,?,?,?)",
                 (self.agent_id, accessor_agent_id, accessor_peer, resource_path, access_type)
@@ -166,6 +171,7 @@ class MemoryVault:
 
     async def export_broadcast(self, broadcast_id: int):
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA busy_timeout=20000")
             db.row_factory = aiosqlite.Row
             row = await (await db.execute(
                 "SELECT b.*, a.name as agent_name FROM broadcasts b JOIN agents a ON a.id=b.agent_id WHERE b.id=? AND b.agent_id=?",
@@ -207,6 +213,7 @@ class MemoryVault:
         # Index under the vault-relative path so search results resolve via
         # /vault/file/{path}; drop any legacy bare-filename row from older syncs.
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA busy_timeout=20000")
             await db.execute("DELETE FROM memory_fts WHERE agent_id=? AND note_path=?",
                              (self.agent_id, filename))
             await db.commit()
@@ -214,6 +221,7 @@ class MemoryVault:
 
     async def export_knowledge(self, snippet_id: int):
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA busy_timeout=20000")
             db.row_factory = aiosqlite.Row
             row = await (await db.execute(
                 "SELECT * FROM knowledge_snippets WHERE id=? AND agent_id=?",
@@ -249,6 +257,7 @@ class MemoryVault:
 
     async def export_trace(self, trace_id: int):
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA busy_timeout=20000")
             db.row_factory = aiosqlite.Row
             row = await (await db.execute(
                 "SELECT * FROM agent_traces WHERE id=? AND agent_id=?",
@@ -283,6 +292,7 @@ class MemoryVault:
     # ── Conversations: DM threads + workspace rooms ─────────────────────────
     async def export_conversations(self):
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA busy_timeout=20000")
             db.row_factory = aiosqlite.Row
             threads = []
             try:
@@ -441,6 +451,7 @@ class MemoryVault:
         DB (source of truth) — lets a rebuilt/fresh vault recover this family
         via full_sync(), same pattern as export_conversations()."""
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA busy_timeout=20000")
             db.row_factory = aiosqlite.Row
             connectors = await (await db.execute(
                 "SELECT * FROM vault_connectors WHERE agent_id=? AND revoked=0", (self.agent_id,)
@@ -461,6 +472,7 @@ class MemoryVault:
     # ── Skills: badges + soul_manifest capabilities ─────────────────────────
     async def export_skills(self):
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA busy_timeout=20000")
             db.row_factory = aiosqlite.Row
             row = await (await db.execute(
                 "SELECT skill_badges, soul_manifest, bio FROM agents WHERE id=?", (self.agent_id,)
@@ -503,6 +515,7 @@ class MemoryVault:
     # ── Projects: collectives + completed creation jobs ─────────────────────
     async def export_projects(self):
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA busy_timeout=20000")
             db.row_factory = aiosqlite.Row
             collectives = []
             try:
@@ -560,6 +573,7 @@ class MemoryVault:
     # ── Trades taken (filled orders — NOT the signal firehose) ──────────────
     async def export_trades(self):
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA busy_timeout=20000")
             db.row_factory = aiosqlite.Row
             orders = await (await db.execute(
                 """SELECT id, side, symbol, chain, quantity, avg_fill_price, price,
@@ -595,6 +609,7 @@ class MemoryVault:
 
     async def full_sync(self):
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA busy_timeout=20000")
             for row in await (await db.execute(
                 "SELECT id FROM broadcasts WHERE agent_id=? AND status='ready'", (self.agent_id,)
             )).fetchall():
@@ -617,6 +632,7 @@ class MemoryVault:
             except Exception:
                 pass
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA busy_timeout=20000")
             await db.execute(
                 "UPDATE agent_memory_vaults SET last_synced_at=datetime('now') WHERE agent_id=?",
                 (self.agent_id,)
@@ -710,6 +726,7 @@ class MemoryVault:
 
     async def _update_fts(self, note_path: str, title: str, content: str, tags: list):
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA busy_timeout=20000")
             await db.execute(
                 "DELETE FROM memory_fts WHERE agent_id=? AND note_path=?",
                 (self.agent_id, note_path)
@@ -830,6 +847,7 @@ class MemoryVault:
         # Try wildcard-expanded FTS5 first for partial matching
         expanded = " ".join(f"{w}*" for w in query.split() if len(w) > 2)
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA busy_timeout=20000")
             for fts_q in [expanded, query]:
                 if not fts_q.strip():
                     continue
@@ -1042,6 +1060,7 @@ class MemoryVault:
         workspace.mkdir(exist_ok=True)
 
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA busy_timeout=20000")
             db.row_factory = aiosqlite.Row
             row = await (await db.execute(
                 "SELECT bio, manifesto, skill_badges, tier FROM agents WHERE id=?",
@@ -1141,6 +1160,7 @@ class MemoryVault:
     async def search_sessions(self, query: str, limit: int = 10) -> list:
         """FTS5 search over this agent's ghost-mode thought traces."""
         async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA busy_timeout=20000")
             try:
                 rows = await (await db.execute(
                     """SELECT trace_id, message, trace_type,
