@@ -524,10 +524,93 @@ async def _get_latest_scan(owner: str, name: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
+async def _trivy_scan(owner: str, name: str, agent_id: int, agent_name: str) -> dict:
+    """Real dependency/CVE + secret + misconfig scan via Trivy (aquasecurity/trivy),
+    filling the gap the regex engine leaves -- that one only matches 6 hardcoded
+    patterns, this covers actual known-vulnerable dependency versions."""
+    full_name = f"{owner}/{name}"
+    clone_url = f"{GITEA_URL}/{full_name}.git".replace("http://", f"http://{GITEA_TOKEN}@")
+    target = os.path.join(SCAN_DIR, f"trivy_{name}")
+    os.makedirs(SCAN_DIR, exist_ok=True)
+
+    try:
+        if os.path.exists(target):
+            shutil.rmtree(target)
+        subprocess.run(["git", "clone", "--depth", "1", clone_url, target], capture_output=True, timeout=30)
+
+        proc = subprocess.run(
+            ["trivy", "fs", "--scanners", "vuln,secret,misconfig",
+             "--format", "json", "--quiet", "--timeout", "120s", target],
+            capture_output=True, text=True, timeout=150,
+        )
+        try:
+            report = json.loads(proc.stdout or "{}")
+        except json.JSONDecodeError:
+            report = {}
+
+        findings = []
+        for result in report.get("Results", []) or []:
+            rel_target = result.get("Target", "")
+            for vuln in result.get("Vulnerabilities", []) or []:
+                findings.append({
+                    "file": rel_target,
+                    "vuln_id": vuln.get("VulnerabilityID", ""),
+                    "package": vuln.get("PkgName", ""),
+                    "installed_version": vuln.get("InstalledVersion", ""),
+                    "fixed_version": vuln.get("FixedVersion", ""),
+                    "severity": vuln.get("Severity", "UNKNOWN"),
+                    "title": (vuln.get("Title") or "")[:120],
+                })
+            for sec in result.get("Secrets", []) or []:
+                findings.append({
+                    "file": rel_target,
+                    "vuln_id": sec.get("RuleID", "SECRET"),
+                    "severity": sec.get("Severity", "HIGH"),
+                    "line": sec.get("StartLine"),
+                    "title": sec.get("Title", ""),
+                })
+            for mis in result.get("Misconfigurations", []) or []:
+                findings.append({
+                    "file": rel_target,
+                    "vuln_id": mis.get("ID", ""),
+                    "severity": mis.get("Severity", "UNKNOWN"),
+                    "title": (mis.get("Title") or "")[:120],
+                })
+
+        sev_rank = {"CRITICAL": 3, "HIGH": 2, "MEDIUM": 1, "LOW": 0, "UNKNOWN": 0}
+        critical = [f for f in findings if sev_rank.get(f.get("severity", ""), 0) >= 3]
+        high = [f for f in findings if sev_rank.get(f.get("severity", ""), 0) == 2]
+
+        _log_activity("scan", full_name, f"trivy: {len(findings)} findings", agent=agent_name)
+
+        result_out = {
+            "repo": full_name,
+            "engine": "trivy",
+            "total_findings": len(findings),
+            "critical": len(critical),
+            "high": len(high),
+            "findings": findings[:30],
+            "scanned_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _post_critical_findings(name, critical[:3])
+
+        scan_id = await _create_scan_row(agent_id, owner, name, "trivy")
+        await _update_scan_row(
+            scan_id,
+            status="complete",
+            findings_json=json.dumps(findings),
+            completed_at=result_out["scanned_at"],
+        )
+        result_out["scan_id"] = scan_id
+        return result_out
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
+
+
 @router.post("/repo/{owner}/{name}/scan")
 async def trigger_scan(
     owner: str, name: str,
-    engine: Literal["regex", "strix"] = Query("regex"),
+    engine: Literal["regex", "strix", "trivy"] = Query("regex"),
     agent: dict = Depends(get_agent),
 ):
     """Trigger a security scan on a repo.
@@ -541,6 +624,13 @@ async def trigger_scan(
     if engine == "regex":
         try:
             result = await _regex_scan(owner, name, agent["id"], agent["name"])
+        except Exception as e:
+            raise HTTPException(500, str(e))
+        return result
+
+    if engine == "trivy":
+        try:
+            result = await _trivy_scan(owner, name, agent["id"], agent["name"])
         except Exception as e:
             raise HTTPException(500, str(e))
         return result
