@@ -676,10 +676,72 @@ async def _semgrep_scan(owner: str, name: str, agent_id: int, agent_name: str) -
         shutil.rmtree(target, ignore_errors=True)
 
 
+async def _sbom_scan(owner: str, name: str, agent_id: int, agent_name: str) -> dict:
+    """Generate a real SBOM (Software Bill of Materials) via Syft, CycloneDX
+    format. Not a vulnerability scan -- an inventory of every package/library
+    a repo actually depends on, the missing piece for knowing what you'''re
+    exposed to when a new CVE drops somewhere in the ecosystem."""
+    full_name = f"{owner}/{name}"
+    clone_url = f"{GITEA_URL}/{full_name}.git".replace("http://", f"http://{GITEA_TOKEN}@")
+    target = os.path.join(SCAN_DIR, f"sbom_{name}")
+    os.makedirs(SCAN_DIR, exist_ok=True)
+
+    try:
+        if os.path.exists(target):
+            shutil.rmtree(target)
+        subprocess.run(["git", "clone", "--depth", "1", clone_url, target], capture_output=True, timeout=30)
+
+        proc = subprocess.run(
+            ["syft", target, "-o", "cyclonedx-json", "--quiet"],
+            capture_output=True, text=True, timeout=120,
+        )
+        try:
+            report = json.loads(proc.stdout or "{}")
+        except json.JSONDecodeError:
+            report = {}
+
+        components = report.get("components", []) or []
+        findings = [
+            {
+                "file": "",
+                "vuln_id": "",
+                "severity": "INFO",
+                "package": c.get("name", ""),
+                "installed_version": c.get("version", ""),
+                "title": c.get("type", ""),
+            }
+            for c in components
+        ]
+
+        _log_activity("scan", full_name, f"sbom: {len(components)} components", agent=agent_name)
+
+        result_out = {
+            "repo": full_name,
+            "engine": "sbom",
+            "total_findings": len(findings),
+            "critical": 0,
+            "high": 0,
+            "findings": findings[:50],
+            "scanned_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        scan_id = await _create_scan_row(agent_id, owner, name, "sbom")
+        await _update_scan_row(
+            scan_id,
+            status="complete",
+            findings_json=json.dumps(findings),
+            completed_at=result_out["scanned_at"],
+        )
+        result_out["scan_id"] = scan_id
+        return result_out
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
+
+
 @router.post("/repo/{owner}/{name}/scan")
 async def trigger_scan(
     owner: str, name: str,
-    engine: Literal["regex", "strix", "trivy", "semgrep"] = Query("regex"),
+    engine: Literal["regex", "strix", "trivy", "semgrep", "sbom"] = Query("regex"),
     agent: dict = Depends(get_agent),
 ):
     """Trigger a security scan on a repo.
@@ -707,6 +769,13 @@ async def trigger_scan(
     if engine == "semgrep":
         try:
             result = await _semgrep_scan(owner, name, agent["id"], agent["name"])
+        except Exception as e:
+            raise HTTPException(500, str(e))
+        return result
+
+    if engine == "sbom":
+        try:
+            result = await _sbom_scan(owner, name, agent["id"], agent["name"])
         except Exception as e:
             raise HTTPException(500, str(e))
         return result
