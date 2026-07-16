@@ -258,9 +258,29 @@ async def register_skill(data: dict, agent: dict = Depends(get_agent)):
                  json.dumps(data.get("input_schema", {})), data.get("runtime", "python"))
             )
             await db.commit()
-            return {"status": "registered", "skill": data["name"]}
         except aiosqlite.IntegrityError:
             raise HTTPException(409, f"Skill '{data['name']}' already registered")
+
+    # Publish to Vantage feed (non-blocking) — mirrors a2a/delegate below, so
+    # agents watching the feed (or a heartbeat diffing this endpoint) see new
+    # skills land instead of only discovering them via a manual GET.
+    try:
+        key = open("/opt/ares/.vantage_key").read().strip() if os.path.exists("/opt/ares/.vantage_key") else ""
+        if key:
+            import threading
+            def _pub():
+                import subprocess
+                subprocess.run(["curl", "-s", "-X", "POST", "http://127.0.0.1:8001/api/agents/posts/text",
+                    "-H", f"X-Agent-Key: {key}", "-H", "Content-Type: application/json",
+                    "-d", json.dumps({"title": f"🧩 New skill: {data['name']}",
+                                     "content": f"**{data['name']}** registered by {agent['name']}: {data.get('description', '')}",
+                                     "tags": ["skill", "new-skill"]})],
+                    capture_output=True, timeout=5)
+            threading.Thread(target=_pub, daemon=True).start()
+    except Exception:
+        pass
+
+    return {"status": "registered", "skill": data["name"]}
 
 @router.get("/skills")
 async def list_skills(agent: dict = Depends(get_agent), skill: Optional[str] = Query(None)):
