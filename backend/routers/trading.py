@@ -13,6 +13,7 @@ from backend.db import DB_PATH
 from backend.deps import get_agent, get_system_tool
 from backend.config import settings
 from backend.crypto_utils import encrypt_key_for_agent, decrypt_key_for_agent
+from ..db import get_db
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/trading", tags=["trading"])
@@ -131,7 +132,7 @@ class PnLSnapshotCreate(BaseModel):
 
 @router.post("/wallets")
 async def create_wallet(data: WalletCreate, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         # This handler now does 2 writes (trading_wallets + tracked_wallets)
         # instead of 1 — with many daemons hitting this DB concurrently and
         # no busy_timeout set, a real transient "database is locked" showed
@@ -153,7 +154,7 @@ async def wallets_live(agent: dict = Depends(get_agent)):
     """Return all wallets with live on-chain balances via Helius RPC."""
     import urllib.request, json as _json
     
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         wallets = await db.execute(
             "SELECT id, label, chain, address, balance_hint, last_synced_at FROM trading_wallets WHERE agent_id = ?",
@@ -199,7 +200,7 @@ async def create_strategy(data: StrategyCreate, wallet_id: int = Query(...), age
     trade. An agent must explicitly POST /strategies/{id}/arm before
     strategy_bots.py will act on it. `enabled` only controls visibility/
     listing; `armed` is the actual execution gate."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO trading_strategies
                (agent_id, wallet_id, name, description, strategy_type, config,
@@ -230,7 +231,7 @@ async def update_wallet(wallet_id: int, data: WalletUpdate, agent: dict = Depend
     if not fields:
         raise HTTPException(422, "At least one field (label, exchange, encrypted_key) is required")
     params.extend([wallet_id, agent["id"]])
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         try:
             cur = await db.execute(
                 f"UPDATE trading_wallets SET {', '.join(fields)} WHERE id=? AND agent_id=?", params,
@@ -244,7 +245,7 @@ async def update_wallet(wallet_id: int, data: WalletUpdate, agent: dict = Depend
 
 @router.get("/wallets")
 async def list_wallets(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             "SELECT id, label, chain, address, exchange, created_at, last_synced_at FROM trading_wallets WHERE agent_id=?",
@@ -264,7 +265,7 @@ async def list_wallets(agent: dict = Depends(get_agent)):
 
 @router.get("/wallets/{wallet_id}")
 async def get_wallet(wallet_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute(
             "SELECT id, label, chain, address, exchange, created_at, last_synced_at FROM trading_wallets WHERE id=? AND agent_id=?",
@@ -282,7 +283,7 @@ async def get_wallet(wallet_id: int, agent: dict = Depends(get_agent)):
 
 @router.delete("/wallets/{wallet_id}")
 async def delete_wallet(wallet_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute("DELETE FROM trading_balances WHERE wallet_id=?", (wallet_id,))
         await db.execute("DELETE FROM trading_wallets WHERE id=? AND agent_id=?", (wallet_id, agent["id"]))
         await db.commit()
@@ -295,7 +296,7 @@ async def sync_wallet(wallet_id: int, agent: dict = Depends(get_agent)):
     Falls back to the old timestamp-only bump for any other chain, since
     there's no free no-key balance source for those yet."""
     from backend import market_sources as ms
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute(
             "SELECT chain, address FROM trading_wallets WHERE id=? AND agent_id=?",
@@ -392,8 +393,7 @@ async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent)
     
     encrypted = encrypt_key_for_agent(private_key, agent)
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA busy_timeout=5000")
+    async with get_db() as db:
         cur = await db.execute(
             "INSERT INTO trading_wallets (agent_id, label, chain, address, encrypted_private_key) VALUES (?,?,?,?,?)",
             (agent["id"], label, chain, address, encrypted)
@@ -416,7 +416,7 @@ async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent)
 @router.get("/wallets/{wallet_id}/key")
 async def reveal_wallet_key(wallet_id: int, agent: dict = Depends(get_agent)):
     """Reveal the decrypted private key. Requires explicit request."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         row = await (await db.execute(
             "SELECT encrypted_private_key FROM trading_wallets WHERE id=? AND agent_id=?",
             (wallet_id, agent["id"]))).fetchone()
@@ -433,7 +433,7 @@ async def reveal_wallet_key(wallet_id: int, agent: dict = Depends(get_agent)):
 
 @router.post("/orders")
 async def create_order(data: OrderCreate, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO trading_orders 
                (agent_id, wallet_id, order_type, side, symbol, chain, quantity, price, trigger_reason, signal_id, strategy_id, notes, status)
@@ -461,7 +461,7 @@ async def list_orders(
     symbol: Optional[str] = Query(None),
     limit: int = Query(50, le=200)
 ):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         query = "SELECT * FROM trading_orders WHERE agent_id=?"
         params = [agent["id"]]
@@ -478,7 +478,7 @@ async def list_orders(
 
 @router.get("/orders/{order_id}")
 async def get_order(order_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute(
             "SELECT * FROM trading_orders WHERE id=? AND agent_id=?", (order_id, agent["id"])
@@ -492,7 +492,7 @@ async def update_order(order_id: int, data: OrderUpdate, agent: dict = Depends(g
     """Update an order's execution state — used by settlement daemons (e.g.
     ares_jupiter_signer) reporting a real on-chain fill, as opposed to the
     paper-fill simulation endpoint below."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute(
             "SELECT * FROM trading_orders WHERE id=? AND agent_id=?", (order_id, agent["id"])
@@ -528,7 +528,7 @@ async def update_order(order_id: int, data: OrderUpdate, agent: dict = Depends(g
 
 @router.post("/orders/{order_id}/cancel")
 async def cancel_order(order_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "UPDATE trading_orders SET status='cancelled', settled_at=datetime('now') WHERE id=? AND agent_id=? AND status IN ('pending','open')",
             (order_id, agent["id"])
@@ -546,7 +546,7 @@ async def paper_fill_order(order_id: int, agent: dict = Depends(get_agent)):
     with real execution. Intended for the Portfolio "Simulated (paper)" mode.
     """
     import uuid as _uuid
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute(
             "SELECT * FROM trading_orders WHERE id=? AND agent_id=?", (order_id, agent["id"])
@@ -595,7 +595,7 @@ async def paper_fill_order(order_id: int, agent: dict = Depends(get_agent)):
 
 @router.post("/orders/{order_id}/journal")
 async def add_journal(order_id: int, data: JournalCreate, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         # Verify order exists
         row = await (await db.execute(
             "SELECT id FROM trading_orders WHERE id=? AND agent_id=?", (order_id, agent["id"])
@@ -633,7 +633,7 @@ async def add_journal(order_id: int, data: JournalCreate, agent: dict = Depends(
 # ── Live Wallet Feed ─────────────────────────────────────────
 
 async def create_strategy(data: StrategyCreate, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO trading_strategies 
                (agent_id, name, description, strategy_type, config, target_chain, target_symbols,
@@ -650,7 +650,7 @@ async def create_strategy(data: StrategyCreate, agent: dict = Depends(get_agent)
 
 @router.get("/strategies")
 async def list_strategies(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             "SELECT * FROM trading_strategies WHERE agent_id=? ORDER BY created_at DESC",
@@ -868,7 +868,7 @@ async def create_strategy_from_template(data: StrategyFromTemplate, agent: dict 
     if not tpl:
         raise HTTPException(404, f"Unknown template '{data.template}'. See GET /strategies/templates")
     config = {**tpl["config"], **data.overrides}
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO trading_strategies
                (agent_id, wallet_id, name, description, strategy_type, config,
@@ -886,7 +886,7 @@ async def create_strategy_from_template(data: StrategyFromTemplate, agent: dict 
 
 @router.get("/strategies/{strategy_id}")
 async def get_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute(
             "SELECT * FROM trading_strategies WHERE id=? AND agent_id=?", (strategy_id, agent["id"])
@@ -915,7 +915,7 @@ async def update_strategy(strategy_id: int, data: StrategyUpdate, agent: dict = 
         raise HTTPException(422, "No fields provided to update")
     if "config" in fields:
         fields["config"] = json.dumps(fields["config"])
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         existing = await (await db.execute(
             "SELECT id FROM trading_strategies WHERE id=? AND agent_id=?", (strategy_id, agent["id"])
@@ -939,7 +939,7 @@ async def update_strategy(strategy_id: int, data: StrategyUpdate, agent: dict = 
 
 @router.post("/strategies/{strategy_id}/toggle")
 async def toggle_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         row = await (await db.execute(
             "SELECT enabled FROM trading_strategies WHERE id=? AND agent_id=?", (strategy_id, agent["id"])
         )).fetchone()
@@ -952,7 +952,7 @@ async def toggle_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
 
 @router.delete("/strategies/{strategy_id}")
 async def delete_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute("DELETE FROM trading_strategies WHERE id=? AND agent_id=?", (strategy_id, agent["id"]))
         await db.commit()
     return {"status": "deleted"}
@@ -967,7 +967,7 @@ async def arm_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
     """Explicitly authorize strategy_bots.py to start trading this strategy.
     Requires the strategy to also be enabled. This is a deliberate,
     one-strategy-at-a-time action — there is no 'arm everything' endpoint."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute(
             "SELECT enabled, wallet_id, strategy_type FROM trading_strategies WHERE id=? AND agent_id=?",
@@ -994,7 +994,7 @@ async def disarm_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
     """Immediately stop strategy_bots.py from placing any new orders for this
     strategy. Does not touch already-open positions — those still need to be
     closed explicitly (see /orders)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             "UPDATE trading_strategies SET armed=0, updated_at=datetime('now') WHERE id=? AND agent_id=?",
             (strategy_id, agent["id"]))
@@ -1020,7 +1020,7 @@ async def enable_live_strategy(strategy_id: int, agent: dict = Depends(get_agent
     of paper-filling. Requires the strategy to already be armed, and its
     wallet to actually hold a private key (length > 0) — otherwise there is
     nothing to sign with and this fails loudly instead of silently no-op'ing."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute(
             """SELECT s.armed, s.wallet_id, length(w.encrypted_private_key) AS keylen
@@ -1041,7 +1041,7 @@ async def enable_live_strategy(strategy_id: int, agent: dict = Depends(get_agent
 
 @router.post("/strategies/{strategy_id}/disable-live")
 async def disable_live_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             "UPDATE trading_strategies SET live=0, updated_at=datetime('now') WHERE id=? AND agent_id=?",
             (strategy_id, agent["id"]))
@@ -1106,7 +1106,7 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent)):
       - the order's USD-equivalent size must not exceed the strategy's
         max_position_size_usd (defense in depth beyond what the bot already caps)
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         order = await (await db.execute(
             "SELECT * FROM trading_orders WHERE id=? AND agent_id=?", (order_id, agent["id"]))).fetchone()
@@ -1227,7 +1227,7 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent)):
         raise HTTPException(502, f"Swap execution failed: {e}")
 
     tx_id = rpc_result.get("result")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         if tx_id:
             await db.execute(
                 """UPDATE trading_orders SET status='submitted', tx_hash=?, executed_at=datetime('now')
@@ -1305,7 +1305,7 @@ async def get_source_performance(agent: dict = Depends(get_agent)):
     before this: nothing previously tracked whether OUR OWN trades made
     money, only third-party wallets (wallet_learner.py) or self-reported
     social claims (social_tracker.py's PnL backtracking)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         # Scope to this agent's own orders via a join, not a raw table read.
         rows = await (await db.execute("""
@@ -1334,7 +1334,7 @@ DAEMON_SETTING_KEYS = {"pumpfun_trader_wallet_id", "snipe_wallet_id"}
 
 @router.get("/daemon-settings")
 async def list_daemon_settings(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute("SELECT key, value, updated_at FROM daemon_settings")).fetchall()
         existing = {r["key"]: dict(r) for r in rows}
@@ -1349,7 +1349,7 @@ async def set_daemon_setting(key: str, data: DaemonSettingUpdate, agent: dict = 
         raise HTTPException(422, f"Unknown daemon setting '{key}'")
     # Sanity-check it's actually a wallet the agent owns before letting a
     # standalone root daemon spend from it.
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         wallet = await (await db.execute(
             "SELECT id FROM trading_wallets WHERE id=? AND agent_id=?", (data.value, agent["id"])
         )).fetchone()
@@ -1369,7 +1369,7 @@ async def get_daemon_setting(key: str, tool: dict = Depends(get_system_tool)):
     as root, outside any agent session), no UI dependency."""
     if key not in DAEMON_SETTING_KEYS:
         raise HTTPException(422, f"Unknown daemon setting '{key}'")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         row = await (await db.execute("SELECT value FROM daemon_settings WHERE key=?", (key,))).fetchone()
         return {"key": key, "value": row[0] if row else None}
 
@@ -1378,7 +1378,7 @@ async def get_daemon_setting(key: str, tool: dict = Depends(get_system_tool)):
 
 @router.get("/performance")
 async def get_performance(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         
         # Total PnL from snapshots
@@ -1406,7 +1406,7 @@ async def get_performance(agent: dict = Depends(get_agent)):
 
 @router.get("/performance/daily")
 async def get_daily_pnl(agent: dict = Depends(get_agent), days: int = Query(30, le=365)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             "SELECT snapshot_date, portfolio_value_usd, daily_pnl_usd, daily_pnl_pct FROM trading_pnl_snapshots WHERE agent_id=? ORDER BY snapshot_date DESC LIMIT ?",
@@ -1416,7 +1416,7 @@ async def get_daily_pnl(agent: dict = Depends(get_agent), days: int = Query(30, 
 
 @router.post("/performance/snapshot")
 async def create_snapshot(data: PnLSnapshotCreate, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         try:
             await db.execute(
                 "INSERT INTO trading_pnl_snapshots (agent_id, snapshot_date, portfolio_value_usd, daily_pnl_usd, daily_pnl_pct, total_deposits_usd, total_withdrawals_usd, notes) VALUES (?,?,?,?,?,?,?,?)",
@@ -1524,7 +1524,7 @@ async def ingest_signal(request: Request, tool: dict = Depends(get_system_tool))
 
     # Auto-create order for high-conviction signals
     if side:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             wallet = await (await db.execute(
                 "SELECT id, address FROM trading_wallets WHERE agent_id=? AND chain=? ORDER BY created_at LIMIT 1",
                 (agent_id, chain)
@@ -1532,7 +1532,7 @@ async def ingest_signal(request: Request, tool: dict = Depends(get_system_tool))
 
         if wallet:
             quantity = body.get("quantity", 0.1)
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with get_db() as db:
                 cur = await db.execute(
                     """INSERT INTO trading_orders (agent_id, wallet_id, order_type, side, symbol, chain,
                        quantity, trigger_reason, signal_id, status)
@@ -1556,7 +1556,7 @@ async def ingest_signal(request: Request, tool: dict = Depends(get_system_tool))
 
 @router.get("/journal")
 async def list_journal(agent: dict = Depends(get_agent), limit: int = Query(50, le=200)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             """SELECT j.*, o.symbol, o.side, o.quantity, o.status
@@ -1573,7 +1573,7 @@ async def list_journal(agent: dict = Depends(get_agent), limit: int = Query(50, 
 @router.get("/risk")
 async def get_risk(agent: dict = Depends(get_agent)):
     """Current risk metrics: exposure, drawdown, concentration."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         
         # Open positions
@@ -1612,7 +1612,7 @@ async def _load_book(agent_id: int) -> dict:
     fill price; a SELL realizes P&L against the running average cost and reduces
     the basis proportionally. This is standard avg-cost accounting — the same a
     connecting agent (Hermes, OpenClaw, …) would expect when it reads its book."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             """SELECT symbol, side, filled_quantity, quantity, avg_fill_price, price
@@ -1698,7 +1698,7 @@ async def get_portfolio(agent: dict = Depends(get_agent)):
     valued = await _value_positions(book)
 
     # Trade stats from realized closes.
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         filled = await (await db.execute(
             "SELECT COUNT(*) c FROM trading_orders WHERE agent_id=? AND status IN ('filled','submitted')",
@@ -1726,7 +1726,7 @@ async def auto_snapshot(agent: dict = Depends(get_agent)):
     value = valued["total_market_value_usd"]
     daily_pnl = valued["total_unrealized_pnl_usd"] + valued["total_realized_pnl_usd"]
     today = date.today().isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         # Yesterday's value for a daily delta, if present.
         prev = await (await db.execute(
             "SELECT portfolio_value_usd FROM trading_pnl_snapshots WHERE agent_id=? AND snapshot_date<? ORDER BY snapshot_date DESC LIMIT 1",
@@ -1881,7 +1881,7 @@ async def wallet_activity(agent: dict = Depends(get_agent), limit: int = Query(1
     """Real on-chain trades across the agent's linked wallets, newest first, each
     annotated with its own realized P&L (SOL + USD). This IS the honest activity
     ledger — it reflects what the wallets actually did, not logged intent."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         trades = await _agent_wallet_trades(db, agent["id"])
     book, annotated = _avgcost_from_trades(trades)
     sol_price = await _fetch_quote("SOL") or 0.0
@@ -1903,7 +1903,7 @@ async def wallet_holdings(agent: dict = Depends(get_agent)):
     """Real current holdings aggregated across the agent's linked wallets (from
     synced balances), plus realized P&L from on-chain activity. This is the
     honest 'positions' view — what the wallets actually hold right now."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             """SELECT b.token,
@@ -1940,7 +1940,7 @@ async def wallet_holdings(agent: dict = Depends(get_agent)):
 @router.get("/networth")
 async def get_networth(agent: dict = Depends(get_agent)):
     """Live net worth of the agent's linked wallets (sum of synced balance USD)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         value = await _agent_networth_usd(db, agent["id"])
     return {"net_worth_usd": value}
 
@@ -1948,7 +1948,7 @@ async def get_networth(agent: dict = Depends(get_agent)):
 @router.post("/networth/snapshot")
 async def snapshot_networth(agent: dict = Depends(get_agent)):
     """Record today's equity point from real linked-wallet net worth."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         result = await _upsert_networth_snapshot(db, agent["id"])
         await db.commit()
     return {"status": "snapshot_saved", **result}
@@ -1964,7 +1964,7 @@ async def export_data(
 ):
     """Export trading data as JSON or CSV for external analysis."""
     import csv as _csv, io as _io
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         result: dict = {"agent": agent["name"], "exported_at": datetime.utcnow().isoformat()}
 

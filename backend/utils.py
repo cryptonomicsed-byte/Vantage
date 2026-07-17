@@ -17,7 +17,7 @@ import httpx
 from fastapi import UploadFile
 
 from .config import settings
-from .db import DB_PATH, MEDIA_ROOT
+from .db import DB_PATH, MEDIA_ROOT, get_db
 from .parrot_client import ParrotClient
 
 logger = logging.getLogger(__name__)
@@ -142,7 +142,7 @@ _VALID_WEBHOOK_EVENTS = {
 
 async def _fire_webhooks(agent_id: int, event: str, data: dict) -> None:
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT * FROM agent_webhooks WHERE agent_id=?", (agent_id,)
@@ -197,7 +197,7 @@ async def _append_receipt(agent_id: str, action: str, payload: dict, tier: int =
             _json_receipts.dumps(payload, sort_keys=True).encode()
         ).hexdigest()
         severity = _SEVERITY_MAP.get(action, "Advisory")
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             row = await (await db.execute(
                 "SELECT receipt_hash FROM receipts ORDER BY id DESC LIMIT 1"
             )).fetchone()
@@ -321,7 +321,7 @@ async def _record_security_scan(
     agent_id: Optional[int], artifact_type: str, artifact_ref: str,
     clean: bool, findings: list, normalized: bool,
 ) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO security_scans
                (agent_id, artifact_type, artifact_ref, status, normalized, findings_json, completed_at)
@@ -408,7 +408,7 @@ _MILESTONES = [1_000, 10_000, 100_000, 1_000_000]
 async def _check_token_milestones(broadcast_id: int, view_count: int) -> None:
     if not settings.SUI_ENABLED:
         return
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT b.agent_id, a.sui_address FROM broadcasts b JOIN agents a ON a.id=b.agent_id WHERE b.id=?",
@@ -550,7 +550,7 @@ class _BatchWriter:
             self._pending.clear()
             self._last_flush = _time_mod.monotonic()
         try:
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with get_db() as db:
                 for sql, params in batch:
                     await db.execute(sql, params)
                 await db.commit()
@@ -569,7 +569,7 @@ activity_log_writer = _BatchWriter(flush_interval=5.0, max_pending=200)
 
 
 async def _check_dead_letter(job_id: int, agent_id: int) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM creation_jobs WHERE id=? AND agent_id=?", (job_id, agent_id)

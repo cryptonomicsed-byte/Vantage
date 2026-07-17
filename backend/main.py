@@ -21,6 +21,7 @@ from slowapi.util import get_remote_address
 
 from .agents import init_agents_db, router as agents_router, admin_router, DB_PATH, _feed_clients, _gossip_channels
 from .config import settings
+from .db import get_db
 from .deps import get_agent
 from .mesh_store import init_mesh_db
 from .manifesto_store import init_manifesto_db
@@ -48,6 +49,7 @@ async def _scheduled_publish_loop():
     while True:
         try:
             async with aiosqlite.connect(_DB_PATH) as db:
+                await db.execute("PRAGMA busy_timeout=20000")
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
                     """SELECT b.id, b.title, b.content_type, b.thumbnail_url, b.stream_url,
@@ -83,7 +85,7 @@ async def _platform_subscription_loop():
     await asyncio.sleep(random.uniform(5, 20))
     while True:
         try:
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with get_db() as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
                     "SELECT * FROM platform_subscriptions"
@@ -96,7 +98,7 @@ async def _platform_subscription_loop():
                     event_type = sub["event_type"]
                     fire_event: dict | None = None
 
-                    async with aiosqlite.connect(DB_PATH) as db:
+                    async with get_db() as db:
                         db.row_factory = aiosqlite.Row
 
                         if event_type == "tag_trending":
@@ -179,7 +181,7 @@ async def _platform_subscription_loop():
                         elif sub["delivery"] == "webhook" and sub["webhook_url"]:
                             await _fire_webhooks(agent_id, "platform_watch", fire_event)
 
-                        async with aiosqlite.connect(DB_PATH) as db:
+                        async with get_db() as db:
                             await db.execute(
                                 "UPDATE platform_subscriptions SET last_fired_at=datetime('now') WHERE id=?",
                                 (sub["id"],),
@@ -215,6 +217,7 @@ async def _federation_gossip_loop():
             continue
         try:
             async with aiosqlite.connect(_DB_PATH) as db:
+                await db.execute("PRAGMA busy_timeout=20000")
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
                     "SELECT id, url, name, reputation, failure_count, circuit_open_until "
@@ -272,6 +275,7 @@ async def _federation_gossip_loop():
                             new_rep = max(0.0, peer["reputation"] - 20.0)
                             flagged = 1 if new_rep < 20.0 else 0
                             async with aiosqlite.connect(_DB_PATH) as db:
+                                await db.execute("PRAGMA busy_timeout=20000")
                                 await db.execute(
                                     "UPDATE federation_peers "
                                     "SET status='active', reputation=?, flagged=? WHERE id=?",
@@ -282,6 +286,7 @@ async def _federation_gossip_loop():
                             breaker["open_until"] = 0.0
                             _peer_breakers[peer_id] = breaker
                             async with aiosqlite.connect(_DB_PATH) as db:
+                                await db.execute("PRAGMA busy_timeout=20000")
                                 await db.execute(
                                     "UPDATE federation_peers SET failure_count=0, circuit_open_until=NULL WHERE id=?",
                                     (peer_id,),
@@ -294,6 +299,7 @@ async def _federation_gossip_loop():
                         breaker["open_until"] = 0.0
                         _peer_breakers[peer_id] = breaker
                         async with aiosqlite.connect(_DB_PATH) as db:
+                            await db.execute("PRAGMA busy_timeout=20000")
                             await db.execute(
                                 "UPDATE federation_peers "
                                 "SET last_seen=datetime('now'), status='active', reputation=?, flagged=0, "
@@ -325,6 +331,7 @@ async def _federation_gossip_loop():
                             if not _is_ssrf_safe_url(rp_url):
                                 continue
                             async with aiosqlite.connect(_DB_PATH) as db:
+                                await db.execute("PRAGMA busy_timeout=20000")
                                 cur = await db.execute(
                                     "INSERT OR IGNORE INTO federation_peers (url, name, status, reputation) "
                                     "VALUES (?,?,'unknown',0.5)",
@@ -348,6 +355,7 @@ async def _federation_gossip_loop():
                         flagged = 1 if new_rep < 20.0 else 0
                         open_until_str = str(breaker["open_until"]) if breaker["open_until"] > now else None
                         async with aiosqlite.connect(_DB_PATH) as db:
+                            await db.execute("PRAGMA busy_timeout=20000")
                             await db.execute(
                                 "UPDATE federation_peers "
                                 "SET status='unreachable', reputation=?, flagged=?, "
@@ -619,7 +627,7 @@ async def rpc_alias(agent: dict = Depends(get_agent)):
 async def health():
     db_ok = False
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute("SELECT 1")
         db_ok = True
     except Exception:
@@ -639,7 +647,7 @@ _last_weather_state: dict = {"overall": None, "stuck_tros": 0, "market_pressure"
 
 async def _compute_weather() -> dict:
     import json as _wjson
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT AVG((JULIANDAY(updated_at)-JULIANDAY(created_at))*1440) as avg_m FROM tro_requests WHERE status='fulfilled' AND created_at>=datetime('now','-24 hours')"
@@ -812,7 +820,7 @@ async def platform_capacity(agent: dict = Depends(get_agent)):
         db_size_mb = round(_os.path.getsize(str(DB_PATH)) / (1024 * 1024), 3)
     except Exception:
         db_size_mb = 0.0
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         async with db.execute(
             "SELECT COUNT(*) FROM creation_jobs WHERE status NOT IN ('done','error','delegated')"
         ) as cur:

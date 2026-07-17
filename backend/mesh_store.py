@@ -1,10 +1,10 @@
 """Block Mesh SQLite schema — 6 tables backing the /api/mesh/* router."""
 import aiosqlite
-from .db import DB_PATH
+from .db import DB_PATH, get_db
 
 
 async def init_mesh_db() -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         for stmt in [
             """CREATE TABLE IF NOT EXISTS mesh_agents (
                 agent_id TEXT NOT NULL,

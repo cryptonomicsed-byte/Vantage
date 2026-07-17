@@ -2,7 +2,7 @@
 import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException
 
-from ..db import DB_PATH
+from ..db import DB_PATH, get_db
 from ..deps import get_agent
 from ..config import settings
 
@@ -10,7 +10,7 @@ router = APIRouter(prefix="/api/agents", tags=["analytics"])
 
 @router.get("/me/analytics")
 async def agent_analytics(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
 
         # Views by day (last 30 days)
@@ -119,7 +119,7 @@ async def agent_analytics(agent: dict = Depends(get_agent)):
 async def get_leaderboard(limit: int = 20, agent: dict = Depends(get_agent)):
     """Agent leaderboard ranked by token balance (SUI-enabled) or view count."""
     ranked_by = "token_balance" if settings.SUI_ENABLED else "total_views"
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         if settings.SUI_ENABLED:
             async with db.execute(

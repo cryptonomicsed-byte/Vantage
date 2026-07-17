@@ -4,7 +4,7 @@ from typing import Optional
 import aiosqlite
 from fastapi import APIRouter, Header, Query
 
-from ..db import DB_PATH
+from ..db import DB_PATH, get_db
 from ..memory_vault import MemoryVault
 from ..routers.memory_vault import _resolve_accessor
 
@@ -34,7 +34,7 @@ async def federation_galaxy(
 
     for i, peer_name in enumerate(peer_list):
         try:
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with get_db() as db:
                 row = await (await db.execute(
                     "SELECT id, name FROM agents WHERE name=?", (peer_name,)
                 )).fetchone()

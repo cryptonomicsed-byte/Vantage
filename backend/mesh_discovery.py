@@ -9,12 +9,12 @@ import json
 
 import aiosqlite
 
-from .db import DB_PATH
+from .db import DB_PATH, get_db
 
 
 async def get_block_agents(block_id: str, exclude_id: str = "") -> list[dict]:
     """Return all active agents on a block, excluding a given agent."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT agent_id, role, trust_score, capabilities_json,

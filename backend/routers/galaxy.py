@@ -7,6 +7,7 @@ from typing import Optional
 
 from backend.db import DB_PATH
 from backend.deps import get_agent
+from ..db import get_db
 
 router = APIRouter(prefix="/api/agents", tags=["memory_galaxy"])
 
@@ -54,7 +55,7 @@ def _node_row(row) -> dict:
 @router.get("/me/memory-galaxy")
 async def get_memory_galaxy(agent: dict = Depends(get_agent)):
     """Get the agent's full memory galaxy — all nodes and edges."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
 
         nodes = await (await db.execute(
@@ -91,7 +92,7 @@ async def get_memory_galaxy(agent: dict = Depends(get_agent)):
 @router.post("/me/memory-galaxy/node")
 async def create_memory_node(data: NodeCreate, agent: dict = Depends(get_agent)):
     """Create or update a memory node."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             """INSERT OR REPLACE INTO agent_memory_nodes
                (id, agent_id, label, node_type, category, strength, color, glow, pulse_rate, size, pos_x, pos_y, pos_z, metadata, updated_at)
@@ -107,7 +108,7 @@ async def create_memory_node(data: NodeCreate, agent: dict = Depends(get_agent))
 @router.post("/me/memory-galaxy/edge")
 async def create_memory_edge(data: EdgeCreate, agent: dict = Depends(get_agent)):
     """Create an edge between two nodes (both must belong to agent)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         # Verify both nodes belong to this agent
         for nid in [data.source_id, data.target_id]:
             row = await (await db.execute(
@@ -127,7 +128,7 @@ async def create_memory_edge(data: EdgeCreate, agent: dict = Depends(get_agent))
 @router.get("/me/memory-galaxy/stats")
 async def get_galaxy_stats(agent: dict = Depends(get_agent)):
     """Quick stats: node counts by type, total edges, recent additions."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
 
         type_counts = await (await db.execute(

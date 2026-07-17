@@ -21,7 +21,7 @@ class LLMConfigUpdate(BaseModel):
     llm_model: Optional[str] = None
     llm_api_key: Optional[str] = None
 
-from ..db import DB_PATH, MEDIA_ROOT
+from ..db import DB_PATH, MEDIA_ROOT, get_db
 from ..deps import get_agent, _parse_body, _update_last_seen, _log_agent_activity
 from ..config import settings
 from ..utils import _compute_reputation_badges, _validate_file_magic, _security_scan_and_normalize
@@ -43,7 +43,7 @@ async def register(request: Request):
     api_key = "vantage_" + secrets.token_hex(24)
     api_key_hash = _hlib.sha256(api_key.encode()).hexdigest()
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute(
                 "INSERT INTO agents (name, api_key, bio) VALUES (?, ?, ?)",
                 (name, api_key_hash, bio),
@@ -77,7 +77,7 @@ async def update_profile(request: Request, agent: dict = Depends(get_agent)):
                 raise HTTPException(422, "soul_manifest must be valid JSON")
         soul_manifest_str = _json.dumps(soul_manifest)
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         if soul_manifest_str is not None:
             await db.execute(
                 "UPDATE agents SET bio=?, manifesto=?, soul_manifest=? WHERE id=?",
@@ -136,14 +136,14 @@ async def upload_avatar(
         raise HTTPException(500, f"Avatar upload failed: {str(e)}")
 
     avatar_url = f"/media/agents/{agent['name']}/avatar{ext}"
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute("UPDATE agents SET avatar_url=? WHERE id=?", (avatar_url, agent["id"]))
         await db.commit()
     return {"avatar_url": avatar_url}
 
 @router.get("/profile/{name}")
 async def get_agent_profile(name: str, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, name, bio, manifesto, soul_manifest, avatar_url, created_at FROM agents WHERE name=?", (name,)
@@ -155,7 +155,7 @@ async def get_agent_profile(name: str, agent: dict = Depends(get_agent)):
     agent = dict(row)
     agent.pop("api_key", None)
     
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT id, title, description, content_type, stream_url, thumbnail_url, view_count, created_at, model_name, model_provider, tags, post_content, series_id
@@ -184,7 +184,7 @@ async def get_agent_profile(name: str, agent: dict = Depends(get_agent)):
 @router.patch("/me/llm")
 async def update_llm_config(data: LLMConfigUpdate, agent: dict = Depends(get_agent)):
     from backend.crypto_utils import encrypt_key_for_agent
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         if data.llm_provider is not None:
             await db.execute("UPDATE agents SET llm_provider=? WHERE id=?", (data.llm_provider, agent["id"]))
         if data.llm_model is not None:
@@ -197,7 +197,7 @@ async def update_llm_config(data: LLMConfigUpdate, agent: dict = Depends(get_age
 
 @router.get("/me/llm")
 async def get_llm_config(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         row = await (await db.execute(
             "SELECT llm_provider, llm_model, llm_api_key_encrypted FROM agents WHERE id=?", (agent["id"],)
         )).fetchone()
@@ -207,7 +207,7 @@ async def get_llm_config(agent: dict = Depends(get_agent)):
 
 @router.get("/directory")
 async def agent_directory(limit: int = 50, offset: int = 0, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT a.id, a.name, a.bio, a.avatar_url, a.skill_badges,
@@ -245,7 +245,7 @@ async def agent_directory(limit: int = 50, offset: int = 0, agent: dict = Depend
 @router.post("/me/heartbeat")
 async def agent_heartbeat(agent: dict = Depends(get_agent)):
     """Simple heartbeat for agents to report liveness."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT last_seen_at FROM agents WHERE id=?", (agent["id"],)) as cur:
             row = await cur.fetchone()
@@ -254,7 +254,7 @@ async def agent_heartbeat(agent: dict = Depends(get_agent)):
 @router.get("/profile/{name}/capabilities")
 async def get_agent_capabilities(name: str, agent: dict = Depends(get_agent)):
     """Return capabilities extracted from soul_manifest."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT soul_manifest FROM agents WHERE name=?", (name,)) as cur:
             row = await cur.fetchone()

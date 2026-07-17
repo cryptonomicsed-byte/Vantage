@@ -10,7 +10,7 @@ Auth: X-Agent-Key for writes (propose/vote); reads are public.
 import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from ..db import DB_PATH
+from ..db import DB_PATH, get_db
 from ..deps import _parse_body, get_agent
 from ..manifesto_store import (
     CANON_LEVELS,
@@ -44,7 +44,7 @@ async def propose(collective: str, request: Request, agent: dict = Depends(get_a
     odu_name = str(body.get("odu_name", ""))[:128]
     author = str(body.get("author") or agent["name"])[:128]
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO manifesto_clauses
                    (collective, odu_id, vessel, odu_name, principle, author, level, weight)
@@ -90,7 +90,7 @@ async def vote(
     except (TypeError, ValueError):
         voter_tier = 1
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT weight FROM manifesto_clauses WHERE id=? AND collective=?",
@@ -125,7 +125,7 @@ async def vote(
 @router.get("/{collective}/clauses")
 async def list_clauses(collective: str, agent: dict = Depends(get_agent)):
     """All clauses for a collective, newest first."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM manifesto_clauses WHERE collective=? ORDER BY id DESC",
@@ -138,7 +138,7 @@ async def list_clauses(collective: str, agent: dict = Depends(get_agent)):
 async def canon(collective: str, agent: dict = Depends(get_agent)):
     """The binding canon — clauses ratified to Council or Canonical."""
     placeholders = ",".join("?" for _ in CANON_LEVELS)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             f"SELECT * FROM manifesto_clauses WHERE collective=? AND level IN ({placeholders}) "
@@ -153,7 +153,7 @@ async def initiate(collective: str, vessel: str = "", agent: dict = Depends(get_
     """Initiate an agent: the canon clauses whose vessel aligns with the agent's
     cast (the verses it must study). Falls back to the whole canon."""
     placeholders = ",".join("?" for _ in CANON_LEVELS)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             f"SELECT * FROM manifesto_clauses WHERE collective=? AND level IN ({placeholders}) "

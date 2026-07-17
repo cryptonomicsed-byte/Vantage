@@ -15,7 +15,7 @@ import uuid as _uuid
 import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from ..db import DB_PATH
+from ..db import DB_PATH, get_db
 from ..deps import get_agent, _parse_body
 from ..identity_verify import verify_identity
 from ..mesh_discovery import suggest_neighbors
@@ -75,7 +75,7 @@ async def join_block(request: Request, agent: dict = Depends(get_agent)):
     # The agent proves control of its keypair by signing its own agent_id.
     verified = 1 if verify_identity(public_key, agent_id, signature) else 0
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             """INSERT INTO mesh_agents
                    (agent_id, block_id, vantage_name, role, capabilities_json,
@@ -131,7 +131,7 @@ async def leave_block(
     block_id = request.query_params.get("block_id", "")
     if not block_id:
         raise HTTPException(422, "block_id query param required")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "UPDATE mesh_agents SET status='offline' WHERE agent_id=? AND block_id=?",
             (agent_id, block_id),
@@ -150,7 +150,7 @@ async def agent_heartbeat(
     block_id = str(body.get("block_id", "")).strip()
     if not block_id:
         raise HTTPException(422, "block_id required")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "UPDATE mesh_agents SET last_seen_at=datetime('now'), status='active' WHERE agent_id=? AND block_id=?",
             (agent_id, block_id),
@@ -164,7 +164,7 @@ async def agent_heartbeat(
 @router.get("/blocks/{block_id}")
 async def get_block(block_id: str, agent: dict = Depends(get_agent)):
     """Full block snapshot: active agents, open proposals, available resources."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM mesh_agents WHERE block_id=? AND status='active' ORDER BY joined_at",
@@ -200,7 +200,7 @@ async def get_block(block_id: str, agent: dict = Depends(get_agent)):
 
 @router.get("/blocks/{block_id}/agents")
 async def get_block_agents(block_id: str, filter: str = "", capabilities: int = 0, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         sql = "SELECT * FROM mesh_agents WHERE block_id=? AND status='active'"
         params: list = [block_id]
@@ -221,7 +221,7 @@ async def get_block_agents(block_id: str, filter: str = "", capabilities: int = 
 
 @router.get("/blocks/{block_id}/events")
 async def block_events(block_id: str, limit: int = 50, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM mesh_events WHERE block_id=? ORDER BY created_at DESC LIMIT ?",
@@ -252,7 +252,7 @@ async def create_proposal(request: Request, agent: dict = Depends(get_agent)):
         raise HTTPException(422, "block_id required")
 
     proposal_id = str(_uuid.uuid4())
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             """INSERT INTO mesh_proposals
                    (id, block_id, proposer_id, respondent_id, give_json, take_json, ttl_ms)
@@ -280,7 +280,7 @@ async def create_proposal(request: Request, agent: dict = Depends(get_agent)):
 
 @router.get("/proposals/{block_id}")
 async def list_proposals(block_id: str, status: str = "open", agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM mesh_proposals WHERE block_id=? AND status=? ORDER BY created_at DESC",
@@ -299,7 +299,7 @@ async def list_proposals(block_id: str, status: str = "open", agent: dict = Depe
 
 @router.get("/proposal/{proposal_id}")
 async def get_proposal(proposal_id: str, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM mesh_proposals WHERE id=?", (proposal_id,)) as cur:
             row = await cur.fetchone()
@@ -334,7 +334,7 @@ async def respond_to_proposal(
     proposer_id = ""
     new_status = status_map[decision]
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM mesh_proposals WHERE id=?", (proposal_id,)) as cur:
             prop = await cur.fetchone()
@@ -414,7 +414,7 @@ async def register_resource(request: Request, agent: dict = Depends(get_agent)):
         raise HTTPException(422, "block_id and resource_type required")
 
     resource_id = str(_uuid.uuid4())
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "INSERT INTO mesh_resources (id, block_id, owner_id, resource_type, description, capacity) VALUES (?,?,?,?,?,?)",
             (resource_id, block_id, owner_id, resource_type, description, capacity),
@@ -427,7 +427,7 @@ async def register_resource(request: Request, agent: dict = Depends(get_agent)):
 
 @router.get("/resources/{block_id}")
 async def list_resources(block_id: str, filter: str = "", agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         sql = "SELECT * FROM mesh_resources WHERE block_id=?"
         params: list = [block_id]
@@ -453,7 +453,7 @@ async def reserve_resource(
     ).strftime("%Y-%m-%d %H:%M:%S")
     now_str = _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM mesh_resources WHERE id=?", (resource_id,)) as cur:
             res = await cur.fetchone()
@@ -488,7 +488,7 @@ async def release_resource(
     body = await _parse_body(request)
     agent_id = str(body.get("agent_id") or agent["name"]).strip()[:128]
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM mesh_resources WHERE id=?", (resource_id,)) as cur:
             res = await cur.fetchone()
@@ -518,7 +518,7 @@ async def release_resource(
 
 @router.get("/trust/{agent_id}")
 async def get_trust(agent_id: str, block_id: str = "", agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         if block_id:
             async with db.execute(
@@ -602,7 +602,7 @@ async def signal_event(request: Request, agent: dict = Depends(get_agent)):
     if not block_id:
         raise HTTPException(422, "block_id required")
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await _record_event(db, block_id, event_type, actor_id, payload)
         await db.commit()
 

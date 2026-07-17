@@ -24,6 +24,7 @@ from backend.db import DB_PATH
 from backend.deps import get_agent
 from backend.alpha_engine import composite_alpha_score, assemble_features
 from backend import wallet_blacklist as wb
+from ..db import get_db
 
 router = APIRouter(prefix="/api", tags=["alpha"])
 
@@ -194,7 +195,7 @@ async def score_token_from_intel(
     symbol = "" if is_addr else ident
     mint = ca or (ident if is_addr else "")
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         signals = await _collect_signals(db, symbol or ident, mint, hours)
         velocity_hint = await _velocity_from_trades(db, mint, hours)
@@ -295,7 +296,7 @@ async def money_flow(
     """
     now = int(time.time())
     since = now - hours * 3600
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(_WALLET_TRADES_DDL)
         await db.execute(_SOCIAL_SIGNALS_DDL)
         db.row_factory = aiosqlite.Row
@@ -675,7 +676,7 @@ async def money_flow(
         }
 
     if migration_updates:
-        async with aiosqlite.connect(DB_PATH) as db2:
+        async with get_db() as db2:
             await db2.execute("PRAGMA busy_timeout=15000")  # real contention from ~15 concurrent daemons, not a stuck lock — verified 3.5s typical wait
             for mint, mc, prior in migration_updates:
                 if prior is None:
