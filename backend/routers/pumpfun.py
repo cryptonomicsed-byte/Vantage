@@ -7,12 +7,13 @@ from fastapi import APIRouter, Query, HTTPException, Header
 
 router = APIRouter(prefix="/api/intel/pumpfun", tags=["pumpfun"])
 DB = Path("/opt/ares/Vantage/data/vantage.db")
+from backend.db import get_sync_db
 BIRDEYE = os.environ.get("BIRDEYE_KEY", "")
 HELIUS = os.environ.get("HELIUS_API_KEY", "")
 
 def get_agent(key):
     h = hashlib.sha256(key.encode()).hexdigest()
-    db = sqlite3.connect(str(DB)); db.row_factory = lambda c,r: dict(zip([col[0] for col in c.description], r))
+    db = get_sync_db(); db.row_factory = lambda c,r: dict(zip([col[0] for col in c.description], r))
     r = db.execute("SELECT id, name FROM agents WHERE api_key=?", (h,)).fetchone(); db.close()
     return dict(r) if r else None
 
@@ -89,7 +90,7 @@ async def bonding_curve(mint: str=Query(...), x_agent_key: str=Header(...)):
 @router.get("/graduations")
 async def graduations(limit: int=20, x_agent_key: str=Header(...)):
     get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
-    db = sqlite3.connect(str(DB)); db.row_factory = lambda c,r: dict(zip([col[0] for col in c.description], r))
+    db = get_sync_db(); db.row_factory = lambda c,r: dict(zip([col[0] for col in c.description], r))
     rows = db.execute("SELECT * FROM trading_signals WHERE type='pumpfun' ORDER BY timestamp DESC LIMIT ?", (limit,)).fetchall(); db.close()
     return {"graduations":[dict(r) for r in rows],"count":len(rows)}
 
@@ -119,7 +120,7 @@ async def risk(mint: str, x_agent_key: str=Header(...)):
 @router.get("/watchlist")
 async def watchlist(x_agent_key: str=Header(...)):
     get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
-    db = sqlite3.connect(str(DB)); db.row_factory = lambda c,r: dict(zip([col[0] for col in c.description], r))
+    db = get_sync_db(); db.row_factory = lambda c,r: dict(zip([col[0] for col in c.description], r))
     rows = db.execute("SELECT * FROM tracked_wallets WHERE chain='pumpfun' ORDER BY created_at DESC LIMIT 50").fetchall(); db.close()
     return {"watchlist":[dict(r) for r in rows],"count":len(rows)}
 
@@ -127,17 +128,22 @@ async def watchlist(x_agent_key: str=Header(...)):
 async def add_watchlist(mint: str=Query(...), label: str=Query(""), x_agent_key: str=Header(...)):
     agent = get_agent(x_agent_key)
     if not agent: raise HTTPException(401)
-    db = sqlite3.connect(str(DB))
-    db.execute("INSERT OR IGNORE INTO tracked_wallets (chain,address,label,added_by_agent_id) VALUES (?,?,?,?)", ("pumpfun", mint, label or f"Pumpfun-{mint[:8]}", agent["id"]))
+    db = get_sync_db()
+    db.execute("INSERT INTO tracked_wallets (chain,address,label,added_by_agent_id) VALUES (?,?,?,?) ON CONFLICT (chain, address) DO NOTHING", ("pumpfun", mint, label or f"Pumpfun-{mint[:8]}", agent["id"]))
     db.commit(); db.close()
     return {"status":"added","mint":mint}
 
 @router.get("/signals")
 async def signals(limit: int=20, x_agent_key: str=Header(...)):
     get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
-    db = sqlite3.connect(str(DB)); db.row_factory = lambda c,r: dict(zip([col[0] for col in c.description], r))
-    rows = db.execute("SELECT * FROM trading_signals WHERE type='pumpfun' ORDER BY timestamp DESC LIMIT ?", (limit,)).fetchall(); db.close()
-    return {"signals":[dict(r) for r in rows],"count":len(rows),"source":"pumpfun"}
+    try:
+        db = get_sync_db(); db.row_factory = lambda c,r: dict(zip([col[0] for col in c.description], r))
+        rows = db.execute("SELECT * FROM trading_signals WHERE type='pumpfun' ORDER BY timestamp DESC LIMIT ?", (limit,)).fetchall(); db.close()
+        return {"signals":[dict(r) for r in rows],"count":len(rows),"source":"pumpfun"}
+    except Exception as e:
+        import logging
+        logging.error(f"Error fetching pumpfun signals: {e}")
+        return {"signals":[],"count":0,"source":"pumpfun","error":"Data source unavailable"}
 
 @router.get("/detect")
 async def detect(address: str = Query(...), x_agent_key: str = Header(...)):

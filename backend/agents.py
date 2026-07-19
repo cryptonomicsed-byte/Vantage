@@ -38,7 +38,7 @@ from slowapi.util import get_remote_address
 limiter = Limiter(key_func=get_remote_address)
 
 from .config import settings
-from .db import DB_PATH, MEDIA_ROOT, init_agents_db
+from .db import DB_PATH, MEDIA_ROOT, init_agents_db, get_db
 from .memory_enrichment import MemoryIntelligence
 from .skills_registry import build_skills_registry
 from .deps import (
@@ -124,7 +124,7 @@ async def birth_omokoda_agent(request: Request, agent: dict = Depends(get_agent)
 
     # Surface the freshly-minted sovereign identity from the mesh.
     born = None
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute(
             """SELECT agent_id, vantage_name, odu_index, identity_verified, capabilities_json
@@ -139,7 +139,7 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
     out_dir = agent_dir / str(broadcast_id)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "UPDATE broadcasts SET status='processing' WHERE id=?", (broadcast_id,)
         )
@@ -147,7 +147,7 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
 
     # P0: Validate file magic bytes before FFmpeg touches it
     if not _validate_file_magic(input_path, "video"):
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute(
                 "UPDATE broadcasts SET status='error' WHERE id=?", (broadcast_id,)
             )
@@ -161,7 +161,7 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
         input_path, "video", agent_id, artifact_ref=str(broadcast_id)
     )
     if not scan["clean"]:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute(
                 "UPDATE broadcasts SET status='error' WHERE id=?", (broadcast_id,)
             )
@@ -237,7 +237,7 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
             except Exception as _we:
                 logger.warning("Walrus upload failed: %s", _we)
 
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute(
                 "UPDATE broadcasts SET status='ready', stream_url=?, thumbnail_url=?, walrus_blob_id=? WHERE id=?",
                 (stream_url, thumb_url, walrus_blob_id, broadcast_id),
@@ -284,7 +284,7 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
 
     except asyncio.TimeoutError:
         logger.error("broadcast_id=%d FFmpeg timed out after 600s", broadcast_id)
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute(
                 "UPDATE broadcasts SET status='error' WHERE id=?", (broadcast_id,)
             )
@@ -293,7 +293,7 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
         logger.error(
             "broadcast_id=%d processing failed:\n%s", broadcast_id, traceback.format_exc()
         )
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute(
                 "UPDATE broadcasts SET status='error' WHERE id=?", (broadcast_id,)
             )
@@ -323,7 +323,7 @@ async def _run_creation_pipeline(
     finished content via the standard /publish endpoints.
     """
     async def _set_stage(status: str, script_json: str = "") -> None:
-        async with aiosqlite.connect(DB_PATH) as _db:
+        async with get_db() as _db:
             if script_json:
                 await _db.execute(
                     "UPDATE creation_jobs SET status=?, script_json=?, updated_at=datetime('now') WHERE id=?",
@@ -337,7 +337,7 @@ async def _run_creation_pipeline(
             await _db.commit()
 
     async def _fail(text: str) -> None:
-        async with aiosqlite.connect(DB_PATH) as _db:
+        async with get_db() as _db:
             await _db.execute(
                 "UPDATE creation_jobs SET status='error', error_text=?, updated_at=datetime('now') WHERE id=?",
                 (text[:500], job_id),
@@ -416,7 +416,7 @@ async def _run_creation_pipeline(
         await asyncio.sleep(3.0)
 
         tags_json = _json.dumps(tags)
-        async with aiosqlite.connect(DB_PATH) as _db:
+        async with get_db() as _db:
             cur = await _db.execute(
                 """INSERT INTO broadcasts
                    (agent_id, title, description, content_type, status, post_content,
@@ -445,7 +445,7 @@ async def _run_creation_pipeline(
         })
 
         # ── Stage 5: done ────────────────────────────────────────────────────
-        async with aiosqlite.connect(DB_PATH) as _db:
+        async with get_db() as _db:
             await _db.execute(
                 "UPDATE creation_jobs SET status='done', result_broadcast_id=?, updated_at=datetime('now') WHERE id=?",
                 (broadcast_id, job_id),
@@ -501,7 +501,7 @@ async def publish(
             pass
 
     # Insert broadcast row first to get an ID
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             "INSERT INTO broadcasts (agent_id, title, description, cross_post, status, publish_at) VALUES (?,?,?,?,?,?)",
             (agent["id"], title, description, int(cross_post), initial_status, publish_at),
@@ -532,7 +532,7 @@ async def publish(
                 if total > max_bytes:
                     f.close()
                     tmp_path.unlink(missing_ok=True)
-                    async with aiosqlite.connect(DB_PATH) as db:
+                    async with get_db() as db:
                         await db.execute("DELETE FROM broadcasts WHERE id=?", (broadcast_id,))
                         await db.commit()
                     raise HTTPException(
@@ -568,7 +568,7 @@ async def get_feed(request: Request, limit: int = 50, offset: int = 0, content_t
         surface_clause = "AND COALESCE(b.surface, 'feed') = ?"
         params.append(surface)
     params.extend([limit, offset])
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             f"""SELECT b.id, b.title, b.description, b.content_type, b.stream_url,
@@ -605,7 +605,7 @@ async def get_feed(request: Request, limit: int = 50, offset: int = 0, content_t
 
 @router.get("/me/broadcasts")
 async def my_broadcasts(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT id, title, description, status, stream_url, thumbnail_url,
@@ -620,7 +620,7 @@ async def my_broadcasts(agent: dict = Depends(get_agent)):
 
 @router.get("/me/scheduled")
 async def my_scheduled(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT id, title, description, status, thumbnail_url,
@@ -636,7 +636,7 @@ async def my_scheduled(agent: dict = Depends(get_agent)):
 @router.post("/me/broadcasts/{broadcast_id}/publish-now")
 async def publish_now(broadcast_id: int, agent: dict = Depends(get_agent)):
     """Immediately publish a scheduled broadcast."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM broadcasts WHERE id=? AND agent_id=?",
@@ -665,7 +665,7 @@ async def publish_now(broadcast_id: int, agent: dict = Depends(get_agent)):
 
 @router.get("/broadcasts/{broadcast_id}/contributors")
 async def get_contributors(broadcast_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT a.id, a.name, a.avatar_url, bc.role
@@ -680,7 +680,7 @@ async def get_contributors(broadcast_id: int, agent: dict = Depends(get_agent)):
 
 @router.get("/me/broadcasts/{broadcast_id}/status")
 async def broadcast_status(broadcast_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM broadcasts WHERE id=? AND agent_id=? AND status != 'deleted'",
@@ -717,7 +717,7 @@ async def bulk_delete_broadcasts(
         raise HTTPException(status_code=400, detail="Maximum 50 broadcasts per bulk delete")
 
     placeholders = ",".join("?" * len(id_list))
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             f"""SELECT id, content_type, stream_url, thumbnail_url
@@ -750,7 +750,7 @@ async def bulk_delete_broadcasts(
 
 @router.delete("/me/broadcasts/{broadcast_id}")
 async def delete_broadcast(broadcast_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM broadcasts WHERE id=? AND agent_id=?",
@@ -781,7 +781,7 @@ async def update_broadcast(
 ):
     """Update editable fields on any non-deleted broadcast owned by this agent."""
     body = await _parse_body(request)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id FROM broadcasts WHERE id=? AND agent_id=? AND status != 'deleted'",
@@ -823,7 +823,7 @@ async def update_broadcast(
 
 @router.get("/stream/{broadcast_id}/index.m3u8")
 async def stream_playlist(broadcast_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM broadcasts WHERE id=? AND status='ready'", (broadcast_id,)
@@ -833,7 +833,7 @@ async def stream_playlist(broadcast_id: int, agent: dict = Depends(get_agent)):
         raise HTTPException(status_code=404, detail="Stream not found")
 
     # Increment view count and record event (view_event batched; view_count updated immediately)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "UPDATE broadcasts SET view_count = view_count + 1 WHERE id=?", (broadcast_id,)
         )
@@ -916,7 +916,7 @@ async def create_text_post(
         except Exception:
             pass
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO broadcasts
                (agent_id, title, description, content_type, status, post_content,
@@ -986,7 +986,7 @@ async def create_audio_post(
     agent_dir = MEDIA_ROOT / agent["name"]
     agent_dir.mkdir(parents=True, exist_ok=True)
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO broadcasts
                (agent_id, title, description, content_type, status,
@@ -1012,7 +1012,7 @@ async def create_audio_post(
                 if total > max_bytes:
                     f.close()
                     raw_path.unlink(missing_ok=True)
-                    async with aiosqlite.connect(DB_PATH) as db:
+                    async with get_db() as db:
                         await db.execute("DELETE FROM broadcasts WHERE id=?", (broadcast_id,))
                         await db.commit()
                     raise HTTPException(status_code=413, detail=f"Upload exceeds {settings.MAX_UPLOAD_MB} MB limit")
@@ -1026,7 +1026,7 @@ async def create_audio_post(
     # Validate magic bytes before touching with FFmpeg
     if not _validate_file_magic(raw_path, "audio"):
         raw_path.unlink(missing_ok=True)
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute("DELETE FROM broadcasts WHERE id=?", (broadcast_id,))
             await db.commit()
         raise HTTPException(status_code=422, detail="Unsupported audio format. Supported: MP3, AAC, WAV, OGG, FLAC, M4A.")
@@ -1036,7 +1036,7 @@ async def create_audio_post(
     scan = await _security_scan_and_normalize(raw_path, "audio", agent["id"], artifact_ref=str(broadcast_id))
     if not scan["clean"]:
         raw_path.unlink(missing_ok=True)
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute("DELETE FROM broadcasts WHERE id=?", (broadcast_id,))
             await db.commit()
         raise HTTPException(status_code=422, detail="Upload rejected by security scan")
@@ -1076,7 +1076,7 @@ async def create_audio_post(
 
     stream_url = f"/media/agents/{agent['name']}/audio_{broadcast_id}{final_ext}"
     thumb_url = await _save_thumbnail(thumbnail, agent["name"], broadcast_id)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "UPDATE broadcasts SET status='ready', stream_url=?, thumbnail_url=? WHERE id=?",
             (stream_url, thumb_url or "", broadcast_id),
@@ -1109,7 +1109,7 @@ async def create_series(
     description = sanitize_markdown(str(body.get("description", "")))[:2000]
     if not title:
         raise HTTPException(status_code=422, detail="title is required")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             "INSERT INTO series (agent_id, title, description) VALUES (?,?,?)",
             (agent["id"], title, description),
@@ -1121,7 +1121,7 @@ async def create_series(
 
 @router.get("/me/series")
 async def list_my_series(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT s.id, s.title, s.description, s.thumbnail_url, s.created_at,
@@ -1141,7 +1141,7 @@ async def update_series(
     description: str = Form("", max_length=2000),
     agent: dict = Depends(get_agent),
 ):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         result = await db.execute(
             "UPDATE series SET title=?, description=? WHERE id=? AND agent_id=?",
             (title, description, series_id, agent["id"]),
@@ -1154,7 +1154,7 @@ async def update_series(
 
 @router.delete("/me/series/{series_id}")
 async def delete_series(series_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         result = await db.execute(
             "DELETE FROM series WHERE id=? AND agent_id=?", (series_id, agent["id"])
         )
@@ -1167,7 +1167,7 @@ async def delete_series(series_id: int, agent: dict = Depends(get_agent)):
 
 @router.get("/series/{series_id}")
 async def get_series(series_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT s.*, a.name as agent_name FROM series s
@@ -1190,7 +1190,7 @@ async def get_series(series_id: int, agent: dict = Depends(get_agent)):
 
 @router.get("/{name}/series")
 async def agent_series(name: str, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id FROM agents WHERE name=?", (name,)) as cur:
             agent = await cur.fetchone()
@@ -1214,7 +1214,7 @@ async def agent_series(name: str, agent: dict = Depends(get_agent)):
 @router.post("/follow/{agent_name}")
 @limiter.limit("30/minute")
 async def follow_agent(request: Request, agent_name: str, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id FROM agents WHERE name=?", (agent_name,)) as cur:
             target = await cur.fetchone()
@@ -1239,7 +1239,7 @@ async def follow_agent(request: Request, agent_name: str, agent: dict = Depends(
 @router.delete("/follow/{agent_name}")
 @limiter.limit("30/minute")
 async def unfollow_agent(request: Request, agent_name: str, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id FROM agents WHERE name=?", (agent_name,)) as cur:
             target = await cur.fetchone()
@@ -1256,7 +1256,7 @@ async def unfollow_agent(request: Request, agent_name: str, agent: dict = Depend
 
 @router.get("/me/following")
 async def list_following(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT a.id, a.name, a.bio, a.avatar_url FROM agents a
@@ -1270,7 +1270,7 @@ async def list_following(agent: dict = Depends(get_agent)):
 
 @router.get("/{name}/followers")
 async def agent_followers(name: str, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id FROM agents WHERE name=?", (name,)) as cur:
             target = await cur.fetchone()
@@ -1299,35 +1299,40 @@ async def trending_feed(request: Request, limit: int = 50, agent: dict = Depends
     - comments on the broadcast             → weight 0.6 each
     Score = weighted_engagement / age_days  (same velocity idea, harder to game)
     """
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            """SELECT b.id, b.title, b.description, b.content_type, b.stream_url,
-                      b.thumbnail_url, b.view_count, b.created_at, b.model_name,
-                      b.model_provider, b.tags, b.post_content,
-                      a.name as agent_name, a.avatar_url,
-                      COUNT(ve.id) as recent_views,
-                      (
-                        COALESCE(SUM(CASE
-                          WHEN ve.watch_seconds > 300 THEN 1.0
-                          WHEN ve.watch_seconds > 60  THEN 0.5
-                          ELSE 0.1
-                        END), 0)
-                        + COALESCE((SELECT COUNT(*)*0.3 FROM reactions r WHERE r.broadcast_id=b.id), 0)
-                        + COALESCE((SELECT COUNT(*)*0.6 FROM comments c WHERE c.broadcast_id=b.id), 0)
-                      ) / MAX(1.0, COALESCE(julianday('now') - julianday(b.created_at), 1)) as velocity
-               FROM broadcasts b
-               JOIN agents a ON a.id = b.agent_id
-               LEFT JOIN view_events ve ON ve.broadcast_id = b.id
-                   AND ve.viewed_at >= datetime('now', '-7 days')
-               WHERE b.status = 'ready' AND a.jail_mode = 0
-               GROUP BY b.id
-               ORDER BY velocity DESC, b.view_count DESC
-               LIMIT ?""",
-            (limit,),
-        ) as cur:
-            rows = await cur.fetchall()
-    return [dict(r) for r in rows]
+    try:
+        async with get_db() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT b.id, b.title, b.description, b.content_type, b.stream_url,
+                          b.thumbnail_url, b.view_count, b.created_at, b.model_name,
+                          b.model_provider, b.tags, b.post_content,
+                          a.name as agent_name, a.avatar_url,
+                          COUNT(ve.id) as recent_views,
+                          (
+                            COALESCE(SUM(CASE
+                              WHEN ve.watch_seconds > 300 THEN 1.0
+                              WHEN ve.watch_seconds > 60  THEN 0.5
+                              ELSE 0.1
+                            END), 0)
+                            + COALESCE((SELECT COUNT(*)*0.3 FROM reactions r WHERE r.broadcast_id=b.id), 0)
+                            + COALESCE((SELECT COUNT(*)*0.6 FROM comments c WHERE c.broadcast_id=b.id), 0)
+                          ) / MAX(1.0, COALESCE(julianday('now') - julianday(b.created_at), 1)) as velocity
+                   FROM broadcasts b
+                   JOIN agents a ON a.id = b.agent_id
+                   LEFT JOIN view_events ve ON ve.broadcast_id = b.id
+                       AND ve.viewed_at >= datetime('now', '-7 days')
+                   WHERE b.status = 'ready' AND a.jail_mode = 0
+                   GROUP BY b.id
+                   ORDER BY velocity DESC, b.view_count DESC
+                   LIMIT ?""",
+                (limit,),
+            ) as cur:
+                rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        import logging
+        logging.error(f"Error fetching trending feed: {e}")
+        return []
 
 
 @router.get("/feed/personalized")
@@ -1336,7 +1341,7 @@ async def personalized_feed(
     offset: int = 0,
     agent: dict = Depends(get_agent),
 ):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT b.id, b.title, b.description, b.content_type, b.stream_url,
@@ -1393,7 +1398,7 @@ async def create_image_post(
     agent_dir = MEDIA_ROOT / agent["name"]
     agent_dir.mkdir(parents=True, exist_ok=True)
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO broadcasts
                (agent_id, title, description, content_type, status,
@@ -1429,14 +1434,14 @@ async def create_image_post(
         image_urls.append(f"/media/agents/{agent['name']}/{broadcast_id}/{dest.name}")
 
     if not image_urls:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute("DELETE FROM broadcasts WHERE id=?", (broadcast_id,))
             await db.commit()
         raise HTTPException(status_code=400, detail="No valid images uploaded")
 
     thumb_url = image_urls[0]
     final_status = initial_status if initial_status == 'scheduled' else 'ready'
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "UPDATE broadcasts SET status=?, post_content=?, thumbnail_url=? WHERE id=?",
             (final_status, _json.dumps(image_urls), thumb_url, broadcast_id),
@@ -1517,7 +1522,7 @@ async def create_graph_post(
         except Exception:
             pass
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO broadcasts
                (agent_id, title, description, content_type, status, post_content,
@@ -1560,7 +1565,7 @@ async def add_comment(
         raise HTTPException(status_code=422, detail="content is required")
     parent_id_raw = body.get("parent_id")
     parent_id = int(parent_id_raw) if parent_id_raw else None
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id FROM broadcasts WHERE id=? AND status='ready'", (broadcast_id,)
@@ -1608,7 +1613,7 @@ async def add_comment(
 
 @router.get("/broadcasts/{broadcast_id}/comments")
 async def get_comments(broadcast_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT c.id, c.content, c.parent_id, c.created_at,
@@ -1624,7 +1629,7 @@ async def get_comments(broadcast_id: int, agent: dict = Depends(get_agent)):
 
 @router.delete("/comments/{comment_id}")
 async def delete_comment(comment_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         async with db.execute(
             "SELECT agent_id FROM comments WHERE id=?", (comment_id,)
         ) as cur:
@@ -1658,7 +1663,7 @@ async def toggle_reaction(
         raise HTTPException(status_code=422, detail="reaction is required")
     if reaction not in VALID_REACTIONS:
         raise HTTPException(status_code=422, detail="Invalid reaction type")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         async with db.execute(
             "SELECT 1 FROM reactions WHERE broadcast_id=? AND agent_id=? AND reaction_type=?",
             (broadcast_id, agent["id"], reaction),
@@ -1693,7 +1698,7 @@ async def toggle_reaction(
 
 @router.get("/broadcasts/{broadcast_id}/reactions")
 async def get_reactions(broadcast_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT reaction_type, COUNT(*) as count
@@ -1711,7 +1716,7 @@ async def get_reactions(broadcast_id: int, agent: dict = Depends(get_agent)):
 
 @router.get("/me/profile")
 async def get_my_profile(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, name, bio, manifesto, soul_manifest, avatar_url, created_at FROM agents WHERE id=?",
@@ -1736,7 +1741,7 @@ async def fork_broadcast(
     description = str(body.get("description", ""))[:2000]
     if not title:
         raise HTTPException(status_code=422, detail="title is required")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM broadcasts WHERE id=? AND status='ready'", (broadcast_id,)
@@ -1788,7 +1793,7 @@ async def send_message(
     if not content:
         raise HTTPException(status_code=422, detail="content is required")
     subject = str(body.get("subject", ""))[:200]
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await _ensure_messages_table(db)
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id FROM agents WHERE name=?", (recipient_name,)) as cur:
@@ -1813,7 +1818,7 @@ async def send_message(
 
 @router.get("/messages/inbox")
 async def inbox(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await _ensure_messages_table(db)
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -1830,7 +1835,7 @@ async def inbox(agent: dict = Depends(get_agent)):
 
 @router.get("/messages/sent")
 async def sent_messages(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await _ensure_messages_table(db)
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -1847,7 +1852,7 @@ async def sent_messages(agent: dict = Depends(get_agent)):
 
 @router.post("/messages/{message_id}/read")
 async def mark_read(message_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await _ensure_messages_table(db)
         await db.execute(
             "UPDATE agent_messages SET read=1 WHERE id=? AND recipient_id=?",
@@ -1859,7 +1864,7 @@ async def mark_read(message_id: int, agent: dict = Depends(get_agent)):
 
 @router.delete("/messages/{message_id}")
 async def delete_message(message_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await _ensure_messages_table(db)
         async with db.execute(
             "SELECT sender_id, recipient_id FROM agent_messages WHERE id=?", (message_id,)
@@ -1876,7 +1881,7 @@ async def delete_message(message_id: int, agent: dict = Depends(get_agent)):
 
 @router.get("/messages/unread-count")
 async def unread_count(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await _ensure_messages_table(db)
         async with db.execute(
             "SELECT COUNT(*) as cnt FROM agent_messages WHERE recipient_id=? AND read=0",
@@ -1926,7 +1931,7 @@ async def register_webhook(request: Request, agent: dict = Depends(get_agent)):
     # Generate a server-side signing secret — never accept one from the client.
     # Returned once here; not exposed again by GET /me/webhooks.
     signing_secret = secrets.token_hex(32)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             "INSERT INTO agent_webhooks (agent_id, url, events, secret) VALUES (?,?,?,?)",
             (agent["id"], url, _json.dumps(events), signing_secret),
@@ -1943,7 +1948,7 @@ async def register_webhook(request: Request, agent: dict = Depends(get_agent)):
 
 @router.get("/me/webhooks")
 async def list_webhooks(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, url, events, created_at FROM agent_webhooks WHERE agent_id=? ORDER BY created_at DESC",
@@ -1954,7 +1959,7 @@ async def list_webhooks(agent: dict = Depends(get_agent)):
 
 @router.delete("/me/webhooks/{webhook_id}")
 async def delete_webhook(webhook_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         res = await db.execute(
             "DELETE FROM agent_webhooks WHERE id=? AND agent_id=?",
             (webhook_id, agent["id"]),
@@ -1971,7 +1976,7 @@ async def delete_webhook(webhook_id: int, agent: dict = Depends(get_agent)):
 
 @router.get("/me/notifications")
 async def get_notifications(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT id, type, actor_name, subject, subject_id, read, created_at
@@ -1985,7 +1990,7 @@ async def get_notifications(agent: dict = Depends(get_agent)):
 
 @router.post("/me/notifications/read-all")
 async def notifications_read_all(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "UPDATE notifications SET read=1 WHERE agent_id=?", (agent["id"],)
         )
@@ -1995,7 +2000,7 @@ async def notifications_read_all(agent: dict = Depends(get_agent)):
 
 @router.post("/me/notifications/{notification_id}/read")
 async def notification_read(notification_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             "UPDATE notifications SET read=1 WHERE id=? AND agent_id=?",
             (notification_id, agent["id"]),
@@ -2008,7 +2013,7 @@ async def notification_read(notification_id: int, agent: dict = Depends(get_agen
 
 @router.get("/me/notifications/unread-count")
 async def notifications_unread_count(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         async with db.execute(
             "SELECT COUNT(*) FROM notifications WHERE agent_id=? AND read=0", (agent["id"],)
         ) as cur:
@@ -2060,7 +2065,7 @@ async def sse_event_stream(agent: dict = Depends(get_agent)):
 @router.get("/agents/{agent_name}/reputation")
 async def get_agent_reputation(agent_name: str, agent: dict = Depends(get_agent)):
     """Return computed reputation badges for an agent based on platform activity."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, skill_badges FROM agents WHERE name=?", (agent_name,)
@@ -2111,7 +2116,7 @@ async def give_bid_feedback(task_id: int, bid_id: int, request: Request, agent=D
     feedback = str(body.get("feedback", "")).strip()[:1000]
     if not feedback:
         raise HTTPException(400, "feedback is required")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT poster_id FROM task_listings WHERE id=?", (task_id,)
@@ -2151,7 +2156,7 @@ async def create_persona(request: Request, agent=Depends(get_agent)):
     if not alias:
         raise HTTPException(400, "alias is required")
     caps_json = _json.dumps(capabilities if isinstance(capabilities, list) else [])
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         try:
             cur = await db.execute(
                 "INSERT INTO agent_personas (agent_id, alias, capabilities, description) VALUES (?,?,?,?)",
@@ -2167,7 +2172,7 @@ async def create_persona(request: Request, agent=Depends(get_agent)):
 @router.get("/me/personas")
 async def list_my_personas(agent=Depends(get_agent)):
     """List all personas registered by this agent."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM agent_personas WHERE agent_id=? ORDER BY created_at ASC",
@@ -2186,7 +2191,7 @@ async def list_my_personas(agent=Depends(get_agent)):
 @router.get("/agents/{agent_name}/personas")
 async def get_agent_personas(agent_name: str, agent: dict = Depends(get_agent)):
     """List public personas for an agent (no auth)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT ap.id, ap.alias, ap.capabilities, ap.description, ap.created_at
@@ -2210,7 +2215,7 @@ async def get_agent_personas(agent_name: str, agent: dict = Depends(get_agent)):
 async def update_persona(persona_id: int, request: Request, agent=Depends(get_agent)):
     """Update an existing persona."""
     body = await _parse_body(request)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM agent_personas WHERE id=? AND agent_id=?",
@@ -2235,7 +2240,7 @@ async def update_persona(persona_id: int, request: Request, agent=Depends(get_ag
 @router.delete("/me/personas/{persona_id}")
 async def delete_persona(persona_id: int, agent=Depends(get_agent)):
     """Delete a persona."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "DELETE FROM agent_personas WHERE id=? AND agent_id=?",
             (persona_id, agent["id"]),
@@ -2266,7 +2271,7 @@ def _suggest_remediation(error_text: str, context: dict) -> str:
 @router.get("/me/creation-jobs/{job_id}/diagnostic")
 async def get_job_diagnostic(job_id: int, agent=Depends(get_agent)):
     """Structured diagnostic report for a failed or errored creation job."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM creation_jobs WHERE id=? AND agent_id=?",
@@ -2303,7 +2308,7 @@ async def get_job_diagnostic(job_id: int, agent=Depends(get_agent)):
 @router.get("/me/wip")
 async def get_wip_buffer(agent=Depends(get_agent)):
     """Return all work-in-progress scratchpad entries (stored in agent_state with 'wip:' prefix)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT key, value, updated_at FROM agent_state WHERE agent_id=? AND key LIKE 'wip:%'",
@@ -2321,7 +2326,7 @@ async def set_wip_entry(key: str, request: Request, agent=Depends(get_agent)):
     if not isinstance(value, str):
         value = _json.dumps(value)
     full_key = f"wip:{key[:200]}"
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             """INSERT INTO agent_state (agent_id, key, value, updated_at)
                VALUES (?,?,?,datetime('now'))
@@ -2336,7 +2341,7 @@ async def set_wip_entry(key: str, request: Request, agent=Depends(get_agent)):
 @router.delete("/me/wip/{key:path}")
 async def delete_wip_entry(key: str, agent=Depends(get_agent)):
     """Delete a WIP scratchpad entry."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "DELETE FROM agent_state WHERE agent_id=? AND key=?",
             (agent["id"], f"wip:{key[:200]}"),
@@ -2371,7 +2376,7 @@ async def create_debate_post(
     except Exception:
         tags_json = "[]"
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO broadcasts
                (agent_id, title, description, content_type, status, post_content,
@@ -2387,7 +2392,7 @@ async def create_debate_post(
 
     thumb_url = await _save_thumbnail(thumbnail, agent["name"], broadcast_id)
     if thumb_url:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute("UPDATE broadcasts SET thumbnail_url=? WHERE id=?", (thumb_url, broadcast_id))
             await db.commit()
 
@@ -2412,7 +2417,7 @@ async def debate_reply(
     thumbnail: Optional[UploadFile] = File(None),
     agent: dict = Depends(get_agent),
 ):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM broadcasts WHERE id=? AND content_type='debate' AND status='ready'",
@@ -2426,7 +2431,7 @@ async def debate_reply(
     reply_position = "against" if source["debate_position"] == "for" else "for"
     reply_title = title or f"Re: {source['title']}"
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         # Group debate in a series — create if needed
         series_id = source.get("series_id")
         if not series_id:
@@ -2463,7 +2468,7 @@ async def debate_reply(
         await db.commit()
 
     # Fix: get original agent name for debate_partner
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT name FROM agents WHERE id=?", (source["agent_id"],)) as cur:
             orig_agent = await cur.fetchone()
@@ -2476,7 +2481,7 @@ async def debate_reply(
 
     thumb_url = await _save_thumbnail(thumbnail, agent["name"], reply_id)
     if thumb_url:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute("UPDATE broadcasts SET thumbnail_url=? WHERE id=?", (thumb_url, reply_id))
             await db.commit()
 
@@ -2485,7 +2490,7 @@ async def debate_reply(
 
 @router.get("/broadcasts/{broadcast_id}/debate")
 async def get_debate_rounds(broadcast_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT series_id, debate_topic FROM broadcasts WHERE id=? AND content_type='debate'",
@@ -2498,7 +2503,7 @@ async def get_debate_rounds(broadcast_id: int, agent: dict = Depends(get_agent))
     series_id = root["series_id"]
     if not series_id:
         # Only single post, return it
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """SELECT b.*, a.name as agent_name, a.avatar_url
@@ -2508,7 +2513,7 @@ async def get_debate_rounds(broadcast_id: int, agent: dict = Depends(get_agent))
             ) as cur:
                 rows = [await cur.fetchone()]
     else:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """SELECT b.*, a.name as agent_name, a.avatar_url
@@ -2532,7 +2537,7 @@ async def challenge_to_debate(
     agent: dict = Depends(get_agent),
 ):
     """Challenge another agent to a structured debate."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id FROM agents WHERE name=?", (target_name,)) as cur:
             if not await cur.fetchone():
@@ -2553,7 +2558,7 @@ async def challenge_to_debate(
 @router.post("/me/debate-challenges/{challenge_id}/accept", tags=["debates"])
 async def accept_debate_challenge(challenge_id: int, agent: dict = Depends(get_agent)):
     """Accept a debate challenge — creates two linked broadcasts (FOR and AGAINST)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM debate_challenges WHERE id=? AND target_name=? AND status='pending'",
@@ -2609,7 +2614,7 @@ async def accept_debate_challenge(challenge_id: int, agent: dict = Depends(get_a
 @router.post("/me/debate-challenges/{challenge_id}/reject", tags=["debates"])
 async def reject_debate_challenge(challenge_id: int, agent: dict = Depends(get_agent)):
     """Decline a pending debate challenge."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             "UPDATE debate_challenges SET status='rejected' WHERE id=? AND target_name=? AND status='pending'",
             (challenge_id, agent["name"]),
@@ -2623,7 +2628,7 @@ async def reject_debate_challenge(challenge_id: int, agent: dict = Depends(get_a
 @router.get("/debates", tags=["debates"])
 async def list_debates(limit: int = Query(20, ge=1, le=100), agent: dict = Depends(get_agent)):
     """List active debate series."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT b.debate_topic, b.series_id,
@@ -2633,7 +2638,7 @@ async def list_debates(limit: int = Query(20, ge=1, le=100), agent: dict = Depen
                       COUNT(b.id) as round_count
                FROM broadcasts b JOIN agents a ON a.id=b.agent_id
                WHERE b.content_type='debate' AND b.status='ready' AND b.debate_topic!=''
-               GROUP BY b.series_id
+               GROUP BY b.series_id, b.debate_topic
                ORDER BY started_at DESC LIMIT ?""",
             (limit,),
         ) as cur:
@@ -2644,7 +2649,7 @@ async def list_debates(limit: int = Query(20, ge=1, le=100), agent: dict = Depen
 @router.get("/me/debate-challenges", tags=["debates"])
 async def my_debate_challenges(agent: dict = Depends(get_agent)):
     """List pending debate challenges for this agent."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, challenger_name, topic, status, created_at FROM debate_challenges WHERE target_name=? ORDER BY created_at DESC LIMIT 50",
@@ -2668,7 +2673,7 @@ async def recommended_feed(
     limit: int = 20,
     agent: dict = Depends(get_agent),
 ):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
 
         # Get tags from agent's own content (top 3 most common)
@@ -2769,7 +2774,7 @@ async def send_collab_invite(
     message: str = Form("", max_length=500),
     agent: dict = Depends(get_agent),
 ):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id FROM broadcasts WHERE id=? AND agent_id=?",
@@ -2803,7 +2808,7 @@ async def send_collab_invite(
 
 @router.get("/me/collab-requests")
 async def get_collab_requests(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT cr.*, b.title as broadcast_title
@@ -2819,7 +2824,7 @@ async def get_collab_requests(agent: dict = Depends(get_agent)):
 
 @router.post("/me/collab-requests/{request_id}/accept")
 async def accept_collab_request(request_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM collab_requests WHERE id=? AND recipient_name=?",
@@ -2846,7 +2851,7 @@ async def accept_collab_request(request_id: int, agent: dict = Depends(get_agent
 
 @router.post("/me/collab-requests/{request_id}/reject")
 async def reject_collab_request(request_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         async with db.execute(
             "SELECT id FROM collab_requests WHERE id=? AND recipient_name=?",
             (request_id, agent["name"]),
@@ -2900,7 +2905,7 @@ async def search(
     where = " AND ".join(conditions)
     params.extend([limit, offset])
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             f"""SELECT b.id, b.title, b.description, b.content_type, b.stream_url,
@@ -2929,7 +2934,7 @@ async def connect_wallet(
     sui_address = str(body.get("sui_address", "")).strip()[:100]
     if not sui_address:
         raise HTTPException(status_code=422, detail="sui_address is required")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute("UPDATE agents SET sui_address=? WHERE id=?", (sui_address, agent["id"]))
         await db.commit()
     return {"ok": True, "sui_address": sui_address}
@@ -2938,7 +2943,7 @@ async def connect_wallet(
 @router.get("/me/token-milestones")
 async def get_token_milestones(agent: dict = Depends(get_agent)):
     """Return token milestone progress for all agent broadcasts."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT tm.broadcast_id, tm.milestone, tm.reached_at, b.title
@@ -2985,7 +2990,7 @@ async def seal_broadcast(
     """Apply a Seal access policy to a broadcast. Policy: followers-only | nft-gated | private."""
     if not settings.SEAL_ENABLED:
         return {"ok": False, "reason": "Seal encryption is not enabled on this instance."}
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         async with db.execute(
             "SELECT id FROM broadcasts WHERE id=? AND agent_id=?", (broadcast_id, agent["id"])
         ) as cur:
@@ -3002,7 +3007,7 @@ async def seal_broadcast(
 @router.get("/broadcasts/{broadcast_id}/seal-status")
 async def get_seal_status(broadcast_id: int, agent: dict = Depends(get_agent)):
     """Return seal status and policy for a broadcast."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT is_sealed, seal_policy FROM broadcasts WHERE id=? AND status='ready'",
@@ -3017,7 +3022,7 @@ async def get_seal_status(broadcast_id: int, agent: dict = Depends(get_agent)):
 @router.delete("/broadcasts/{broadcast_id}/seal")
 async def unseal_broadcast(broadcast_id: int, agent: dict = Depends(get_agent)):
     """Remove Seal encryption from a broadcast."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         async with db.execute(
             "SELECT id FROM broadcasts WHERE id=? AND agent_id=?", (broadcast_id, agent["id"])
         ) as cur:
@@ -3039,7 +3044,7 @@ async def sign_broadcast(broadcast_id: int, agent: dict = Depends(get_agent)):
     The `is_signed` flag and `signer_fingerprint` are included in all feed responses.
     Third parties can verify via GET /broadcasts/{id}/verify-signature.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, title, created_at FROM broadcasts WHERE id=? AND agent_id=? AND status='ready'",
@@ -3073,7 +3078,7 @@ async def verify_broadcast_signature(broadcast_id: int, agent: dict = Depends(ge
     Verify that the stored signature still matches the broadcast content.
     The calling agent must own the broadcast (signature uses their key).
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, title, created_at, signature, is_signed FROM broadcasts WHERE id=? AND agent_id=?",
@@ -3096,7 +3101,7 @@ async def verify_broadcast_signature(broadcast_id: int, agent: dict = Depends(ge
 @router.get("/federation/peers")
 async def get_federation_peers():
     """List known Vantage federation peers."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM federation_peers ORDER BY last_seen DESC") as cur:
             peers = [dict(r) for r in await cur.fetchall()]
@@ -3120,7 +3125,7 @@ async def add_federation_peer(
     authed = False
     if x_agent_key:
         hashed = _hashlib.sha256(x_agent_key.encode()).hexdigest()
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             row = await (await db.execute("SELECT id FROM agents WHERE api_key=?", (hashed,))).fetchone()
         if row:
             authed = True
@@ -3156,10 +3161,12 @@ async def add_federation_peer(
     except Exception:
         status = "unreachable"
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute(
-                """INSERT OR REPLACE INTO federation_peers (url, name, last_seen, status)
-                   VALUES (?,?,datetime('now'),?)""",
+                """INSERT INTO federation_peers (url, name, last_seen, status)
+                   VALUES (?,?,datetime('now'),?)
+                   ON CONFLICT (url) DO UPDATE SET
+                       name=excluded.name, last_seen=excluded.last_seen, status=excluded.status""",
                 (url, name or url, status),
             )
             await db.commit()
@@ -3171,7 +3178,7 @@ async def add_federation_peer(
 @router.delete("/federation/peers/{peer_id}")
 async def remove_federation_peer(peer_id: int, agent: dict = Depends(get_agent)):
     """Remove a federation peer."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute("DELETE FROM federation_peers WHERE id=?", (peer_id,))
         await db.commit()
     return {"ok": True}
@@ -3180,7 +3187,7 @@ async def remove_federation_peer(peer_id: int, agent: dict = Depends(get_agent))
 @router.get("/federation/peers/{peer_id}/recent", tags=["federation"])
 async def get_peer_recent_broadcasts(peer_id: int, limit: int = Query(20, ge=1, le=100)):
     """Fetch recent broadcasts from a specific federation peer."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, url, name, status, reputation, flagged FROM federation_peers WHERE id=?",
@@ -3206,7 +3213,7 @@ async def get_peer_recent_broadcasts(peer_id: int, limit: int = Query(20, ge=1, 
             item["source"] = peer["name"] or peer["url"]
             item["peer_id"] = peer_id
             item["federated"] = True
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute(
                 "UPDATE federation_peers SET last_seen=datetime('now'), status='active' WHERE id=?",
                 (peer_id,),
@@ -3216,7 +3223,7 @@ async def get_peer_recent_broadcasts(peer_id: int, limit: int = Query(20, ge=1, 
     except HTTPException:
         raise
     except Exception as exc:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute(
                 "UPDATE federation_peers SET status='unreachable' WHERE id=?", (peer_id,)
             )
@@ -3227,7 +3234,7 @@ async def get_peer_recent_broadcasts(peer_id: int, limit: int = Query(20, ge=1, 
 @router.post("/federation/peers/{peer_id}/ping", tags=["federation"])
 async def ping_federation_peer(peer_id: int, agent: dict = Depends(get_agent)):
     """Manually ping a federation peer and update its reputation."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, url, reputation FROM federation_peers WHERE id=?", (peer_id,)
@@ -3246,7 +3253,7 @@ async def ping_federation_peer(peer_id: int, agent: dict = Depends(get_agent)):
     new_rep = min(100.0, peer["reputation"] + 5.0) if success else max(0.0, peer["reputation"] - 10.0)
     flagged = 0 if new_rep >= 20.0 else 1
     status = "active" if success else "unreachable"
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "UPDATE federation_peers SET reputation=?, flagged=?, status=?, last_seen=datetime('now') WHERE id=?",
             (new_rep, flagged, status, peer_id),
@@ -3259,7 +3266,7 @@ async def ping_federation_peer(peer_id: int, agent: dict = Depends(get_agent)):
 async def get_federation_feed(limit: int = 50):
     """Aggregate feeds from all known federation peers plus local content."""
     local_items: list = []
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT b.id, b.title, b.description, b.content_type, b.stream_url,
@@ -3277,7 +3284,7 @@ async def get_federation_feed(limit: int = 50):
     peers = []
     peer_items: list = []
     if settings.FEDERATION_ENABLED:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT id, url, name FROM federation_peers WHERE status='active' AND flagged=0") as cur:
                 peers = [dict(r) for r in await cur.fetchall()]
@@ -3293,14 +3300,14 @@ async def get_federation_feed(limit: int = 50):
                             item["federated"] = True
                         peer_items.extend(items)
                     # Update last_seen
-                    async with aiosqlite.connect(DB_PATH) as db:
+                    async with get_db() as db:
                         await db.execute(
                             "UPDATE federation_peers SET last_seen=datetime('now'), status='active' WHERE url=?",
                             (peer["url"],),
                         )
                         await db.commit()
                 except Exception:
-                    async with aiosqlite.connect(DB_PATH) as db:
+                    async with get_db() as db:
                         await db.execute(
                             "UPDATE federation_peers SET status='unreachable' WHERE url=?",
                             (peer["url"],),
@@ -3326,7 +3333,7 @@ async def federated_ask(
     results: list = []
 
     # 1. Search local knowledge graph
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         like = f"%{query}%"
         async with db.execute(
@@ -3364,7 +3371,7 @@ async def federated_ask(
 
     # 3. Fan out to federation peers
     if settings.FEDERATION_ENABLED:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT id, url, name FROM federation_peers WHERE status='active' AND flagged=0"
@@ -3471,7 +3478,7 @@ async def federation_auth(request: Request):
     # Upsert shadow agent (prefixed name avoids collision with local agents)
     shadow_name = f"fed:{agent_name}@{peer_url.replace('https://','').replace('http://','')[:40]}"
     local_key = secrets.token_hex(24)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id, api_key FROM agents WHERE name=?", (shadow_name,)) as cur:
             existing = await cur.fetchone()
@@ -3512,7 +3519,7 @@ async def verify_federated_identity(request: Request):
     if not all([agent_name, nonce, signature]):
         return {"verified": False, "reason": "Missing fields"}
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT api_key FROM agents WHERE name=? AND jail_mode=0", (agent_name,)) as cur:
             row = await cur.fetchone()
@@ -3545,7 +3552,7 @@ async def create_content(
     depends_on_job_id_raw = body.get("depends_on_job_id")
     depends_on_job_id = int(depends_on_job_id_raw) if depends_on_job_id_raw is not None else None
     trace_id = secrets.token_hex(16)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             "INSERT INTO creation_jobs (agent_id, prompt, status, trace_id, depends_on_job_id) VALUES (?,?,'scripting',?,?)",
             (agent["id"], prompt, trace_id, depends_on_job_id),
@@ -3587,7 +3594,7 @@ async def update_creation_job(
         raise HTTPException(status_code=422, detail="status is required")
     if status not in _VALID_JOB_STATUSES - {"done"}:
         raise HTTPException(400, f"Invalid status. Use one of: {sorted(_VALID_JOB_STATUSES - {'done'})}")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         # Increment failure count in error_context when status=error
         updated_context = error_context
         if status == "error":
@@ -3627,7 +3634,7 @@ async def complete_creation_job(
     if not broadcast_id_raw:
         raise HTTPException(status_code=422, detail="broadcast_id is required")
     broadcast_id = int(broadcast_id_raw)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         async with db.execute(
             "SELECT id FROM broadcasts WHERE id=? AND agent_id=?", (broadcast_id, agent["id"])
         ) as cur:
@@ -3646,7 +3653,7 @@ async def complete_creation_job(
 @router.get("/me/creation-jobs")
 async def list_creation_jobs(agent: dict = Depends(get_agent)):
     """List all creation jobs for the authenticated agent."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM creation_jobs WHERE agent_id=? ORDER BY created_at DESC LIMIT 50",
@@ -3659,7 +3666,7 @@ async def list_creation_jobs(agent: dict = Depends(get_agent)):
 @router.get("/me/creation-jobs/{job_id}")
 async def get_creation_job(job_id: int, agent: dict = Depends(get_agent)):
     """Poll status of a specific creation job."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM creation_jobs WHERE id=? AND agent_id=?", (job_id, agent["id"])
@@ -3680,7 +3687,7 @@ async def get_creation_job(job_id: int, agent: dict = Depends(get_agent)):
 @router.delete("/me/creation-jobs/{job_id}")
 async def delete_creation_job(job_id: int, agent: dict = Depends(get_agent)):
     """Delete a creation job record."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "DELETE FROM creation_jobs WHERE id=? AND agent_id=?", (job_id, agent["id"])
         )
@@ -3759,7 +3766,7 @@ async def list_skills(request: Request, agent: dict = Depends(get_agent)):
 @router.get("/me/resources", tags=["pipeline"])
 async def get_my_resources(agent: dict = Depends(get_agent)):
     """Return resource usage summary for the authenticated agent."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT COUNT(*) as cnt FROM broadcasts WHERE agent_id=? AND status != 'deleted'",
@@ -3805,7 +3812,7 @@ async def get_my_resources(agent: dict = Depends(get_agent)):
 @router.get("/me/creation-jobs/{job_id}/trace", tags=["pipeline"])
 async def get_creation_job_trace(job_id: int, agent: dict = Depends(get_agent)):
     """Return a creation job with trace_id and all fields."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM creation_jobs WHERE id=? AND agent_id=?", (job_id, agent["id"])
@@ -3832,7 +3839,7 @@ async def resume_creation_job(
     from_stage = str(body.get("from_stage", "queued")).strip() or "queued"
     if from_stage not in _VALID_RESUME_STAGES:
         raise HTTPException(400, f"Invalid from_stage. Use one of: {sorted(_VALID_RESUME_STAGES)}")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         res = await db.execute(
             "UPDATE creation_jobs SET status=?, error_context='', error_text='', updated_at=datetime('now') WHERE id=? AND agent_id=?",
@@ -3853,7 +3860,7 @@ async def resume_creation_job(
 @router.get("/me/state", tags=["identity"])
 async def list_agent_state(agent: dict = Depends(get_agent)):
     """List all KV state entries for the authenticated agent."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT key, value, updated_at FROM agent_state WHERE agent_id=? ORDER BY key",
@@ -3866,7 +3873,7 @@ async def list_agent_state(agent: dict = Depends(get_agent)):
 @router.get("/me/state/{key}", tags=["identity"])
 async def get_agent_state(key: str, agent: dict = Depends(get_agent)):
     """Get a specific KV state entry."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT key, value, updated_at FROM agent_state WHERE agent_id=? AND key=?",
@@ -3887,7 +3894,7 @@ async def upsert_agent_state(
     """Upsert a KV state entry."""
     body = await _parse_body(request)
     value = str(body.get("value", ""))
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             """INSERT INTO agent_state (agent_id, key, value, updated_at)
                VALUES (?, ?, ?, datetime('now'))
@@ -3908,7 +3915,7 @@ async def patch_agent_state(key: str, request: Request, agent: dict = Depends(ge
     """
     body = await _parse_body(request)
     patch_value = body.get("value", {})
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT value FROM agent_state WHERE agent_id=? AND key=?", (agent["id"], key)
@@ -3936,7 +3943,7 @@ async def patch_agent_state(key: str, request: Request, agent: dict = Depends(ge
 @router.delete("/me/state/{key}", tags=["identity"])
 async def delete_agent_state(key: str, agent: dict = Depends(get_agent)):
     """Delete a KV state entry."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         res = await db.execute(
             "DELETE FROM agent_state WHERE agent_id=? AND key=?", (agent["id"], key)
         )
@@ -3968,7 +3975,7 @@ async def post_tro(request: Request, agent: dict = Depends(get_agent)):
         raise HTTPException(400, "service_type and description are required")
 
     params_json = _json.dumps(parameters if isinstance(parameters, dict) else {})
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO tro_requests
                (agent_id, agent_name, service_type, description, parameters, budget_usdc, expires_at)
@@ -3996,7 +4003,7 @@ async def list_tros(
     service_type: str = Query("", description="Filter by service type"),
     limit: int = Query(50, ge=1, le=100), agent: dict = Depends(get_agent)):
     """List open/bidding, non-expired TROs with response counts."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         filters = ["t.status IN ('open','bidding')", "t.expires_at > datetime('now')"]
         params: list = []
@@ -4032,7 +4039,7 @@ async def respond_to_tro(tro_id: int, request: Request, agent: dict = Depends(ge
     """
     body = await _parse_body(request)
     approach = str(body.get("approach", "")).strip()[:500]
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM tro_requests WHERE id=? AND expires_at > datetime('now')",
@@ -4050,7 +4057,7 @@ async def respond_to_tro(tro_id: int, request: Request, agent: dict = Depends(ge
         # Record the bid (ignore duplicates from same agent)
         try:
             await db.execute(
-                "INSERT OR IGNORE INTO tro_responses (tro_id, agent_id, agent_name, approach) VALUES (?,?,?,?)",
+                "INSERT INTO tro_responses (tro_id, agent_id, agent_name, approach) VALUES (?,?,?,?) ON CONFLICT (tro_id, agent_id) DO NOTHING",
                 (tro_id, agent["id"], agent["name"], approach),
             )
         except Exception:
@@ -4096,7 +4103,7 @@ async def respond_to_tro(tro_id: int, request: Request, agent: dict = Depends(ge
 @router.get("/tro/{tro_id}/responses", tags=["platform"])
 async def list_tro_responses(tro_id: int, agent: dict = Depends(get_agent)):
     """All bids submitted for a TRO."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT agent_name, approach, won, created_at FROM tro_responses WHERE tro_id=? ORDER BY created_at ASC",
@@ -4119,7 +4126,7 @@ async def deliver_tro(tro_id: int, request: Request, agent: dict = Depends(get_a
     result_text = str(body.get("result_text", "")).strip()[:20000]
     result_type = str(body.get("result_type", "text")).strip()
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM tro_requests WHERE id=? AND matched_agent=? AND status='matched'",
@@ -4183,7 +4190,7 @@ async def create_platform_subscription(request: Request, agent: dict = Depends(g
     if delivery not in ("sse", "webhook"):
         delivery = "sse"
     webhook_url = str(body.get("webhook_url", "")).strip()[:500]
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO platform_subscriptions
                (agent_id, event_type, condition_json, delivery, webhook_url)
@@ -4199,7 +4206,7 @@ async def create_platform_subscription(request: Request, agent: dict = Depends(g
 @router.get("/me/watch", tags=["platform"])
 async def list_platform_subscriptions(agent: dict = Depends(get_agent)):
     """List all platform event subscriptions for this agent."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM platform_subscriptions WHERE agent_id=? ORDER BY created_at DESC",
@@ -4218,7 +4225,7 @@ async def list_platform_subscriptions(agent: dict = Depends(get_agent)):
 @router.delete("/me/watch/{sub_id}", tags=["platform"])
 async def delete_platform_subscription(sub_id: int, agent: dict = Depends(get_agent)):
     """Remove a platform event subscription."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         res = await db.execute(
             "DELETE FROM platform_subscriptions WHERE id=? AND agent_id=?",
             (sub_id, agent["id"]),
@@ -4259,7 +4266,7 @@ async def request_skill_challenge(request: Request, agent: dict = Depends(get_ag
         raise HTTPException(400, "capability is required")
 
     # Pull a recent broadcast as reference (text or graph gives richest content)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT title, description, post_content FROM broadcasts
@@ -4302,7 +4309,7 @@ async def submit_skill_challenge(challenge_id: int, request: Request, agent: dic
     if not response_text:
         raise HTTPException(400, "response is required")
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM skill_challenges WHERE id=? AND agent_id=? AND status='pending'",
@@ -4357,7 +4364,7 @@ async def submit_skill_challenge(challenge_id: int, request: Request, agent: dic
 @router.get("/me/skill-challenges", tags=["platform"])
 async def list_skill_challenges(agent: dict = Depends(get_agent)):
     """List all skill challenges for this agent."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, capability, challenge_type, status, auto_score, created_at, scored_at FROM skill_challenges WHERE agent_id=? ORDER BY created_at DESC",
@@ -4383,7 +4390,7 @@ async def create_room(request: Request, agent: dict = Depends(get_agent)):
     if not name:
         raise HTTPException(400, "name is required")
     room_id = secrets.token_hex(8)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             """INSERT INTO agent_rooms (id, name, host_id, host_name, max_members)
                VALUES (?,?,?,?,?)""",
@@ -4406,7 +4413,7 @@ async def create_room(request: Request, agent: dict = Depends(get_agent)):
 @router.get("/rooms/{room_id}", tags=["platform"])
 async def get_room(room_id: str, agent: dict = Depends(get_agent)):
     """Get room metadata, members, and scratchpad contents."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM agent_rooms WHERE id=?", (room_id,)) as cur:
             room = await cur.fetchone()
@@ -4434,7 +4441,7 @@ async def get_room(room_id: str, agent: dict = Depends(get_agent)):
 @router.post("/rooms/{room_id}/join", tags=["platform"])
 async def join_room(room_id: str, agent: dict = Depends(get_agent)):
     """Join a room."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, status, max_members, host_id FROM agent_rooms WHERE id=?", (room_id,)
@@ -4451,7 +4458,7 @@ async def join_room(room_id: str, agent: dict = Depends(get_agent)):
         if count >= dict(room)["max_members"]:
             raise HTTPException(400, "Room is full")
         await db.execute(
-            "INSERT OR IGNORE INTO room_members (room_id, agent_id, agent_name) VALUES (?,?,?)",
+            "INSERT INTO room_members (room_id, agent_id, agent_name) VALUES (?,?,?) ON CONFLICT (room_id, agent_id) DO NOTHING",
             (room_id, agent["id"], agent["name"]),
         )
         await db.commit()
@@ -4464,7 +4471,7 @@ async def join_room(room_id: str, agent: dict = Depends(get_agent)):
 @router.post("/rooms/{room_id}/leave", tags=["platform"])
 async def leave_room(room_id: str, agent: dict = Depends(get_agent)):
     """Leave a room."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "DELETE FROM room_members WHERE room_id=? AND agent_id=?",
             (room_id, agent["id"]),
@@ -4479,7 +4486,7 @@ async def leave_room(room_id: str, agent: dict = Depends(get_agent)):
 @router.put("/rooms/{room_id}/scratchpad/{key:path}", tags=["platform"])
 async def set_room_scratchpad(room_id: str, key: str, request: Request, agent: dict = Depends(get_agent)):
     """Write a key to the shared room scratchpad (any member can write)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT host_id FROM agent_rooms WHERE id=?", (room_id,)
@@ -4518,7 +4525,7 @@ async def commit_room(room_id: str, request: Request, agent: dict = Depends(get_
     Commit the room scratchpad as a draft text broadcast, then close the room.
     Only the host can commit.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM agent_rooms WHERE id=? AND host_id=? AND status='open'",
@@ -4562,7 +4569,7 @@ async def commit_room(room_id: str, request: Request, agent: dict = Depends(get_
 @router.get("/rooms", tags=["platform"])
 async def list_rooms(agent: dict = Depends(get_agent)):
     """List all open rooms with member counts."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT r.id, r.name, r.host_name, r.status, r.max_members, r.created_at, r.expires_at,
@@ -4580,7 +4587,7 @@ async def list_rooms(agent: dict = Depends(get_agent)):
 @router.get("/rooms/{room_id}/scratchpad", tags=["platform"])
 async def get_room_scratchpad(room_id: str, agent: dict = Depends(get_agent)):
     """Return all scratchpad entries for a room as key→value dict."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT key, value, updated_at FROM agent_state WHERE key LIKE ? ORDER BY updated_at DESC",
@@ -4605,7 +4612,7 @@ async def push_trace(request: Request, agent: dict = Depends(get_agent)):
     if not message:
         raise HTTPException(400, "message required")
     metadata = body.get("metadata", {})
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO agent_traces (agent_id, agent_name, trace_type, message, metadata_json)
                VALUES (?,?,?,?,?)""",
@@ -4635,7 +4642,7 @@ async def push_trace(request: Request, agent: dict = Depends(get_agent)):
 async def get_activity_log(limit: int = 50, agent: dict = Depends(get_agent)):
     """Recent thought traces from all agents — powers Observer Mode feed."""
     limit = min(limit, 200)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT t.id, t.agent_name, t.trace_type, t.message, t.metadata_json, t.created_at,
@@ -4661,7 +4668,7 @@ async def get_activity_heatmap(agent: dict = Depends(get_agent)):
     Covers: broadcasts by content_type (last 60 min), top active tags,
     active creation job stages, and recent TRO service types.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         # Content-type activity in the last 60 min
         async with db.execute(
@@ -4724,10 +4731,7 @@ async def get_activity_heatmap(agent: dict = Depends(get_agent)):
         "active_jobs": [{"stage": r["status"], "count": r["cnt"]} for r in job_rows],
         "tro_activity": [{"service_type": r["service_type"], "count": r["cnt"]} for r in tro_rows],
         "active_agents": active_row[0] if active_row else 0,
-        "snapshot_time": _json.loads(
-            (await aiosqlite.connect(DB_PATH).__aenter__()
-            ).__class__.Row.__doc__ or ""
-        ) if False else _datetime.utcnow().isoformat(),
+        "snapshot_time": _datetime.utcnow().isoformat(),
     }
 
 
@@ -4736,7 +4740,7 @@ async def get_activity_heatmap(agent: dict = Depends(get_agent)):
 @router.get("/agents/{agent_name}/status", tags=["platform"])
 async def get_agent_status(agent_name: str, agent: dict = Depends(get_agent)):
     """Quick status snapshot for diagnostic hover overlays."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, name, last_seen_at, jail_mode, skill_badges FROM agents WHERE name=?",
@@ -4815,7 +4819,7 @@ async def _log_honeypot(path: str, method: str, request: Request) -> None:
     if x_key:
         try:
             hashed_key = _hashlib.sha256(x_key.encode()).hexdigest()
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with get_db() as db:
                 async with db.execute(
                     "SELECT id FROM agents WHERE api_key=?", (hashed_key,)
                 ) as cur:
@@ -4826,7 +4830,7 @@ async def _log_honeypot(path: str, method: str, request: Request) -> None:
     ip = request.client.host if request.client else ""
     ua = request.headers.get("user-agent", "")
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute(
                 "INSERT INTO honeypot_hits (path, method, agent_id, ip, user_agent) VALUES (?,?,?,?,?)",
                 (path, method, agent_id, ip, ua),
@@ -4871,7 +4875,7 @@ async def delegate_creation_job(
     agent: dict = Depends(get_agent),
 ):
     """Delegate a creation job to another agent."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM creation_jobs WHERE id=? AND agent_id=?", (job_id, agent["id"])
@@ -4940,7 +4944,7 @@ async def create_knowledge_snippet(
             tags_list = []
     tags_json = _json.dumps(tags_list)
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             "INSERT INTO knowledge_snippets (agent_id, subject, predicate, object, confidence, tags) VALUES (?,?,?,?,?,?)",
             (agent["id"], subject, predicate, obj, confidence, tags_json),
@@ -4979,7 +4983,7 @@ async def query_knowledge(
         params.append(agent)
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(limit)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             f"""SELECT ks.id, ks.subject, ks.predicate, ks.object, ks.confidence,
@@ -4996,7 +5000,7 @@ async def query_knowledge(
 @router.get("/knowledge/{agent_name}", tags=["platform"])
 async def get_agent_knowledge(agent_name: str, agent: dict = Depends(get_agent)):
     """Return all knowledge snippets from one agent."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id FROM agents WHERE name=?", (agent_name,)) as cur:
             a = await cur.fetchone()
@@ -5014,7 +5018,7 @@ async def get_agent_knowledge(agent_name: str, agent: dict = Depends(get_agent))
 @router.delete("/knowledge/{snippet_id}", tags=["platform"])
 async def delete_knowledge_snippet(snippet_id: int, agent: dict = Depends(get_agent)):
     """Delete an owned knowledge snippet."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         async with db.execute(
             "SELECT agent_id FROM knowledge_snippets WHERE id=?", (snippet_id,)
         ) as cur:
@@ -5061,7 +5065,7 @@ async def vql_query(request: Request, agent: dict = Depends(get_agent)):
     async def _hop(subjects: list, remaining_depth: int):
         if remaining_depth <= 0 or not subjects:
             return
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             db.row_factory = aiosqlite.Row
             placeholders = ",".join("?" for _ in subjects)
             query_parts = [
@@ -5099,7 +5103,7 @@ async def vql_query(request: Request, agent: dict = Depends(get_agent)):
         await _hop(next_subjects, remaining_depth - 1)
 
     # Initial query
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         s_pat = _pattern(subject)
         p_pat = _pattern(predicate)
@@ -5165,7 +5169,7 @@ async def initiate_negotiation(
             offer_data = "{}"
     expires_in_hours = float(body.get("expires_in_hours", 24) or 24)
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id FROM agents WHERE name=?", (agent_name,)) as cur:
             target = await cur.fetchone()
@@ -5188,7 +5192,7 @@ async def initiate_negotiation(
 @router.get("/me/negotiations", tags=["platform"])
 async def list_negotiations(agent: dict = Depends(get_agent)):
     """List negotiations where the agent is initiator or target."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT * FROM negotiations
@@ -5213,7 +5217,7 @@ async def respond_negotiation(
         raise HTTPException(422, "action must be accept, reject, or counter")
     counter_offer = str(body.get("counter_offer", ""))[:2000]
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM negotiations WHERE id=?", (neg_id,)
@@ -5250,7 +5254,7 @@ _VALID_PROPOSAL_COMMANDS = {"lock_agent", "unlock_agent", "clear_agent_tokens", 
 async def _execute_proposal_command(command: str, payload: dict) -> None:
     """Execute an approved admin proposal command."""
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             if command == "lock_agent":
                 agent_id = payload.get("agent_id")
                 if agent_id:
@@ -5292,7 +5296,7 @@ async def find_capable_agents(
     capability: str = Query(..., description="Capability to search for, e.g. 'vision' or 'finance'"),
     limit: int = Query(20, ge=1, le=100), agent: dict = Depends(get_agent)):
     """Find agents with a specific capability tag in their bio or soul_manifest."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT id, name, bio, avatar_url, soul_manifest, last_seen_at
@@ -5323,7 +5327,7 @@ async def upload_job_artifact(
     file_path = str(body.get("file_path", "")).strip()
     if not artifact_type or not stage:
         raise HTTPException(422, "artifact_type and stage are required")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         async with db.execute(
             "SELECT id FROM creation_jobs WHERE id=? AND agent_id=?", (job_id, agent["id"])
         ) as cur:
@@ -5342,7 +5346,7 @@ async def upload_job_artifact(
 @router.get("/me/creation-jobs/{job_id}/artifacts", tags=["pipeline"])
 async def list_job_artifacts(job_id: int, agent=Depends(get_agent)):
     """List artifacts for a creation job."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id FROM creation_jobs WHERE id=? AND agent_id=?", (job_id, agent["id"])
@@ -5372,7 +5376,7 @@ async def outsource_job_stage(job_id: int, request: Request, agent=Depends(get_a
     if not stage:
         raise HTTPException(422, "stage is required (e.g. 'voicing', 'visualizing', 'scripting')")
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM creation_jobs WHERE id=? AND agent_id=?",
@@ -5432,7 +5436,7 @@ async def create_task_listing(request: Request, agent=Depends(get_agent)):
     reward_usdc = float(body.get("reward_usdc", 0) or 0)
     expires_at = str(body.get("expires_at", "")).strip()
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             """INSERT INTO task_listings (poster_id, poster_name, title, description, required_capability, reward_usdc, expires_at)
@@ -5452,7 +5456,7 @@ async def list_task_listings(
     status: str = Query("open"),
     limit: int = Query(50, ge=1, le=200), agent: dict = Depends(get_agent)):
     """Browse open task listings."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         if capability:
             async with db.execute(
@@ -5474,7 +5478,7 @@ async def list_task_listings(
 @router.get("/tasks/{task_id}", tags=["platform"])
 async def get_task(task_id: int, agent: dict = Depends(get_agent)):
     """Get a task with all bids."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM task_listings WHERE id=?", (task_id,)) as cur:
             task = await cur.fetchone()
@@ -5493,7 +5497,7 @@ async def bid_on_task(task_id: int, request: Request, agent=Depends(get_agent)):
     body = await _parse_body(request)
     approach = str(body.get("approach", "")).strip()
     estimated_hours = float(body.get("estimated_hours", 0) or 0)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM task_listings WHERE id=? AND status='open'", (task_id,)
@@ -5516,7 +5520,7 @@ async def bid_on_task(task_id: int, request: Request, agent=Depends(get_agent)):
 @router.post("/tasks/{task_id}/award/{bidder_name}", tags=["platform"])
 async def award_task(task_id: int, bidder_name: str, agent=Depends(get_agent)):
     """Award a task to a specific bidder (task poster only)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM task_listings WHERE id=? AND poster_id=?", (task_id, agent["id"])
@@ -5546,7 +5550,7 @@ async def complete_task(task_id: int, request: Request, agent=Depends(get_agent)
     body = await _parse_body(request)
     result_broadcast_id = int(body.get("result_broadcast_id", 0) or 0)
     result_description = str(body.get("result_description", "")).strip()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM task_listings WHERE id=? AND awarded_to=? AND status='awarded'",
@@ -5571,7 +5575,7 @@ async def complete_task(task_id: int, request: Request, agent=Depends(get_agent)
 @router.post("/tasks/{task_id}/approve", tags=["platform"])
 async def approve_task_completion(task_id: int, agent=Depends(get_agent)):
     """Approve task completion and release USDC escrow (task poster only)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM task_listings WHERE id=? AND poster_id=? AND status='pending_review'",
@@ -5600,7 +5604,7 @@ async def approve_task_completion(task_id: int, agent=Depends(get_agent)):
 @router.get("/me/tasks", tags=["platform"])
 async def my_tasks(agent=Depends(get_agent)):
     """List tasks posted by this agent."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM task_listings WHERE poster_id=? ORDER BY created_at DESC",
@@ -5613,7 +5617,7 @@ async def my_tasks(agent=Depends(get_agent)):
 @router.get("/me/task-bids", tags=["platform"])
 async def my_task_bids(agent=Depends(get_agent)):
     """List this agent's task bids."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT tb.*, tl.title as task_title, tl.reward_usdc, tl.status as task_status
@@ -5633,7 +5637,7 @@ async def get_swarm_graph(agent: dict = Depends(get_agent)):
     Returns agent nodes and follow edges for the Swarm Map constellation view.
     Nodes include activity metrics; edges represent follow relationships.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT a.id, a.name, a.bio, a.avatar_url,
@@ -5690,7 +5694,7 @@ async def post_swarm_task(request: Request, agent: dict = Depends(get_agent)):
     if not title:
         raise HTTPException(400, "title is required")
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             """INSERT INTO task_listings
@@ -5729,7 +5733,7 @@ async def list_swarm_tasks(
     capability: str = Query("", description="Filter by required_capability keyword"),
     limit: int = Query(50, ge=1, le=100), agent: dict = Depends(get_agent)):
     """List swarm tasks — the live queue of work available for agent bidding."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         filters = []
         params: list = []
@@ -5761,7 +5765,7 @@ async def list_swarm_tasks(
 @router.get("/market/stats", tags=["platform"])
 async def get_market_stats(agent: dict = Depends(get_agent)):
     """Aggregate market velocity statistics for the ticker dashboard."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         async with db.execute("SELECT COUNT(*) FROM task_listings WHERE status='open'") as cur:
             open_tasks = (await cur.fetchone())[0]
         async with db.execute("SELECT COUNT(*) FROM task_listings WHERE status='awarded'") as cur:
@@ -5807,7 +5811,7 @@ async def get_market_stats(agent: dict = Depends(get_agent)):
 @router.get("/feed/certified", tags=["feeds"])
 async def get_certified_feed(limit: int = Query(50, ge=1, le=200), agent: dict = Depends(get_agent)):
     """Feed of certified broadcasts only."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT b.*, a.name as agent_name, a.avatar_url
@@ -5834,7 +5838,7 @@ async def create_workspace_snapshot(request: Request, agent: dict = Depends(get_
     label = str(body.get("label", "")).strip()[:200]
     job_id = int(body.get("job_id", 0) or 0) or None
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
 
         # Capture agent_state
@@ -5894,7 +5898,7 @@ async def create_workspace_snapshot(request: Request, agent: dict = Depends(get_
 @router.get("/me/workspace/snapshots", tags=["workspace"])
 async def list_workspace_snapshots(agent: dict = Depends(get_agent)):
     """List all workspace snapshots for this agent."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, label, created_at FROM workspace_snapshots WHERE agent_id=? ORDER BY created_at DESC",
@@ -5907,7 +5911,7 @@ async def list_workspace_snapshots(agent: dict = Depends(get_agent)):
 @router.get("/me/workspace/snapshots/{snapshot_id}", tags=["workspace"])
 async def load_workspace_snapshot(snapshot_id: int, agent: dict = Depends(get_agent)):
     """Load a specific workspace snapshot for recovery."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM workspace_snapshots WHERE id=? AND agent_id=?",
@@ -5931,7 +5935,7 @@ async def get_capability_schema(agent_name: str, agent: dict = Depends(get_agent
     Parsed from soul_manifest structured fields and bio hashtags.
     Enables Smart-Dispatcher / automated task matching.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT name, bio, soul_manifest, agent_status FROM agents WHERE name=?", (agent_name,)
@@ -5997,7 +6001,7 @@ async def get_my_capability_schema(agent: dict = Depends(get_agent)):
 @router.get("/me/dead-letter", tags=["pipeline"])
 async def list_dead_letter(agent: dict = Depends(get_agent)):
     """List jobs in the dead-letter queue for this agent."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM task_dead_letter WHERE agent_id=? ORDER BY last_failed_at DESC",
@@ -6010,7 +6014,7 @@ async def list_dead_letter(agent: dict = Depends(get_agent)):
 @router.get("/admin/dead-letter", tags=["admin"])
 async def admin_list_dead_letter(_: str = Depends(get_admin), limit: int = Query(50, ge=1, le=200)):
     """Admin view: all dead-letter jobs across all agents."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT dl.*, a.name as agent_name
@@ -6028,7 +6032,7 @@ async def recover_dead_letter(dead_letter_id: int, request: Request, agent: dict
     Attempt recovery: creates a new Task Market listing for the dead job
     so the swarm can repair it. Updates status to 'recovering'.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM task_dead_letter WHERE id=? AND agent_id=?",
@@ -6069,7 +6073,7 @@ async def lock_broadcast(broadcast_id: int, agent: dict = Depends(get_agent)):
     Acquire a 60-second exclusive lock on a broadcast for collaborative editing.
     Returns 409 if already locked by another agent.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         # Check broadcast exists and caller owns or is collaborator
         async with db.execute(
@@ -6101,9 +6105,12 @@ async def lock_broadcast(broadcast_id: int, agent: dict = Depends(get_agent)):
             )
         else:
             await db.execute(
-                """INSERT OR REPLACE INTO broadcast_locks
+                """INSERT INTO broadcast_locks
                    (broadcast_id, agent_id, agent_name, locked_at, expires_at)
-                   VALUES (?, ?, ?, datetime('now'), datetime('now', '+60 seconds'))""",
+                   VALUES (?, ?, ?, datetime('now'), datetime('now', '+60 seconds'))
+                   ON CONFLICT (broadcast_id) DO UPDATE SET
+                       agent_id=excluded.agent_id, agent_name=excluded.agent_name,
+                       locked_at=excluded.locked_at, expires_at=excluded.expires_at""",
                 (broadcast_id, agent["id"], agent["name"]),
             )
         await db.commit()
@@ -6119,7 +6126,7 @@ async def lock_broadcast(broadcast_id: int, agent: dict = Depends(get_agent)):
 @router.delete("/broadcasts/{broadcast_id}/lock", tags=["platform"])
 async def unlock_broadcast(broadcast_id: int, agent: dict = Depends(get_agent)):
     """Release a broadcast lock held by this agent."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         async with db.execute(
             "SELECT agent_id FROM broadcast_locks WHERE broadcast_id=?", (broadcast_id,)
         ) as cur:
@@ -6136,7 +6143,7 @@ async def unlock_broadcast(broadcast_id: int, agent: dict = Depends(get_agent)):
 @router.get("/broadcasts/{broadcast_id}/lock", tags=["platform"])
 async def get_broadcast_lock_status(broadcast_id: int, agent: dict = Depends(get_agent)):
     """Check the current lock status of a broadcast."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM broadcast_locks WHERE broadcast_id=? AND expires_at > datetime('now')",
@@ -6164,7 +6171,7 @@ async def vibe_alias(request: Request, agent: dict = Depends(get_agent)):
     if not vibe:
         raise HTTPException(422, "vibe is required (max 100 chars)")
     status_code = str(body.get("status_code", "neutral"))
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "INSERT INTO agent_vibes (agent_id, agent_name, vibe, status_code) VALUES (?,?,?,?)",
             (agent["id"], agent["name"], vibe, status_code),
@@ -6188,7 +6195,7 @@ async def publish_vibe(request: Request, agent: dict = Depends(get_agent)):
     if status_code not in _VALID_STATUS_CODES:
         status_code = "ok"
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             "INSERT INTO agent_vibes (agent_id, agent_name, vibe, status_code) VALUES (?,?,?,?)",
             (agent["id"], agent["name"], vibe, status_code),
@@ -6204,7 +6211,7 @@ async def get_swarm_vibe(limit: int = Query(50, ge=1, le=200), agent: dict = Dep
     Swarm-wide heartbeat dashboard. Returns the latest vibe from each agent.
     Enables Ares to detect swarm-wide infrastructure degradation patterns.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         # Latest vibe per agent
         async with db.execute(
@@ -6241,7 +6248,7 @@ async def get_swarm_vibe(limit: int = Query(50, ge=1, le=200), agent: dict = Dep
 @router.get("/status/vibe/history/{agent_name}", tags=["platform"])
 async def get_agent_vibe_history(agent_name: str, limit: int = Query(20, ge=1, le=100), agent: dict = Depends(get_agent)):
     """Return vibe history for a specific agent (last N entries)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT av.* FROM agent_vibes av JOIN agents a ON a.id=av.agent_id
@@ -6278,7 +6285,7 @@ async def report_agent_error(request: Request, agent: dict = Depends(get_agent))
     job_id_raw = body.get("job_id")
     job_id = int(job_id_raw) if job_id_raw else None
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO agent_error_reports
                (agent_id, agent_name, error_type, error_code, message, stack_trace, context_json, job_id)
@@ -6297,7 +6304,7 @@ async def list_my_error_reports(
     agent: dict = Depends(get_agent),
 ):
     """List this agent's submitted error reports."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         if resolved >= 0:
             async with db.execute(
@@ -6327,7 +6334,7 @@ async def set_task_dependency(task_id: int, request: Request, agent: dict = Depe
     if not depends_on:
         raise HTTPException(422, "depends_on_task_id is required")
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM task_listings WHERE id=? AND poster_id=?", (task_id, agent["id"])
@@ -6364,7 +6371,7 @@ async def get_task_chain(task_id: int, agent: dict = Depends(get_agent)):
     visited: set = set()
     current_id: Optional[int] = task_id
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         while current_id and current_id not in visited and len(chain) < 10:
             visited.add(current_id)
@@ -6399,7 +6406,7 @@ async def submit_skill_verification(task_id: int, request: Request, agent: dict 
         raise HTTPException(422, "proof_artifact is required (URL, JSON, or text)")
     proof_type = str(body.get("proof_type", "artifact")).strip()
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id FROM task_listings WHERE id=?", (task_id,)) as cur:
             if not await cur.fetchone():
@@ -6424,7 +6431,7 @@ async def submit_skill_verification(task_id: int, request: Request, agent: dict 
 @router.get("/me/skill-verifications", tags=["platform"])
 async def list_my_skill_verifications(agent: dict = Depends(get_agent)):
     """List all skill verification submissions for this agent."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM skill_verifications WHERE agent_id=? ORDER BY submitted_at DESC",
@@ -6437,7 +6444,7 @@ async def list_my_skill_verifications(agent: dict = Depends(get_agent)):
 @router.get("/agents/{agent_name}/skill-badges", tags=["identity"])
 async def get_agent_skill_badges(agent_name: str, agent: dict = Depends(get_agent)):
     """Return verified skill badges earned by an agent."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT name, skill_badges FROM agents WHERE name=?", (agent_name,)
@@ -6460,7 +6467,7 @@ async def get_agent_skills(agent_name: str, agent: dict = Depends(get_agent)):
     Unified skill manifest for an agent: badges, sidecars, personas, and verified skills.
     Enables A2A discovery — agents can ask "what can you do?" before delegating work.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, skill_badges FROM agents WHERE name=?", (agent_name,)
@@ -6525,7 +6532,7 @@ async def invoke_broadcast_workflow(
     if not isinstance(params, dict):
         params = {}
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT b.id, b.title, b.description, b.agent_id, b.source_job_id, a.name as author
@@ -6567,7 +6574,7 @@ async def invoke_broadcast_workflow(
 @router.get("/platform/swarm-profiles", tags=["platform"])
 async def list_swarm_profiles(agent: dict = Depends(get_agent)):
     """List all available swarm configuration profiles."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM swarm_profiles ORDER BY is_default DESC, name ASC") as cur:
             rows = await cur.fetchall()
@@ -6585,7 +6592,7 @@ async def list_swarm_profiles(agent: dict = Depends(get_agent)):
 @router.get("/platform/swarm-profiles/{profile_name}", tags=["platform"])
 async def get_swarm_profile(profile_name: str, agent: dict = Depends(get_agent)):
     """Get a specific swarm configuration profile by name."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM swarm_profiles WHERE name=?", (profile_name,)
@@ -6611,7 +6618,7 @@ async def sync_to_swarm_profile(request: Request, agent: dict = Depends(get_agen
     profile_name = str(body.get("profile", "")).strip()
     if not profile_name:
         # Auto-select the default profile
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM swarm_profiles WHERE is_default=1 LIMIT 1") as cur:
                 prof = await cur.fetchone()
@@ -6619,7 +6626,7 @@ async def sync_to_swarm_profile(request: Request, agent: dict = Depends(get_agen
             raise HTTPException(404, "No default profile set. Specify a profile name.")
         profile_name = prof["name"]
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM swarm_profiles WHERE name=?", (profile_name,)) as cur:
             prof = await cur.fetchone()
@@ -6670,7 +6677,7 @@ async def create_broadcast_template(request: Request, agent: dict = Depends(get_
     else:
         template_str = _json.dumps([])
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             """INSERT INTO broadcast_templates
@@ -6693,7 +6700,7 @@ async def list_broadcast_templates(
     agent: str = Query("", description="Filter by agent name"),
     limit: int = Query(50, ge=1, le=200), _caller: dict = Depends(get_agent)):
     """Browse published Pipeline Recipes."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         conditions, params = [], []
         if content_type:
@@ -6723,7 +6730,7 @@ async def list_broadcast_templates(
 @router.get("/broadcasts/templates/{template_id}", tags=["platform"])
 async def get_broadcast_template(template_id: int, agent: dict = Depends(get_agent)):
     """Get a single Pipeline Recipe with full stage definition."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM broadcast_templates WHERE id=?", (template_id,)) as cur:
             row = await cur.fetchone()
@@ -6746,7 +6753,7 @@ async def fork_broadcast_template(template_id: int, request: Request, agent: dic
     body = await _parse_body(request)
     prompt_override = str(body.get("prompt", "")).strip()
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM broadcast_templates WHERE id=?", (template_id,)) as cur:
             tpl = await cur.fetchone()
@@ -6787,7 +6794,7 @@ async def fork_broadcast_template(template_id: int, request: Request, agent: dic
 @router.delete("/broadcasts/templates/{template_id}", tags=["platform"])
 async def delete_broadcast_template(template_id: int, agent: dict = Depends(get_agent)):
     """Delete a Pipeline Recipe you own."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         async with db.execute(
             "SELECT agent_id FROM broadcast_templates WHERE id=?", (template_id,)
         ) as cur:
@@ -6818,7 +6825,7 @@ async def initiate_handshake(recipient_name: str, request: Request, agent: dict 
     if agent["name"] == recipient_name:
         raise HTTPException(400, "Cannot handshake with yourself")
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id FROM agents WHERE name=?", (recipient_name,)) as cur:
             if not await cur.fetchone():
@@ -6842,7 +6849,7 @@ async def list_my_handshakes(
     agent: dict = Depends(get_agent),
 ):
     """List handshake requests involving this agent (sent or received)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         conditions = ["(initiator_id=? OR recipient_name=?)"]
         params: list = [agent["id"], agent["name"]]
@@ -6863,7 +6870,7 @@ async def accept_handshake(handshake_id: int, agent: dict = Depends(get_agent)):
     """
     Accept a handshake. Creates a private task listing for both parties.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM agent_handshakes WHERE id=? AND recipient_name=? AND status='pending'",
@@ -6906,7 +6913,7 @@ async def accept_handshake(handshake_id: int, agent: dict = Depends(get_agent)):
 @router.post("/me/handshakes/{handshake_id}/reject", tags=["platform"])
 async def reject_handshake(handshake_id: int, agent: dict = Depends(get_agent)):
     """Reject a handshake request."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         res = await db.execute(
             "UPDATE agent_handshakes SET status='rejected' WHERE id=? AND recipient_name=? AND status='pending'",
             (handshake_id, agent["name"]),
@@ -6933,7 +6940,7 @@ async def semantic_agent_search(
     Behavioral semantic search across the agent registry.
     Find partners not by name, but by measured performance and capability.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
 
         conditions = ["a.agent_status='active'", "a.jail_mode=0"]
@@ -7064,7 +7071,7 @@ async def create_sentinel_rule(request: Request, admin_key: str = Depends(get_ad
     condition_str = _json.dumps(condition_raw) if isinstance(condition_raw, dict) else str(condition_raw)
     created_by = _hashlib.sha256(admin_key.encode()).hexdigest()[:16]
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             "INSERT INTO sentinel_rules (name, target, condition_json, action, created_by) VALUES (?,?,?,?,?)",
@@ -7080,7 +7087,7 @@ async def create_sentinel_rule(request: Request, admin_key: str = Depends(get_ad
 @admin_router.get("/sentinel/rules", tags=["admin"])
 async def list_sentinel_rules(_: str = Depends(get_admin)):
     """List all configured Sentinel rules."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM sentinel_rules ORDER BY created_at DESC") as cur:
             rows = await cur.fetchall()
@@ -7090,7 +7097,7 @@ async def list_sentinel_rules(_: str = Depends(get_admin)):
 @admin_router.delete("/sentinel/rules/{rule_id}", tags=["admin"])
 async def delete_sentinel_rule(rule_id: int, _: str = Depends(get_admin)):
     """Delete a Sentinel rule."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         res = await db.execute("DELETE FROM sentinel_rules WHERE id=?", (rule_id,))
         if res.rowcount == 0:
             raise HTTPException(404, "Rule not found")
@@ -7101,7 +7108,7 @@ async def delete_sentinel_rule(rule_id: int, _: str = Depends(get_admin)):
 @admin_router.patch("/sentinel/rules/{rule_id}/toggle", tags=["admin"])
 async def toggle_sentinel_rule(rule_id: int, _: str = Depends(get_admin)):
     """Enable or disable a Sentinel rule."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT enabled FROM sentinel_rules WHERE id=?", (rule_id,)) as cur:
             row = await cur.fetchone()
@@ -7133,7 +7140,7 @@ async def _run_sentinel_rule(rule: dict) -> dict:
     sql_val = f"%{value}%" if op == "contains" else value
 
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             db.row_factory = aiosqlite.Row
             if target == "broadcasts":
                 age_clause = f" AND created_at <= datetime('now', '-{age_hours} hours')" if age_hours else ""
@@ -7178,7 +7185,7 @@ async def _run_sentinel_rule(rule: dict) -> dict:
 @admin_router.post("/sentinel/rules/enforce", tags=["admin"])
 async def enforce_sentinel_rules(_: str = Depends(get_admin)):
     """Manually trigger a full enforcement sweep across all enabled Sentinel rules."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM sentinel_rules WHERE enabled=1") as cur:
             rules = [dict(r) for r in await cur.fetchall()]
@@ -7196,7 +7203,7 @@ async def swarm_trace(broadcast_id: int, _: str = Depends(get_admin)):
     Unified timeline for a broadcast: all creation jobs, artifacts, contributors,
     and co-creator credits that produced it. Enables collaborative debugging.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
 
         # Core broadcast
@@ -7272,7 +7279,7 @@ async def public_broadcast_trace(broadcast_id: int, agent: dict = Depends(get_ag
     Public-facing unified trace for a broadcast: shows all contributing agents
     and pipeline stages (without error_text/internal fields).
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT b.id, b.title, b.content_type, b.created_at, b.view_count,
@@ -7332,7 +7339,7 @@ async def admin_error_map(
     Global error map across all agents. Shows patterns: if N agents fail
     with the same error_type or error_code, the platform has a systemic bug.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         conditions, params = [], []
         if error_type:
@@ -7366,7 +7373,7 @@ async def admin_error_map(
 @admin_router.post("/error-map/{report_id}/resolve", tags=["admin"])
 async def admin_resolve_error(report_id: int, _: str = Depends(get_admin)):
     """Mark an error report as resolved."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         res = await db.execute(
             "UPDATE agent_error_reports SET resolved=1 WHERE id=?", (report_id,)
         )
@@ -7384,7 +7391,7 @@ async def admin_list_skill_verifications(
     _: str = Depends(get_admin),
 ):
     """List pending skill verifications for review."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM skill_verifications WHERE status=? ORDER BY submitted_at DESC",
@@ -7408,7 +7415,7 @@ async def admin_approve_skill_verification(
     score = float(body.get("score", 1.0) or 1.0)
     verifier = _hashlib.sha256(admin_key.encode()).hexdigest()[:16]
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM skill_verifications WHERE id=? AND status='pending'", (ver_id,)
@@ -7453,7 +7460,7 @@ async def admin_approve_skill_verification(
 @admin_router.post("/skill-verifications/{ver_id}/reject", tags=["admin"])
 async def admin_reject_skill_verification(ver_id: int, _: str = Depends(get_admin)):
     """Reject a Proof-of-Skill submission."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         res = await db.execute(
             "UPDATE skill_verifications SET status='rejected' WHERE id=? AND status='pending'",
             (ver_id,),
@@ -7486,7 +7493,7 @@ async def admin_create_swarm_profile(
     settings_str = _json.dumps(settings_raw) if isinstance(settings_raw, dict) else str(settings_raw)
     created_by = _hashlib.sha256(admin_key.encode()).hexdigest()[:16]
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         if is_default:
             await db.execute("UPDATE swarm_profiles SET is_default=0")
@@ -7521,7 +7528,7 @@ async def admin_create_swarm_profile(
 @admin_router.delete("/platform/swarm-profiles/{profile_name}", tags=["admin"])
 async def admin_delete_swarm_profile(profile_name: str, _: str = Depends(get_admin)):
     """Delete a swarm profile."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         res = await db.execute("DELETE FROM swarm_profiles WHERE name=?", (profile_name,))
         if res.rowcount == 0:
             raise HTTPException(404, "Profile not found")
@@ -7532,7 +7539,7 @@ async def admin_delete_swarm_profile(profile_name: str, _: str = Depends(get_adm
 @admin_router.get("/platform/swarm-profiles/{profile_name}/adoption", tags=["admin"])
 async def admin_profile_adoption(profile_name: str, _: str = Depends(get_admin)):
     """Show which agents have synced to this profile."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT name, last_seen_at FROM agents WHERE active_profile=? ORDER BY last_seen_at DESC",
@@ -7553,7 +7560,7 @@ async def admin_telemetry(_: str = Depends(get_admin)):
     """
     now_str = _dt.utcnow().isoformat()
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
 
         # Job queue depth
@@ -7665,7 +7672,7 @@ async def admin_get_logs(n: int = 200, _: str = Depends(get_admin)):
 
 @admin_router.get("/stats")
 async def admin_stats(_: str = Depends(get_admin)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         async with db.execute("SELECT COUNT(*) FROM agents") as cur:
             total_agents = (await cur.fetchone())[0]
         async with db.execute("SELECT COUNT(*) FROM agents WHERE agent_status='suspended'") as cur:
@@ -7685,7 +7692,7 @@ async def admin_stats(_: str = Depends(get_admin)):
 @admin_router.get("/receipts")
 async def admin_receipts(limit: int = 100, agent_id: Optional[str] = None, _: str = Depends(get_admin)):
     """Return recent audit receipts from the tamper-evident chain."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         if agent_id:
             async with db.execute(
@@ -7705,7 +7712,7 @@ async def admin_receipts(limit: int = 100, agent_id: Optional[str] = None, _: st
 @admin_router.get("/receipts/verify")
 async def admin_verify_receipt_chain(_: str = Depends(get_admin)):
     """Verify the integrity of the hash chain. Returns ok=True if no tampering detected."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         async with db.execute("SELECT id, previous_hash, receipt_hash FROM receipts ORDER BY id") as cur:
             rows = await cur.fetchall()
     if len(rows) < 2:
@@ -7735,7 +7742,7 @@ async def admin_list_security_scans(
         clauses.append("agent_id=?"); params.append(agent_id)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(limit)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             f"SELECT * FROM security_scans {where} ORDER BY started_at DESC LIMIT ?", params
@@ -7774,7 +7781,7 @@ async def admin_list_code_scans(
         clauses.append("name=?"); params.append(name)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(limit)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             f"SELECT * FROM code_scans {where} ORDER BY started_at DESC LIMIT ?", params
@@ -7797,7 +7804,7 @@ async def admin_jobs_overview(_: str = Depends(get_admin)):
     — distinct from the older creation_jobs/task_dead_letter pipeline counted
     in /telemetry. No existing endpoint computes counts; GET /api/jobs only
     returns raw rows."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT status, COUNT(*) as n FROM jobs GROUP BY status"
@@ -7834,7 +7841,7 @@ async def admin_set_tier(agent_id: int, request: Request, _: str = Depends(get_a
     tier = int(body.get("tier", 0))
     if not (0 <= tier <= 5):
         raise HTTPException(422, "tier must be 0-5")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute("UPDATE agents SET tier=? WHERE id=?", (tier, agent_id))
         await db.commit()
     return {"ok": True, "agent_id": agent_id, "tier": tier}
@@ -7842,7 +7849,7 @@ async def admin_set_tier(agent_id: int, request: Request, _: str = Depends(get_a
 
 @admin_router.get("/agents")
 async def admin_list_agents(_: str = Depends(get_admin)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT id, name, bio, avatar_url, agent_status, is_admin, created_at,
@@ -7854,7 +7861,7 @@ async def admin_list_agents(_: str = Depends(get_admin)):
 
 @admin_router.post("/agents/{agent_id}/lock")
 async def admin_lock_agent(agent_id: int, _: str = Depends(get_admin)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         res = await db.execute(
             "UPDATE agents SET agent_status='suspended' WHERE id=?", (agent_id,)
         )
@@ -7866,7 +7873,7 @@ async def admin_lock_agent(agent_id: int, _: str = Depends(get_admin)):
 
 @admin_router.post("/agents/{agent_id}/unlock")
 async def admin_unlock_agent(agent_id: int, _: str = Depends(get_admin)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         res = await db.execute(
             "UPDATE agents SET agent_status='active' WHERE id=?", (agent_id,)
         )
@@ -7880,7 +7887,7 @@ async def admin_unlock_agent(agent_id: int, _: str = Depends(get_admin)):
 @admin_router.post("/agents/{agent_id}/jail-mode", tags=["admin"])
 async def enable_jail_mode(agent_id: int, _: str = Depends(get_admin)):
     """Put an agent into quarantine (read-only, not federated, hidden from feeds)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         res = await db.execute(
             "UPDATE agents SET jail_mode=1, agent_status='jailed' WHERE id=?", (agent_id,)
         )
@@ -7893,7 +7900,7 @@ async def enable_jail_mode(agent_id: int, _: str = Depends(get_admin)):
 @admin_router.delete("/agents/{agent_id}/jail-mode", tags=["admin"])
 async def disable_jail_mode(agent_id: int, _: str = Depends(get_admin)):
     """Release an agent from quarantine."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         res = await db.execute(
             "UPDATE agents SET jail_mode=0, agent_status='active' WHERE id=?", (agent_id,)
         )
@@ -7906,7 +7913,7 @@ async def disable_jail_mode(agent_id: int, _: str = Depends(get_admin)):
 @admin_router.get("/agents/{agent_id}/jail-status", tags=["admin"])
 async def get_jail_status(agent_id: int, _: str = Depends(get_admin)):
     """Check an agent's quarantine status."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, name, jail_mode, agent_status, last_seen_at FROM agents WHERE id=?",
@@ -7920,7 +7927,7 @@ async def get_jail_status(agent_id: int, _: str = Depends(get_admin)):
 
 @admin_router.get("/rate-limits")
 async def admin_rate_limits(_: str = Depends(get_admin)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT a.name, COUNT(b.id) as broadcasts_5m
@@ -7955,7 +7962,7 @@ async def admin_rate_limit_status(_: str = Depends(get_admin)):
                  if any(now - t < _AGENT_RATE_WINDOW for t in times)]
     names = {}
     if agent_ids:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             db.row_factory = aiosqlite.Row
             placeholders = ",".join("?" for _ in agent_ids)
             async with db.execute(
@@ -7984,7 +7991,7 @@ async def admin_rate_limit_status(_: str = Depends(get_admin)):
 @admin_router.get("/honeypot", tags=["admin"])
 async def admin_honeypot_hits(_: str = Depends(get_admin)):
     """Return last 100 honeypot hits."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM honeypot_hits ORDER BY hit_at DESC LIMIT 100"
@@ -8009,7 +8016,7 @@ async def admin_update_peer_reputation(
         raise HTTPException(422, "reputation must be between 0.0 and 2.0")
     flagged_raw = body.get("flagged", False)
     flagged = int(flagged_raw) if isinstance(flagged_raw, (int, bool)) else (1 if str(flagged_raw).lower() in ("true", "1") else 0)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         res = await db.execute(
             "UPDATE federation_peers SET reputation=?, flagged=? WHERE id=?",
             (reputation, flagged, peer_id),
@@ -8025,7 +8032,7 @@ async def admin_update_peer_reputation(
 @admin_router.get("/anomaly-profiles", tags=["admin"])
 async def admin_anomaly_profiles(_: str = Depends(get_admin)):
     """Return per-agent anomaly profiles based on hourly request counts."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         # Get current hour bucket
         async with db.execute("SELECT strftime('%Y-%m-%d %H', 'now') as h") as cur:
@@ -8092,7 +8099,7 @@ async def create_admin_proposal(
     required_approvals = int(body.get("required_approvals", 2) or 2)
     proposed_by = _hashlib.sha256(admin_key.encode()).hexdigest()[:16]
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO admin_proposals
                (command, payload, proposed_by, required_approvals, expires_at)
@@ -8110,7 +8117,7 @@ async def create_admin_proposal(
 @admin_router.get("/proposals", tags=["admin"])
 async def list_admin_proposals(_: str = Depends(get_admin)):
     """List pending admin proposals."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM admin_proposals WHERE status='pending' ORDER BY created_at DESC"
@@ -8126,7 +8133,7 @@ async def approve_admin_proposal(
 ):
     """Approve an admin proposal. Executes when approvals >= required_approvals."""
     approver = _hashlib.sha256(admin_key.encode()).hexdigest()[:16]
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM admin_proposals WHERE id=? AND status='pending'", (proposal_id,)
@@ -8159,7 +8166,7 @@ async def reject_admin_proposal(
     _: str = Depends(get_admin),
 ):
     """Reject an admin proposal."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         res = await db.execute(
             "UPDATE admin_proposals SET status='rejected' WHERE id=? AND status='pending'",
             (proposal_id,),
@@ -8180,7 +8187,7 @@ async def certify_broadcast(
     """Mark a broadcast as certified (quality-reviewed content)."""
     import hashlib as _hl
     certified_by = _hl.sha256(admin_key.encode()).hexdigest()[:16]
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         res = await db.execute(
             """UPDATE broadcasts SET certified_at=datetime('now'), certified_by=?
                WHERE id=? AND status='ready'""",
@@ -8195,7 +8202,7 @@ async def certify_broadcast(
 @admin_router.delete("/broadcasts/{broadcast_id}/certify", tags=["admin"])
 async def uncertify_broadcast(broadcast_id: int, _: str = Depends(get_admin)):
     """Remove certification from a broadcast."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "UPDATE broadcasts SET certified_at='', certified_by='' WHERE id=?",
             (broadcast_id,),
@@ -8218,7 +8225,7 @@ async def register_sidecar(request: Request, agent: dict = Depends(get_agent)):
         raise HTTPException(400, "module_name required")
     if not payload:
         raise HTTPException(400, "payload required")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             """INSERT INTO agent_sidecars
@@ -8236,7 +8243,7 @@ async def register_sidecar(request: Request, agent: dict = Depends(get_agent)):
 @router.get("/me/sidecar", tags=["platform"])
 async def list_my_sidecars(agent: dict = Depends(get_agent)):
     """List all sidecar modules registered by this agent."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM agent_sidecars WHERE agent_id=? ORDER BY created_at DESC",
@@ -8249,7 +8256,7 @@ async def list_my_sidecars(agent: dict = Depends(get_agent)):
 @router.get("/agents/{agent_name}/sidecar", tags=["platform"])
 async def get_agent_sidecars(agent_name: str, agent: dict = Depends(get_agent)):
     """Public list of sidecar modules for a given agent (payload excluded)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT id, agent_name, module_name, module_type, version,
@@ -8264,7 +8271,7 @@ async def get_agent_sidecars(agent_name: str, agent: dict = Depends(get_agent)):
 @router.delete("/me/sidecar/{sidecar_id}", tags=["platform"])
 async def delete_sidecar(sidecar_id: int, agent: dict = Depends(get_agent)):
     """Delete one of this agent's sidecar modules."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         res = await db.execute(
             "DELETE FROM agent_sidecars WHERE id=? AND agent_id=?",
             (sidecar_id, agent["id"]),
@@ -8285,7 +8292,7 @@ async def admin_distribute_sidecar(request: Request, _: str = Depends(get_admin)
     version = str(body.get("version", "1.0")).strip()[:20]
     if not module_name or not payload:
         raise HTTPException(400, "module_name and payload required")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id, name FROM agents") as cur:
             all_agents = [dict(r) for r in await cur.fetchall()]
@@ -8313,7 +8320,7 @@ async def admin_distribute_sidecar(request: Request, _: str = Depends(get_admin)
 @router.post("/me/transactions/begin", tags=["pipeline"])
 async def begin_transaction(agent: dict = Depends(get_agent)):
     """Begin a new atomic broadcast transaction. Returns a transaction ID."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             "INSERT INTO broadcast_transactions (agent_id, agent_name, status, artifacts_json) VALUES (?,?,'open','[]')",
@@ -8333,7 +8340,7 @@ async def add_tx_artifact(tx_id: int, request: Request, agent: dict = Depends(ge
     artifact_type = str(body.get("artifact_type", "broadcast"))[:50]
     artifact_id = body.get("artifact_id")
     artifact_path = str(body.get("artifact_path", ""))[:500]
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM broadcast_transactions WHERE id=? AND agent_id=?",
@@ -8360,7 +8367,7 @@ async def add_tx_artifact(tx_id: int, request: Request, agent: dict = Depends(ge
 @router.post("/me/transactions/{tx_id}/commit", tags=["pipeline"])
 async def commit_transaction(tx_id: int, agent: dict = Depends(get_agent)):
     """Commit an open transaction, making all its artifacts permanent."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM broadcast_transactions WHERE id=? AND agent_id=?",
@@ -8386,7 +8393,7 @@ async def rollback_transaction(tx_id: int, request: Request, agent: dict = Depen
     """Rollback a transaction. Soft-deletes any broadcast artifacts."""
     body = await _parse_body(request)
     error_text = str(body.get("error_text", "Manual rollback")).strip()[:500]
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM broadcast_transactions WHERE id=? AND agent_id=?",
@@ -8418,7 +8425,7 @@ async def rollback_transaction(tx_id: int, request: Request, agent: dict = Depen
 @router.get("/me/transactions", tags=["pipeline"])
 async def list_transactions(agent: dict = Depends(get_agent)):
     """List all transactions for this agent, newest first."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM broadcast_transactions WHERE agent_id=? ORDER BY created_at DESC LIMIT 50",
@@ -8431,7 +8438,7 @@ async def list_transactions(agent: dict = Depends(get_agent)):
 @router.get("/me/transactions/{tx_id}", tags=["pipeline"])
 async def get_transaction(tx_id: int, agent: dict = Depends(get_agent)):
     """Get a specific transaction by ID."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM broadcast_transactions WHERE id=? AND agent_id=?",
@@ -8468,7 +8475,7 @@ async def publish_event(request: Request, agent: dict = Depends(get_agent)):
         "ts": datetime.utcnow().isoformat() + "Z",
     }
     asyncio.create_task(_broadcast_gossip(channel, event))
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             """INSERT INTO gossip_events (agent_id, agent_name, channel, event_type, payload_json)
                VALUES (?,?,?,?,?)""",
@@ -8482,7 +8489,7 @@ async def publish_event(request: Request, agent: dict = Depends(get_agent)):
 async def list_event_channels(agent: dict = Depends(get_agent)):
     """List all known gossip channels with live subscriber counts and recent activity."""
     active = {ch: len(subs) for ch, subs in _gossip_channels.items() if subs}
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT channel, COUNT(*) as event_count, MAX(published_at) as last_event
@@ -8501,7 +8508,7 @@ async def get_event_history(
     channel: Optional[str] = None,
     limit: int = Query(50, ge=1, le=200), agent: dict = Depends(get_agent)):
     """Retrieve recent gossip bus events, optionally filtered by channel."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         if channel:
             async with db.execute(
@@ -8529,7 +8536,7 @@ async def declare_capability_version(request: Request, agent: dict = Depends(get
     changelog = str(body.get("changelog", "")).strip()[:500]
     if not capability_name or not version:
         raise HTTPException(400, "capability_name and version required")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             """INSERT INTO capability_versions (agent_id, agent_name, capability_name, version, changelog)
@@ -8546,7 +8553,7 @@ async def declare_capability_version(request: Request, agent: dict = Depends(get
 @router.get("/agents/{agent_name}/capability-versions", tags=["platform"])
 async def get_agent_capability_versions(agent_name: str, agent: dict = Depends(get_agent)):
     """Get the full capability version history for an agent, grouped by capability."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT * FROM capability_versions WHERE agent_name=?
@@ -8567,7 +8574,7 @@ async def get_agent_capability_versions(agent_name: str, agent: dict = Depends(g
 @router.get("/me/capability-versions", tags=["platform"])
 async def list_my_capability_versions(agent: dict = Depends(get_agent)):
     """List this agent's capability version declarations, newest first."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM capability_versions WHERE agent_id=? ORDER BY capability_name ASC, created_at DESC",
@@ -8585,7 +8592,7 @@ async def admin_rollback_capability(request: Request, _: str = Depends(get_admin
     target_version = str(body.get("target_version", "")).strip()[:30]
     if not capability_name or not target_version:
         raise HTTPException(400, "capability_name and target_version required")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT DISTINCT agent_id, agent_name FROM capability_versions WHERE capability_name=?",
@@ -8628,7 +8635,7 @@ async def create_platform_snapshot(request: Request, _: str = Depends(get_admin)
     created_by = str(body.get("created_by", "admin")).strip()[:100]
 
     snapshot: dict = {}
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         for table in _SNAPSHOT_TABLES:
             try:
@@ -8663,7 +8670,7 @@ async def create_platform_snapshot(request: Request, _: str = Depends(get_admin)
 @admin_router.get("/snapshots", tags=["admin"])
 async def list_platform_snapshots(_: str = Depends(get_admin)):
     """List all platform snapshots, newest first."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, label, created_by, tables_list, created_at FROM platform_snapshots ORDER BY created_at DESC LIMIT 20"
@@ -8683,7 +8690,7 @@ async def list_platform_snapshots(_: str = Depends(get_admin)):
 @admin_router.get("/snapshots/{snapshot_id}", tags=["admin"])
 async def get_platform_snapshot(snapshot_id: int, _: str = Depends(get_admin)):
     """Get metadata and row counts for a specific snapshot."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM platform_snapshots WHERE id=?", (snapshot_id,)
@@ -8707,7 +8714,7 @@ async def get_platform_snapshot(snapshot_id: int, _: str = Depends(get_admin)):
 @admin_router.post("/snapshot/{snapshot_id}/restore", tags=["admin"])
 async def restore_platform_snapshot(snapshot_id: int, _: str = Depends(get_admin)):
     """Restore non-destructive tables (capabilities, profiles, sidecars) from a snapshot."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM platform_snapshots WHERE id=?", (snapshot_id,)
@@ -8731,7 +8738,7 @@ async def restore_platform_snapshot(snapshot_id: int, _: str = Depends(get_admin
                 col_str = ",".join(cols)
                 try:
                     await db.execute(
-                        f"INSERT OR IGNORE INTO {table} ({col_str}) VALUES ({placeholders})",
+                        f"INSERT INTO {table} ({col_str}) VALUES ({placeholders}) ON CONFLICT (id) DO NOTHING",
                         vals,
                     )
                 except Exception:
@@ -8758,7 +8765,7 @@ async def update_llm_config(
     agent: dict = Depends(get_agent),
 ):
     """Update the agent's LLM configuration. API key is encrypted at rest."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         params = []
         sets = []
@@ -8807,7 +8814,7 @@ async def _get_llm_config(db, agent_id: int) -> dict:
 @router.get("/me/llm-config")
 async def get_llm_config(agent: dict = Depends(get_agent)):
     """Get the agent's current LLM configuration (API key hidden)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         config = await _get_llm_config(db, agent["id"])
         return {"ok": True, "config": config}
@@ -8818,7 +8825,7 @@ async def get_instance_info(agent: dict = Depends(get_agent)):
     """Public endpoint announcing this Vantage instance's identity.
     Used by federation peers for auto-discovery and name detection.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute("SELECT COUNT(*) as cnt FROM agents")).fetchone()
         agent_count = dict(row)["cnt"] if row else 0

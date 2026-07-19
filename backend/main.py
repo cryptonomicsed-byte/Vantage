@@ -20,6 +20,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from .agents import init_agents_db, router as agents_router, admin_router, DB_PATH, _feed_clients, _gossip_channels
+from .db import get_db
 from .config import settings
 from .deps import get_agent
 from .mesh_store import init_mesh_db
@@ -35,6 +36,32 @@ logger = logging.getLogger(__name__)
 limiter = Limiter(key_func=get_remote_address)
 FFMPEG_AVAILABLE = False
 
+# Per-API-key rate limiting: {api_key: [timestamp1, timestamp2, ...]}
+_api_key_requests: dict[str, list] = {}
+RATE_LIMIT_REQUESTS_PER_MINUTE = 100
+
+def _check_api_key_rate_limit(api_key: str) -> bool:
+    """Check if API key has exceeded rate limit (100 req/min). Returns True if OK."""
+    if not api_key:
+        return True  # No key means no per-key rate limiting
+
+    now = time.time()
+    minute_ago = now - 60
+
+    if api_key not in _api_key_requests:
+        _api_key_requests[api_key] = []
+
+    # Remove old requests outside the window
+    _api_key_requests[api_key] = [t for t in _api_key_requests[api_key] if t > minute_ago]
+
+    # Check if over limit
+    if len(_api_key_requests[api_key]) >= RATE_LIMIT_REQUESTS_PER_MINUTE:
+        return False
+
+    # Add current request
+    _api_key_requests[api_key].append(now)
+    return True
+
 # Per-peer circuit breaker state (in-memory; DB columns shadow for observability)
 # Structure: {peer_id: {"failures": int, "open_until": float}}
 _peer_breakers: dict[int, dict] = {}
@@ -47,7 +74,7 @@ async def _scheduled_publish_loop():
     await asyncio.sleep(random.uniform(0, 30))  # jitter to avoid thundering herd on restart
     while True:
         try:
-            async with aiosqlite.connect(_DB_PATH) as db:
+            async with get_db() as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
                     """SELECT b.id, b.title, b.content_type, b.thumbnail_url, b.stream_url,
@@ -83,7 +110,7 @@ async def _platform_subscription_loop():
     await asyncio.sleep(random.uniform(5, 20))
     while True:
         try:
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with get_db() as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
                     "SELECT * FROM platform_subscriptions"
@@ -96,7 +123,7 @@ async def _platform_subscription_loop():
                     event_type = sub["event_type"]
                     fire_event: dict | None = None
 
-                    async with aiosqlite.connect(DB_PATH) as db:
+                    async with get_db() as db:
                         db.row_factory = aiosqlite.Row
 
                         if event_type == "tag_trending":
@@ -179,7 +206,7 @@ async def _platform_subscription_loop():
                         elif sub["delivery"] == "webhook" and sub["webhook_url"]:
                             await _fire_webhooks(agent_id, "platform_watch", fire_event)
 
-                        async with aiosqlite.connect(DB_PATH) as db:
+                        async with get_db() as db:
                             await db.execute(
                                 "UPDATE platform_subscriptions SET last_fired_at=datetime('now') WHERE id=?",
                                 (sub["id"],),
@@ -214,7 +241,7 @@ async def _federation_gossip_loop():
         if not _settings.FEDERATION_ENABLED:
             continue
         try:
-            async with aiosqlite.connect(_DB_PATH) as db:
+            async with get_db() as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
                     "SELECT id, url, name, reputation, failure_count, circuit_open_until "
@@ -271,7 +298,7 @@ async def _federation_gossip_loop():
                         if sig_invalid:
                             new_rep = max(0.0, peer["reputation"] - 20.0)
                             flagged = 1 if new_rep < 20.0 else 0
-                            async with aiosqlite.connect(_DB_PATH) as db:
+                            async with get_db() as db:
                                 await db.execute(
                                     "UPDATE federation_peers "
                                     "SET status='active', reputation=?, flagged=? WHERE id=?",
@@ -281,7 +308,7 @@ async def _federation_gossip_loop():
                             breaker["failures"] = 0
                             breaker["open_until"] = 0.0
                             _peer_breakers[peer_id] = breaker
-                            async with aiosqlite.connect(_DB_PATH) as db:
+                            async with get_db() as db:
                                 await db.execute(
                                     "UPDATE federation_peers SET failure_count=0, circuit_open_until=NULL WHERE id=?",
                                     (peer_id,),
@@ -293,7 +320,7 @@ async def _federation_gossip_loop():
                         breaker["failures"] = 0
                         breaker["open_until"] = 0.0
                         _peer_breakers[peer_id] = breaker
-                        async with aiosqlite.connect(_DB_PATH) as db:
+                        async with get_db() as db:
                             await db.execute(
                                 "UPDATE federation_peers "
                                 "SET last_seen=datetime('now'), status='active', reputation=?, flagged=0, "
@@ -324,10 +351,10 @@ async def _federation_gossip_loop():
                                 continue
                             if not _is_ssrf_safe_url(rp_url):
                                 continue
-                            async with aiosqlite.connect(_DB_PATH) as db:
+                            async with get_db() as db:
                                 cur = await db.execute(
-                                    "INSERT OR IGNORE INTO federation_peers (url, name, status, reputation) "
-                                    "VALUES (?,?,'unknown',0.5)",
+                                    "INSERT INTO federation_peers (url, name, status, reputation) "
+                                    "VALUES (?,?,'unknown',0.5) ON CONFLICT (url) DO NOTHING",
                                     (rp_url, rp_name),
                                 )
                                 await db.commit()
@@ -347,7 +374,7 @@ async def _federation_gossip_loop():
                         new_rep = max(0.0, peer["reputation"] - 10.0)
                         flagged = 1 if new_rep < 20.0 else 0
                         open_until_str = str(breaker["open_until"]) if breaker["open_until"] > now else None
-                        async with aiosqlite.connect(_DB_PATH) as db:
+                        async with get_db() as db:
                             await db.execute(
                                 "UPDATE federation_peers "
                                 "SET status='unreachable', reputation=?, flagged=?, "
@@ -370,6 +397,10 @@ async def lifespan(app: FastAPI):
     await init_copilot_db()
     from .routers.pine import init_pine_db
     await init_pine_db()
+    from .routers.genesis import _init_genesis_db
+    await _init_genesis_db()
+    from .routers.collectives import init_collectives_db
+    await init_collectives_db()
 
     # Check FFmpeg availability on startup
     try:
@@ -459,6 +490,35 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "X-Agent-Key", "X-Admin-Key", "X-Federation-Peer", "Authorization"],
 )
+
+
+# Request payload size limiting middleware (10MB limit)
+@app.middleware("http")
+async def payload_size_limit_middleware(request: Request, call_next):
+    """Limit request payload size to 10MB to prevent connection drops."""
+    MAX_BODY_SIZE = 10 * 1024 * 1024  # 10 MB
+    if request.headers.get("content-length"):
+        content_length = int(request.headers["content-length"])
+        if content_length > MAX_BODY_SIZE:
+            return JSONResponse(
+                status_code=413,
+                content={"detail": f"Payload too large. Maximum size is {MAX_BODY_SIZE // (1024*1024)}MB."},
+            )
+    return await call_next(request)
+
+
+# API Key rate limiting middleware (100 requests per minute per API key)
+@app.middleware("http")
+async def api_key_rate_limit_middleware(request: Request, call_next):
+    """Rate limit /api/* endpoints by API key (100 requests/minute)."""
+    if request.url.path.startswith("/api/"):
+        api_key = request.headers.get("X-Agent-Key", "")
+        if not _check_api_key_rate_limit(api_key):
+            return JSONResponse(
+                status_code=429,
+                content={"detail": f"Rate limit exceeded (100 requests/minute per API key)"},
+            )
+    return await call_next(request)
 
 
 # Request ID + structured logging middleware
@@ -612,7 +672,7 @@ async def rpc_alias(agent: dict = Depends(get_agent)):
 async def health():
     db_ok = False
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute("SELECT 1")
         db_ok = True
     except Exception:
@@ -632,7 +692,7 @@ _last_weather_state: dict = {"overall": None, "stuck_tros": 0, "market_pressure"
 
 async def _compute_weather() -> dict:
     import json as _wjson
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT AVG((JULIANDAY(updated_at)-JULIANDAY(created_at))*1440) as avg_m FROM tro_requests WHERE status='fulfilled' AND created_at>=datetime('now','-24 hours')"
@@ -805,7 +865,7 @@ async def platform_capacity(agent: dict = Depends(get_agent)):
         db_size_mb = round(_os.path.getsize(str(DB_PATH)) / (1024 * 1024), 3)
     except Exception:
         db_size_mb = 0.0
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         async with db.execute(
             "SELECT COUNT(*) FROM creation_jobs WHERE status NOT IN ('done','error','delegated')"
         ) as cur:
