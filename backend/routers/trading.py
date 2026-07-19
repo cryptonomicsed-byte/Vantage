@@ -406,7 +406,6 @@ async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent)
         "id": wallet_id, "label": label, "chain": chain,
         "address": address, "system": system,
         "warning": "Private key encrypted at rest. Store the mnemonic safely.",
-        "mnemonic": result.get("mnemonic", ""),
     }
     if "ifascript" in result:
         response.update(result["ifascript"])
@@ -1420,11 +1419,16 @@ async def get_performance(agent: dict = Depends(get_agent)):
             (agent["id"],)
         )).fetchone()
         
+        # Calculate win rate and cap at 100% (can't exceed 100% win rate)
+        win_rate = 0.0
+        if total and total[0]:
+            win_rate = min(100.0, round(winning[0] / total[0] * 100, 1))
+
         return {
             "portfolio_value": dict(latest) if latest else None,
             "total_trades": total[0] if total else 0,
             "winning_trades": winning[0] if winning else 0,
-            "win_rate": round(winning[0] / total[0] * 100, 1) if total and total[0] else 0,
+            "win_rate": win_rate,
         }
 
 @router.get("/performance/daily")
