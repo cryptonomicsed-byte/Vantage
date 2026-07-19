@@ -1,6 +1,7 @@
-import React, { useState, useCallback } from 'react'
-import { Wallet, TrendingUp, TrendingDown, Shield, BookOpen, PieChart, Activity } from 'lucide-react'
+import React, { useState, useCallback, useEffect } from 'react'
+import { Wallet, TrendingUp, TrendingDown, Shield, BookOpen, PieChart, Activity, Brain, Plus, X, Power, ToggleLeft, ToggleRight } from 'lucide-react'
 import { useTradingStore } from './tradingStore'
+import GenerateWalletModal from './GenerateWalletModal'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ExecutionPanel — right panel. Risk slider always visible. Quick trade,
@@ -19,40 +20,144 @@ export default function ExecutionPanel() {
   const { state, dispatch, tradingApi, toggleDrawer } = useTradingStore()
   const [quickTradeSide, setQuickTradeSide] = useState<'buy' | 'sell'>('buy')
   const [quickTradeSize, setQuickTradeSize] = useState('')
+  // activePair is a display pair like "BTC/USDT" — not resolvable to a
+  // Solana mint, so it can't drive real execution. Orders/positions store
+  // the mint directly in `symbol` for solana-chain rows (see
+  // trading.py execute_live_order), so this field is the actual trade
+  // target: paste a CA, or it prefills from a clicked position below.
+  const [mint, setMint] = useState('')
+  const [strategyId, setStrategyId] = useState('')
+  const [strategies, setStrategies] = useState<any[]>([])
   const [tradeMsg, setTradeMsg] = useState('')
+  const [tradeMsgOk, setTradeMsgOk] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [showGenerateWallet, setShowGenerateWallet] = useState(false)
+
+  async function refreshWallets() {
+    try {
+      const r = await tradingApi('/wallets')
+      if (r.ok) {
+        const d = await r.json()
+        dispatch({ type: 'SET_WALLETS', wallets: Array.isArray(d) ? d : (d.wallets || []) })
+      }
+    } catch { /* best-effort */ }
+  }
 
   const portfolio = state.portfolio
   const activeWallet = state.wallets.find(w => w.id === state.activeWalletId)
+  const [sourcePerf, setSourcePerf] = useState<any[]>([])
+
+  useEffect(() => {
+    if (!state.activeWalletId) return
+    (async () => {
+      try {
+        const r = await tradingApi('/strategies')
+        if (r.ok) {
+          // Show every strategy, not just armed+live — same as
+          // EntityProfileCard's TradePanel: picking a not-yet-armed one
+          // surfaces a clear backend error at trade time instead of just
+          // silently disappearing from the picker.
+          setStrategies(await r.json())
+        }
+      } catch { /* best-effort */ }
+    })()
+  }, [state.activeWalletId, tradingApi])
+
+  // Real learning signal: does trading source X actually make money? Backed
+  // by trade_outcome_learner.py evaluating every executed buy at +1h/+24h —
+  // not a heuristic, actual pnl on this agent's own trades.
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await tradingApi('/source-performance')
+        if (r.ok) setSourcePerf((await r.json()).sources || [])
+      } catch { /* best-effort */ }
+    })()
+    const iv = setInterval(async () => {
+      try {
+        const r = await tradingApi('/source-performance')
+        if (r.ok) setSourcePerf((await r.json()).sources || [])
+      } catch {}
+    }, 60000)
+    return () => clearInterval(iv)
+  }, [tradingApi])
+
+  // Auto-Trading Daemons — the fail-closed arm switches for the standalone
+  // daemons that create AND execute their own orders (degen_alpha_fusion,
+  // ares_pumpfun_trader, ares_jupiter_signer). Unlike the strategy armed/live
+  // gate above, nothing here had a UI-controlled off switch until now — a
+  // daemon traded the instant its systemd service was running. Backed by
+  // /api/trading/daemon-settings/{key} (same table+endpoints the wallet
+  // pickers below already use), value "1" enabled / anything else disabled.
+  const AUTO_TRADE_DAEMONS = [
+    { key: 'degen_alpha_fusion_trading_enabled', label: 'Degen Alpha Fusion', hint: 'Moonshot sniping on trending pools' },
+    { key: 'pumpfun_trader_trading_enabled', label: 'Pumpfun Trader', hint: 'Buys pumpfun signals from degen_alpha_fusion/ogun_degen' },
+    { key: 'jupiter_signer_trading_enabled', label: 'Jupiter Signer', hint: 'Signs + submits queued moonshot swaps' },
+    { key: 'hyperliquid_trader_trading_enabled', label: 'Hyperliquid Trader', hint: 'Perp market_open/market_close via the HL SDK — real signing, wallet currently unfunded' },
+    { key: 'base_trader_trading_enabled', label: 'Base Trader', hint: '1inch swaps on Base — real EIP-1559 signing + broadcast, needs ETH for gas' },
+    { key: 'sui_trader_trading_enabled', label: 'Sui Trader', hint: 'Real signing via pysui + multi-protocol swaps via Cetus\'s official SDK (Node bridge), needs SUI for gas' },
+    { key: 'polymarket_trader_trading_enabled', label: 'Polymarket Trader', hint: 'Real EIP-712 CLOB orders via py-clob-client, needs USDC.e on Polygon' },
+    { key: 'solana_engine_trading_enabled', label: 'Solana Engine', hint: 'General Solana order executor — routes through the same real execute-live signer as Pumpfun Trader' },
+  ]
+  const [daemonSettings, setDaemonSettings] = useState<Record<string, { value: string | null }>>({})
+  const [daemonBusy, setDaemonBusy] = useState<Record<string, boolean>>({})
+
+  const loadDaemonSettings = useCallback(async () => {
+    try {
+      const r = await tradingApi('/daemon-settings')
+      if (r.ok) setDaemonSettings(await r.json())
+    } catch { /* best-effort */ }
+  }, [tradingApi])
+  useEffect(() => { loadDaemonSettings() }, [loadDaemonSettings])
+
+  const toggleDaemonTrading = useCallback(async (key: string, currentlyOn: boolean) => {
+    setDaemonBusy(b => ({ ...b, [key]: true }))
+    try {
+      const r = await tradingApi(`/daemon-settings/${key}`, {
+        method: 'PUT',
+        body: JSON.stringify({ value: currentlyOn ? '0' : '1' }),
+      })
+      if (r.ok) await loadDaemonSettings()
+    } catch { /* best-effort */ }
+    setDaemonBusy(b => ({ ...b, [key]: false }))
+  }, [tradingApi, loadDaemonSettings])
 
   const handleQuickTrade = useCallback(async () => {
     const apiKey = localStorage.getItem('vantage_api_key')
-    if (!apiKey) { setTradeMsg('Connect API key first'); return }
+    if (!apiKey) { setTradeMsgOk(false); setTradeMsg('Connect API key first'); return }
+    if (!activeWallet) { setTradeMsgOk(false); setTradeMsg('Select a wallet first'); return }
+    if (!mint.trim()) { setTradeMsgOk(false); setTradeMsg('Enter a token contract address (mint)'); return }
     const size = parseFloat(quickTradeSize)
-    if (!size || size <= 0) { setTradeMsg('Enter valid size'); return }
+    if (!size || size <= 0) { setTradeMsgOk(false); setTradeMsg('Enter valid size'); return }
 
+    setBusy(true)
     try {
-      const r = await tradingApi('/orders', {
+      const r = await tradingApi('/quick-trade', {
         method: 'POST',
         body: JSON.stringify({
-          order_type: 'market',
-          side: quickTradeSide.toUpperCase(),
-          symbol: state.activePair,
-          chain: activeWallet?.chain || 'solana',
+          mint: mint.trim(),
+          side: quickTradeSide,
+          wallet_id: activeWallet.id,
           quantity: size,
-          trigger_reason: 'manual_quick_trade',
+          strategy_id: strategyId ? Number(strategyId) : undefined,
+          trigger_reason: strategyId ? 'strategy_terminal' : 'manual_terminal',
         }),
       })
+      const d = await r.json().catch(() => ({}))
       if (r.ok) {
-        setTradeMsg(`Order placed: ${quickTradeSide.toUpperCase()} ${size} ${state.activePair}`)
+        setTradeMsgOk(true)
+        setTradeMsg(`Submitted — tx ${String(d.tx_hash || '').slice(0, 10)}…`)
         setQuickTradeSize('')
       } else {
-        const d = await r.json().catch(() => ({}))
-        setTradeMsg(d.detail || 'Order failed')
+        setTradeMsgOk(false)
+        setTradeMsg(typeof d.detail === 'string' ? d.detail : (d.detail?.error?.detail || d.detail?.error || 'Order failed'))
       }
     } catch {
+      setTradeMsgOk(false)
       setTradeMsg('Network error')
     }
-  }, [quickTradeSide, quickTradeSize, state.activePair, activeWallet, tradingApi])
+    setBusy(false)
+  }, [quickTradeSide, quickTradeSize, mint, strategyId, activeWallet, tradingApi])
 
   return (
     <div style={styles.container}>
@@ -110,26 +215,45 @@ export default function ExecutionPanel() {
             <TrendingDown size={13} /> Sell
           </button>
         </div>
+        <input
+          style={{ ...styles.tradeInput, width: '100%', marginBottom: 6 }}
+          type="text"
+          placeholder="Token contract address (mint)..."
+          value={mint}
+          onChange={e => setMint(e.target.value)}
+        />
+        {strategies.length > 0 && (
+          <select
+            value={strategyId}
+            onChange={e => setStrategyId(e.target.value)}
+            style={{ ...styles.tradeInput, width: '100%', marginBottom: 6 }}
+          >
+            <option value="">Manual (no strategy)</option>
+            {strategies.map(s => <option key={s.id} value={s.id}>{s.name} {s.armed && s.live ? '● live' : s.armed ? '○ armed, paper' : '○ not armed'}</option>)}
+          </select>
+        )}
         <div style={{ display: 'flex', gap: 6 }}>
           <input
             style={styles.tradeInput}
             type="number"
-            placeholder="Size..."
+            placeholder="Size (SOL to buy, tokens to sell)..."
             value={quickTradeSize}
             onChange={e => setQuickTradeSize(e.target.value)}
           />
           <button
             style={{
               ...styles.tradeExecuteBtn,
-              background: quickTradeSide === 'buy' ? '#39ff14' : '#ff2d4a',
-              color: '#0a0a14',
+              background: busy ? 'rgba(255,255,255,0.1)' : (quickTradeSide === 'buy' ? '#39ff14' : '#ff2d4a'),
+              color: busy ? '#6b7280' : '#0a0a14',
+              cursor: busy ? 'wait' : 'pointer',
             }}
             onClick={handleQuickTrade}
+            disabled={busy}
           >
-            {quickTradeSide === 'buy' ? 'BUY' : 'SELL'}
+            {busy ? '…' : (quickTradeSide === 'buy' ? 'BUY' : 'SELL')}
           </button>
         </div>
-        {tradeMsg && <div style={{ fontSize: 10, color: '#ffaa00', marginTop: 4 }}>{tradeMsg}</div>}
+        {tradeMsg && <div style={{ fontSize: 10, color: tradeMsgOk ? '#39ff14' : '#ff2d4a', marginTop: 4, wordBreak: 'break-all' }}>{tradeMsg}</div>}
       </div>
 
       {/* Wallet Selector */}
@@ -137,7 +261,14 @@ export default function ExecutionPanel() {
         <div style={styles.sectionHeader}>
           <Wallet size={13} style={{ color: '#8a4bff' }} />
           <span style={styles.sectionTitle}>Wallet</span>
+          <button onClick={() => setShowGenerateWallet(true)}
+            style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 3, padding: '2px 6px', background: 'rgba(138,75,255,0.15)', border: '1px solid rgba(138,75,255,0.3)', borderRadius: 5, color: '#c4b5fd', fontSize: 10, cursor: 'pointer' }}>
+            <Plus size={10} /> Generate
+          </button>
         </div>
+        {showGenerateWallet && (
+          <GenerateWalletModal onClose={() => setShowGenerateWallet(false)} onCreated={refreshWallets} tradingApi={tradingApi} />
+        )}
         {state.wallets.length === 0 ? (
           <div style={{ fontSize: 11, color: '#6b7280' }}>No wallets connected</div>
         ) : (
@@ -171,7 +302,12 @@ export default function ExecutionPanel() {
             <div style={{ fontSize: 11, color: '#6b7280' }}>No open positions</div>
           ) : (
             state.positions.map((p, i) => (
-              <div key={i} style={styles.positionItem}>
+              <div
+                key={i}
+                style={{ ...styles.positionItem, cursor: 'pointer' }}
+                title="Click to load into Quick Trade"
+                onClick={() => setMint(p.symbol)}
+              >
                 <span style={styles.posSymbol}>{p.symbol}</span>
                 <span style={{ ...styles.posPnl, color: p.unrealized_pnl_usd >= 0 ? '#39ff14' : '#ff2d4a' }}>
                   {p.unrealized_pnl_usd >= 0 ? '+' : ''}{p.unrealized_pnl_pct.toFixed(1)}%
@@ -208,6 +344,58 @@ export default function ExecutionPanel() {
           </div>
         ) : (
           <div style={{ fontSize: 11, color: '#6b7280' }}>Connect API key to view portfolio</div>
+        )}
+      </div>
+
+      {/* Auto-Trading Daemons — fail-closed arm switches. Off by default;
+          a daemon here does nothing (not even paper-fill) until toggled on. */}
+      <div style={styles.portfolioSection}>
+        <div style={styles.sectionHeader}>
+          <Power size={13} style={{ color: '#ff2d4a' }} />
+          <span style={styles.sectionTitle}>Auto-Trading Daemons</span>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {AUTO_TRADE_DAEMONS.map(d => {
+            const on = daemonSettings[d.key]?.value === '1'
+            return (
+              <div key={d.key} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11 }}>
+                <button
+                  style={{ padding: 0, background: 'none', border: 'none', cursor: daemonBusy[d.key] ? 'default' : 'pointer' }}
+                  disabled={!!daemonBusy[d.key]}
+                  onClick={() => toggleDaemonTrading(d.key, on)}
+                  title={on ? 'Disable live trading' : 'Enable live trading'}
+                >
+                  {on ? <ToggleRight size={20} color="#39ff14" /> : <ToggleLeft size={20} color="#6b7280" />}
+                </button>
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  <span style={{ color: '#e0e0e0' }}>{d.label}</span>
+                  <span style={{ color: '#6b7280', fontSize: 9 }}>{d.hint}</span>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* Source Performance — real pnl by strategy/trigger source, not a heuristic */}
+      <div style={styles.portfolioSection}>
+        <div style={styles.sectionHeader}>
+          <Brain size={13} style={{ color: '#8a4bff' }} />
+          <span style={styles.sectionTitle}>Learning: Source Performance</span>
+        </div>
+        {sourcePerf.length === 0 ? (
+          <div style={{ fontSize: 11, color: '#6b7280' }}>No evaluated trades yet — real pnl appears here 1h+ after your first live buy.</div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {sourcePerf.map((s, i) => (
+              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11, padding: '3px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                <span style={{ color: '#e0e0e0' }}>{s.source} <span style={{ color: '#6b7280', fontSize: 9 }}>({s.window}, n={s.n_trades})</span></span>
+                <span style={{ color: s.avg_pnl_pct >= 0 ? '#39ff14' : '#ff2d4a', fontWeight: 700, fontFamily: 'monospace' }}>
+                  {s.avg_pnl_pct >= 0 ? '+' : ''}{s.avg_pnl_pct.toFixed(1)}%
+                </span>
+              </div>
+            ))}
+          </div>
         )}
       </div>
 
