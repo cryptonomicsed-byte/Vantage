@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect } from 'react'
-import { Wallet, TrendingUp, TrendingDown, Shield, BookOpen, PieChart, Activity, Brain, Plus, X } from 'lucide-react'
+import { Wallet, TrendingUp, TrendingDown, Shield, BookOpen, PieChart, Activity, Brain, Plus, X, Power, ToggleLeft, ToggleRight } from 'lucide-react'
 import { useTradingStore } from './tradingStore'
 import GenerateWalletModal from './GenerateWalletModal'
 
@@ -81,6 +81,46 @@ export default function ExecutionPanel() {
     }, 60000)
     return () => clearInterval(iv)
   }, [tradingApi])
+
+  // Auto-Trading Daemons — the fail-closed arm switches for the standalone
+  // daemons that create AND execute their own orders (degen_alpha_fusion,
+  // ares_pumpfun_trader, ares_jupiter_signer). Unlike the strategy armed/live
+  // gate above, nothing here had a UI-controlled off switch until now — a
+  // daemon traded the instant its systemd service was running. Backed by
+  // /api/trading/daemon-settings/{key} (same table+endpoints the wallet
+  // pickers below already use), value "1" enabled / anything else disabled.
+  const AUTO_TRADE_DAEMONS = [
+    { key: 'degen_alpha_fusion_trading_enabled', label: 'Degen Alpha Fusion', hint: 'Moonshot sniping on trending pools' },
+    { key: 'pumpfun_trader_trading_enabled', label: 'Pumpfun Trader', hint: 'Buys pumpfun signals from degen_alpha_fusion/ogun_degen' },
+    { key: 'jupiter_signer_trading_enabled', label: 'Jupiter Signer', hint: 'Signs + submits queued moonshot swaps' },
+    { key: 'hyperliquid_trader_trading_enabled', label: 'Hyperliquid Trader', hint: 'Perp market_open/market_close via the HL SDK — real signing, wallet currently unfunded' },
+    { key: 'base_trader_trading_enabled', label: 'Base Trader', hint: '1inch swaps on Base — real EIP-1559 signing + broadcast, needs ETH for gas' },
+    { key: 'sui_trader_trading_enabled', label: 'Sui Trader', hint: 'Real signing via pysui + multi-protocol swaps via Cetus\'s official SDK (Node bridge), needs SUI for gas' },
+    { key: 'polymarket_trader_trading_enabled', label: 'Polymarket Trader', hint: 'Real EIP-712 CLOB orders via py-clob-client, needs USDC.e on Polygon' },
+    { key: 'solana_engine_trading_enabled', label: 'Solana Engine', hint: 'General Solana order executor — routes through the same real execute-live signer as Pumpfun Trader' },
+  ]
+  const [daemonSettings, setDaemonSettings] = useState<Record<string, { value: string | null }>>({})
+  const [daemonBusy, setDaemonBusy] = useState<Record<string, boolean>>({})
+
+  const loadDaemonSettings = useCallback(async () => {
+    try {
+      const r = await tradingApi('/daemon-settings')
+      if (r.ok) setDaemonSettings(await r.json())
+    } catch { /* best-effort */ }
+  }, [tradingApi])
+  useEffect(() => { loadDaemonSettings() }, [loadDaemonSettings])
+
+  const toggleDaemonTrading = useCallback(async (key: string, currentlyOn: boolean) => {
+    setDaemonBusy(b => ({ ...b, [key]: true }))
+    try {
+      const r = await tradingApi(`/daemon-settings/${key}`, {
+        method: 'PUT',
+        body: JSON.stringify({ value: currentlyOn ? '0' : '1' }),
+      })
+      if (r.ok) await loadDaemonSettings()
+    } catch { /* best-effort */ }
+    setDaemonBusy(b => ({ ...b, [key]: false }))
+  }, [tradingApi, loadDaemonSettings])
 
   const handleQuickTrade = useCallback(async () => {
     const apiKey = localStorage.getItem('vantage_api_key')
@@ -305,6 +345,36 @@ export default function ExecutionPanel() {
         ) : (
           <div style={{ fontSize: 11, color: '#6b7280' }}>Connect API key to view portfolio</div>
         )}
+      </div>
+
+      {/* Auto-Trading Daemons — fail-closed arm switches. Off by default;
+          a daemon here does nothing (not even paper-fill) until toggled on. */}
+      <div style={styles.portfolioSection}>
+        <div style={styles.sectionHeader}>
+          <Power size={13} style={{ color: '#ff2d4a' }} />
+          <span style={styles.sectionTitle}>Auto-Trading Daemons</span>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {AUTO_TRADE_DAEMONS.map(d => {
+            const on = daemonSettings[d.key]?.value === '1'
+            return (
+              <div key={d.key} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11 }}>
+                <button
+                  style={{ padding: 0, background: 'none', border: 'none', cursor: daemonBusy[d.key] ? 'default' : 'pointer' }}
+                  disabled={!!daemonBusy[d.key]}
+                  onClick={() => toggleDaemonTrading(d.key, on)}
+                  title={on ? 'Disable live trading' : 'Enable live trading'}
+                >
+                  {on ? <ToggleRight size={20} color="#39ff14" /> : <ToggleLeft size={20} color="#6b7280" />}
+                </button>
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  <span style={{ color: '#e0e0e0' }}>{d.label}</span>
+                  <span style={{ color: '#6b7280', fontSize: 9 }}>{d.hint}</span>
+                </div>
+              </div>
+            )
+          })}
+        </div>
       </div>
 
       {/* Source Performance — real pnl by strategy/trigger source, not a heuristic */}
