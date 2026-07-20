@@ -7,7 +7,7 @@ agrees with the Rust engine that produces the divined Odù.
 """
 import aiosqlite
 
-from .db import DB_PATH
+from .db import DB_PATH, get_db
 
 # Consensus thresholds (mirror ifascript::calabash::scaling).
 SWARM_THRESHOLD = 2.0
@@ -76,7 +76,7 @@ def clause_ratified_event(
 
 
 async def init_manifesto_db() -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         for stmt in [
             """CREATE TABLE IF NOT EXISTS manifesto_clauses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

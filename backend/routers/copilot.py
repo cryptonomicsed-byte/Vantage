@@ -10,6 +10,7 @@ from backend.db import DB_PATH
 from backend.deps import get_agent, _parse_body
 from backend.config import settings
 from backend import market_sources as ms
+from ..db import get_db
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/copilot", tags=["copilot"])
@@ -116,7 +117,7 @@ async def _vol_data(sym):
 
 # ── DB init ──
 async def init_copilot_db():
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute("""CREATE TABLE IF NOT EXISTS copilot_alerts (
             id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id INTEGER, symbol TEXT,
             condition_text TEXT, target_price REAL, direction TEXT DEFAULT 'above',
@@ -316,7 +317,7 @@ async def copilot_execute(request: Request, agent: dict = Depends(get_agent)):
 # ── Alerts CRUD ──
 @router.get("/alerts")
 async def list_alerts(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM copilot_alerts WHERE agent_id=? ORDER BY created_at DESC",(agent["id"],)) as cur:
             return [dict(r) for r in await cur.fetchall()]
@@ -324,7 +325,7 @@ async def list_alerts(agent: dict = Depends(get_agent)):
 @router.post("/alerts")
 async def create_alert(request: Request, agent: dict = Depends(get_agent)):
     body = await _parse_body(request)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             "INSERT INTO copilot_alerts (agent_id,symbol,condition_text,target_price,direction) VALUES (?,?,?,?,?)",
             (agent["id"],body.get("symbol",""),body.get("condition",""),body.get("target_price"),body.get("direction","above")))
@@ -333,7 +334,7 @@ async def create_alert(request: Request, agent: dict = Depends(get_agent)):
 
 @router.delete("/alerts/{alert_id}")
 async def delete_alert(alert_id:int, agent:dict=Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute("DELETE FROM copilot_alerts WHERE id=? AND agent_id=?",(alert_id,agent["id"]))
         await db.commit()
     return {"status":"deleted"}
@@ -341,7 +342,7 @@ async def delete_alert(alert_id:int, agent:dict=Depends(get_agent)):
 # ── Goals CRUD ──
 @router.get("/goals")
 async def list_goals(agent:dict=Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory=aiosqlite.Row
         async with db.execute("SELECT * FROM copilot_goals WHERE agent_id=? ORDER BY created_at DESC",(agent["id"],)) as cur:
             return [dict(r) for r in await cur.fetchall()]
@@ -349,7 +350,7 @@ async def list_goals(agent:dict=Depends(get_agent)):
 @router.post("/goals")
 async def create_goal(request:Request, agent:dict=Depends(get_agent)):
     body = await _parse_body(request)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur=await db.execute("INSERT INTO copilot_goals (agent_id,goal,target,current,unit) VALUES (?,?,?,?,?)",
             (agent["id"],body.get("goal",""),body.get("target",0),body.get("current",0),body.get("unit","%")))
         await db.commit()
@@ -358,7 +359,7 @@ async def create_goal(request:Request, agent:dict=Depends(get_agent)):
 # ── Scheduled alerts ──
 @router.get("/scheduled")
 async def list_scheduled(agent:dict=Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory=aiosqlite.Row
         async with db.execute("SELECT * FROM copilot_scheduled WHERE agent_id=? ORDER BY created_at DESC",(agent["id"],)) as cur:
             return [dict(r) for r in await cur.fetchall()]
@@ -366,7 +367,7 @@ async def list_scheduled(agent:dict=Depends(get_agent)):
 @router.post("/scheduled")
 async def create_scheduled(request:Request, agent:dict=Depends(get_agent)):
     body = await _parse_body(request)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur=await db.execute("INSERT INTO copilot_scheduled (agent_id,name,cron_expr,intent_action,intent_params) VALUES (?,?,?,?,?)",
             (agent["id"],body.get("name",""),body.get("cron","0 */4 * * *"),body.get("action",""),json.dumps(body.get("params",{}))))
         await db.commit()
@@ -479,7 +480,7 @@ async def submit_quiz(request: Request, agent: dict = Depends(get_agent)):
 @router.get("/learn/progress")
 async def get_learning_progress(agent: dict = Depends(get_agent)):
     """Get the agent's learning progress across all paths."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         rows = await (await db.execute(
             "SELECT key, value FROM agent_state WHERE agent_id=? AND key LIKE 'learn_%'",
             (agent["id"],)

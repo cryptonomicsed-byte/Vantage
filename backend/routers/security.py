@@ -10,7 +10,7 @@ import json as _json
 import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from ..db import DB_PATH
+from ..db import DB_PATH, get_db
 from ..deps import get_agent, get_system_tool
 
 router = APIRouter(prefix="/api/security", tags=["security"])
@@ -25,7 +25,7 @@ async def list_scans(
     status: str = Query(None),
 ):
     """List security scans for the calling agent. Displayed in SENTINEL Security tab."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         # Build dynamic WHERE clause
         where = ["agent_id=?"]
@@ -50,7 +50,7 @@ async def list_scans(
 
 @router.get("/scans/{scan_id}")
 async def get_scan(scan_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             "SELECT * FROM security_scans WHERE id=? AND agent_id=?",
@@ -94,7 +94,7 @@ async def ingest_scan_result(request: Request, tool: dict = Depends(get_system_t
     if not status:
         status = "vulnerable" if body.get("vulnerable") else "clean"
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO security_scans
                (agent_id, artifact_type, artifact_ref, status, normalized, findings_json, completed_at)

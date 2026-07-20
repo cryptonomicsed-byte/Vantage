@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from backend.db import DB_PATH
 from backend.deps import get_agent
+from ..db import get_db
 
 router = APIRouter(prefix="/api", tags=["surfaces"])
 
@@ -120,7 +121,7 @@ async def _insert_broadcast(agent, *, title, description, content_type, stream_u
                             season_number=0, episode_number=0):
     import json as _json
     tag_str = _json.dumps(tags) if isinstance(tags, list) else str(tags or "[]")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO broadcasts
                  (agent_id, title, description, status, content_type, stream_url,
@@ -192,7 +193,7 @@ async def publish_cinema(title: CinemaTitle, agent: dict = Depends(get_agent)):
     # Shows/podcasts group episodes under a series (find-or-created by title).
     series_id = None
     if title.series_title.strip():
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             series_id = await _find_or_create_series(
                 db, agent, title=title.series_title, surface="cinema",
                 cinema_kind=kind, category=title.category, thumbnail_url=title.cover_url)
@@ -226,7 +227,7 @@ async def publish_audio(track: AudioTrack, agent: dict = Depends(get_agent)):
     series_id = None
     if track.album.strip():
         tags = [f"album:{track.album}"] + tags
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             series_id = await _find_or_create_series(
                 db, agent, title=track.album, surface="audio",
                 category=track.category, thumbnail_url=track.cover_url)
@@ -251,7 +252,7 @@ _CINEMA_COLS = """b.id, b.title, b.description, b.post_content, b.stream_url,
 @router.get("/cinema", operation_id="browse_cinema")
 async def browse_cinema(_caller: dict = Depends(get_agent), limit: int = Query(120, le=400)):
     """Netflix-style browse: a featured title plus rows grouped by category."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = [dict(r) for r in await (await db.execute(
             f"""SELECT {_CINEMA_COLS}
@@ -273,7 +274,7 @@ async def browse_cinema(_caller: dict = Depends(get_agent), limit: int = Query(1
     rows_out = [{"title": kind_label.get(k, k.title()), "items": v} for k, v in by_kind.items()]
     rows_out += [{"title": c, "items": v} for c, v in by_cat.items() if len(v) >= 1]
     # Shows/podcasts as collections (series) — a tile opens the series page.
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         shows = [dict(r) for r in await (await db.execute(
             """SELECT s.id, s.title, s.thumbnail_url, s.cinema_kind, s.category,
@@ -289,7 +290,7 @@ async def browse_cinema(_caller: dict = Depends(get_agent), limit: int = Query(1
 @router.get("/cinema/series/{sid}", operation_id="get_cinema_series")
 async def cinema_series(sid: int, _caller: dict = Depends(get_agent)):
     """A show/podcast with its episodes grouped by season (ordered)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         s = await (await db.execute(
             "SELECT id, title, description, thumbnail_url, cinema_kind, category FROM series WHERE id=?",
@@ -316,7 +317,7 @@ async def cinema_series(sid: int, _caller: dict = Depends(get_agent)):
 
 @router.get("/cinema/{bid}", operation_id="get_cinema_title")
 async def cinema_detail(bid: int, _caller: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute(
             f"""SELECT {_CINEMA_COLS}
@@ -335,7 +336,7 @@ async def cinema_detail(bid: int, _caller: dict = Depends(get_agent)):
 @router.get("/audio", operation_id="browse_audio")
 async def browse_audio(_caller: dict = Depends(get_agent), limit: int = Query(200, le=500)):
     """Spotify-style browse: rows grouped by genre plus per-artist grouping."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = [dict(r) for r in await (await db.execute(
             """SELECT b.id, b.title, b.stream_url, b.thumbnail_url, b.view_count,
@@ -353,7 +354,7 @@ async def browse_audio(_caller: dict = Depends(get_agent), limit: int = Query(20
         by_genre.setdefault(g, []).append(r)
     rows_out = [{"title": g, "items": v} for g, v in by_genre.items()]
     # Albums as collections (series) — a tile opens the album tracklist.
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         albums = [dict(r) for r in await (await db.execute(
             """SELECT s.id, s.title, s.thumbnail_url, s.category,
@@ -369,7 +370,7 @@ async def browse_audio(_caller: dict = Depends(get_agent), limit: int = Query(20
 @router.get("/audio/album/{sid}", operation_id="get_audio_album")
 async def audio_album(sid: int, _caller: dict = Depends(get_agent)):
     """An album with its ordered tracklist."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         s = await (await db.execute(
             "SELECT id, title, description, thumbnail_url, category FROM series WHERE id=?",

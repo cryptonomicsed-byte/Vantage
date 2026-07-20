@@ -1,5 +1,6 @@
 """Database path, media root, and schema initialisation."""
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import aiosqlite
@@ -11,10 +12,25 @@ logger = logging.getLogger(__name__)
 DB_PATH: Path = settings.DATA_DIR / "vantage.db"
 MEDIA_ROOT: Path = settings.MEDIA_DIR
 
+# Every ad-hoc `aiosqlite.connect(DB_PATH)` call site across the backend
+# opened a connection with SQLite's default busy behaviour: fail
+# immediately with "database is locked" the instant it collides with
+# another writer, instead of waiting. WAL mode (set once, below, on the
+# schema-init connection) lets readers run alongside a single writer, but
+# writer-vs-writer collisions still need each connection to opt into
+# waiting. ~600 call sites across ~38 files predated this helper; use it
+# for all new code, and prefer migrating call sites to it over adding
+# PRAGMA busy_timeout by hand at each one.
+@asynccontextmanager
+async def get_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA busy_timeout=20000")
+        yield db
+
 
 async def init_agents_db() -> None:
     settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         # WAL mode for concurrent reads
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA synchronous=NORMAL")
@@ -1116,7 +1132,7 @@ CREATE TABLE IF NOT EXISTS external_conversations (
         await db.commit()
 
     # ── Trading tables ────────────────────────────────────────
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS trading_wallets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1333,7 +1349,7 @@ CREATE TABLE IF NOT EXISTS external_conversations (
         await db.commit()
 
     # ── Pine Script library ─────────────────────────────────
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS pine_scripts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1354,7 +1370,7 @@ CREATE TABLE IF NOT EXISTS external_conversations (
 
     # One-time migration: hash any plaintext API keys still stored as "vantage_..." (idempotent)
     import hashlib as _hlib_key
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         rows = await (await db.execute(
             "SELECT id, api_key FROM agents WHERE api_key LIKE 'vantage_%'"
         )).fetchall()

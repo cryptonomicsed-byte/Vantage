@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, Query
-from backend.db import DB_PATH
+from backend.db import DB_PATH, get_db
 from backend.deps import get_agent
 from backend.config import settings
 
@@ -43,7 +43,7 @@ class A2ADelegate(BaseModel):
 # ─── Database Init ───────────────────────────────────────────
 
 async def init_collectives_db():
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.executescript("""
             CREATE TABLE IF NOT EXISTS agent_collectives (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -114,7 +114,7 @@ async def init_collectives_db():
 
 @router.post("")
 async def create_collective(data: CollectiveCreate, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         try:
             cur = await db.execute(
                 "INSERT INTO agent_collectives (name, description, manifesto, governance, created_by) VALUES (?,?,?,?,?)",
@@ -133,39 +133,16 @@ async def create_collective(data: CollectiveCreate, agent: dict = Depends(get_ag
 
 @router.get("")
 async def list_collectives(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             "SELECT c.*, (SELECT COUNT(*) FROM collective_members WHERE collective_id=c.id) as member_count FROM agent_collectives c ORDER BY c.created_at DESC"
         )).fetchall()
         return [dict(r) for r in rows]
 
-@router.get("/{collective_id}")
-async def get_collective(collective_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        row = await (await db.execute(
-            "SELECT * FROM agent_collectives WHERE id=?", (collective_id,)
-        )).fetchone()
-        if not row:
-            raise HTTPException(404, "Collective not found")
-        c = dict(row)
-        # Members
-        members = await (await db.execute(
-            "SELECT a.id, a.name, cm.role, cm.joined_at FROM collective_members cm JOIN agents a ON a.id=cm.agent_id WHERE cm.collective_id=?",
-            (collective_id,)
-        )).fetchall()
-        c["members"] = [dict(m) for m in members]
-        # Workspaces
-        workspaces = await (await db.execute(
-            "SELECT * FROM collective_workspaces WHERE collective_id=?", (collective_id,)
-        )).fetchall()
-        c["workspaces"] = [dict(w) for w in workspaces]
-        return c
-
 @router.post("/{collective_id}/members")
 async def add_member(collective_id: int, data: CollectiveMember, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         # Find target agent
         target = await (await db.execute(
             "SELECT id FROM agents WHERE name=?", (data.agent_name,)
@@ -208,7 +185,7 @@ async def create_workspace(data: WorkspaceCreate, agent: dict = Depends(get_agen
             except Exception:
                 pass
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             "INSERT INTO collective_workspaces (collective_id, name, description, gitea_repo) VALUES (?,?,?,?)",
             (data.collective_id, data.name, data.description, gitea_url)
@@ -218,7 +195,7 @@ async def create_workspace(data: WorkspaceCreate, agent: dict = Depends(get_agen
 
 @router.get("/workspaces/{workspace_id}")
 async def get_workspace(workspace_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute(
             "SELECT * FROM collective_workspaces WHERE id=?", (workspace_id,)
@@ -238,7 +215,7 @@ async def get_workspace(workspace_id: int, agent: dict = Depends(get_agent)):
 
 @router.post("/workspaces/{workspace_id}/tasks")
 async def create_task(workspace_id: int, data: dict, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             "INSERT INTO collective_tasks (workspace_id, title, description, created_by, priority) VALUES (?,?,?,?,?)",
             (workspace_id, data.get("title"), data.get("description", ""), agent["id"], data.get("priority", 0))
@@ -250,7 +227,7 @@ async def create_task(workspace_id: int, data: dict, agent: dict = Depends(get_a
 
 @router.post("/skills")
 async def register_skill(data: dict, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         try:
             await db.execute(
                 "INSERT INTO agent_skills (agent_id, name, description, input_schema, runtime) VALUES (?,?,?,?,?)",
@@ -264,7 +241,7 @@ async def register_skill(data: dict, agent: dict = Depends(get_agent)):
 
 @router.get("/skills")
 async def list_skills(agent: dict = Depends(get_agent), skill: Optional[str] = Query(None)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         query = "SELECT s.*, a.name as agent_name FROM agent_skills s JOIN agents a ON a.id=s.agent_id"
         params = []
@@ -280,7 +257,7 @@ async def list_skills(agent: dict = Depends(get_agent), skill: Optional[str] = Q
 @router.get("/a2a/discover")
 async def discover_agents(skill: Optional[str] = Query(None), agent: dict = Depends(get_agent)):
     """Discover agents by skill/capability."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         query = "SELECT DISTINCT a.id, a.name, a.bio FROM agents a"
         params = []
@@ -299,7 +276,7 @@ async def discover_agents(skill: Optional[str] = Query(None), agent: dict = Depe
 @router.post("/a2a/delegate")
 async def delegate_task(data: A2ADelegate, agent: dict = Depends(get_agent)):
     """Delegate a task to another agent via A2A protocol."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         target = await (await db.execute(
             "SELECT id, name FROM agents WHERE name=?", (data.target_agent,)
         )).fetchone()
@@ -337,7 +314,7 @@ async def delegate_task(data: A2ADelegate, agent: dict = Depends(get_agent)):
 
 @router.get("/reputation")
 async def get_reputation(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute("""
             SELECT ar.*, ac.name as collective_name FROM agent_reputation ar
@@ -356,7 +333,7 @@ async def implement_task(workspace_id: int, task_id: int, agent: dict = Depends(
     Calls the OpenCode serve API (port 4096) to generate code.
     The code is committed to the workspace's Gitea repo.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         
         # Get workspace
@@ -431,10 +408,36 @@ async def implement_task(workspace_id: int, task_id: int, agent: dict = Depends(
             raise HTTPException(500, f"OpenCode execution failed: {e}")
 
 
+# Registered after all static single-segment GET routes (/skills, /reputation) so
+# this dynamic path does not shadow them under Starlette's declaration-order matching.
+@router.get("/{collective_id}")
+async def get_collective(collective_id: int, agent: dict = Depends(get_agent)):
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        row = await (await db.execute(
+            "SELECT * FROM agent_collectives WHERE id=?", (collective_id,)
+        )).fetchone()
+        if not row:
+            raise HTTPException(404, "Collective not found")
+        c = dict(row)
+        # Members
+        members = await (await db.execute(
+            "SELECT a.id, a.name, cm.role, cm.joined_at FROM collective_members cm JOIN agents a ON a.id=cm.agent_id WHERE cm.collective_id=?",
+            (collective_id,)
+        )).fetchall()
+        c["members"] = [dict(m) for m in members]
+        # Workspaces
+        workspaces = await (await db.execute(
+            "SELECT * FROM collective_workspaces WHERE collective_id=?", (collective_id,)
+        )).fetchall()
+        c["workspaces"] = [dict(w) for w in workspaces]
+        return c
+
+
 @router.post("/reputation/award")
 async def award_reputation(data: dict, agent: dict = Depends(get_agent)):
     """Award reputation points to an agent (lead-only)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         target = await (await db.execute(
             "SELECT id FROM agents WHERE name=?", (data.get("agent_name"),)
         )).fetchone()

@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from backend.db import DB_PATH
 from backend.deps import get_agent, _parse_body
 from backend import market_sources as ms
+from ..db import get_db
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/pine", tags=["pine"])
@@ -23,7 +24,7 @@ ZANGBETO_URL = os.environ.get("ZANGBETO_URL", "")  # optional governance service
 
 
 async def init_pine_db():
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute("""CREATE TABLE IF NOT EXISTS pine_indicators (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             agent_id INTEGER NOT NULL,
@@ -104,7 +105,7 @@ async def save_indicator(request: Request, agent: dict = Depends(get_agent)):
     if verdict["block"]:
         raise HTTPException(403, f"Script blocked by governance: {verdict['reason']}")
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             "INSERT INTO pine_indicators (agent_id, name, script, description) VALUES (?,?,?,?)",
             (agent["id"], name, script, description))
@@ -115,7 +116,7 @@ async def save_indicator(request: Request, agent: dict = Depends(get_agent)):
 @router.get("/indicators")
 async def list_indicators(agent: dict = Depends(get_agent)):
     """The agent's own indicators plus any shared into its guilds."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         own = await (await db.execute(
             "SELECT id, name, script, description, shared, guild_slug, created_at FROM pine_indicators WHERE agent_id=? ORDER BY created_at DESC",
@@ -132,7 +133,7 @@ async def share_indicator(indicator_id: int, request: Request, agent: dict = Dep
     """Share one of the agent's own indicators (optionally tagged to a guild)."""
     body = await _parse_body(request)
     guild_slug = (body.get("guild_slug") or "").strip() or None
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         row = await (await db.execute(
             "SELECT id FROM pine_indicators WHERE id=? AND agent_id=?", (indicator_id, agent["id"]))).fetchone()
         if not row:
@@ -144,7 +145,7 @@ async def share_indicator(indicator_id: int, request: Request, agent: dict = Dep
 
 @router.delete("/indicators/{indicator_id}")
 async def delete_indicator(indicator_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute("DELETE FROM pine_indicators WHERE id=? AND agent_id=?", (indicator_id, agent["id"]))
         await db.commit()
     return {"status": "deleted"}

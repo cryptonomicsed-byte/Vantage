@@ -13,7 +13,7 @@ from slowapi.util import get_remote_address
 from backend import market_sources as ms
 from backend import indicators as ind
 from backend import wallet_blacklist as wb
-from backend.db import DB_PATH
+from backend.db import DB_PATH, get_db
 from backend.deps import get_agent, get_system_tool
 
 logger = logging.getLogger(__name__)
@@ -346,7 +346,7 @@ async def _record_wallet_edges(chain: str, address: str, transactions: list[dict
 
     if not edges:
         return
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         for (cp_address, role), agg in edges.items():
             await db.execute(
                 """INSERT INTO wallet_edges (chain, address_a, address_b, role, tx_count, total_value)
@@ -531,7 +531,7 @@ async def add_watchlist_wallet(req: WatchlistAddRequest, agent: dict = Depends(g
     if address_type not in ADDRESS_TYPES:
         raise HTTPException(422, f"address_type must be one of {sorted(ADDRESS_TYPES)}")
     notes = req.notes.strip()[:2000]
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         await db.execute(
             """INSERT INTO tracked_wallets (chain, address, label, address_type, notes, added_by_agent_id)
@@ -552,7 +552,7 @@ async def add_watchlist_wallet(req: WatchlistAddRequest, agent: dict = Depends(g
 @router.get("/watchlist")
 async def list_watchlist_wallets(agent: dict = Depends(get_agent)):
     """List every tracked wallet — shared across all agents, like /trace and /whales."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM tracked_wallets ORDER BY created_at DESC") as cur:
             rows = [dict(r) for r in await cur.fetchall()]
@@ -576,7 +576,7 @@ async def update_watchlist_wallet(wallet_id: int, req: WatchlistUpdateRequest, a
     if not fields:
         raise HTTPException(422, "At least one field (label, address_type, notes) is required")
     params.append(wallet_id)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(f"UPDATE tracked_wallets SET {', '.join(fields)} WHERE id=?", params)
         await db.commit()
@@ -590,7 +590,7 @@ async def update_watchlist_wallet(wallet_id: int, req: WatchlistUpdateRequest, a
 async def remove_watchlist_wallet(wallet_id: int, agent: dict = Depends(get_agent)):
     """Remove a wallet from the shared watchlist. Any authenticated agent may
     remove any entry — this is shared platform intel, not per-agent private data."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute("DELETE FROM tracked_wallets WHERE id=?", (wallet_id,))
         await db.commit()
         rowcount = cur.rowcount
@@ -623,7 +623,7 @@ async def list_blacklisted_wallets(agent: dict = Depends(get_agent)):
     """Explicit blacklist entries, plus the count of pattern-matched
     exchange labels currently excluded automatically (not individually
     listed here — see backend/wallet_blacklist.py for the pattern list)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(wb._BLACKLIST_DDL)
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute("SELECT * FROM wallet_blacklist ORDER BY created_at DESC")).fetchall()
@@ -636,7 +636,7 @@ async def list_blacklisted_wallets(agent: dict = Depends(get_agent)):
 
 @router.delete("/blacklist/{entry_id}")
 async def remove_blacklisted_wallet(entry_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute("DELETE FROM wallet_blacklist WHERE id=?", (entry_id,))
         await db.commit()
         if cur.rowcount == 0:
@@ -648,7 +648,7 @@ async def refresh_watchlist_wallets(agent: dict = Depends(get_agent)):
     """Re-run the wallet trace for every tracked wallet at once (bounded
     concurrency, reusing address_lookup's own 20s cache) and flag large recent
     balance moves as whale activity."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM tracked_wallets ORDER BY created_at DESC") as cur:
             rows = [dict(r) for r in await cur.fetchall()]
@@ -673,7 +673,7 @@ async def get_wallet_network(
     densely-connected wallets into visible 'hot zones'."""
     chain = (chain or "").strip().lower()
     canon = "bitcoin" if chain in ("bitcoin", "btc") else "solana" if chain in ("solana", "sol") else chain
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT * FROM wallet_edges WHERE chain=? AND tx_count>=?
@@ -911,7 +911,7 @@ async def ingest_signal(payload: dict, tool: dict = Depends(get_system_tool)):
 
     # Durable write-through (best-effort — the in-memory pool is still the fast path).
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await _ensure_signal_tables(db)
             await db.execute(
                 "INSERT INTO signal_pool (symbol, source, type, conviction, direction, detail, mint, ts) "
@@ -935,7 +935,7 @@ async def _durable_pool(limit: int = 50) -> list[dict]:
     Lets the feed survive a restart that empties the in-memory pool."""
     rows: list[dict] = []
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await _ensure_signal_tables(db)
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
@@ -1225,7 +1225,7 @@ _SIGNALS_TTL = 45  # seconds a snapshot is considered fresh
 async def _persist_signals_snapshot(data: dict, ts: int) -> None:
     import json
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await _ensure_signal_tables(db)
             await db.execute(
                 "INSERT INTO intel_cache (key, payload, updated_at) VALUES ('signals', ?, ?) "
@@ -1239,7 +1239,7 @@ async def _persist_signals_snapshot(data: dict, ts: int) -> None:
 async def _load_signals_snapshot() -> Optional[dict]:
     import json
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await _ensure_signal_tables(db)
             cur = await db.execute("SELECT payload, updated_at FROM intel_cache WHERE key='signals'")
             row = await cur.fetchone()
@@ -1345,6 +1345,7 @@ async def memory_graph(agent_name: str = None, limit: int = 80, agent: dict = De
     agent_display = agent_name or "Unknown"
     
     async with aiosqlite.connect(db) as conn:
+        await conn.execute("PRAGMA busy_timeout=20000")
         conn.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
         
         # Find target agent

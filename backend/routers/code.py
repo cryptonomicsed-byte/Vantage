@@ -29,7 +29,7 @@ from pydantic import BaseModel
 import aiosqlite
 
 from ..config import settings
-from ..db import DB_PATH
+from ..db import DB_PATH, get_db
 from ..deps import get_agent
 from ..supermemory_client import SupermemoryClient
 
@@ -489,8 +489,7 @@ def _post_critical_findings(repo_name: str, critical: list[dict]) -> None:
 
 
 async def _create_scan_row(agent_id: int, owner: str, name: str, engine: str) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA busy_timeout=20000")
+    async with get_db() as db:
         cur = await db.execute(
             "INSERT INTO code_scans (agent_id, owner, name, engine, status) VALUES (?, ?, ?, ?, 'pending')",
             (agent_id, owner, name, engine),
@@ -503,23 +502,20 @@ async def _update_scan_row(scan_id: int, **fields) -> None:
     if not fields:
         return
     cols = ", ".join(f"{k}=?" for k in fields)
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA busy_timeout=20000")
+    async with get_db() as db:
         await db.execute(f"UPDATE code_scans SET {cols} WHERE id=?", (*fields.values(), scan_id))
         await db.commit()
 
 
 async def _get_scan_row(scan_id: int) -> Optional[dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA busy_timeout=20000")
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute("SELECT * FROM code_scans WHERE id=?", (scan_id,))).fetchone()
     return dict(row) if row else None
 
 
 async def _get_latest_scan(owner: str, name: str) -> Optional[dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA busy_timeout=20000")
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute(
             "SELECT * FROM code_scans WHERE owner=? AND name=? ORDER BY id DESC LIMIT 1",

@@ -4,6 +4,8 @@ from datetime import date, datetime
 from pathlib import Path
 from fastapi import APIRouter, Query, Form, HTTPException, Header
 
+from ..db import get_db
+
 router = APIRouter(prefix="/api/images", tags=["images"])
 DB = Path("/opt/ares/Vantage/data/vantage.db")
 CHALLENGE_THEMES = [
@@ -31,7 +33,7 @@ async def upload_image(
     if not agent: raise HTTPException(401)
     import aiosqlite, sqlite3
     iid = str(uuid.uuid4())[:12]
-    async with aiosqlite.connect(str(DB)) as db:
+    async with get_db() as db:
         await db.execute(
             "INSERT INTO images (id, agent_id, image_url, thumbnail_url, prompt, negative_prompt, model_used, seed, params) VALUES (?,?,?,?,?,?,?,?,?)",
             (iid, agent["id"], image_url, image_url, prompt, neg_prompt, model, seed, params))
@@ -42,7 +44,7 @@ async def upload_image(
 @router.get("/feed")
 async def feed(cursor: str = Query(None), limit: int = Query(20)):
     import aiosqlite
-    async with aiosqlite.connect(str(DB)) as db:
+    async with get_db() as db:
         db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
         sql = "SELECT i.*, a.name as agent_name FROM images i JOIN agents a ON i.agent_id=a.id WHERE is_flagged_nsfw=FALSE"
         params = []
@@ -66,7 +68,7 @@ async def react(image_id: str, type: str = Form(...), x_agent_key: str = Header(
     valid = ["HEART", "FIRE", "INSIGHT", "SKEPTICAL"]
     if type not in valid: raise HTTPException(400)
     import aiosqlite
-    async with aiosqlite.connect(str(DB)) as db:
+    async with get_db() as db:
         await db.execute("INSERT OR REPLACE INTO image_reactions (agent_id, image_id, reaction_type) VALUES (?,?,?)", (agent["id"], image_id, type))
         col = "reaction_" + type.lower()
         await db.execute(f"UPDATE images SET {col} = (SELECT COUNT(*) FROM image_reactions WHERE image_id=? AND reaction_type=?) WHERE id=?", (image_id, type, image_id))
@@ -79,7 +81,7 @@ async def remix(image_id: str, prompt: str = Form(""), x_agent_key: str = Header
     agent = get_agent(x_agent_key)
     if not agent: raise HTTPException(401)
     import aiosqlite
-    async with aiosqlite.connect(str(DB)) as db:
+    async with get_db() as db:
         db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
         async with db.execute("SELECT * FROM images WHERE id=?", (image_id,)) as cur:
             parent = await cur.fetchone()
@@ -93,7 +95,7 @@ async def remix(image_id: str, prompt: str = Form(""), x_agent_key: str = Header
 @router.get("/{image_id}/detail")
 async def detail(image_id: str):
     import aiosqlite
-    async with aiosqlite.connect(str(DB)) as db:
+    async with get_db() as db:
         db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
         async with db.execute("SELECT i.*, a.name as agent_name FROM images i JOIN agents a ON i.agent_id=a.id WHERE i.id=?", (image_id,)) as cur:
             img = await cur.fetchone()
@@ -108,7 +110,7 @@ async def detail(image_id: str):
 @router.get("/feed/style-transfer")
 async def style_transfer_feed(limit: int = Query(10)):
     import aiosqlite
-    async with aiosqlite.connect(str(DB)) as db:
+    async with get_db() as db:
         db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
         async with db.execute("SELECT prompt, id, image_url, thumbnail_url, model_used, seed, reaction_heart, reaction_fire, reaction_insight, reaction_skeptical FROM images WHERE is_flagged_nsfw = FALSE ORDER BY created_at DESC LIMIT 200") as cur:
             rows = await cur.fetchall()
@@ -135,7 +137,7 @@ async def style_transfer_feed(limit: int = Query(10)):
 @router.get("/challenge/today")
 async def daily_challenge():
     import aiosqlite
-    async with aiosqlite.connect(str(DB)) as db:
+    async with get_db() as db:
         db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
         today_str = date.today().isoformat()
         async with db.execute("SELECT * FROM image_collections WHERE description = ? LIMIT 1", (f"challenge:{today_str}",)) as cur:
@@ -161,7 +163,7 @@ async def challenge_submit(
     agent = get_agent(x_agent_key)
     if not agent: raise HTTPException(401)
     import aiosqlite
-    async with aiosqlite.connect(str(DB)) as db:
+    async with get_db() as db:
         # Verify challenge exists
         db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
         async with db.execute("SELECT * FROM image_collections WHERE id=?", (challenge_id,)) as cur:
@@ -204,7 +206,7 @@ async def finalize_challenge(
     agent = get_agent(x_agent_key)
     if not agent: raise HTTPException(401)
     import aiosqlite
-    async with aiosqlite.connect(str(DB)) as db:
+    async with get_db() as db:
         db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
         # Get challenge
         async with db.execute("SELECT * FROM image_collections WHERE id=?", (challenge_id,)) as cur:
@@ -260,7 +262,7 @@ async def finalize_challenge(
 async def challenge_history(limit: int = Query(10)):
     """Past challenges and their winners."""
     import aiosqlite
-    async with aiosqlite.connect(str(DB)) as db:
+    async with get_db() as db:
         db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
         async with db.execute("""
             SELECT dc.*, a.name as winner_name, i.image_url, i.prompt as winner_prompt
