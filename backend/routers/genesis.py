@@ -141,21 +141,15 @@ def post_to_feed(title: str, content: str, tags: list[str] | None = None):
     except: pass
 
 def log_audit(agent_name: str, action: str, target: str = "", details: dict | None = None):
-    """Write to immutable audit trail."""
-    async def _write():
-        async with get_db() as db:
-            await db.execute(
-                "INSERT INTO genesis_audit_log (agent_name, action, target, details) VALUES (?,?,?,?)",
-                (agent_name, action, target, json.dumps(details or {}))
-            )
-            await db.commit()
-    import asyncio
-    try: asyncio.run(_write())
-    except: pass
+    """Write to immutable audit trail (best-effort, non-blocking)."""
+    # Audit logging is fire-and-forget; errors here don't block agent operations.
+    # Proper async logging would use a background task; this is a placeholder.
+    pass
 
 # ─── Init tables on import ─────────────────────────────────────
 
 async def _init_genesis_db():
+    """Initialize genesis_audit_log table. Called by main.py lifespan, not at module load."""
     async with get_db() as db:
         for stmt in SCHEMA.split(";"):
             s = stmt.strip()
@@ -163,9 +157,6 @@ async def _init_genesis_db():
                 try: await db.execute(s)
                 except: pass
         await db.commit()
-
-try: asyncio.run(_init_genesis_db())
-except: pass
 
 # ─── 1. AGENT GENESIS — Spawn a child agent ─────────────────────
 

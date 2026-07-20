@@ -467,10 +467,4 @@ async def award_reputation(data: dict, agent: dict = Depends(get_agent)):
         await db.commit()
         return {"status": "awarded", "agent": data.get("agent_name"), "points": points}
 
-# ─── Init on import ──────────────────────────────────────────
-
-import asyncio, os, logging
-try:
-    asyncio.run(init_collectives_db())
-except:
-    pass
+# ─── Schema init handled by main.py lifespan, not at module load ──────────────────────────────────────────

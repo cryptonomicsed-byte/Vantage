@@ -265,10 +265,10 @@ async def rug_check(mint: str=Query(...), x_agent_key: str=Header(...)):
             checks.append({"check":"LIQUIDITY","status":"WARN","detail":"No price data — may have no liquidity"})
             risk_score += 20
         elif price < 0.000001:
-            checks.append({"check":"PRICE","status":"WARN","detail":f"Extremely low price: \${price:.10f}"})
+            checks.append({"check":"PRICE","status":"WARN","detail":f"Extremely low price: ${price:.10f}"})
             risk_score += 10
         else:
-            checks.append({"check":"PRICE","status":"PASS","detail":f"\${price:.8f}"})
+            checks.append({"check":"PRICE","status":"PASS","detail":f"${price:.8f}"})
         safe = risk_score <= 20
         return {"mint":mint,"checks":checks,"risk_score":risk_score,"safe":safe,"supply":supply}
     except Exception as e:
