@@ -137,6 +137,17 @@ class Settings(BaseSettings):
     # settings.OMOKODA_URL — must exist here so that access never AttributeErrors.
     OMOKODA_URL: str = ""
 
+    # Database backend: PostgreSQL or SQLite fallback
+    # POSTGRES_URL format: postgresql://user:password@host:port/database
+    # Leave empty to use SQLite (data/vantage.db)
+    # Set via VANTAGE_POSTGRES_URL env var
+    POSTGRES_URL: str = ""
+
+    # PostgreSQL connection pool settings (only used if POSTGRES_URL is set)
+    POSTGRES_POOL_MIN: int = 5
+    POSTGRES_POOL_MAX: int = 20
+    POSTGRES_POOL_TIMEOUT: int = 10  # seconds
+
 
 settings = Settings()
 

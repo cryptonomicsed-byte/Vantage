@@ -22,6 +22,7 @@ from slowapi.util import get_remote_address
 from .agents import init_agents_db, router as agents_router, admin_router, DB_PATH, _feed_clients, _gossip_channels
 from .config import settings
 from .db import get_db
+from .db_init import init_database, shutdown_database
 from .deps import get_agent
 from .mesh_store import init_mesh_db
 from .manifesto_store import init_manifesto_db
@@ -371,6 +372,9 @@ async def _federation_gossip_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global FFMPEG_AVAILABLE
+    # Initialize database (SQLite or PostgreSQL)
+    await init_database()
+
     await init_agents_db()
     await init_mesh_db()
     await init_manifesto_db()
@@ -425,6 +429,8 @@ async def lifespan(app: FastAPI):
             await t
         except asyncio.CancelledError:
             pass
+    # Shutdown database connections
+    await shutdown_database()
 
 
 app = FastAPI(
