@@ -20,7 +20,7 @@ from typing import Optional
 
 import aiosqlite
 
-from .db import DB_PATH
+from .db import DB_PATH, get_db
 
 
 SIGNAL_WEIGHTS = {
@@ -52,7 +52,7 @@ async def emit_trust_signal(
         "timestamp": int(time.time()),
     }
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             """INSERT INTO mesh_events (block_id, actor_id, event_type, payload_json)
                VALUES (?, ?, ?, ?)""",
@@ -68,7 +68,7 @@ async def get_trust_signals(
     limit: int = 100,
 ) -> list[dict]:
     """Return recent trust signals between two agents, suitable for Julia /mesh/score."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         async with db.execute(
             """SELECT payload_json FROM mesh_events
                WHERE block_id = ?

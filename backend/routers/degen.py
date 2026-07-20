@@ -7,6 +7,7 @@ from fastapi import APIRouter, Query, HTTPException, Header
 
 router = APIRouter(prefix="/api/intel/degen", tags=["degen"])
 DB = Path("/opt/ares/Vantage/data/vantage.db")
+from backend.db import get_sync_db
 HELIUS = os.environ.get("HELIUS_API_KEY", "")
 BIRDEYE = os.environ.get("BIRDEYE_KEY", "")
 
@@ -17,7 +18,7 @@ def _fetch(url, headers=None, timeout=10):
 
 def get_agent(key):
     h = hashlib.sha256(key.encode()).hexdigest()
-    db = sqlite3.connect(str(DB)); db.row_factory = lambda c,r: dict(zip([col[0] for col in c.description], r))
+    db = get_sync_db(); db.row_factory = lambda c,r: dict(zip([col[0] for col in c.description], r))
     r = db.execute("SELECT id, name FROM agents WHERE api_key=?", (h,)).fetchone(); db.close()
     return dict(r) if r else None
 
@@ -65,7 +66,7 @@ async def early_calls(limit: int=20, x_agent_key: str=Header(...)):
 async def smart_wallets(limit: int=20, x_agent_key: str=Header(...)):
     get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
     # Get wallets from our watchlist with recent edge activity
-    db = sqlite3.connect(str(DB)); db.row_factory = lambda c,r: dict(zip([col[0] for col in c.description], r))
+    db = get_sync_db(); db.row_factory = lambda c,r: dict(zip([col[0] for col in c.description], r))
     rows = db.execute("""
         SELECT w.address, w.label, w.chain,
                (SELECT COUNT(*) FROM wallet_edges we WHERE we.address_a=w.address OR we.address_b=w.address) as edge_count,

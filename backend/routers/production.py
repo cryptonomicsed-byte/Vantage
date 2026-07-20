@@ -15,7 +15,7 @@ import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from backend.db import DB_PATH
+from backend.db import DB_PATH, get_db
 from backend.deps import get_agent
 from backend.routers.surfaces import _insert_broadcast, _find_or_create_series
 
@@ -125,7 +125,7 @@ async def create_production(p: ProjectCreate, agent: dict = Depends(get_agent)):
     medium = p.medium.lower().strip()
     if medium not in MEDIA_SURFACE:
         raise HTTPException(422, "medium must be 'video' or 'audio'")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO production_projects
                  (owner_id, owner_name, title, description, medium, target_surface,
@@ -147,7 +147,7 @@ async def create_production(p: ProjectCreate, agent: dict = Depends(get_agent)):
 @router.get("", operation_id="list_productions")
 async def list_productions(agent: dict = Depends(get_agent),
                            mine: bool = Query(False), limit: int = Query(60, le=200)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         where = "WHERE p.status != 'archived'"
         params: list = []
@@ -168,7 +168,7 @@ async def list_productions(agent: dict = Depends(get_agent),
 
 @router.get("/{pid}", operation_id="get_production")
 async def get_production(pid: int, _caller: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         project = await _project_or_404(db, pid)
         collaborators = [dict(r) for r in await (await db.execute(
             "SELECT agent_id, agent_name, role, joined_at FROM production_collaborators WHERE project_id=? ORDER BY joined_at",
@@ -181,12 +181,12 @@ async def get_production(pid: int, _caller: dict = Depends(get_agent)):
 
 @router.post("/{pid}/join", operation_id="join_production")
 async def join_production(pid: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         project = await _project_or_404(db, pid)
         if project["status"] == "published":
             raise HTTPException(409, "Project is already published")
         await db.execute(
-            "INSERT OR IGNORE INTO production_collaborators (project_id, agent_id, agent_name, role) VALUES (?,?,?,'contributor')",
+            "INSERT INTO production_collaborators (project_id, agent_id, agent_name, role) VALUES (?,?,?,'contributor') ON CONFLICT (project_id, agent_id) DO NOTHING",
             (pid, agent["id"], agent["name"]),
         )
         if project["status"] == "open":
@@ -200,7 +200,7 @@ async def add_contribution(pid: int, c: Contribution, agent: dict = Depends(get_
     kind = c.kind.lower().strip()
     if kind not in CONTRIB_KINDS:
         raise HTTPException(422, f"kind must be one of {sorted(CONTRIB_KINDS)}")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         project = await _project_or_404(db, pid)
         if not await _is_collaborator(db, pid, agent["id"]):
             raise HTTPException(403, "Join the project before contributing")
@@ -217,7 +217,7 @@ async def add_contribution(pid: int, c: Contribution, agent: dict = Depends(get_
             "SELECT * FROM production_contributions WHERE project_id=? ORDER BY order_index, created_at", (pid,))).fetchall()]
     repo = await _gitea_sync(project, contributions)
     if repo and repo != project.get("gitea_repo"):
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute("UPDATE production_projects SET gitea_repo=? WHERE id=?", (repo, pid))
             await db.commit()
     return {"status": "added", "contribution_count": len(contributions), "gitea_repo": repo}
@@ -232,7 +232,7 @@ async def update_production(pid: int, patch: ProjectPatch, agent: dict = Depends
             fields.append(f"{col}=?"); params.append(val)
     if not fields:
         raise HTTPException(422, "No fields to update")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         project = await _project_or_404(db, pid)
         if project["owner_id"] != agent["id"]:
             raise HTTPException(403, "Only the owner can edit the project")
@@ -247,7 +247,7 @@ async def update_production(pid: int, patch: ProjectPatch, agent: dict = Depends
 async def publish_production(pid: int, req: PublishRequest, agent: dict = Depends(get_agent)):
     """Ship the finished production to its surface: a cinema title (video) or an
     album assembled from the project's track contributions (audio)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         project = await _project_or_404(db, pid)
         if project["owner_id"] != agent["id"]:
             raise HTTPException(403, "Only the owner can publish")
@@ -267,7 +267,7 @@ async def publish_production(pid: int, req: PublishRequest, agent: dict = Depend
         duration = req.duration_sec or sum(int(c["duration_sec"] or 0) for c in contributions) or 60
         series_id = None
         if project["cinema_kind"] in ("show", "podcast"):
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with get_db() as db:
                 series_id = await _find_or_create_series(
                     db, owner, title=project["title"], surface="cinema",
                     cinema_kind=project["cinema_kind"], category=project["category"],
@@ -286,7 +286,7 @@ async def publish_production(pid: int, req: PublishRequest, agent: dict = Depend
             raise HTTPException(422, "cover_url (album art) is required before publishing to Audio")
         if not tracks:
             raise HTTPException(422, "Add at least one 'track' contribution (body = audio URL) before publishing")
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             series_id = await _find_or_create_series(
                 db, owner, title=project["title"], surface="audio",
                 category=project["category"] or "Album", thumbnail_url=project["cover_url"])
@@ -303,7 +303,7 @@ async def publish_production(pid: int, req: PublishRequest, agent: dict = Depend
             first_bid = first_bid or bid
         published = {"broadcast_id": first_bid, "series_id": series_id, "surface": "audio", "tracks": len(tracks)}
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "UPDATE production_projects SET status='published', published_broadcast_id=?, published_series_id=?, updated_at=datetime('now') WHERE id=?",
             (published.get("broadcast_id"), published.get("series_id"), pid))

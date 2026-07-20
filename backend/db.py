@@ -1,15 +1,41 @@
 """Database path, media root, and schema initialisation."""
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import aiosqlite
 
+from . import pg_compat
 from .config import settings
 
 logger = logging.getLogger(__name__)
 
 DB_PATH: Path = settings.DATA_DIR / "vantage.db"
 MEDIA_ROOT: Path = settings.MEDIA_DIR
+
+
+@asynccontextmanager
+async def get_db():
+    """Async DB connection -- aiosqlite by default, or the Postgres shim
+    when VANTAGE_POSTGRES_URL is set (see backend/pg_compat.py)."""
+    if settings.POSTGRES_URL:
+        async with pg_compat.get_pg_db(settings.POSTGRES_URL) as db:
+            yield db
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA busy_timeout=20000")
+        yield db
+
+
+def get_sync_db():
+    """Sync counterpart to get_db(), for the handful of call sites that
+    connect from plain (non-async) functions."""
+    if settings.POSTGRES_URL:
+        return pg_compat.get_sync_pg_db(settings.POSTGRES_URL)
+    import sqlite3
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA busy_timeout=20000")
+    return conn
 
 
 async def init_agents_db() -> None:

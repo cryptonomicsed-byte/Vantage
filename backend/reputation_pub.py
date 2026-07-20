@@ -11,7 +11,7 @@ import aiosqlite
 import httpx
 
 from .config import settings
-from .db import DB_PATH
+from .db import DB_PATH, get_db
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ async def publish_julia_score(
         score = float(data.get("trust_score", prior))
 
         # Cache in mesh_agents for display (not authoritative — Julia owns the score)
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute(
                 """UPDATE mesh_agents SET trust_score = ?
                    WHERE agent_id = ? AND block_id = ?""",

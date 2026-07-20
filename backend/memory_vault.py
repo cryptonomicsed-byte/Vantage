@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 
 import aiosqlite
 
-from .db import DB_PATH
+from .db import DB_PATH, get_db
 from .config import settings
 
 VAULT_ROOT = Path(settings.DATA_DIR) / "memory_vaults"
@@ -61,7 +61,7 @@ class MemoryVault:
             (self.vault_path / sub).mkdir(exist_ok=True)
 
     async def get_config(self) -> VaultConfig:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             db.row_factory = aiosqlite.Row
             row = await (await db.execute(
                 "SELECT * FROM agent_memory_vaults WHERE agent_id=?", (self.agent_id,)
@@ -83,7 +83,7 @@ class MemoryVault:
             )
 
     async def set_access(self, level: AccessLevel, peers: Optional[List[str]] = None):
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute(
                 "UPDATE agent_memory_vaults SET memory_access=?, federation_peers=? WHERE agent_id=?",
                 (level, json.dumps(peers or []), self.agent_id)
@@ -99,7 +99,7 @@ class MemoryVault:
         if config.access == "followers":
             if accessor_agent_id == self.agent_id:
                 return True
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with get_db() as db:
                 row = await (await db.execute(
                     "SELECT 1 FROM agent_follows WHERE follower_id=? AND following_id=?",
                     (accessor_agent_id, self.agent_id)
@@ -110,7 +110,7 @@ class MemoryVault:
                 return True
             if accessor_peer and accessor_peer in config.federation_peers:
                 return True
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with get_db() as db:
                 row = await (await db.execute(
                     "SELECT 1 FROM agent_follows WHERE follower_id=? AND following_id=?",
                     (accessor_agent_id, self.agent_id)
@@ -120,7 +120,7 @@ class MemoryVault:
 
     async def log_access(self, accessor_agent_id: Optional[int], accessor_peer: str,
                          resource_path: str, access_type: str = "read"):
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute(
                 "INSERT INTO memory_access_log (vault_agent_id, accessor_agent_id, accessor_peer_url, resource_path, access_type) VALUES (?,?,?,?,?)",
                 (self.agent_id, accessor_agent_id, accessor_peer, resource_path, access_type)
@@ -165,7 +165,7 @@ class MemoryVault:
         return s
 
     async def export_broadcast(self, broadcast_id: int):
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             db.row_factory = aiosqlite.Row
             row = await (await db.execute(
                 "SELECT b.*, a.name as agent_name FROM broadcasts b JOIN agents a ON a.id=b.agent_id WHERE b.id=? AND b.agent_id=?",
@@ -206,14 +206,14 @@ class MemoryVault:
         self._write_note(path, frontmatter, body)
         # Index under the vault-relative path so search results resolve via
         # /vault/file/{path}; drop any legacy bare-filename row from older syncs.
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute("DELETE FROM memory_fts WHERE agent_id=? AND note_path=?",
                              (self.agent_id, filename))
             await db.commit()
         await self._update_fts(f"broadcasts/{filename}", b.get("title", ""), body, tags)
 
     async def export_knowledge(self, snippet_id: int):
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             db.row_factory = aiosqlite.Row
             row = await (await db.execute(
                 "SELECT * FROM knowledge_snippets WHERE id=? AND agent_id=?",
@@ -248,7 +248,7 @@ class MemoryVault:
         self._write_note(self.vault_path / "knowledge" / f"{safe}.md", frontmatter, body)
 
     async def export_trace(self, trace_id: int):
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             db.row_factory = aiosqlite.Row
             row = await (await db.execute(
                 "SELECT * FROM agent_traces WHERE id=? AND agent_id=?",
@@ -282,7 +282,7 @@ class MemoryVault:
 
     # ── Conversations: DM threads + workspace rooms ─────────────────────────
     async def export_conversations(self):
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             db.row_factory = aiosqlite.Row
             threads = []
             try:
@@ -440,7 +440,7 @@ class MemoryVault:
         """Batch re-render of every externally-ingested conversation from the
         DB (source of truth) — lets a rebuilt/fresh vault recover this family
         via full_sync(), same pattern as export_conversations()."""
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             db.row_factory = aiosqlite.Row
             connectors = await (await db.execute(
                 "SELECT * FROM vault_connectors WHERE agent_id=? AND revoked=0", (self.agent_id,)
@@ -460,7 +460,7 @@ class MemoryVault:
 
     # ── Skills: badges + soul_manifest capabilities ─────────────────────────
     async def export_skills(self):
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             db.row_factory = aiosqlite.Row
             row = await (await db.execute(
                 "SELECT skill_badges, soul_manifest, bio FROM agents WHERE id=?", (self.agent_id,)
@@ -502,7 +502,7 @@ class MemoryVault:
 
     # ── Projects: collectives + completed creation jobs ─────────────────────
     async def export_projects(self):
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             db.row_factory = aiosqlite.Row
             collectives = []
             try:
@@ -559,7 +559,7 @@ class MemoryVault:
 
     # ── Trades taken (filled orders — NOT the signal firehose) ──────────────
     async def export_trades(self):
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             db.row_factory = aiosqlite.Row
             orders = await (await db.execute(
                 """SELECT id, side, symbol, chain, quantity, avg_fill_price, price,
@@ -594,7 +594,7 @@ class MemoryVault:
             await self._update_fts(f"trades/trade-{o['id']}.md", title, body, ["trade"])
 
     async def full_sync(self):
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             for row in await (await db.execute(
                 "SELECT id FROM broadcasts WHERE agent_id=? AND status='ready'", (self.agent_id,)
             )).fetchall():
@@ -616,7 +616,7 @@ class MemoryVault:
                 await exporter()
             except Exception:
                 pass
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute(
                 "UPDATE agent_memory_vaults SET last_synced_at=datetime('now') WHERE agent_id=?",
                 (self.agent_id,)
@@ -709,7 +709,13 @@ class MemoryVault:
         log_path.write_text(new_content.rstrip() + "\n", encoding="utf-8")
 
     async def _update_fts(self, note_path: str, title: str, content: str, tags: list):
-        async with aiosqlite.connect(DB_PATH) as db:
+        # memory_fts is a SQLite FTS5 virtual table with no direct Postgres
+        # equivalent -- excluded from the pg migration by design (see
+        # backend/pg_compat.py module docstring). No-op under Postgres until
+        # native tsvector/GIN full-text search is implemented as a follow-up.
+        if settings.POSTGRES_URL:
+            return
+        async with get_db() as db:
             await db.execute(
                 "DELETE FROM memory_fts WHERE agent_id=? AND note_path=?",
                 (self.agent_id, note_path)
@@ -829,7 +835,7 @@ class MemoryVault:
     async def semantic_search(self, query: str, top_k: int = 20) -> list:
         # Try wildcard-expanded FTS5 first for partial matching
         expanded = " ".join(f"{w}*" for w in query.split() if len(w) > 2)
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             for fts_q in [expanded, query]:
                 if not fts_q.strip():
                     continue
@@ -1041,7 +1047,7 @@ class MemoryVault:
         workspace = self.vault_path / "workspace"
         workspace.mkdir(exist_ok=True)
 
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             db.row_factory = aiosqlite.Row
             row = await (await db.execute(
                 "SELECT bio, manifesto, skill_badges, tier FROM agents WHERE id=?",
@@ -1140,7 +1146,7 @@ class MemoryVault:
 
     async def search_sessions(self, query: str, limit: int = 10) -> list:
         """FTS5 search over this agent's ghost-mode thought traces."""
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             try:
                 rows = await (await db.execute(
                     """SELECT trace_id, message, trace_type,

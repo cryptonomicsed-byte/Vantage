@@ -18,7 +18,7 @@ import aiosqlite
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
-from backend.db import DB_PATH
+from backend.db import DB_PATH, get_db
 from backend.deps import get_agent
 from backend.alpha_engine import composite_alpha_score, assemble_features
 
@@ -191,7 +191,7 @@ async def score_token_from_intel(
     symbol = "" if is_addr else ident
     mint = ca or (ident if is_addr else "")
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         signals = await _collect_signals(db, symbol or ident, mint, hours)
         velocity_hint = await _velocity_from_trades(db, mint, hours)
@@ -226,7 +226,7 @@ async def money_flow(
     fade toward the background nebulae exactly as specified.
     """
     since = int(time.time()) - hours * 3600
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(_WALLET_TRADES_DDL)
         db.row_factory = aiosqlite.Row
         rows = [dict(r) for r in await (await db.execute(

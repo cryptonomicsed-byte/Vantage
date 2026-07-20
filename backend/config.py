@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     DATA_DIR: Path = Path("data")
+    # Real Postgres cutover (see backend/pg_compat.py). Empty = stay on
+    # SQLite (get_db() unchanged). Set VANTAGE_POSTGRES_URL to switch --
+    # e.g. postgresql://vantage:PASS@127.0.0.1:5432/vantage.
+    POSTGRES_URL: str = ""
     MEDIA_DIR: Path = Path("media/agents")
     WEBUI_DIR: Path = Path("/opt/ares/Vantage/frontend/dist")
 

@@ -25,7 +25,7 @@ import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from pydantic import BaseModel
 
-from backend.db import DB_PATH
+from backend.db import DB_PATH, get_db
 from backend.deps import get_agent
 from backend.thumbnails import generate_thumbnail, get_default_thumbnail
 
@@ -63,7 +63,7 @@ class RenderRequest(BaseModel):
 # ── DB Init ──────────────────────────────────────────────────
 
 async def init_video_db():
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS video_projects (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,7 +123,7 @@ async def init_video_db():
 @router.post("/projects")
 async def create_project(data: VideoProjectCreate, agent: dict = Depends(get_agent)):
     """Create a new video project. Auto-creates Gitea repo for collaboration."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO video_projects (agent_id, title, description, template, width, height, fps, duration_sec)
                VALUES (?,?,?,?,?,?,?,?)""",
@@ -146,7 +146,7 @@ async def create_project(data: VideoProjectCreate, agent: dict = Depends(get_age
 @router.get("/projects")
 async def list_projects(agent: dict = Depends(get_agent), include_co_created: bool = False):
     """List video projects."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             "SELECT * FROM video_projects WHERE agent_id=? ORDER BY updated_at DESC",
@@ -157,7 +157,7 @@ async def list_projects(agent: dict = Depends(get_agent), include_co_created: bo
 @router.get("/projects/{project_id}")
 async def get_project(project_id: int, agent: dict = Depends(get_agent)):
     """Get a video project with scenes."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         project = await (await db.execute(
             "SELECT * FROM video_projects WHERE id=? AND agent_id=?", (project_id, agent["id"])
@@ -183,7 +183,7 @@ async def get_project(project_id: int, agent: dict = Depends(get_agent)):
 @router.post("/projects/{project_id}/scenes")
 async def add_scene(project_id: int, data: SceneCreate, agent: dict = Depends(get_agent)):
     """Add a scene to a video project."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         # Verify ownership
         project = await (await db.execute(
             "SELECT id FROM video_projects WHERE id=? AND agent_id=?", (project_id, agent["id"])
@@ -209,7 +209,7 @@ async def add_scene(project_id: int, data: SceneCreate, agent: dict = Depends(ge
 async def render_project(project_id: int, data: RenderRequest = RenderRequest(),
                          agent: dict = Depends(get_agent)):
     """Render a video project to MP4."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         project = await (await db.execute(
             "SELECT * FROM video_projects WHERE id=? AND agent_id=?", (project_id, agent["id"])
@@ -239,7 +239,7 @@ async def render_project(project_id: int, data: RenderRequest = RenderRequest(),
     try:
         output_path = await render_with_engine(data.engine, project, scenes)
         
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             file_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
             # Auto-generate thumbnail from rendered video
             thumb_url = None
@@ -267,7 +267,7 @@ async def render_project(project_id: int, data: RenderRequest = RenderRequest(),
         return {"render_id": render_id, "status": "completed", "output_path": output_path}
     
     except Exception as e:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute(
                 "UPDATE video_renders SET status='failed', error=? WHERE id=?",
                 (str(e)[:500], render_id)
@@ -381,7 +381,7 @@ async def render_vimax(project: dict, scenes: list, output_path: str) -> str:
     import urllib.request as _urlreq
 
     # Load agent with LLM config
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         agent_row = await (await db.execute(
             "SELECT * FROM agents WHERE id=?", (project["agent_id"],)
@@ -601,7 +601,7 @@ window.addEventListener('load', () => {{
 @router.get("/library")
 async def video_library(agent: dict = Depends(get_agent)):
     """Browse all rendered videos across all agents (global library)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             """SELECT p.id, p.title, p.description, p.template, p.status, p.render_url,
@@ -620,7 +620,7 @@ async def video_library(agent: dict = Depends(get_agent)):
 @router.get("/library/mine")
 async def my_videos(agent: dict = Depends(get_agent)):
     """Browse your own rendered videos."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             """SELECT id, title, description, template, status, render_url,
@@ -641,7 +641,7 @@ async def my_videos(agent: dict = Depends(get_agent)):
 @router.post("/projects/{project_id}/publish")
 async def publish_video(project_id: int, agent: dict = Depends(get_agent)):
     """Publish rendered video to Vantage feed."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         project = await (await db.execute(
             "SELECT * FROM video_projects WHERE id=? AND agent_id=?", (project_id, agent["id"])
@@ -708,7 +708,7 @@ async def publish_video(project_id: int, agent: dict = Depends(get_agent)):
 @router.post("/projects/{project_id}/fork")
 async def fork_project(project_id: int, agent: dict = Depends(get_agent)):
     """Fork a video project for remixing."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         project = await (await db.execute(
             "SELECT * FROM video_projects WHERE id=?", (project_id,)
@@ -755,7 +755,7 @@ async def vimax_generate(project_id: int, agent: dict = Depends(get_agent)):
     logger = logging.getLogger("vimax")
 
     # Fetch project
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         proj = await (await db.execute(
             "SELECT * FROM video_projects WHERE id = ?", (project_id,)

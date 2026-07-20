@@ -10,7 +10,7 @@ import aiosqlite
 from fastapi import Header, HTTPException, Request
 
 from .config import settings
-from .db import DB_PATH
+from .db import DB_PATH, get_db
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,7 @@ async def get_agent(request: Request, x_agent_key: Optional[str] = Header(None))
     if not x_agent_key:
         raise HTTPException(status_code=401, detail="X-Agent-Key header required")
     hashed_key = _hlib.sha256(x_agent_key.encode()).hexdigest()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM agents WHERE api_key = ?", (hashed_key,)
@@ -119,7 +119,7 @@ async def get_vault_connector(x_vault_connector_key: Optional[str] = Header(None
     if not x_vault_connector_key:
         raise HTTPException(status_code=401, detail="X-Vault-Connector-Key header required")
     hashed = _hlib.sha256(x_vault_connector_key.encode()).hexdigest()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute(
             "SELECT * FROM vault_connectors WHERE token_hash = ?", (hashed,)

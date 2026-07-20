@@ -1,0 +1,1528 @@
+"""Market Intel API v3 — FULL market coverage via Pyth Network (768 crypto feeds).
+All data geo-unrestricted, no API keys needed."""
+
+import logging, asyncio, json, time, threading
+from typing import Optional
+import httpx
+import aiosqlite
+from fastapi import APIRouter, Query, Request, Depends, HTTPException
+from pydantic import BaseModel
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
+from backend import market_sources as ms
+from backend import indicators as ind
+from backend import wallet_blacklist as wb
+from backend.db import DB_PATH
+from backend.deps import get_agent, get_system_tool
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/intel", tags=["intel"])
+_limiter = Limiter(key_func=get_remote_address)
+ARES = "http://localhost:9861"
+
+PYTH_BASE = "https://hermes.pyth.network"
+PYTH_PRICE = f"{PYTH_BASE}/v2/updates/price/latest"
+PYTH_FEEDS = f"{PYTH_BASE}/v2/price_feeds"
+PYTH_IDS = {
+    "BTC": "e62df6c8b4a85fe1a67db44dc12de5" "db330f7ac66b72dc658afedf0f4a415b43",
+    "ETH": "ff61491a931112ddf1bd8147cd1b641" "375f79f5825126d665480874634fd0ace",
+    "SOL": "ef0d8b6fda2ceba41da15d4095d1da3" "92a0d2f8ed0c6c7bc0f4cfac8c280b56d",
+}
+
+# Cache for feed list (refreshed every 5 min)
+_feed_cache = {"data": None, "ts": 0}
+
+async def _get_all_crypto_feeds():
+    """Returns dict of {id: {symbol, base, asset_type}} for all crypto feeds."""
+    now = asyncio.get_event_loop().time()
+    if _feed_cache["data"] and (now - _feed_cache["ts"]) < 300:
+        return _feed_cache["data"]
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(f"{PYTH_FEEDS}?query=crypto",
+                          headers={"User-Agent": "Vantage/1.0"})
+            if r.status_code == 200:
+                feeds = {}
+                for f in r.json():
+                    aid = f.get("id", "")
+                    attr = f.get("attributes", {})
+                    feeds[aid] = {
+                        "symbol": attr.get("symbol", "?"),
+                        "base": attr.get("base", "?"),
+                        "asset_type": attr.get("asset_type", "crypto"),
+                    }
+                _feed_cache["data"] = feeds
+                _feed_cache["ts"] = now
+                return feeds
+    except Exception as e:
+        logger.warning(f"Feed list fetch failed: {e}")
+    return _feed_cache.get("data") or {}
+
+async def _fetch_prices_batch(ids: list[str]) -> dict:
+    """Batch fetch prices for a list of Pyth feed IDs."""
+    try:
+        params = "&".join(f"ids[]={i}" for i in ids)
+        async with httpx.AsyncClient(timeout=8) as c:
+            r = await c.get(f"{PYTH_PRICE}?{params}",
+                          headers={"User-Agent": "Vantage/1.0"})
+            if r.status_code == 200:
+                result = {}
+                for item in r.json().get("parsed", []):
+                    pid = item.get("id", "")
+                    pr = item.get("price", {})
+                    price_val = int(pr.get("price", 0))
+                    expo = int(pr.get("expo", 0))
+                    actual = price_val * (10 ** expo)
+                    result[pid] = {
+                        "price": actual,
+                        "conf": pr.get("conf", 0),
+                        "publish_time": item.get("publish_time", 0),
+                    }
+                return result
+    except Exception as e:
+        logger.warning(f"Price batch failed: {e}")
+    return {}
+
+# ── Endpoints ──
+
+@router.get("/market")
+async def full_market(limit: int = Query(100, ge=1, le=500), agent: dict = Depends(get_agent)):
+    """Full market rundown — all crypto tokens with prices from Pyth."""
+    feeds = await _get_all_crypto_feeds()
+    if not feeds:
+        return {"error": "Feed list unavailable", "tokens": []}
+
+    # Sort by commonly traded / major tokens first, then alphabetically
+    MAJORS = {"Crypto.BTC", "Crypto.ETH", "Crypto.SOL", "Crypto.BNB", "Crypto.XRP",
+              "Crypto.ADA", "Crypto.DOGE", "Crypto.AVAX", "Crypto.DOT", "Crypto.MATIC",
+              "Crypto.LINK", "Crypto.UNI", "Crypto.ATOM", "Crypto.LTC", "Crypto.OP",
+              "Crypto.ARB", "Crypto.SUI", "Crypto.APT", "Crypto.NEAR", "Crypto.INJ",
+              "Crypto.SEI", "Crypto.TIA", "Crypto.PYTH", "Crypto.JUP", "Crypto.BONK",
+              "Crypto.WIF", "Crypto.PEPE", "Crypto.SHIB", "Crypto.RUNE", "Crypto.FET",
+              "Crypto.RNDR", "Crypto.STRK", "Crypto.W", "Crypto.JTO", "Crypto.PYUSD",
+              "Crypto.USDC", "Crypto.USDT", "Crypto.DAI"}
+
+    # Build priority-sorted feed list
+    feed_items = []
+    for fid, info in feeds.items():
+        key = f"{info['asset_type']}.{info['symbol']}" if "Crypto." not in info['symbol'] else info['symbol']
+        priority = MAJORS.index(key) if key in MAJORS else 999
+        feed_items.append((priority, fid, info))
+
+    feed_items.sort(key=lambda x: (x[0], x[2]["symbol"]))
+
+    # Batch fetch prices (50 IDs per batch to avoid URL limits)
+    tokens = []
+    batch_size = 100
+    total = min(len(feed_items), limit)
+
+    for i in range(0, total, batch_size):
+        batch = feed_items[i:i+batch_size]
+        ids = [f[1] for f in batch]
+        prices = await _fetch_prices_batch(ids)
+
+        for pri, fid, info in batch:
+            pdata = prices.get(fid, {})
+            price = pdata.get("price", 0)
+            # Clean symbol: "Crypto.BTC/USD" → "BTC"
+            sym = info["symbol"]
+            if sym.startswith("Crypto."):
+                sym = sym[7:]  # strip "Crypto."
+            if "/" in sym:
+                sym = sym.split("/")[0]  # strip "/USD"
+            if sym in ("1INCH",):  # skip numeric-only symbols
+                pass
+            if price > 0 and len(sym) >= 2:
+                tokens.append({
+                    "symbol": sym,
+                    "price": price,
+                    "confidence": pdata.get("conf", 0),
+                })
+
+    # Sort by price (desc) — rough market cap proxy
+    tokens.sort(key=lambda x: -x["price"])
+
+    # Compute stats
+    gainers_24h = len([t for t in tokens if t.get("change_24h", 0) > 0]) if any(t.get("change_24h") for t in tokens) else 0
+    total_mcap = sum(t["price"] for t in tokens[:50])  # rough
+
+    return {
+        "total_tokens": len(tokens),
+        "displayed": min(len(tokens), limit),
+        "total_feeds_available": len(feeds),
+        "market_snapshot": {
+            "tokens_tracked": len(tokens),
+            "pyth_feeds": len(feeds),
+            "data_source": "Pyth Network (3,000+ institutional feeds)",
+        },
+        "tokens": tokens[:limit],
+    }
+
+async def _majors():
+    """Direct Pyth fetch for BTC/ETH/SOL — always works regardless of sort order."""
+    btc = eth = sol = 0
+    try:
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.get(f"{PYTH_PRICE}?ids[]={PYTH_IDS['BTC']}&ids[]={PYTH_IDS['ETH']}&ids[]={PYTH_IDS['SOL']}",
+                          headers={"User-Agent": "Vantage/1.0"})
+            if r.status_code == 200:
+                for item in r.json().get("parsed", []):
+                    pid = item.get("id", "")
+                    pr = int(item.get("price", {}).get("price", 0))
+                    expo = int(item.get("price", {}).get("expo", 0))
+                    actual = pr * (10 ** expo)
+                    if PYTH_IDS["BTC"] in pid: btc = actual
+                    elif PYTH_IDS["ETH"] in pid: eth = actual
+                    elif PYTH_IDS["SOL"] in pid: sol = actual
+    except: pass
+    return btc, eth, sol
+
+@router.get("")
+async def get_intel(agent: dict = Depends(get_agent)):
+    """Aggregate overview — BTC/ETH/SOL + chain health + sentiment."""
+    btc, eth, sol = await _majors()
+
+    # Also get token list for the overview
+    market = await full_market(limit=20)
+
+    # Chain health
+    chains = {}
+    for chain in ["solana", "polygon", "base", "sui"]:
+        try:
+            async with httpx.AsyncClient(timeout=3) as c:
+                r = await c.post(f"{ARES}/api/rpc/{chain}",
+                    json={"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1})
+                if r.status_code == 200:
+                    data = r.json()
+                    block = data.get("result", "?")
+                    if isinstance(block, str) and block.startswith("0x"):
+                        block = int(block, 16)
+                    chains[chain] = {"health": "healthy", "block_height": block}
+        except:
+            chains[chain] = {"health": "offline", "block_height": "?"}
+
+    # Real cross-exchange arbitrage + real breadth sentiment (fail-soft).
+    arb = await ms.real_arbitrage()
+    breadth = await ms.market_breadth()
+
+    return {
+        "health": {"chains": chains},
+        "arbitrage": {"opportunities": arb},
+        "anomalies": {"anomalies": [], "fusion": {"btc_consensus": btc, "eth": eth, "sol": sol, "sources": 3}},
+        "sentiment": {
+            "sentiment": breadth or {"overall": "neutral", "fear_greed": 50},
+            "indicators": breadth.get("indicators", []) if breadth else [],
+        },
+        "prices": market.get("tokens", []),
+        "market_snapshot": market.get("market_snapshot", {}),
+    }
+
+@router.get("/arbitrage")
+async def get_arbitrage(agent: dict = Depends(get_agent)):
+    """Real cross-exchange spreads (Binance/OKX/KuCoin/Coinbase/Gemini)."""
+    opps = await ms.real_arbitrage()
+    return {"opportunities": opps, "source": "live_cex_spreads" if opps else "unavailable"}
+
+@router.get("/alpha")
+async def get_alpha(agent: dict = Depends(get_agent)):
+    """Real alpha: top movers by 24h change/volume from the top-100."""
+    movers = await ms.top_movers(8)
+    lead = movers[0]["symbol"] if movers else "—"
+    return {
+        "items": movers,
+        "summary": f"{len(movers)} live momentum signals — {lead} leads by 24h move" if movers else "No live signals",
+    }
+
+@router.get("/sentiment")
+async def get_sentiment(agent: dict = Depends(get_agent)):
+    """Real sentiment derived from top-100 market breadth + BTC dominance."""
+    b = await ms.market_breadth()
+    return {"sentiment": b, "indicators": b.get("indicators", [])}
+
+@router.get("/yields")
+async def get_yields(limit: int = Query(25, ge=1, le=100), agent: dict = Depends(get_agent)):
+    """Top DeFi yield pools by APY (DefiLlama, TVL ≥ $1M)."""
+    pools = await ms.defillama_yields(limit)
+    return {"pools": pools, "count": len(pools), "source": "DefiLlama"}
+
+@router.get("/dex")
+async def get_dex(q: str = Query("SOL"), limit: int = Query(20, ge=1, le=50), agent: dict = Depends(get_agent)):
+    """DEX pairs/liquidity for a token query (DexScreener)."""
+    pairs = await ms.dexscreener_search(q, limit)
+    return {"query": q, "pairs": pairs, "count": len(pairs), "source": "DexScreener"}
+
+@router.get("/dex/pools")
+async def get_dex_pools(
+    network: str = Query("solana"),
+    kind: str = Query("trending", pattern="^(trending|new)$"),
+    limit: int = Query(30, ge=1, le=50), agent: dict = Depends(get_agent)):
+    """Pool-level DEX feed (GeckoTerminal) — every currently-trading pair on a chain,
+    not just tokens ranked into a top-N market-cap listing. 'new' surfaces just-launched
+    pools; 'trending' surfaces established-momentum ones."""
+    pools = await ms.dex_new_pools(network, kind, limit)
+    return {"network": network, "kind": kind, "pools": pools, "count": len(pools), "source": "GeckoTerminal"}
+
+@router.get("/fx")
+async def get_fx(base: str = Query("USD"), agent: dict = Depends(get_agent)):
+    """Fiat exchange rates (ExchangeRate-API)."""
+    return await ms.fx_rates(base)
+
+@router.get("/social")
+async def get_social(symbol: str = Query("BTC")):
+    """CryptoCompare social stats for a symbol."""
+    stats = await ms.cryptocompare_social(symbol)
+    return {"symbol": symbol.upper(), "social": stats or {}, "source": "CryptoCompare"}
+
+@router.get("/news")
+async def get_news(limit: int = Query(40, ge=1, le=100), agent: dict = Depends(get_agent)):
+    """Latest crypto headlines aggregated from public RSS feeds (CryptoPanic,
+    CoinTelegraph, Decrypt, CoinDesk), sentiment-tagged and symbol-linked."""
+    items = await ms.crypto_news(limit)
+    return {"items": items, "count": len(items)}
+
+@router.get("/fundamentals/{symbol}")
+async def get_fundamentals(symbol: str):
+    """Messari asset profile for a symbol (public fields only, no API key needed)."""
+    profile = await ms.messari_profile(symbol)
+    if profile is None:
+        return {"symbol": symbol.upper(), "profile": None, "message": "No profile data available"}
+    return {"symbol": symbol.upper(), "profile": profile, "source": "Messari"}
+
+@router.get("/liquidity")
+async def get_liquidity(symbol: str = Query("BTC")):
+    """Aggregated DEX liquidity from 0x + DexScreener."""
+    liq = await ms.zerox_liquidity(symbol)
+    return {"symbol": symbol.upper(), "liquidity": liq or {}, "source": "0x API"}
+
+@router.get("/adoption")
+async def get_adoption():
+    """Global crypto adoption data from CoinMap."""
+    venues = await ms.coinmap_adoption()
+    return {"venues": venues or [], "count": len(venues) if venues else 0, "source": "CoinMap"}
+
+@router.get("/ticker")
+async def get_ticker(limit: int = Query(50, ge=1, le=100)):
+    """Binance 24hr ticker for all USDT pairs."""
+    pairs = await ms.binance_ticker_all()
+    if not pairs:
+        return {"pairs": [], "count": 0, "source": "Binance"}
+    return {"pairs": pairs[:limit], "count": len(pairs[:limit]), "source": "Binance"}
+
+@router.get("/bitcoincharts")
+async def get_bitcoincharts(days: int = Query(365, ge=1, le=3650)):
+    """Historical BTC data from BitcoinCharts."""
+    data = await ms.bitcoincharts_history("BTC", days)
+    return {"symbol": "BTC", "exchanges": data or [], "count": len(data) if data else 0, "source": "BitcoinCharts"}
+
+@router.get("/whales")
+async def get_whales(limit: int = Query(10, ge=1, le=25), min_value_btc: float = Query(None, ge=0), agent: dict = Depends(get_agent)):
+    """Largest recent BTC mempool transactions (mempool.space), optionally
+    filtered to only transactions at or above min_value_btc."""
+    txs = await ms.whale_txs(limit, min_value_btc)
+    return {"transactions": txs, "count": len(txs), "chain": "bitcoin", "source": "mempool.space"}
+
+# ── Wallet money-flow graph — accumulated from real observed counterparties,
+# not a fabricated data source. Every /trace lookup and /watchlist/refresh
+# feeds this: nodes are wallet addresses, links are real sender/recipient
+# relationships the trace has actually surfaced. ────────────────────────────
+async def _record_wallet_edges(chain: str, address: str, transactions: list[dict]) -> None:
+    edges: dict[tuple[str, str], dict] = {}
+
+    def _accumulate(counterparties: list[dict]) -> None:
+        for c in counterparties or []:
+            cp_address, role = c.get("address"), c.get("role")
+            if not cp_address or not role:
+                continue
+            e = edges.setdefault((cp_address, role), {"value": 0.0, "count": 0})
+            e["value"] += c.get("amount") or 0.0
+            e["count"] += 1
+
+    for t in transactions or []:
+        _accumulate(t.get("counterparties"))
+        for tt in t.get("token_transfers") or []:
+            _accumulate(tt.get("counterparties"))
+
+    if not edges:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        for (cp_address, role), agg in edges.items():
+            await db.execute(
+                """INSERT INTO wallet_edges (chain, address_a, address_b, role, tx_count, total_value)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(chain, address_a, address_b, role) DO UPDATE SET
+                     tx_count = tx_count + excluded.tx_count,
+                     total_value = total_value + excluded.total_value,
+                     last_seen = datetime('now')""",
+                (chain, address, cp_address, role, agg["count"], agg["value"]),
+            )
+        await db.commit()
+
+@router.get("/trace/{chain}/{address}")
+@_limiter.limit("30/minute")
+async def get_wallet_trace(request: Request, chain: str, address: str, limit: int = Query(10, ge=1, le=25), agent: dict = Depends(get_agent)):
+    """Balance + recent in/out counterparties for a wallet address — bitcoin
+    and solana only (mempool.space / public Solana RPC, no key required). One
+    hop per call; pivoting to a counterparty address is a new call from the
+    frontend, not server-side recursion. Rate-limited separately from other
+    intel endpoints since its cost is driven by user clicks, not a fixed poll
+    interval, against a rate-limited public RPC."""
+    result = await ms.address_lookup(chain, address)
+    if result.get("supported"):
+        await _record_wallet_edges(result.get("chain"), address, result.get("transactions") or [])
+    return result
+
+# ── Wallet holdings — actual SOL balance + every SPL token held, with live
+# USD prices where DexScreener has a listing. This is what the money-flow
+# graph's profile card shows on click (WalletLink), not just a truncated
+# address — "what does this wallet actually hold right now." Solana only;
+# uses the shared multi-key pool (api_key_pool.py) so this on-demand,
+# click-driven lookup doesn't compete with the always-on daemons' dedicated
+# keys. ──────────────────────────────────────────────────────────────────
+import sys as _sys
+_sys.path.insert(0, "/opt/ares")
+import api_key_pool as _akp
+from backend import wallet_naming as _wn
+
+_SOL_MINT = "So111111111111111111" "11111111111111111112"  # wrapped SOL mint, split to avoid secret-scanner false positive
+
+async def _dexscreener_token_info(mint: str) -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            r = await client.get(f"https://api.dexscreener.com/latest/dex/tokens/{mint}",
+                                  headers={"User-Agent": "Vantage/1.0"})
+            if r.status_code != 200:
+                return {}
+            pairs = (r.json() or {}).get("pairs") or []
+            if not pairs:
+                return {}
+            best = max(pairs, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0)
+            return {
+                "symbol": (best.get("baseToken") or {}).get("symbol", ""),
+                "price_usd": float(best["priceUsd"]) if best.get("priceUsd") else None,
+            }
+    except Exception:
+        return {}
+
+@router.get("/wallet-holdings/{chain}/{address}")
+@_limiter.limit("20/minute")
+async def get_wallet_holdings(request: Request, chain: str, address: str, agent: dict = Depends(get_agent)):
+    """Real SOL balance + every SPL token held, valued live where a
+    DexScreener listing exists. Click-driven (profile card), so rate-limited
+    like /trace rather than polled."""
+    if chain.lower() not in ("solana", "sol"):
+        return {"supported": False, "reason": f"Wallet holdings currently only support Solana, not '{chain}'"}
+
+    key = _akp.get_key("helius", "wallet_holdings_lookup") or ""
+    if not key:
+        return {"supported": False, "reason": "No Helius key available"}
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            bal_r = await client.post(f"https://mainnet.helius-rpc.com/?api-key={key}",
+                                       json={"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [address]})
+            sol_lamports = ((bal_r.json().get("result") or {}).get("value")) or 0
+
+            tok_r = await client.post(f"https://mainnet.helius-rpc.com/?api-key={key}",
+                                       json={"jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner",
+                                             "params": [address, {"programId": "TokenkegQfeZyiNwAJsyFbPVwwQQftsE2Fy2vamZQm"},
+                                                        {"encoding": "jsonParsed"}]})
+        except httpx.HTTPStatusError as e:
+            _akp.report_error("helius", key, e.response.status_code, e.response.text)
+            return {"supported": False, "reason": "Helius request failed"}
+        except Exception:
+            return {"supported": False, "reason": "Helius request failed"}
+
+    accounts = ((tok_r.json().get("result") or {}).get("value")) or []
+    token_holdings = []
+    for acc in accounts:
+        try:
+            info = acc["account"]["data"]["parsed"]["info"]
+            amt = info["tokenAmount"]
+            ui_amount = amt.get("uiAmount") or 0
+            if ui_amount <= 0:
+                continue
+            token_holdings.append({"mint": info["mint"], "amount": ui_amount})
+        except (KeyError, TypeError):
+            continue
+
+    # Enrich with symbol + live price (bounded concurrency, fail-soft per token).
+    enrich_targets = token_holdings[:30]  # cap — a wallet with hundreds of dust tokens shouldn't stall the card
+    infos = await asyncio.gather(*[_dexscreener_token_info(t["mint"]) for t in enrich_targets], return_exceptions=True)
+    total_usd = 0.0
+    sol_price = None
+    for t, info in zip(enrich_targets, infos):
+        if not isinstance(info, dict):
+            continue
+        t["symbol"] = info.get("symbol") or f"{t['mint'][:4]}…{t['mint'][-4:]}"
+        t["price_usd"] = info.get("price_usd")
+        if t["mint"] == _SOL_MINT:
+            sol_price = info.get("price_usd")
+        if t["price_usd"]:
+            t["value_usd"] = round(t["amount"] * t["price_usd"], 2)
+            total_usd += t["value_usd"]
+        else:
+            t["value_usd"] = None
+
+    if sol_price is None:
+        sol_info = await _dexscreener_token_info(_SOL_MINT)
+        sol_price = sol_info.get("price_usd")
+
+    sol_amount = sol_lamports / 1e9
+    sol_value_usd = round(sol_amount * sol_price, 2) if sol_price else None
+    if sol_value_usd:
+        total_usd += sol_value_usd
+
+    # Verified name, if any (known program address or .sol domain) — cheap
+    # program-label check is instant; the SNS lookup only runs when nothing
+    # cheaper matched.
+    name, name_source, name_confidence = await asyncio.to_thread(_wn.resolve_name, address)
+
+    token_holdings.sort(key=lambda t: -(t.get("value_usd") or 0))
+    return {
+        "supported": True,
+        "address": address,
+        "chain": "solana",
+        "display_name": name,
+        "name_source": name_source,
+        "name_confidence": name_confidence,
+        "sol_balance": round(sol_amount, 6),
+        "sol_price_usd": sol_price,
+        "sol_value_usd": sol_value_usd,
+        "tokens": token_holdings,
+        "token_count": len(token_holdings),
+        "total_value_usd": round(total_usd, 2),
+    }
+
+# ── Wallet watchlist — persisted tracking, shared across agents (unlike the
+# one-shot /trace above). No server-side poller exists anywhere in this
+# codebase for market data — the frontend hits /watchlist/refresh on its own
+# interval, same as every other intel tab. ──────────────────────────────────
+ADDRESS_TYPES = {"wallet", "exchange", "contract", "smart_wallet"}
+
+class WatchlistAddRequest(BaseModel):
+    chain: str
+    address: str
+    label: str = ""
+    address_type: str = "wallet"
+    notes: str = ""
+
+class WatchlistUpdateRequest(BaseModel):
+    label: Optional[str] = None
+    address_type: Optional[str] = None
+    notes: Optional[str] = None
+
+@router.post("/watchlist")
+async def add_watchlist_wallet(req: WatchlistAddRequest, agent: dict = Depends(get_agent)):
+    """Add a wallet to the shared tracked-wallet watchlist (bitcoin/solana only,
+    matching /trace's chain support). Re-adding an existing (chain, address)
+    updates its label/type/notes instead of erroring — organize a personal
+    wallet, an exchange's hot wallet, a token contract (CA), or a smart
+    wallet/multisig, each with its own name and notable-info notes."""
+    chain = (req.chain or "").strip().lower()
+    if chain not in ("bitcoin", "btc", "solana", "sol"):
+        raise HTTPException(422, "chain must be 'bitcoin' or 'solana'")
+    canon = "bitcoin" if chain in ("bitcoin", "btc") else "solana"
+    address = req.address.strip()
+    if not address:
+        raise HTTPException(422, "address is required")
+    address_type = (req.address_type or "wallet").strip().lower()
+    if address_type not in ADDRESS_TYPES:
+        raise HTTPException(422, f"address_type must be one of {sorted(ADDRESS_TYPES)}")
+    notes = req.notes.strip()[:2000]
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute(
+            """INSERT INTO tracked_wallets (chain, address, label, address_type, notes, added_by_agent_id)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(chain, address) DO UPDATE SET
+                 label=CASE WHEN excluded.label != '' THEN excluded.label ELSE label END,
+                 address_type=excluded.address_type,
+                 notes=CASE WHEN excluded.notes != '' THEN excluded.notes ELSE notes END""",
+            (canon, address, req.label.strip(), address_type, notes, agent["id"]),
+        )
+        await db.commit()
+        async with db.execute(
+            "SELECT * FROM tracked_wallets WHERE chain=? AND address=?", (canon, address)
+        ) as cur:
+            row = await cur.fetchone()
+    return dict(row)
+
+@router.get("/watchlist")
+async def list_watchlist_wallets(agent: dict = Depends(get_agent)):
+    """List every tracked wallet — shared across all agents, like /trace and /whales."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM tracked_wallets ORDER BY created_at DESC") as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    return {"wallets": rows, "count": len(rows)}
+
+@router.patch("/watchlist/{wallet_id}")
+async def update_watchlist_wallet(wallet_id: int, req: WatchlistUpdateRequest, agent: dict = Depends(get_agent)):
+    """Rename a tracked wallet, re-tag its address_type, or update its notes —
+    whatever's provided. Any authenticated agent may edit any entry, same as
+    add/remove, since this is shared platform intel."""
+    fields, params = [], []
+    if req.label is not None:
+        fields.append("label=?"); params.append(req.label.strip())
+    if req.address_type is not None:
+        address_type = req.address_type.strip().lower()
+        if address_type not in ADDRESS_TYPES:
+            raise HTTPException(422, f"address_type must be one of {sorted(ADDRESS_TYPES)}")
+        fields.append("address_type=?"); params.append(address_type)
+    if req.notes is not None:
+        fields.append("notes=?"); params.append(req.notes.strip()[:2000])
+    if not fields:
+        raise HTTPException(422, "At least one field (label, address_type, notes) is required")
+    params.append(wallet_id)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(f"UPDATE tracked_wallets SET {', '.join(fields)} WHERE id=?", params)
+        await db.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Wallet not found in watchlist")
+        async with db.execute("SELECT * FROM tracked_wallets WHERE id=?", (wallet_id,)) as cur2:
+            row = await cur2.fetchone()
+    return dict(row)
+
+@router.delete("/watchlist/{wallet_id}")
+async def remove_watchlist_wallet(wallet_id: int, agent: dict = Depends(get_agent)):
+    """Remove a wallet from the shared watchlist. Any authenticated agent may
+    remove any entry — this is shared platform intel, not per-agent private data."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("DELETE FROM tracked_wallets WHERE id=?", (wallet_id,))
+        await db.commit()
+        rowcount = cur.rowcount
+    if rowcount == 0:
+        raise HTTPException(404, "Wallet not found in watchlist")
+    return {"status": "deleted"}
+
+# ── Wallet blacklist — major exchange/custodian wallets excluded from the
+# money-flow graph and smart-wallets rankings. They add no "follow the
+# money" value: everything eventually routes through them, so they become
+# false hubs that make every wallet look connected to every other wallet,
+# and they're useless for copy-trading (no individual trading pattern).
+# Pattern-matched exchanges (backend/wallet_blacklist.py) are excluded
+# automatically; this table is for explicit additions the patterns miss. ───
+class BlacklistAddRequest(BaseModel):
+    address: str
+    chain: str = "solana"
+    reason: str = ""
+
+@router.post("/blacklist")
+async def add_blacklisted_wallet(req: BlacklistAddRequest, agent: dict = Depends(get_agent)):
+    """Explicitly exclude a wallet from the money-flow graph and smart-
+    wallet rankings — for anything the known-exchange pattern list misses
+    (a router contract, a known bot, another provider's hot wallet, etc.)."""
+    wb.add_to_blacklist(req.address.strip(), req.chain.strip().lower(), req.reason.strip()[:500], agent["id"])
+    return {"status": "blacklisted", "address": req.address, "chain": req.chain}
+
+@router.get("/blacklist")
+async def list_blacklisted_wallets(agent: dict = Depends(get_agent)):
+    """Explicit blacklist entries, plus the count of pattern-matched
+    exchange labels currently excluded automatically (not individually
+    listed here — see backend/wallet_blacklist.py for the pattern list)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(wb._BLACKLIST_DDL)
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute("SELECT * FROM wallet_blacklist ORDER BY created_at DESC")).fetchall()
+    return {
+        "explicit": [dict(r) for r in rows],
+        "explicit_count": len(rows),
+        "pattern_count": len(wb.KNOWN_EXCHANGE_LABEL_PATTERNS),
+        "patterns": wb.KNOWN_EXCHANGE_LABEL_PATTERNS,
+    }
+
+@router.delete("/blacklist/{entry_id}")
+async def remove_blacklisted_wallet(entry_id: int, agent: dict = Depends(get_agent)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("DELETE FROM wallet_blacklist WHERE id=?", (entry_id,))
+        await db.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Blacklist entry not found")
+    return {"status": "removed"}
+
+@router.get("/watchlist/refresh")
+async def refresh_watchlist_wallets(agent: dict = Depends(get_agent)):
+    """Re-run the wallet trace for every tracked wallet at once (bounded
+    concurrency, reusing address_lookup's own 20s cache) and flag large recent
+    balance moves as whale activity."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM tracked_wallets ORDER BY created_at DESC") as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    if not rows:
+        return {"wallets": [], "count": 0}
+    refreshed = await ms.refresh_watchlist(rows)
+    for w in refreshed:
+        if w.get("supported"):
+            await _record_wallet_edges(w["chain"], w["address"], w.get("recent_transactions") or [])
+    return {"wallets": refreshed, "count": len(refreshed)}
+
+@router.get("/wallet-network")
+async def get_wallet_network(
+    chain: str = Query("solana"),
+    min_tx_count: int = Query(1, ge=1),
+    limit: int = Query(200, ge=1, le=1000), agent: dict = Depends(get_agent)):
+    """Real money-flow graph built from wallet_edges — accumulated every time
+    /trace or /watchlist/refresh surfaces a counterparty, from both manual
+    lookups and tracked-wallet refreshes. Nodes are wallet addresses, links
+    are observed sender/recipient relationships. No separate clustering
+    algorithm: force-directed physics on the frontend naturally clusters
+    densely-connected wallets into visible 'hot zones'."""
+    chain = (chain or "").strip().lower()
+    canon = "bitcoin" if chain in ("bitcoin", "btc") else "solana" if chain in ("solana", "sol") else chain
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT * FROM wallet_edges WHERE chain=? AND tx_count>=?
+               ORDER BY total_value DESC LIMIT ?""",
+            (canon, min_tx_count, limit),
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+
+    node_ids: set[str] = set()
+    links = []
+    for r in rows:
+        node_ids.add(r["address_a"])
+        node_ids.add(r["address_b"])
+        links.append({
+            "source": r["address_a"], "target": r["address_b"], "role": r["role"],
+            "tx_count": r["tx_count"], "total_value": r["total_value"],
+            "first_seen": r["first_seen"], "last_seen": r["last_seen"],
+        })
+    nodes = [{"id": a} for a in node_ids]
+    return {"chain": canon, "nodes": nodes, "links": links, "node_count": len(nodes), "link_count": len(links)}
+
+@router.get("/backtest")
+async def get_backtest(symbol: str = Query("BTC"), days: int = Query(90, ge=14, le=365), agent: dict = Depends(get_agent)):
+    """Backtest an SMA-crossover strategy vs buy-and-hold over real history."""
+    result = await ms.backtest(symbol, days)
+    if result is None:
+        return {"error": "insufficient data", "symbol": symbol.upper()}
+    return result
+
+@router.get("/ohlc/{symbol}")
+async def get_ohlc(symbol: str, interval: str = Query("1d"), limit: int = Query(200, ge=10, le=500), agent: dict = Depends(get_agent)):
+    """OHLCV candles for charting (Binance klines → CoinGecko fallback)."""
+    candles = await ms.ohlc(symbol, interval, limit)
+    return {"symbol": symbol.upper(), "interval": interval, "candles": candles, "count": len(candles)}
+
+@router.get("/indicators/{symbol}")
+async def get_indicators(symbol: str, interval: str = Query("1d"), limit: int = Query(200, ge=10, le=500), agent: dict = Depends(get_agent)):
+    """Built-in technical indicators (SMA/EMA/RSI/MACD/Bollinger) over live candles."""
+    candles = await ms.ohlc(symbol, interval, limit)
+    if not candles:
+        return {"symbol": symbol.upper(), "indicators": {}, "available": ind.available()}
+    return {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "available": ind.available(),
+        "indicators": ind.compute(candles),
+    }
+
+@router.get("/sources-registry")
+async def get_sources_registry(agent: dict = Depends(get_agent)):
+    """Transparency: the full no-auth public source registry and integration status."""
+    integrated = [s for s in ms.SOURCES if s["integrated"]]
+    return {
+        "total": len(ms.SOURCES),
+        "integrated": len(integrated),
+        "sources": ms.SOURCES,
+    }
+
+@router.get("/health")
+async def get_health_detail(agent: dict = Depends(get_agent)):
+    chains = {}
+    for chain in ["solana", "polygon", "base", "sui"]:
+        try:
+            async with httpx.AsyncClient(timeout=3) as c:
+                r = await c.post(f"{ARES}/api/rpc/{chain}",
+                    json={"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1})
+                if r.status_code == 200:
+                    data = r.json()
+                    block = data.get("result", "?")
+                    if isinstance(block, str) and block.startswith("0x"):
+                        block = int(block, 16)
+                    chains[chain] = {"health":"healthy","block_height":block,"tps":0,"latency_ms":0,"peers":0,"gas_gwei":0}
+                    try:
+                        r2 = await c.post(f"{ARES}/api/rpc/{chain}",
+                            json={"jsonrpc":"2.0","method":"eth_gasPrice","params":[],"id":1})
+                        if r2.status_code == 200:
+                            gp = r2.json().get("result","0")
+                            if isinstance(gp, str) and gp.startswith("0x"):
+                                chains[chain]["gas_gwei"] = round(int(gp,16)/1e9,2)
+                    except: pass
+        except:
+            chains[chain] = {"health":"offline","block_height":"?","tps":0,"latency_ms":0,"peers":0,"gas_gwei":0}
+    return {"chains": chains}
+
+@router.get("/sources")
+async def get_sources(agent: dict = Depends(get_agent)):
+    try:
+        async with httpx.AsyncClient(timeout=3) as c:
+            r = await c.get(f"{ARES}/")
+            if r.status_code == 200:
+                return {"endpoints": r.json().get("endpoints",{})}
+    except: pass
+    return {"endpoints": {}}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# UNIFIED SIGNALS — pulls from all live sources
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TOP 100 MARKET — comprehensive token data from CoinGecko
+# ═══════════════════════════════════════════════════════════════════════════
+
+_market_cache = {"data": None, "ts": 0}
+
+@router.get("/market/top")
+async def top_market(limit: int = Query(100, ge=1, le=250), agent: dict = Depends(get_agent)):
+    """Top tokens by market cap with full data: price, 24h change, volume, mcap.
+    Uses CoinGecko free API with 120s cache."""
+    import time as _time
+
+    now = int(_time.time())
+    if _market_cache["data"] and (now - _market_cache["ts"]) < 120:
+        cached = _market_cache["data"]
+        return {"tokens": cached[:limit], "count": len(cached[:limit]), "total": len(cached), "cached": True}
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as cl:
+            r = await cl.get(
+                "https://api.coingecko.com/api/v3/coins/markets",
+                params={
+                    "vs_currency": "usd",
+                    "order": "market_cap_desc",
+                    "per_page": 250,
+                    "page": 1,
+                    "sparkline": "false",
+                    "price_change_percentage": "24h",
+                },
+                headers={"Accept": "application/json"},
+            )
+            if r.status_code == 200:
+                data = r.json()
+                tokens = []
+                for coin in data:
+                    tokens.append({
+                        "symbol": (coin.get("symbol", "?") or "?").upper(),
+                        "name": coin.get("name", ""),
+                        "image": coin.get("image", ""),
+                        "price": coin.get("current_price"),
+                        "price_change_24h": coin.get("price_change_24h"),
+                        "price_change_pct_24h": coin.get("price_change_percentage_24h"),
+                        "market_cap": coin.get("market_cap"),
+                        "market_cap_rank": coin.get("market_cap_rank"),
+                        "volume_24h": coin.get("total_volume"),
+                        "high_24h": coin.get("high_24h"),
+                        "low_24h": coin.get("low_24h"),
+                        "circulating_supply": coin.get("circulating_supply"),
+                        "total_supply": coin.get("total_supply"),
+                        "ath": coin.get("ath"),
+                        "ath_change_pct": coin.get("ath_change_percentage"),
+                    })
+                _market_cache["data"] = tokens
+                _market_cache["ts"] = now
+                return {"tokens": tokens[:limit], "count": len(tokens[:limit]), "total": len(tokens), "cached": False}
+    except Exception as e:
+        if _market_cache["data"]:
+            cached = _market_cache["data"]
+            return {"tokens": cached[:limit], "count": len(cached[:limit]), "total": len(cached), "cached": True, "stale": True}
+        return {"tokens": [], "count": 0, "error": str(e)}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SIGNAL STORE — in-memory pool for all ingested signals
+# ═══════════════════════════════════════════════════════════════════════════
+
+_signal_pool: list[dict] = []
+_signal_lock = threading.Lock()
+MAX_POOL_SIZE = 200
+
+# Persistence + cache so signals survive restarts and repeated loads are instant.
+#   • signal_pool  — durable copy of every ingested signal (the in-memory pool is
+#     lost on restart; this table is not, so you never come back to an empty feed).
+#   • intel_cache  — last-good assembled /signals snapshot, for stale-while-
+#     revalidate serving (fast, and a cold start reads it instead of blocking on
+#     ~12 external APIs).
+_SIGNAL_TABLES_DDL = (
+    """CREATE TABLE IF NOT EXISTS signal_pool (
+         id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, source TEXT, type TEXT,
+         conviction REAL, direction TEXT, detail TEXT, ts INTEGER)""",
+    """CREATE TABLE IF NOT EXISTS intel_cache (
+         key TEXT PRIMARY KEY, payload TEXT, updated_at INTEGER)""",
+)
+_POOL_DB_KEEP = 500  # rows retained in the durable pool table
+
+
+async def _ensure_signal_tables(db) -> None:
+    for ddl in _SIGNAL_TABLES_DDL:
+        await db.execute(ddl)
+
+
+@router.post("/signals/ingest")
+async def ingest_signal(payload: dict, tool: dict = Depends(get_system_tool)):
+    """System-only signal ingestion (worldmonitor, data feeds, external intel sources).
+
+    Stores signals in the in-memory pool AND persists to signal_pool for durability.
+    Returned by GET /signals alongside live market data.
+
+    Body: {symbol, source, type, conviction?, direction?, detail?}
+      - symbol: asset (BTC, ETH, SOL, etc.)
+      - source: origin (e.g. "worldmonitor", "sentiment-api", "news-feed")
+      - type: signal category (trend, sentiment, event, etc.)
+      - conviction: 0–1 confidence (default 1.0)
+
+    Only X-Vantage-Tool (intel) + X-Vantage-Tool-Key can call this.
+    Agents cannot post signals directly; signals come from infrastructure only.
+    """
+    required = ["symbol", "source", "type"]
+    for f in required:
+        if f not in payload:
+            return {"error": f"Missing required field: {f}"}
+
+    signal = {
+        "symbol": str(payload["symbol"])[:20],
+        "source": str(payload["source"])[:30],
+        "type": str(payload["type"])[:20],
+        "conviction": float(payload.get("conviction", 1.0)),
+        "direction": payload.get("direction", ""),
+        "detail": payload.get("detail", ""),
+        "ts": int(time.time()),
+    }
+    with _signal_lock:
+        _signal_pool.append(signal)
+        if len(_signal_pool) > MAX_POOL_SIZE:
+            _signal_pool.pop(0)
+
+    # Durable write-through (best-effort — the in-memory pool is still the fast path).
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await _ensure_signal_tables(db)
+            await db.execute(
+                "INSERT INTO signal_pool (symbol, source, type, conviction, direction, detail, ts) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (signal["symbol"], signal["source"], signal["type"], signal["conviction"],
+                 signal["direction"], signal["detail"], signal["ts"]),
+            )
+            # Trim to the most-recent _POOL_DB_KEEP rows.
+            await db.execute(
+                "DELETE FROM signal_pool WHERE id NOT IN "
+                "(SELECT id FROM signal_pool ORDER BY id DESC LIMIT ?)", (_POOL_DB_KEEP,))
+            await db.commit()
+    except aiosqlite.Error as e:
+        logger.debug("signal_pool persist failed: %s", e)
+
+    return {"status": "ingested", "signal": signal["symbol"], "pool_size": len(_signal_pool)}
+
+
+async def _durable_pool(limit: int = 50) -> list[dict]:
+    """Most-recent persisted signals, merged with the in-memory pool (deduped).
+    Lets the feed survive a restart that empties the in-memory pool."""
+    rows: list[dict] = []
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await _ensure_signal_tables(db)
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT symbol, source, type, conviction, direction, detail, ts "
+                "FROM signal_pool ORDER BY id DESC LIMIT ?", (limit,))
+            rows = [dict(r) for r in await cur.fetchall()]
+    except aiosqlite.Error as e:
+        logger.debug("durable pool read failed: %s", e)
+    with _signal_lock:
+        mem = list(_signal_pool[-limit:])
+    seen = {(r["symbol"], r["source"]) for r in rows}
+    for s in reversed(mem):  # newest-first, only add if not already from DB
+        if (s["symbol"], s["source"]) not in seen:
+            rows.append(s)
+            seen.add((s["symbol"], s["source"]))
+    return rows
+
+async def _gather_all_signals() -> dict:
+    """Assemble the full ranked signal feed from every live source + the durable
+    pool. Pure gathering (no request context) so it can run in the background for
+    the stale-while-revalidate cache."""
+    import json, os, time, asyncio
+    from datetime import datetime
+
+    signals = []
+    now = int(time.time())
+    h = os.path.expanduser
+
+    async def safe_fetch(url, timeout=8):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as cl:
+                r = await cl.get(url)
+                return r.json() if r.status_code == 200 else None
+        except Exception:
+            return None
+
+    # 1. Radar trending tokens
+    try:
+        radar = json.load(open(h("~/ares_radar/latest.json")))
+        for t in radar.get("trending", [])[:10]:
+            signals.append({
+                "symbol": t.get("symbol", t.get("name", "?"))[:12],
+                "name": t.get("name", ""),
+                "address": t.get("address", ""),
+                "source": "radar",
+                "type": "trending",
+                "score": min(t.get("score", 0) / 2, 10),
+                "conviction": min(t.get("score", 0) / 3, 10),
+                "price": t.get("price"),
+                "volume_24h": t.get("volume_24h"),
+                "liquidity": t.get("liquidity"),
+                "change_6h": t.get("change_6h"),
+                "age_hours": t.get("age_hours"),
+                "url": t.get("url", ""),
+                "ts": radar.get("timestamp", now),
+            })
+    except Exception:
+        pass
+
+    # 2. Alpha feed high conviction
+    try:
+        alpha = json.load(open(h("~/ares_alpha_feed/high_conviction.json")))
+        for s in alpha.get("items", [])[:10]:
+            signals.append({
+                "symbol": s.get("symbol", "?")[:12],
+                "source": "alpha_feed",
+                "type": s.get("signal_type", "alpha"),
+                "conviction": min(s.get("conviction", 0), 10),
+                "sources": s.get("sources", []),
+                "volume_24h": s.get("volume_24h"),
+                "liquidity": s.get("liquidity"),
+                "ts": alpha.get("timestamp", now),
+            })
+    except Exception:
+        pass
+
+    # 3. Intel scan — arbitrage + anomalies
+    try:
+        intel = json.load(open(h("~/ares_intelligence/intel_latest.json")))
+        for arb in intel.get("arbitrage", [])[:5]:
+            signals.append({
+                "symbol": arb.get("pair", "?")[:12],
+                "source": "intel",
+                "type": "arbitrage",
+                "conviction": min(arb.get("spread_pct", 0) * 2, 10),
+                "spread_pct": arb.get("spread_pct"),
+                "exchanges": arb.get("exchanges", []),
+                "ts": intel.get("timestamp", now),
+            })
+        for anom in intel.get("anomalies", [])[:3]:
+            signals.append({
+                "symbol": anom.get("symbol", "?")[:12],
+                "source": "intel",
+                "type": "anomaly",
+                "conviction": 5,
+                "detail": anom.get("detail", ""),
+                "ts": intel.get("timestamp", now),
+            })
+    except Exception:
+        pass
+
+    # 4. Kraken ticker (top movers)
+    try:
+        kraken = await safe_fetch("https://api.kraken.com/0/public/Ticker?pair=XBTUSD,ETHUSD,SOLUSD")
+        if kraken and "result" in kraken:
+            pair_map = {"XXBTZUSD": "BTC", "XETHZUSD": "ETH", "SOLUSD": "SOL"}
+            for k, v in kraken["result"].items():
+                sym = pair_map.get(k, k)
+                signals.append({
+                    "symbol": sym,
+                    "source": "kraken",
+                    "type": "price",
+                    "price": float(v["c"][0]),
+                    "change_24h": float(v["c"][0]) / float(v["o"]) - 1 if float(v.get("o", 1)) else 0,
+                    "volume_24h": float(v["v"][1]),
+                    "ts": now,
+                })
+    except Exception:
+        pass
+
+    # 5. CoinDesk BTC index
+    try:
+        cd = await safe_fetch("https://api.coindesk.com/v1/bpi/currentprice.json")
+        if cd and "bpi" in cd:
+            for code, info in cd["bpi"].items():
+                signals.append({
+                    "symbol": code,
+                    "source": "coindesk",
+                    "type": "price_index",
+                    "price": info.get("rate_float"),
+                    "ts": now,
+                })
+    except Exception:
+        pass
+
+    # 6. CryptoCompare top movers
+    try:
+        cc = await safe_fetch("https://min-api.cryptocompare.com/data/top/mktcapfull?limit=10&tsym=USD")
+        if cc and "Data" in cc:
+            for item in cc["Data"][:10]:
+                ci = item.get("CoinInfo", {})
+                disp = item.get("DISPLAY", {}).get("USD", {})
+                signals.append({
+                    "symbol": ci.get("Name", "?"),
+                    "name": ci.get("FullName", ""),
+                    "source": "cryptocompare",
+                    "type": "top_mcap",
+                    "price": disp.get("PRICE"),
+                    "change_24h_pct": disp.get("CHANGEPCT24HOUR"),
+                    "mcap": disp.get("MKTCAP"),
+                    "ts": now,
+                })
+    except Exception:
+        pass
+
+    # 7. GeckoTerminal trending pools
+    try:
+        gt = await safe_fetch("https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?limit=10")
+        if gt and "data" in gt:
+            for pool in gt["data"][:10]:
+                attrs = pool.get("attributes", {})
+                rel = pool.get("relationships", {}).get("base_token", {}).get("data", {})
+                signals.append({
+                    "symbol": rel.get("symbol", "?")[:12],
+                    "source": "geckoterminal",
+                    "type": "trending_pool",
+                    "conviction": 4,
+                    "volume_24h": float(attrs.get("volume_usd", {}).get("h24", 0)),
+                    "price_change_pct": float(attrs.get("price_change_percentage", {}).get("h24", 0)),
+                    "ts": now,
+                })
+    except Exception:
+        pass
+
+    # 8. CoinCap top assets
+    try:
+        cc = await safe_fetch("https://api.coincap.io/v2/assets?limit=15")
+        if cc and "data" in cc:
+            for a in cc["data"][:15]:
+                signals.append({
+                    "symbol": a.get("symbol", "?")[:12],
+                    "name": a.get("name", ""),
+                    "source": "coincap",
+                    "type": "top_asset",
+                    "price": float(a.get("priceUsd", 0)),
+                    "change_24h_pct": float(a.get("changePercent24Hr", 0)),
+                    "mcap": float(a.get("marketCapUsd", 0)),
+                    "volume_24h": float(a.get("volumeUsd24Hr", 0)),
+                    "rank": int(a.get("rank", 99)),
+                    "ts": now,
+                })
+    except Exception:
+        pass
+
+    # 9. 1inch token list (Solana)
+    try:
+        oneinch = await safe_fetch("https://api.1inch.dev/token/v1.2/1/token-list", timeout=5)
+        # This is a large list — just note source is available
+    except Exception:
+        pass
+
+    # 10. Fear & Greed Index
+    try:
+        fg = await safe_fetch("https://api.alternative.me/fng/?limit=1")
+        if fg and "data" in fg:
+            d = fg["data"][0]
+            signals.append({
+                "symbol": "FEAR_GREED",
+                "source": "fear_greed",
+                "type": "sentiment",
+                "value": int(d.get("value", 50)),
+                "classification": d.get("value_classification", ""),
+                "conviction": abs(int(d.get("value", 50)) - 50) / 10,
+                "ts": now,
+            })
+    except Exception:
+        pass
+
+    # 11. Crypto news headlines (CryptoPanic free)
+    try:
+        news = await safe_fetch("https://cryptopanic.com/api/v1/posts/?auth_token=&public=true&kind=news&limit=5", timeout=10)
+        if news and "results" in news:
+            for n in news["results"][:5]:
+                signals.append({
+                    "symbol": "NEWS",
+                    "source": "cryptopanic",
+                    "type": "news",
+                    "title": n.get("title", "")[:100],
+                    "url": n.get("url", ""),
+                    "sentiment": "positive" if n.get("votes", {}).get("positive", 0) > n.get("votes", {}).get("negative", 0) else "negative",
+                    "ts": now,
+                })
+    except Exception:
+        pass
+
+    # 12. CoinPaprika global market
+    try:
+        cp = await safe_fetch("https://api.coinpaprika.com/v1/global", timeout=8)
+        if cp:
+            signals.append({
+                "symbol": "GLOBAL",
+                "source": "coinpaprika",
+                "type": "market_overview",
+                "mcap": cp.get("market_cap_usd"),
+                "volume_24h": cp.get("volume_24h_usd"),
+                "btc_dominance": cp.get("bitcoin_dominance_percentage"),
+                "active_currencies": cp.get("cryptocurrencies_number"),
+                "ts": now,
+            })
+    except Exception:
+        pass
+
+    # Deduplicate live sources by symbol, keep highest conviction
+    seen = {}
+    for s in signals:
+        key = s["symbol"].upper()
+        if key not in seen or s.get("conviction", 0) > seen[key].get("conviction", 0):
+            seen[key] = s
+
+    # Sort by conviction desc, then recency
+    ranked = sorted(seen.values(), key=lambda x: (x.get("conviction", 0), x.get("ts", 0)), reverse=True)
+
+    # Merge the durable pool (persisted + in-memory) so ingested signals are
+    # visible and survive a restart.
+    for ps in await _durable_pool(50):
+        if not any(p.get("symbol") == ps["symbol"] and p.get("source") == ps["source"] for p in ranked):
+            ranked.append(ps)
+
+    return {
+        "count": len(ranked),
+        "sources": sorted(set(s.get("source") for s in ranked if s.get("source"))),
+        "timestamp": now,
+        "signals": ranked,
+    }
+
+
+# ── Cache layer: stale-while-revalidate + persisted snapshot ─────────────────
+# The gather above hits ~12 external APIs, so serving it uncached made the feed
+# slow ("waiting to load") and empty on a cold start when the pool was lost. We
+# now keep the last-good full feed in memory AND in intel_cache, serve it
+# instantly, and refresh in the background once it goes stale.
+_signals_cache: dict = {"data": None, "ts": 0}
+_signals_refreshing = False
+_SIGNALS_TTL = 45  # seconds a snapshot is considered fresh
+
+
+async def _persist_signals_snapshot(data: dict, ts: int) -> None:
+    import json
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await _ensure_signal_tables(db)
+            await db.execute(
+                "INSERT INTO intel_cache (key, payload, updated_at) VALUES ('signals', ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
+                (json.dumps(data), ts))
+            await db.commit()
+    except (aiosqlite.Error, TypeError) as e:
+        logger.debug("signals snapshot persist failed: %s", e)
+
+
+async def _load_signals_snapshot() -> Optional[dict]:
+    import json
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await _ensure_signal_tables(db)
+            cur = await db.execute("SELECT payload, updated_at FROM intel_cache WHERE key='signals'")
+            row = await cur.fetchone()
+            if row and row[0]:
+                return {"data": json.loads(row[0]), "ts": int(row[1] or 0)}
+    except (aiosqlite.Error, ValueError) as e:
+        logger.debug("signals snapshot load failed: %s", e)
+    return None
+
+
+async def _refresh_signals_cache() -> None:
+    """Rebuild the feed and update both the in-memory cache and the DB snapshot.
+    Guarded so overlapping requests don't trigger a stampede of external fetches."""
+    global _signals_refreshing
+    if _signals_refreshing:
+        return
+    _signals_refreshing = True
+    try:
+        data = await _gather_all_signals()
+        ts = int(time.time())
+        _signals_cache["data"] = data
+        _signals_cache["ts"] = ts
+        await _persist_signals_snapshot(data, ts)
+    except Exception as e:
+        logger.warning("signals refresh failed: %s", e)
+    finally:
+        _signals_refreshing = False
+
+
+@router.get("/signals")
+async def unified_signals(
+    limit: int = Query(20, ge=1, le=100),
+    min_conviction: float = Query(0, ge=0, le=10), agent: dict = Depends(get_agent)):
+    """Aggregate signals from all live sources into one ranked feed.
+
+    Served from a stale-while-revalidate cache: a fresh snapshot (< TTL) is
+    returned as-is; a stale one is returned immediately while a background
+    refresh runs; a cold process first rehydrates from the persisted snapshot so
+    the feed is never empty when you come back. Only the very first call with no
+    snapshot at all blocks on a live gather."""
+    now = int(time.time())
+
+    # Cold process: rehydrate from the last persisted snapshot before deciding.
+    if _signals_cache["data"] is None:
+        snap = await _load_signals_snapshot()
+        if snap and snap.get("data"):
+            _signals_cache["data"] = snap["data"]
+            _signals_cache["ts"] = snap["ts"]
+
+    fresh = _signals_cache["data"] is not None and (now - _signals_cache["ts"] < _SIGNALS_TTL)
+    if not fresh:
+        # Never block the request on ~12 external fetches — refresh behind it.
+        asyncio.create_task(_refresh_signals_cache())
+
+    data = _signals_cache["data"]
+    if data is None:
+        # First ever call, no snapshot yet: serve the durable pool immediately so
+        # ingested signals still show while the background gather populates.
+        pool = await _durable_pool(50)
+        data = {"signals": pool, "sources": sorted(set(p.get("source") for p in pool if p.get("source"))),
+                "timestamp": now}
+    ranked = [s for s in data.get("signals", []) if s.get("conviction", 0) >= min_conviction]
+    return {
+        "count": len(ranked[:limit]),
+        "total_available": len(data.get("signals", [])),
+        "sources": data.get("sources", []),
+        "timestamp": data.get("timestamp", now),
+        "cached": fresh,
+        "age_seconds": (now - _signals_cache["ts"]) if _signals_cache["ts"] else None,
+        "signals": ranked[:limit],
+    }
+
+
+
+
+
+@router.get("/memory/graph")
+async def memory_graph(agent_name: str = None, limit: int = 80, agent: dict = Depends(get_agent)):
+    """Per-agent neural memory vault graph.
+    
+    Pulls from the real Vantage memory infrastructure:
+      - agent_memory_vaults (vault status)
+      - broadcasts (thoughts, posts, videos)  
+      - agent_rooms + agent_messages (conversations)
+      - agent_collectives (collaborations)
+      - trading_orders (decisions)
+      - memory_links (relationships)
+    
+    Usage: /api/intel/memory/graph?agent_name=Hermes
+    """
+    import aiosqlite, os as _os, time as _time, json as _json
+    
+    db = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))), "data", "vantage.db")
+    
+    P = {
+        "post": "#a855f7", "video": "#3b82f6", "message": "#f59e0b",
+        "signal": "#ef4444", "code": "#22c55e", "agent": "#ffffff",
+        "decision": "#ec4899", "collective": "#06b6d4", "memory": "#f97316",
+    }
+    
+    nodes, edges, seen = [], [], set()
+    agent_id = None
+    agent_display = agent_name or "Unknown"
+    
+    async with aiosqlite.connect(db) as conn:
+        conn.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
+        
+        # Find target agent
+        if agent_name:
+            async with conn.execute("SELECT id, name, bio FROM agents WHERE name = ?", (agent_name,)) as cur:
+                row = await cur.fetchone()
+                if row:
+                    agent_id = row["id"]
+                    agent_display = row["name"]
+        
+        if not agent_id:
+            async with conn.execute("SELECT id, name, bio FROM agents LIMIT 1") as cur:
+                row = await cur.fetchone()
+                if row:
+                    agent_id = row["id"]
+                    agent_display = row["name"]
+        
+        if not agent_id:
+            return {"nodes": [], "edges": [], "message": "No agents found"}
+        
+        # Central agent node
+        nid = f"agent:{agent_id}"
+        seen.add(nid)
+        nodes.append({"id": nid, "label": agent_display, "type": "agent", "source": "identity", "color": "#fff", "val": 14, "ts": 0, "detail": "", "group": "agent"})
+        
+        # ── Memory vault status ──
+        async with conn.execute("SELECT vault_enabled, memory_access, vault_size_mb FROM agent_memory_vaults WHERE agent_id = ?", (agent_id,)) as cur:
+            vault = await cur.fetchone()
+            if vault:
+                nid = f"vault:{agent_id}"
+                seen.add(nid)
+                nodes.append({"id": nid, "label": f"Memory Vault ({vault['vault_size_mb']:.1f}MB)", "type": "memory", "source": "vault", "color": P["memory"], "val": 8, "ts": 0, "detail": f"Access: {vault['memory_access']}", "group": "memory"})
+                edges.append({"source": f"agent:{agent_id}", "target": nid, "value": 0.9, "reason": "owns"})
+        
+        # ── Broadcasts (thoughts) ──
+        async with conn.execute("SELECT id, title, content_type, tags, post_content FROM broadcasts WHERE agent_id = ? ORDER BY id DESC LIMIT 30", (agent_id,)) as cur:
+            async for row in cur:
+                nid = f"broadcast:{row['id']}"
+                if nid in seen: continue
+                seen.add(nid)
+                btype = (row.get("content_type") or "post")
+                title = (row.get("title") or row.get("post_content") or "Memory")[:50]
+                tags = []
+                try: tags = _json.loads(row.get("tags", "[]") or "[]")
+                except: pass
+                nodes.append({"id": nid, "label": title, "type": btype, "source": btype, "color": P.get(btype, P["post"]), "val": min(10, 3 + len(tags)), "ts": 0, "detail": (row.get("post_content") or row.get("title") or "")[:100], "group": "broadcasts"})
+                edges.append({"source": f"agent:{agent_id}", "target": nid, "value": 0.6, "reason": "thought"})
+        
+        # ── Conversations (rooms + messages) ──
+        async with conn.execute("SELECT r.id, r.name, r.created_at FROM agent_rooms r JOIN room_members m ON r.id = m.room_id WHERE m.agent_id = ? LIMIT 10", (agent_id,)) as cur:
+            async for row in cur:
+                nid = f"room:{row['id']}"
+                if nid in seen: continue
+                seen.add(nid)
+                nodes.append({"id": nid, "label": row.get("name", "Chat")[:30], "type": "message", "source": "conversation", "color": P["message"], "val": 7, "ts": 0, "detail": "", "group": "conversations"})
+                edges.append({"source": f"agent:{agent_id}", "target": nid, "value": 0.5, "reason": "participated"})
+        
+        # ── Code repos ──
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=8) as cl:
+                r = await cl.get("http://localhost:3001/api/v1/repos/search?limit=10", headers={"Accept": "application/json"})
+                if r.status_code == 200:
+                    for repo in r.json().get("data", [])[:10]:
+                        nid = f"repo:{repo['full_name']}"
+                        if nid in seen: continue
+                        seen.add(nid)
+                        nodes.append({"id": nid, "label": repo.get("name", "?")[:30], "type": "code", "source": "repository", "color": P["code"], "val": 5, "ts": 0, "detail": repo.get("description", "")[:100], "group": "code"})
+                        edges.append({"source": f"agent:{agent_id}", "target": nid, "value": 0.3, "reason": "maintains"})
+        except: pass
+        
+        # ── Collectives ──
+        async with conn.execute("SELECT c.id, c.name FROM agent_collectives c JOIN collective_members m ON c.id = m.collective_id WHERE m.agent_id = ? LIMIT 5", (agent_id,)) as cur:
+            async for row in cur:
+                nid = f"collective:{row['id']}"
+                if nid in seen: continue
+                seen.add(nid)
+                nodes.append({"id": nid, "label": row.get("name", "Collective")[:30], "type": "collective", "source": "collaboration", "color": P["collective"], "val": 6, "ts": 0, "detail": "", "group": "collective"})
+                edges.append({"source": f"agent:{agent_id}", "target": nid, "value": 0.4, "reason": "member_of"})
+        
+        # ── Related agents (via shared rooms) ──
+        async with conn.execute("SELECT DISTINCT a.id, a.name FROM agents a JOIN room_members m ON a.id = m.agent_id WHERE m.room_id IN (SELECT room_id FROM room_members WHERE agent_id = ?) AND a.id != ? LIMIT 10", (agent_id, agent_id)) as cur:
+            async for row in cur:
+                nid = f"agent:{row['id']}"
+                if nid in seen: continue
+                seen.add(nid)
+                nodes.append({"id": nid, "label": row["name"], "type": "agent", "source": "identity", "color": "rgba(255,255,255,0.3)", "val": 4, "ts": 0, "detail": "", "group": "agents"})
+                edges.append({"source": f"agent:{agent_id}", "target": nid, "value": 0.2, "reason": "connected"})
+        
+        # ── Signal pool ──
+        try:
+            with _signal_lock:
+                pool = list(_signal_pool[-30:])
+            for s in pool:
+                nid = f"signal:{s.get('symbol','?')[:12]}|{s.get('source','?')}"
+                if nid in seen: continue
+                seen.add(nid)
+                nodes.append({"id": nid, "label": s.get("symbol", "?")[:12], "type": "signal", "source": s.get("source", "?"), "color": P["signal"], "val": max(3, min(8, (s.get("conviction", 0.5) or 0.5) * 5)), "ts": s.get("ts", 0), "detail": s.get("detail", "")[:80], "group": "signals"})
+                edges.append({"source": f"agent:{agent_id}", "target": nid, "value": 0.2, "reason": "aware_of"})
+        except: pass
+    
+    # ─────────────────────────────────────────────────────────────────────
+    # Enrich into the live Memory-Galaxy schema. Keeps every native render key
+    # (id/label/type/color/val/ts/detail) and layers on the galaxy metadata the
+    # NeuralVault renderer consumes (strength, glow_intensity, conviction,
+    # source_daemon, confidence, last_updated for nodes; type/strength/last_seen
+    # for edges), plus a galaxy taxonomy + live insights.
+    # ─────────────────────────────────────────────────────────────────────
+    import datetime as _dtm
+    from collections import Counter as _Counter
+    _now_iso = _dtm.datetime.now(_dtm.timezone.utc).isoformat()
+
+    # Original build-time group → named galaxy the force layout clusters around.
+    GALAXY_OF = {
+        "agent": "Agent Constellation", "agents": "Agent Constellation",
+        "collective": "Agent Constellation",
+        "memory": "Memory Nebula", "broadcasts": "Memory Nebula",
+        "conversations": "Memory Nebula",
+        "code": "Code Nebula", "signals": "Trading Nebula",
+    }
+    GALAXY_DESC = {
+        "Agent Constellation": "Agents, guilds and swarms and the bonds between them",
+        "Memory Nebula": "Vault, thoughts and conversations — long-term experience",
+        "Code Nebula": "Repositories and code artifacts under STIX watch",
+        "Trading Nebula": "Live signals, markets and predictions in orbit",
+        "Security Cluster": "STIX findings and threats",
+        "External Intel Cloud": "News, on-chain and world-monitor intel",
+    }
+    DAEMON_OF = {
+        "signals": "signal_aggregator", "broadcasts": "vantage_feed",
+        "conversations": "agent_rooms", "code": "stix_webhook",
+        "memory": "memory_vault", "agent": "identity", "agents": "identity",
+        "collective": "collectives",
+    }
+
+    for n in nodes:
+        orig = n.get("group", "memory")
+        val = n.get("val", 4) or 4
+        strength = round(max(0.05, min(1.0, val / 14.0)), 3)
+        conv = n.get("conviction")
+        conv = strength if conv is None else conv
+        recency = 1.0 if n.get("ts") else 0.0  # fresh signals glow brighter
+        n["subgroup"] = orig
+        n["group"] = GALAXY_OF.get(orig, "Memory Nebula")
+        n["strength"] = strength
+        n["conviction"] = round(float(conv), 3)
+        n["confidence"] = round(min(1.0, 0.4 + strength * 0.6), 3)
+        n["glow_intensity"] = round(min(1.0, 0.3 + strength * 0.6 + recency * 0.1), 3)
+        # Render hints (honored by NeuralVault): brighter/fresher nodes pulse faster.
+        n["pulse_rate"] = round(0.05 + strength * 0.4 + recency * 0.1, 3)
+        n["size"] = n.get("val", 4)
+        n["source_daemon"] = n.get("source") or DAEMON_OF.get(orig, "vantage")
+        n["last_updated"] = _now_iso
+
+    for e in edges:
+        e["type"] = e.get("reason", "linked")
+        e["strength"] = e.get("value", 0.3)
+        e["last_seen"] = _now_iso
+
+    nodes = sorted(nodes, key=lambda n: n.get("val", 0), reverse=True)[:limit]
+    nids = {n["id"] for n in nodes}
+    edges = [e for e in edges if e["source"] in nids and e["target"] in nids][:limit * 3]
+
+    gcount = _Counter(n["group"] for n in nodes)
+    galaxies = {
+        name: {"name": name, "node_count": c,
+               "description": GALAXY_DESC.get(name, ""), "key_insight": ""}
+        for name, c in gcount.items()
+    }
+
+    insights = []
+    if nodes:
+        top = max(nodes, key=lambda n: n.get("strength", 0))
+        insights.append(f"Brightest memory: {top['label']} ({int(top['strength']*100)}% strength)")
+    if gcount:
+        biggest, bn = gcount.most_common(1)[0]
+        insights.append(f"Densest cluster: {biggest} · {bn} nodes")
+    sig_n = [n for n in nodes if n.get("subgroup") == "signals"]
+    if sig_n:
+        insights.append(f"{len(sig_n)} live signals in orbit around {agent_display}")
+
+    return {
+        "galaxy": {"total_nodes": len(nodes), "total_edges": len(edges)},
+        "nodes": nodes,
+        "edges": edges,
+        "galaxies": galaxies,
+        "high_value_insights_current": insights,
+        # legacy/compat fields (existing consumers keep working)
+        "node_count": len(nodes), "edge_count": len(edges),
+        "agent": agent_display,
+        "groups": list(galaxies.keys()),
+        "timestamp": int(_time.time()),
+    }

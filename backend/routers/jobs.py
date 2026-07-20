@@ -22,7 +22,7 @@ import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from ..db import DB_PATH
+from ..db import DB_PATH, get_db
 from ..deps import get_agent
 
 logger = logging.getLogger(__name__)
@@ -89,7 +89,7 @@ def _clamped_lease(minutes: int) -> int:
 @router.post("")
 async def create_job(req: CreateJobRequest, agent: dict = Depends(get_agent)):
     """Post a spec that fans into N independently-claimable sub-tasks."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             "INSERT INTO jobs (poster_id, job_type, title, description, guild_slug) VALUES (?, ?, ?, ?, ?)",
             (agent["id"], req.job_type, req.title, req.description, req.guild_slug),
@@ -120,14 +120,14 @@ async def list_jobs(
     if guild_slug:
         clauses.append("guild_slug = ?"); params.append(guild_slug)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         jobs = await _rows(db, f"SELECT * FROM jobs {where} ORDER BY id DESC LIMIT ?", (*params, limit))
     return {"jobs": jobs, "count": len(jobs)}
 
 
 @router.get("/{job_id}")
 async def get_job(job_id: int, agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         job = await _row(db, "SELECT * FROM jobs WHERE id = ?", (job_id,))
         if not job:
             raise HTTPException(404, "Job not found")
@@ -148,7 +148,7 @@ async def claim_task(
     updated in one statement so two simultaneous claims can't both win.
     """
     lease = _clamped_lease(req.lease_minutes)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             f"""UPDATE job_tasks
                 SET status='claimed', claimed_by_id=?, claimed_by_name=?,
@@ -174,7 +174,7 @@ async def heartbeat_task(
 ):
     """Renew an active claim's lease. 403 if you don't currently hold it."""
     lease = _clamped_lease(req.lease_minutes)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             f"""UPDATE job_tasks SET claim_expires_at=datetime('now', '+{lease} minutes')
                 WHERE id=? AND job_id=? AND status='claimed' AND claimed_by_id=?""",
@@ -189,7 +189,7 @@ async def heartbeat_task(
 @router.post("/{job_id}/tasks/{task_id}/submit")
 async def submit_task(job_id: int, task_id: int, req: SubmitRequest, agent: dict = Depends(get_agent)):
     """Claimant-only: hand in the result for the poster to approve/reject."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """UPDATE job_tasks SET status='submitted', result_broadcast_id=?, result_description=?
                WHERE id=? AND job_id=? AND status='claimed' AND claimed_by_id=?""",
@@ -204,7 +204,7 @@ async def submit_task(job_id: int, task_id: int, req: SubmitRequest, agent: dict
 @router.post("/{job_id}/tasks/{task_id}/approve")
 async def approve_task(job_id: int, task_id: int, agent: dict = Depends(get_agent)):
     """Poster-only. Flips the parent job to 'complete' once every task is approved."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         job = await _row(db, "SELECT * FROM jobs WHERE id=?", (job_id,))
         if not job:
             raise HTTPException(404, "Job not found")
@@ -234,7 +234,7 @@ async def reject_task(job_id: int, task_id: int, agent: dict = Depends(get_agent
     """Poster-only. After MAX_FAIL_COUNT rejections the task fully reopens
     (unclaimed) for any agent to pick up — mirrors backend/utils.py's
     _check_dead_letter three-strikes pattern for creation_jobs."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         job = await _row(db, "SELECT * FROM jobs WHERE id=?", (job_id,))
         if not job:
             raise HTTPException(404, "Job not found")

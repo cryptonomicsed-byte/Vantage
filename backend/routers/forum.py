@@ -20,12 +20,13 @@ from typing import Optional
 router = APIRouter(prefix="/api/forum", tags=["forum"])
 
 import aiosqlite, os
+from backend.db import get_db
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data", "vantage.db")
 # /opt/ares/Vantage/backend/routers/forum.py → /opt/ares/Vantage/data/vantage.db
 
 async def resolve_agent(x_agent_key: str) -> dict:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
         async with db.execute("SELECT id, name FROM agents WHERE api_key = ?", (x_agent_key,)) as cur:
             a = await cur.fetchone()
@@ -47,7 +48,7 @@ async def create_thread(
     x_agent_key: str = Header(...),
 ):
     agent = await resolve_agent(x_agent_key)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute("""
             INSERT INTO forum_threads (title, body, agent_id, collective_id, flair, is_debate, is_research, is_alpha)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -80,7 +81,7 @@ async def list_threads(
     limit: int = Query(25),
     offset: int = Query(0),
 ):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
 
         where = ["1=1"]
@@ -141,7 +142,7 @@ async def list_threads(
 # ── Thread Detail + Nested Comments ──────────────────────────────────────────
 @router.get("/threads/{thread_id}")
 async def thread_detail(thread_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
 
         async with db.execute("""
@@ -186,7 +187,7 @@ async def add_comment(
     x_agent_key: str = Header(...),
 ):
     agent = await resolve_agent(x_agent_key)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         # Get parent depth
         depth = 0
         if parent_id > 0:
@@ -217,7 +218,7 @@ async def vote(
     if vote_val not in (-1, 1):
         raise HTTPException(400, "Vote must be -1 or 1")
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         # Insert or update vote
         await db.execute("""
             INSERT INTO thread_votes (thread_id, comment_id, agent_id, vote, conviction)
@@ -240,7 +241,7 @@ async def vote(
 @router.post("/threads/{thread_id}/fork")
 async def fork_to_vault(thread_id: int, x_agent_key: str = Header(...)):
     agent = await resolve_agent(x_agent_key)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         # Verify thread exists
         async with db.execute("SELECT id, title, body FROM forum_threads WHERE id = ?", (thread_id,)) as cur:
             thread = await cur.fetchone()
@@ -248,7 +249,7 @@ async def fork_to_vault(thread_id: int, x_agent_key: str = Header(...)):
             raise HTTPException(404)
 
         vault_id = f"fork-thread-{thread_id}-{agent['id']}"
-        await db.execute("INSERT OR IGNORE INTO thread_forks (thread_id, agent_id, vault_note_id) VALUES (?, ?, ?)",
+        await db.execute("INSERT INTO thread_forks (thread_id, agent_id, vault_note_id) VALUES (?, ?, ?)",
                         (thread_id, agent["id"], vault_id))
         await db.commit()
 
@@ -263,7 +264,7 @@ async def cross_post(
     x_agent_key: str = Header(...),
 ):
     agent = await resolve_agent(x_agent_key)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute("""
             INSERT INTO cross_posts (original_thread_id, target_collective_id, cross_posted_by)
             VALUES (?, ?, ?)
@@ -276,7 +277,7 @@ async def cross_post(
 # ── Tag Cloud ────────────────────────────────────────────────────────────────
 @router.get("/tags")
 async def tag_cloud():
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
         async with db.execute("""
             SELECT tag, COUNT(*) as count FROM thread_tags

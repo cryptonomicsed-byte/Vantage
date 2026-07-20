@@ -1,0 +1,123 @@
+"""ARES-ALPHA Hunter Router — read API for the wallet-hunting daemon
+(daemons/ares_alpha_hunter.py). Detection/scoring only, no execution here.
+"""
+import json
+import sqlite3
+import time
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, Query
+
+from backend.deps import get_agent
+
+router = APIRouter(prefix="/api/alpha-hunter", tags=["alpha-hunter"])
+DB = Path("/opt/ares/Vantage/data/vantage.db")
+
+
+def _conn():
+    conn = sqlite3.connect(DB, timeout=5)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+@router.get("/status")
+def status(agent: dict = Depends(get_agent)):
+    conn = _conn()
+    counts = {r["tier"]: r["c"] for r in conn.execute(
+        "SELECT tier, COUNT(*) c FROM alpha_wallets GROUP BY tier").fetchall()}
+    clusters_today = conn.execute(
+        "SELECT COUNT(*) c FROM alpha_clusters WHERE detected_at > ?",
+        (time.time() - 86400,)).fetchone()["c"]
+    top = conn.execute(
+        "SELECT * FROM alpha_clusters ORDER BY detected_at DESC LIMIT 1").fetchone()
+    conn.close()
+    return {
+        "tracked_wallets": sum(counts.values()),
+        "tiers": {"S": counts.get("S", 0), "A": counts.get("A", 0),
+                  "B": counts.get("B", 0), "C": counts.get("C", 0)},
+        "clusters_24h": clusters_today,
+        "top_signal": dict(top) if top else None,
+    }
+
+
+@router.get("/wallets")
+def list_wallets(
+    agent: dict = Depends(get_agent),
+    tier: str = Query(None, description="Filter: S, A, B, C"),
+    limit: int = Query(50, le=200),
+):
+    conn = _conn()
+    if tier:
+        rows = conn.execute(
+            "SELECT * FROM alpha_wallets WHERE tier = ? ORDER BY score DESC LIMIT ?",
+            (tier.upper(), limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM alpha_wallets ORDER BY score DESC LIMIT ?", (limit,)
+        ).fetchall()
+    conn.close()
+    return {"wallets": [dict(r) for r in rows], "count": len(rows)}
+
+
+@router.get("/wallets/{address}")
+def wallet_dossier(address: str, agent: dict = Depends(get_agent)):
+    conn = _conn()
+    row = conn.execute(
+        "SELECT * FROM alpha_wallets WHERE address = ?", (address,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return {"found": False, "address": address}
+    return {"found": True, "dossier": dict(row)}
+
+
+@router.get("/clusters")
+def list_clusters(
+    agent: dict = Depends(get_agent),
+    limit: int = Query(20, le=100),
+    since_hours: int = Query(24, le=720),
+):
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT * FROM alpha_clusters WHERE detected_at > ? ORDER BY detected_at DESC LIMIT ?",
+        (time.time() - since_hours * 3600, limit),
+    ).fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["wallets_json"] = json.loads(d["wallets_json"])
+        except Exception:
+            pass
+        out.append(d)
+    return {"clusters": out, "count": len(out)}
+
+
+@router.get("/events")
+def list_events(
+    agent: dict = Depends(get_agent),
+    limit: int = Query(50, le=200),
+    kind: str = Query(None),
+):
+    conn = _conn()
+    if kind:
+        rows = conn.execute(
+            "SELECT * FROM alpha_signals_log WHERE kind = ? ORDER BY ts DESC LIMIT ?",
+            (kind, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM alpha_signals_log ORDER BY ts DESC LIMIT ?", (limit,)
+        ).fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["payload"] = json.loads(d["payload"])
+        except Exception:
+            pass
+        out.append(d)
+    return {"events": out, "count": len(out)}

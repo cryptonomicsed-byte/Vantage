@@ -18,7 +18,7 @@ from ..config import settings
 from ..deps import get_agent, get_vault_connector, _parse_body
 from ..memory_enrichment import MemoryIntelligence
 from ..memory_vault import MemoryVault, VAULT_ROOT, OKF_VERSION, OKF_RESERVED_FILENAMES
-from ..db import DB_PATH
+from ..db import DB_PATH, get_db
 
 router = APIRouter(prefix="/api/agents", tags=["memory_vault"])
 
@@ -28,7 +28,7 @@ router = APIRouter(prefix="/api/agents", tags=["memory_vault"])
 external_router = APIRouter(prefix="/api/vault/external", tags=["memory_vault"])
 
 async def _resolve_agent(agent_name: str) -> dict:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute(
             "SELECT id, name FROM agents WHERE name=?", (agent_name,)
@@ -41,7 +41,7 @@ async def _resolve_accessor(x_agent_key: Optional[str]) -> Optional[int]:
     if not x_agent_key:
         return None
     hashed_key = _hlib.sha256(x_agent_key.encode()).hexdigest()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         row = await (await db.execute(
             "SELECT id FROM agents WHERE api_key=?", (hashed_key,)
         )).fetchone()
@@ -110,7 +110,7 @@ async def search_vault(
     accessor_id = await _resolve_accessor(x_agent_key)
     if not await vault.check_access(accessor_id, x_federation_peer or ""):
         raise HTTPException(403)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         results = await (await db.execute(
             """SELECT note_path, title, snippet(memory_fts, 3, '**', '**', '...', 30) as snip
                FROM memory_fts WHERE agent_id=? AND memory_fts MATCH ? ORDER BY rank LIMIT 20""",
@@ -139,7 +139,7 @@ async def get_access_log(
 ):
     if agent["name"] != agent_name:
         raise HTTPException(403)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             "SELECT * FROM memory_access_log WHERE vault_agent_id=? ORDER BY accessed_at DESC LIMIT ?",
@@ -267,7 +267,7 @@ async def import_vault(
 
         links = payload.get("links", [])
         if isinstance(links, list):
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with get_db() as db:
                 for link in links[:500]:
                     if not isinstance(link, dict):
                         continue
@@ -404,7 +404,7 @@ async def search_vault_sessions(
     accessor_id = await _resolve_accessor(x_agent_key)
     if not await vault.check_access(accessor_id, x_federation_peer or ""):
         raise HTTPException(403)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         rows = await (await db.execute(
             """SELECT note_path, title, tags, snippet(memory_fts, 3, '**', '**', '...', 30) as snip
                FROM memory_fts
@@ -526,7 +526,7 @@ async def create_vault_note(
 async def get_memory_links(agent_name: str, agent: dict = Depends(get_agent)):
     target = await _resolve_agent(agent_name)
     agent_id = target["id"]
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             """SELECT * FROM memory_links
@@ -543,7 +543,7 @@ async def get_note_links(agent_name: str, path: str = Query(...), agent: dict = 
     as opposed to /vault/links which returns every link for the agent."""
     target = await _resolve_agent(agent_name)
     agent_id = target["id"]
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             """SELECT l.id, l.link_type, l.created_at,
@@ -578,7 +578,7 @@ async def create_memory_link(
         raise HTTPException(422, "to_agent_name is required")
 
     # Resolve target agent
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         row = await (await db.execute(
             "SELECT id FROM agents WHERE name=?", (to_agent_name,)
         )).fetchone()
@@ -641,7 +641,7 @@ async def create_vault_connector(agent_name: str, request: Request, agent: dict 
 
     token = "vconn_" + secrets.token_hex(24)
     token_hash = _hlib.sha256(token.encode()).hexdigest()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             "INSERT INTO vault_connectors (agent_id, name, source, token_hash) VALUES (?,?,?,?)",
             (agent["id"], name, source, token_hash),
@@ -672,7 +672,7 @@ async def create_vault_connector(agent_name: str, request: Request, agent: dict 
 async def list_vault_connectors(agent_name: str, agent: dict = Depends(get_agent)):
     if agent["name"] != agent_name:
         raise HTTPException(403, "Can only view your own connectors")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             """SELECT id, name, source, created_at, last_used_at, revoked, turn_count
@@ -686,7 +686,7 @@ async def list_vault_connectors(agent_name: str, agent: dict = Depends(get_agent
 async def revoke_vault_connector(agent_name: str, connector_id: int, agent: dict = Depends(get_agent)):
     if agent["name"] != agent_name:
         raise HTTPException(403, "Can only revoke your own connectors")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             "UPDATE vault_connectors SET revoked=1 WHERE id=? AND agent_id=?",
             (connector_id, agent["id"]),
@@ -711,7 +711,7 @@ async def ingest_external_conversation(request: Request, connector: dict = Depen
     title = str(body.get("title", ""))[:150].strip()
     resource = str(body.get("resource", ""))[:500].strip()
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         existing = await (await db.execute(
             "SELECT * FROM external_conversations WHERE connector_id=? AND conversation_id=?",

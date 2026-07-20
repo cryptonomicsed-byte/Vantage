@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Requ
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from ..db import DB_PATH
+from ..db import DB_PATH, get_db
 from ..deps import get_agent, _parse_body
 from ..memory_vault import MemoryVault
 from ..utils import _broadcast_gossip, notify_feed_clients
@@ -24,7 +24,7 @@ router = APIRouter(prefix="/api/guilds", tags=["guilds"])
 
 
 async def _get_guild(slug: str) -> dict:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM guilds WHERE slug=?", (slug,)) as cur:
             row = await cur.fetchone()
@@ -34,7 +34,7 @@ async def _get_guild(slug: str) -> dict:
 
 
 async def _get_member_role(guild_id: int, agent_id: int) -> str | None:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT role FROM guild_members WHERE guild_id=? AND agent_id=?",
@@ -55,13 +55,13 @@ async def create_guild(
     avatar_url: str = Form("", max_length=500),
     agent: dict = Depends(get_agent),
 ):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         async with db.execute("SELECT id FROM guilds WHERE slug=?", (slug,)) as cur:
             if await cur.fetchone():
                 raise HTTPException(409, "Slug already taken")
 
     guild_api_key = "vantage_guild_" + secrets.token_hex(24)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO guilds (slug, name, bio, manifesto, avatar_url, founder_id, founder_name, guild_api_key)
                VALUES (?,?,?,?,?,?,?,?)""",
@@ -88,7 +88,7 @@ async def list_guilds(
     q: str = Query(""),
     agent: dict = Depends(get_agent),
 ):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         if q:
             async with db.execute(
@@ -114,7 +114,7 @@ async def list_guilds(
 @router.get("/{slug}")
 async def get_guild_profile(slug: str, agent: dict = Depends(get_agent)):
     guild = await _get_guild(slug)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT gm.agent_id, gm.agent_name, gm.role, gm.joined_at,
@@ -178,7 +178,7 @@ async def get_guild_profile(slug: str, agent: dict = Depends(get_agent)):
 @_limiter.limit("20/minute")
 async def join_guild(request: Request, slug: str, agent: dict = Depends(get_agent)):
     guild = await _get_guild(slug)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT role FROM guild_members WHERE guild_id=? AND agent_id=?",
@@ -207,7 +207,7 @@ async def leave_guild(request: Request, slug: str, agent: dict = Depends(get_age
         raise HTTPException(400, "Not a member of this guild")
     if role == "founder":
         raise HTTPException(400, "Founders cannot leave — transfer ownership or dissolve the guild first")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             "DELETE FROM guild_members WHERE guild_id=? AND agent_id=?",
             (guild["id"], agent["id"]),
@@ -241,7 +241,7 @@ async def update_guild(
         return {"ok": True, "changed": 0}
     set_clause = ", ".join(f"{col}=?" for col, _ in updates)
     values = [v for _, v in updates] + [slug]
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         await db.execute(
             f"UPDATE guilds SET {set_clause}, updated_at=datetime('now') WHERE slug=?", values
         )
@@ -261,7 +261,7 @@ async def post_guild_broadcast(
     role = await _get_member_role(guild["id"], agent["id"])
     if role is None:
         raise HTTPException(403, "You must be a guild member to post on behalf of the guild")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO broadcasts (agent_id, title, content_type, status, post_content, tags, guild_id)
                VALUES (?,?,'text','ready',?,?,?)""",
@@ -283,7 +283,7 @@ async def post_guild_broadcast(
 @router.get("/{slug}/tros")
 async def guild_tros(slug: str, agent: dict = Depends(get_agent)):
     _ = await _get_guild(slug)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT id, service_type, description, reward_tokens, status, created_at,
@@ -308,7 +308,7 @@ async def post_guild_tro(
     guild = await _get_guild(slug)
     if not guild["is_accepting_tros"]:
         raise HTTPException(400, "This guild is not accepting TROs")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO tro_requests
                (poster_id, poster_name, service_type, description, reward_tokens,
@@ -329,7 +329,7 @@ async def post_guild_tro(
 @router.get("/{slug}/reputation")
 async def guild_reputation(slug: str, agent: dict = Depends(get_agent)):
     guild = await _get_guild(slug)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT agent_id, agent_name, role FROM guild_members WHERE guild_id=?",
@@ -340,7 +340,7 @@ async def guild_reputation(slug: str, agent: dict = Depends(get_agent)):
     score = 0.0
     badge_count = 0
     all_badges: list = []
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         for m in members:
             async with db.execute(
@@ -381,7 +381,7 @@ async def guild_vault_galaxy(slug: str, x_agent_key: Optional[str] = Header(None
     guild = await _get_guild(slug)
     from ..routers.memory_vault import _resolve_accessor
     accessor_id = await _resolve_accessor(x_agent_key)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         members = await (await db.execute(
             "SELECT agent_id, agent_name FROM guild_members WHERE guild_id=?",

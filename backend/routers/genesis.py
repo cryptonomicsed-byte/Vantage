@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 
 import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, Query
-from backend.db import DB_PATH
+from backend.db import DB_PATH, get_db
 from backend.deps import get_agent
 from backend.config import settings
 
@@ -142,7 +142,7 @@ def post_to_feed(title: str, content: str, tags: list[str] | None = None):
 def log_audit(agent_name: str, action: str, target: str = "", details: dict | None = None):
     """Write to immutable audit trail."""
     async def _write():
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with get_db() as db:
             await db.execute(
                 "INSERT INTO genesis_audit_log (agent_name, action, target, details) VALUES (?,?,?,?)",
                 (agent_name, action, target, json.dumps(details or {}))
@@ -155,7 +155,7 @@ def log_audit(agent_name: str, action: str, target: str = "", details: dict | No
 # ─── Init tables on import ─────────────────────────────────────
 
 async def _init_genesis_db():
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         for stmt in SCHEMA.split(";"):
             s = stmt.strip()
             if s:
@@ -163,8 +163,10 @@ async def _init_genesis_db():
                 except: pass
         await db.commit()
 
-try: asyncio.run(_init_genesis_db())
-except: pass
+# NOTE: no longer run at import time -- see lifespan() in main.py, which
+# awaits this in the real event loop instead (import-time asyncio.run()
+# created its own throwaway loop, which broke the Postgres connection
+# pool binding once uvicorn's loop took over).
 
 # ─── 1. AGENT GENESIS — Spawn a child agent ─────────────────────
 
@@ -189,7 +191,7 @@ async def spawn_agent(data: GenesisRequest, parent: dict = Depends(get_agent)):
     key_hash = hash_key(api_key)
     
     # Calculate generation — parent's generation + 1
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         parent_gen = await (await db.execute(
             "SELECT generation FROM genesis_lineage WHERE child_name=?", (parent["name"],)
         )).fetchone()
@@ -253,7 +255,7 @@ async def discover(
     Returns matching agents with their reputation scores.
     E2E: multi-table join, scored, capped.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         
         # Build query dynamically
@@ -297,7 +299,7 @@ async def propose_skill(data: SkillProposal, agent: dict = Depends(get_agent)):
     On majority approve, the skill is registered.
     E2E: proposal created, audit logged.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         try:
             await db.execute(
                 "INSERT INTO genesis_skill_proposals (proposer, skill_name, description) VALUES (?,?,?)",
@@ -324,7 +326,7 @@ async def vote_on_skill(proposal_id: int, data: SkillVote, agent: dict = Depends
     When reject >= 3, proposal is closed.
     E2E: threshold-checked, auto-resolved.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         prop = await (await db.execute(
             "SELECT * FROM genesis_skill_proposals WHERE id=?", (proposal_id,)
         )).fetchone()
@@ -382,7 +384,7 @@ async def get_audit(limit: int = Query(50, le=200), agent: dict = Depends(get_ag
     Every spawn, vote, proposal, and delegation is recorded.
     E2E: always returns ordered results.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             "SELECT * FROM genesis_audit_log ORDER BY created_at DESC LIMIT ?", (limit,)
@@ -398,7 +400,7 @@ async def get_lineage(name: Optional[str] = Query(None), agent: dict = Depends(g
     Returns the full family tree or a filtered branch.
     E2E: recursive parent-child resolution with generation tracking.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         
         if name:
@@ -417,7 +419,7 @@ async def get_lineage(name: Optional[str] = Query(None), agent: dict = Depends(g
 
 @router.get("/status", summary="Genesis Engine health and stats")
 async def genesis_status(agent: dict = Depends(get_agent)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         agents = await (await db.execute("SELECT COUNT(*) FROM genesis_lineage WHERE status='active'")).fetchone()
         proposals = await (await db.execute("SELECT COUNT(*) FROM genesis_skill_proposals WHERE status='proposed'")).fetchone()
         audits = await (await db.execute("SELECT COUNT(*) FROM genesis_audit_log")).fetchone()

@@ -11,7 +11,7 @@ from datetime import datetime
 
 import aiosqlite
 
-from backend.db import DB_PATH
+from backend.db import DB_PATH, get_db
 from backend.crypto_utils import decrypt_private_key
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ def register_adapter(chain: str, fn):
 
 async def _load_agent_info(agent_id: int) -> dict | None:
     """Load agent info including api_key for wallet decryption."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute(
             "SELECT id, name, api_key FROM agents WHERE id=?", (agent_id,)
@@ -38,7 +38,7 @@ async def _load_agent_info(agent_id: int) -> dict | None:
 
 async def _get_wallet_key(wallet_id: int, agent_info: dict) -> tuple[str | None, str | None]:
     """Decrypt a wallet's private key. Returns (address, decrypted_key)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         row = await (await db.execute(
             "SELECT address, encrypted_private_key, chain FROM trading_wallets WHERE id=? AND agent_id=?",
             (wallet_id, agent_info["id"])
@@ -60,7 +60,7 @@ async def _get_wallet_key(wallet_id: int, agent_info: dict) -> tuple[str | None,
 
 async def _get_pending_orders() -> list[dict]:
     """Get all pending orders across all chains."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             """SELECT o.*, w.address as wallet_address, w.encrypted_private_key, w.chain as wallet_chain
@@ -75,7 +75,7 @@ async def _get_pending_orders() -> list[dict]:
 
 async def _update_order(order_id: int, status: str, tx_hash: str = "", error: str = ""):
     """Update order status in DB."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         if status in ("filled", "confirmed"):
             await db.execute(
                 """UPDATE trading_orders SET status=?, tx_hash=?, executed_at=datetime("now"),
