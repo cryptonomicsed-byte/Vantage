@@ -692,35 +692,18 @@ async def money_flow(
                     )
             await db2.commit()
 
-    # ── Wallet dormancy — "don't hoard wallets." Active (touched within 3
-    # days) wallets are untouched. Dormant + balance >= $10k dim (low
-    # brightness) but stay, so real whale positions don't disappear just
-    # because they're between trades. Dormant + low/unknown balance are
-    # dropped entirely — every tracked wallet used to get a permanent node
-    # the moment it was added regardless of activity, which is exactly the
-    # hoarding this removes. Never drops the Raydium anchor or any node with
-    # real capital weight already established this render (size uses
-    # volume_sol, computed after this filter, so this only looks at raw
-    # activity/balance signals, not the derived score).
+    # ── Wallet dormancy — mark inactive wallets as dimmed, but keep all tracked
+    # wallets visible. Active (touched within 3 days) wallets are untouched.
+    # Dormant wallets are flagged for visual dimming (low brightness on frontend)
+    # but never removed from the graph — all tracked wallets stay visible.
     DORMANT_AFTER_SECONDS = 3 * 86400
-    DORMANT_SURVIVE_BALANCE_USD = 10_000.0
-    excluded_ids: set = set()
     for nid, n in nodes.items():
         if n["type"] != "wallet" or n.get("is_migration_anchor"):
             continue
         last_active = last_seen.get(nid, 0)
         is_dormant = (now - last_active) > DORMANT_AFTER_SECONDS
-        if not is_dormant:
-            continue
-        balance = n.get("balance_usd") or 0
-        if balance >= DORMANT_SURVIVE_BALANCE_USD:
+        if is_dormant:
             n["dormant_dim"] = True  # frontend caps brightness for these
-        else:
-            excluded_ids.add(nid)
-    if excluded_ids:
-        for nid in excluded_ids:
-            nodes.pop(nid, None)
-        edges = {k: e for k, e in edges.items() if e["source"] not in excluded_ids and e["target"] not in excluded_ids}
 
     # Normalise brightness (recent activity share) and size (capital weight) —
     # the Mandelbrot fade: dormant nodes → brightness 0, sink into background.
