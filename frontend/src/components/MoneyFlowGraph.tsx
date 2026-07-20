@@ -274,7 +274,7 @@ export default function MoneyFlowGraph() {
           .showNavInfo(false)
           .nodeLabel((n: any) => `<div style="font-family:monospace;font-size:11px;color:#dfe6ff;background:rgba(5,5,16,.9);padding:4px 8px;border-radius:6px;border:1px solid rgba(255,255,255,.12)">${n.ntype.toUpperCase()} · ${n.name}</div>`)
           .nodeThreeObject((n: any) => {
-            const brightness = Math.max(0.15, n.raw.brightness) // Mandelbrot fade floor so dormant nodes stay faintly visible
+            const brightness = Math.max(0.15, n.raw.brightness)
             const mat = new THREE.SpriteMaterial({
               map: nodeTex, color: n.color, transparent: true, opacity: 0.35 + brightness * 0.6,
               depthWrite: false, blending: THREE.AdditiveBlending,
@@ -287,10 +287,6 @@ export default function MoneyFlowGraph() {
           .linkColor((l: any) => l.color)
           .linkOpacity(0.35)
           .linkWidth((l: any) => l.width)
-          // Synapses only fire for edges with genuinely recent activity
-          // (server-computed `live`, ~one refresh cycle old or less) — a
-          // static/historical connection is still drawn as a line, it just
-          // doesn't pulse, so the galaxy isn't animating on stale data 24/7.
           .linkDirectionalParticles((l: any) => l.live ? Math.min(4, Math.max(1, Math.round(l.width))) : 0)
           .linkDirectionalParticleWidth(1.4)
           .linkDirectionalParticleSpeed((l: any) => l.live ? 0.006 : 0)
@@ -313,11 +309,6 @@ export default function MoneyFlowGraph() {
         .height(mountRef.current!.clientHeight)
         .graphData({ nodes, links })
 
-      // Migration gravity physics — pre-migration tokens get a long link
-      // distance to the exchange anchor (drifts far away); as
-      // migration_distance shrinks toward 0 (closer to/through migration)
-      // the link shortens, visibly pulling the token toward the exchange
-      // node. Every other edge type keeps the library's default distance.
       const linkForce = graphRef.current.d3Force('link')
       if (linkForce) {
         linkForce.distance((l: any) =>
@@ -337,7 +328,20 @@ export default function MoneyFlowGraph() {
     window.addEventListener('resize', onResize)
     return () => {
       window.removeEventListener('resize', onResize)
-      graphRef.current?._destructor?.()
+      // Properly dispose Three.js renderer and WebGL context
+      if (graphRef.current) {
+        try {
+          const renderer = graphRef.current.renderer?.()
+          if (renderer) {
+            renderer.dispose()
+            renderer.forceContextLoss()
+            renderer.domElement?.remove()
+          }
+          graphRef.current._destructor?.()
+        } catch (e) {
+          console.error('Error disposing graph:', e)
+        }
+      }
       graphRef.current = null
     }
   }, [])
