@@ -570,7 +570,9 @@ from .routers.alpha import router as alpha_router
 app.include_router(alpha_router)
 from .routers.intel import router as intel_router
 from .routers.code import router as code_router
+from .routers.audio import router as audio_router
 app.include_router(code_router)
+app.include_router(audio_router)
 app.include_router(intel_router)
 from .routers.jobs import router as jobs_router
 app.include_router(jobs_router)
