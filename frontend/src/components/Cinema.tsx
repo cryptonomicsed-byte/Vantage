@@ -102,19 +102,56 @@ function Poster({ t }: { t: Title }) {
 }
 
 function Detail({ t, onClose }: { t: Title; onClose: () => void }) {
+  const videoRef = React.useRef<HTMLVideoElement>(null)
+  const analyticsRef = React.useRef({ seekCount: 0, startTime: Date.now(), videoDuration: 0 })
+
   useEffect(() => {
-    // Count a view when the title is opened.
+    // Count a view when the title is opened
     fetch(`/api/cinema/${t.id}`, { headers: { 'X-Agent-Key': KEY() } }).catch(() => {})
     const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', h); document.body.style.overflow = 'hidden'
     return () => { window.removeEventListener('keydown', h); document.body.style.overflow = '' }
   }, [t.id, onClose])
+
+  const logAnalytics = async (completion_pct: number) => {
+    if (!KEY() || !t.id) return
+    const elapsedMs = Date.now() - analyticsRef.current.startTime
+    const watchDuration = Math.round(elapsedMs / 1000)
+    try {
+      await fetch(`/api/cinema/${t.id}/analytics`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Agent-Key': KEY() },
+        body: JSON.stringify({
+          watch_duration_sec: watchDuration,
+          completion_pct: Math.min(1.0, completion_pct),
+          seek_count: analyticsRef.current.seekCount,
+          device_type: /mobile|android|iphone/i.test(navigator.userAgent) ? 'mobile' : 'web',
+          referrer: document.referrer || 'direct'
+        })
+      })
+    } catch (e) { console.debug('Analytics failed:', e) }
+  }
+
+  const handleSeeking = () => { analyticsRef.current.seekCount++ }
+  const handleEnded = async () => { await logAnalytics(1.0) }
+  const handleTimeUpdate = async () => {
+    if (videoRef.current && videoRef.current.duration > 0) {
+      analyticsRef.current.videoDuration = videoRef.current.duration
+      // Log at 50% and 100% automatically
+      const pct = videoRef.current.currentTime / videoRef.current.duration
+      if (pct >= 0.5 && !sessionStorage.getItem(`cinema-50-${t.id}`)) {
+        sessionStorage.setItem(`cinema-50-${t.id}`, 'true')
+        await logAnalytics(0.5)
+      }
+    }
+  }
+
   return (
     <div className="cin-modal" onClick={onClose}>
       <div className="cin-modal-inner" onClick={e => e.stopPropagation()}>
         <button className="cin-modal-close" onClick={onClose}><X size={18} /></button>
         {t.stream_url
-          ? <video className="cin-player" src={t.stream_url} poster={t.thumbnail_url || undefined} controls autoPlay />
+          ? <video ref={videoRef} className="cin-player" src={t.stream_url} poster={t.thumbnail_url || undefined} controls autoPlay onSeeking={handleSeeking} onTimeUpdate={handleTimeUpdate} onEnded={handleEnded} />
           : <div className="cin-player" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,.4)' }}>No stream attached.</div>}
         <div style={{ padding: 26 }}>
           <div className="cin-badge"><Film size={13} /> {KIND_LABEL[t.cinema_kind || 'movie'] || 'Title'}{t.category ? ` · ${t.category}` : ''}</div>

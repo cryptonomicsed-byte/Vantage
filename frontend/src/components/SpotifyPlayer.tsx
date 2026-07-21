@@ -9,6 +9,7 @@ interface Track {
 }
 interface ListeningAgent { agent: string; track: string; track_id: string; started_at: string }
 interface Playlist { id: string; title: string; description: string; is_radio_station: boolean; is_collaborative: boolean }
+interface Album { id: number; title: string; description: string; agent: string; cover_url: string; track_count: number; created_at: string }
 
 const API = '/api/audio'
 const AGENT_KEY = localStorage.getItem('vantage_api_key') || ''
@@ -16,6 +17,7 @@ const AGENT_KEY = localStorage.getItem('vantage_api_key') || ''
 export default function SpotifyPlayer() {
   const [tracks, setTracks] = useState<Track[]>([])
   const [playlists, setPlaylists] = useState<Playlist[]>([])
+  const [albums, setAlbums] = useState<Album[]>([])
   const [nowPlaying, setNowPlaying] = useState<ListeningAgent[]>([])
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null)
   const [isPlaying, setIsPlaying] = useState(false)
@@ -25,28 +27,64 @@ export default function SpotifyPlayer() {
   const [showLeftPanel, setShowLeftPanel] = useState(true)
   const [showRightPanel, setShowRightPanel] = useState(true)
   const [showBottomBar, setShowBottomBar] = useState(true)
+  const [showAlbums, setShowAlbums] = useState(false)
   const [volume, setVolume] = useState(0.7)
   const [progress, setProgress] = useState(0)
   const audioRef = useRef<HTMLAudioElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const analyticsRef = useRef({ startTime: 0, skipped: false, logged50: false })
 
   const loadTracks = useCallback(() => {
     fetch(API + '/tracks?limit=50').then(r => r.json())
       .then(d => { setTracks(d); setLoading(false) }).catch(() => setLoading(false))
   }, [])
+  const loadAlbums = useCallback(() => {
+    fetch(API + '/albums').then(r => r.json()).then(d => setAlbums(Array.isArray(d) ? d : [])).catch(() => {})
+  }, [])
   const loadNowPlaying = useCallback(() => {
     fetch(API + '/now-playing').then(r => r.json()).then(setNowPlaying).catch(() => {})
   }, [])
 
-  useEffect(() => { loadTracks(); loadNowPlaying(); const t = setInterval(loadNowPlaying, 10000); return () => clearInterval(t) }, [loadTracks, loadNowPlaying])
+  useEffect(() => { loadTracks(); loadAlbums(); loadNowPlaying(); const t = setInterval(loadNowPlaying, 10000); return () => clearInterval(t) }, [loadTracks, loadAlbums, loadNowPlaying])
+
+  const logAudioAnalytics = useCallback(async (trackId: string, duration: number, completion: number, skipped: boolean) => {
+    if (!AGENT_KEY) return
+    try {
+      await fetch(`/api/audio/${trackId}/analytics`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Agent-Key': AGENT_KEY },
+        body: JSON.stringify({
+          listen_duration_sec: Math.round(duration),
+          completion_pct: Math.min(1.0, completion),
+          skip_count: skipped ? 1 : 0,
+          replay_count: 0,
+          device_type: /mobile|android|iphone/i.test(navigator.userAgent) ? 'mobile' : 'web'
+        })
+      })
+    } catch (e) { console.debug('Audio analytics failed:', e) }
+  }, [])
 
   const play = (track: Track) => {
     setCurrentTrack(track); setIsPlaying(true)
+    analyticsRef.current = { startTime: Date.now(), skipped: false, logged50: false }
     if (audioRef.current) { audioRef.current.src = track.url || ''; audioRef.current.play() }
     // Report listening
     fetch(API + '/listen', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Agent-Key': AGENT_KEY }, body: 'track_id=' + track.id }).catch(() => {})
     // Also post to now-listening for WebSocket broadcast
     fetch(API + '/now-listening', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Agent-Key': AGENT_KEY }, body: 'track_id=' + track.id }).catch(() => {})
+  }
+
+  const skipTrack = (next: boolean = true) => {
+    // Log skip analytics for current track
+    if (currentTrack) {
+      const elapsed = (Date.now() - analyticsRef.current.startTime) / 1000
+      const pct = audioRef.current?.currentTime ? audioRef.current.currentTime / (audioRef.current.duration || 1) : 0
+      logAudioAnalytics(currentTrack.id, elapsed, pct, true)
+    }
+    // Find next/previous track and play
+    const currentIndex = filtered.findIndex(t => t.id === currentTrack?.id)
+    if (next && currentIndex < filtered.length - 1) play(filtered[currentIndex + 1])
+    else if (!next && currentIndex > 0) play(filtered[currentIndex - 1])
   }
 
   const togglePlay = () => {
@@ -96,13 +134,25 @@ export default function SpotifyPlayer() {
               <div style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Library</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                 {['All Tracks', 'Recent Plays', 'Your Uploads'].map((item, i) => (
-                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 6, cursor: 'pointer', fontSize: 11, color: i === 0 ? '#fff' : 'var(--muted)' }}>
+                  <div key={i} onClick={() => setShowAlbums(false)} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 6, cursor: 'pointer', fontSize: 11, color: !showAlbums && i === 0 ? '#fff' : 'var(--muted)' }}>
                     {i === 0 ? <Music size={13} /> : i === 1 ? <Play size={13} /> : <Upload size={13} />}
                     {item}
                   </div>
                 ))}
               </div>
             </div>
+            {albums.length > 0 && (
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Albums</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  {albums.map(a => (
+                    <div key={a.id} onClick={() => setShowAlbums(a.id === (showAlbums as number))} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 6, cursor: 'pointer', fontSize: 11, color: showAlbums === a.id ? '#fff' : 'var(--muted)' }}>
+                      <Music size={13} /> {a.title}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             <div>
               <div style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Radio Stations</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -200,11 +250,11 @@ export default function SpotifyPlayer() {
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
               <Shuffle size={14} style={{ color: 'var(--muted)', cursor: 'pointer' }} />
-              <SkipBack size={16} style={{ color: '#fff', cursor: 'pointer' }} />
+              <SkipBack size={16} style={{ color: '#fff', cursor: 'pointer' }} onClick={() => skipTrack(false)} />
               <button onClick={togglePlay} style={{ background: '#fff', border: 'none', borderRadius: '50%', width: 32, height: 32, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
                 {isPlaying ? <Pause size={14} fill="black" color="black" /> : <Play size={14} fill="black" color="black" />}
               </button>
-              <SkipForward size={16} style={{ color: '#fff', cursor: 'pointer' }} />
+              <SkipForward size={16} style={{ color: '#fff', cursor: 'pointer' }} onClick={() => skipTrack(true)} />
               <Repeat size={14} style={{ color: 'var(--muted)', cursor: 'pointer' }} />
             </div>
             {/* Progress bar */}
@@ -226,7 +276,27 @@ export default function SpotifyPlayer() {
       )}
 
       {/* AUDIO ELEMENT */}
-      <audio ref={audioRef} onTimeUpdate={() => { if (audioRef.current) setProgress(audioRef.current.currentTime / (audioRef.current.duration || 1)) }} onEnded={() => { setIsPlaying(false) }} />
+      <audio ref={audioRef}
+        onTimeUpdate={() => {
+          if (audioRef.current) {
+            setProgress(audioRef.current.currentTime / (audioRef.current.duration || 1))
+            // Log at 50% automatically
+            const pct = audioRef.current.currentTime / audioRef.current.duration
+            if (pct >= 0.5 && !analyticsRef.current.logged50 && currentTrack) {
+              analyticsRef.current.logged50 = true
+              const elapsed = (Date.now() - analyticsRef.current.startTime) / 1000
+              logAudioAnalytics(currentTrack.id, elapsed, 0.5, false)
+            }
+          }
+        }}
+        onEnded={() => {
+          if (currentTrack) {
+            const elapsed = (Date.now() - analyticsRef.current.startTime) / 1000
+            logAudioAnalytics(currentTrack.id, elapsed, 1.0, false)
+          }
+          setIsPlaying(false)
+        }}
+      />
 
       {/* UPLOAD MODAL */}
       {showUpload && (
