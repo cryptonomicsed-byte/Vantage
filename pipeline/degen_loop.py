@@ -3,14 +3,17 @@
 DEGEN LOOP — Continuous Pump.fun scalping with profit-splitting
 Strategy: 50% profit → vault (USDC) | 50% → compound into next trade
 Start: $7 (~0.085 SOL) per trade
+
+REQUIRES: VANTAGE_KEY, BIRDEYE_KEY env vars set
 """
 import subprocess, json, sqlite3, time, os, urllib.request
 from datetime import datetime, timezone
 
 VANTAGE_URL = "http://localhost:8001"
 VANTAGE_KEY = os.environ.get("VANTAGE_KEY","")
-DB_PATH = "/opt/ares/Vantage/data/vantage.db"
-WALLET = "ogun"
+BIRDEYE_KEY = os.environ.get("BIRDEYE_KEY","")
+DB_PATH = os.environ.get("DB_PATH", "/opt/ares/Vantage/data/vantage.db")
+WALLET = os.environ.get("WALLET", "ogun")
 
 # ── Degen Loop Config ────────────────────────────────────────
 INITIAL_TRADE_SOL = 0.085   # ~$7
@@ -65,14 +68,38 @@ def get_vault_total():
     db.close()
     return total - withdrawals
 
-def get_token_price(symbol):
+def get_token_price(symbol_or_mint):
+    """Get token price from Birdeye API. Accepts symbol or mint address."""
+    if not BIRDEYE_KEY:
+        return None
+
     try:
-        result = subprocess.run(["sol", "token", "price", symbol.lower()],
-                               capture_output=True, text=True, timeout=15)
-        for line in result.stdout.split("\n"):
-            if "$" in line and symbol.lower() in line.lower():
-                return float(line.split("$")[-1].strip())
-    except: pass
+        # Try as mint first (44-char base58), then search by symbol
+        search_term = symbol_or_mint
+        req = urllib.request.Request(
+            f"https://public-api.birdeye.so/defi/price?address={search_term}",
+            headers={"X-API-KEY": BIRDEYE_KEY, "accept": "application/json"}
+        )
+        resp = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
+        price = float(resp.get("data", {}).get("value", 0))
+        if price > 0:
+            return price
+    except:
+        pass
+
+    # Fall back to searching by symbol via Vantage API
+    try:
+        req = urllib.request.Request(
+            f"{VANTAGE_URL}/api/intel/signals?source=degen&symbol={symbol_or_mint}",
+            headers={"X-Agent-Key": VANTAGE_KEY}
+        )
+        resp = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
+        signals = resp.get("signals", [])
+        if signals and "price" in signals[0]:
+            return float(signals[0]["price"])
+    except:
+        pass
+
     return None
 
 def get_degen_signals():
@@ -88,58 +115,72 @@ def get_degen_signals():
         return []
 
 def execute_degen(symbol, conviction, amount_sol):
-    """Execute Pump.fun scalp trade."""
+    """Execute Pump.fun scalp trade via Vantage trading API."""
     global TRADE_COUNT, CURRENT_BANKROLL
-    
-    token = symbol.lower().replace(" ", "-").replace("/", "-")[:20]
+
     print(f"\n{'='*50}")
     print(f"  🎯 DEGEN #{TRADE_COUNT+1}: {symbol}")
     print(f"  Conviction: {conviction:.2f} | Amount: {amount_sol:.4f} SOL")
     print(f"{'='*50}")
-    
+
     try:
-        cmd = f"sol token swap {amount_sol} sol {token} --wallet {WALLET}"
-        print(f"  $ {cmd}")
-        result = subprocess.run(cmd.split(), capture_output=True, text=True, timeout=60)
-        output = result.stdout + result.stderr
-        
-        sig = None
-        for line in output.split("\n"):
-            if "Signature:" in line:
-                sig = line.split("Signature:")[-1].strip()
-            if "Explorer:" in line:
-                print(f"  {line.strip()}")
-        
-        if sig and "Error" not in output:
+        # Place buy order via Vantage API
+        payload = json.dumps({
+            "symbol": f"{symbol}/USDC",
+            "side": "buy",
+            "type": "market",
+            "amount": amount_sol,
+            "chain": "solana",
+            "notes": f"Degen scalp #{TRADE_COUNT+1} | conviction={conviction:.2f}",
+            "source": "degen_loop",
+        }).encode()
+
+        req = urllib.request.Request(
+            f"{VANTAGE_URL}/api/trading/orders",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "X-Agent-Key": VANTAGE_KEY,
+            }
+        )
+        resp = json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
+        order_id = resp.get("order_id")
+        tx_sig = resp.get("tx_sig", f"order_{order_id}")
+
+        if order_id:
             TRADED.add(symbol)
             TRADE_COUNT += 1
-            
+
             price = get_token_price(symbol) or 0
-            
+
             db = sqlite3.connect(DB_PATH)
             db.execute("""
                 INSERT INTO strategy_trades (strategy, symbol, side, amount_sol, entry_price, conviction, status, entry_time, notes)
                 VALUES ('degen_loop', ?, 'BUY', ?, ?, ?, 'open', ?, ?)
             """, (symbol, amount_sol, price, conviction,
                   datetime.now(timezone.utc).isoformat(),
-                  f"TX: {sig} | Vault: {get_vault_total():.4f} SOL"))
+                  f"Order #{order_id} | TX: {tx_sig} | Vault: {get_vault_total():.4f} SOL"))
             db.commit()
             db.close()
-            
-            urllib.request.urlopen(urllib.request.Request(
-                f"{VANTAGE_URL}/api/trading/signals/ingest",
-                data=json.dumps({
-                    "title": f"🎯 Degen #{TRADE_COUNT}: {symbol}",
-                    "content": f"**Pump.fun Scalp**\n\nToken: {symbol}\nAmount: {amount_sol:.4f} SOL\nTX: {sig}\nVault: {get_vault_total():.4f} SOL",
-                    "tags": ["trading","degen","pumpfun"], "status": "published", "content_type": "text"
-                }).encode(),
-                headers={"Content-Type": "application/json", "X-Agent-Key": VANTAGE_KEY}
-            ), timeout=5)
-            
-            print(f"  ✅ LIVE: {sig[:20]}... | Vault: {get_vault_total():.4f} SOL")
-            return sig
+
+            # Post to signals feed
+            try:
+                urllib.request.urlopen(urllib.request.Request(
+                    f"{VANTAGE_URL}/api/trading/signals/ingest",
+                    data=json.dumps({
+                        "title": f"🎯 Degen #{TRADE_COUNT}: {symbol}",
+                        "content": f"**Pump.fun Scalp**\n\nToken: {symbol}\nAmount: {amount_sol:.4f} SOL\nOrder: #{order_id}\nVault: {get_vault_total():.4f} SOL",
+                        "tags": ["trading","degen","pumpfun"], "status": "published", "content_type": "text"
+                    }).encode(),
+                    headers={"Content-Type": "application/json", "X-Agent-Key": VANTAGE_KEY}
+                ), timeout=5)
+            except:
+                pass
+
+            print(f"  ✅ LIVE: Order #{order_id} | Vault: {get_vault_total():.4f} SOL")
+            return tx_sig
         else:
-            print(f"  ❌ Failed: {output[:200]}")
+            print(f"  ❌ Order failed: {resp.get('error', 'unknown error')}")
             return None
     except Exception as e:
         print(f"  ❌ Error: {e}")
@@ -166,17 +207,28 @@ def check_exits_and_compound():
         
         if pnl >= TAKE_PROFIT:
             print(f"\n  🎯 TAKE PROFIT: {symbol} @ +{pnl*100:.1f}%")
-            
-            # Sell entire position
-            token = symbol.lower()
-            result = subprocess.run(
-                f"sol token swap all {token} sol --wallet {WALLET}".split(),
-                capture_output=True, text=True, timeout=60
-            )
-            sig = None
-            for line in (result.stdout + result.stderr).split("\n"):
-                if "Signature:" in line:
-                    sig = line.split("Signature:")[-1].strip()
+
+            # Sell entire position via Vantage API
+            try:
+                payload = json.dumps({
+                    "symbol": f"{symbol}/USDC",
+                    "side": "sell",
+                    "type": "market",
+                    "amount": amount,
+                    "chain": "solana",
+                    "notes": f"Degen TP +{pnl*100:.1f}%",
+                    "source": "degen_loop",
+                }).encode()
+                req = urllib.request.Request(
+                    f"{VANTAGE_URL}/api/trading/orders",
+                    data=payload,
+                    headers={"Content-Type": "application/json", "X-Agent-Key": VANTAGE_KEY}
+                )
+                resp = json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
+                sig = resp.get("tx_sig", f"order_{resp.get('order_id')}")
+            except Exception as e:
+                print(f"  Sell order failed: {e}")
+                sig = None
             
             # Calculate profit and split
             profit_sol = amount * pnl  # Approximate profit in SOL
@@ -211,15 +263,28 @@ def check_exits_and_compound():
             
         elif pnl <= STOP_LOSS:
             print(f"\n  🛑 STOP LOSS: {symbol} @ {pnl*100:.1f}%")
-            token = symbol.lower()
-            result = subprocess.run(
-                f"sol token swap all {token} sol --wallet {WALLET}".split(),
-                capture_output=True, text=True, timeout=60
-            )
-            sig = None
-            for line in (result.stdout + result.stderr).split("\n"):
-                if "Signature:" in line:
-                    sig = line.split("Signature:")[-1].strip()
+
+            # Sell entire position via Vantage API
+            try:
+                payload = json.dumps({
+                    "symbol": f"{symbol}/USDC",
+                    "side": "sell",
+                    "type": "market",
+                    "amount": amount,
+                    "chain": "solana",
+                    "notes": f"Degen SL {pnl*100:.1f}%",
+                    "source": "degen_loop",
+                }).encode()
+                req = urllib.request.Request(
+                    f"{VANTAGE_URL}/api/trading/orders",
+                    data=payload,
+                    headers={"Content-Type": "application/json", "X-Agent-Key": VANTAGE_KEY}
+                )
+                resp = json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
+                sig = resp.get("tx_sig", f"order_{resp.get('order_id')}")
+            except Exception as e:
+                print(f"  Sell order failed: {e}")
+                sig = None
             
             db.execute(
                 "UPDATE strategy_trades SET status='closed', exit_price=?, pnl_pct=?, exit_time=?, notes=notes||? WHERE id=?",
