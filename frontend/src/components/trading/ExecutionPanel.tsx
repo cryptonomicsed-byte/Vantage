@@ -43,6 +43,11 @@ export default function ExecutionPanel() {
     } catch { /* best-effort */ }
   }
 
+  // Load wallets on mount
+  useEffect(() => {
+    refreshWallets()
+  }, [])
+
   const portfolio = state.portfolio
   const activeWallet = state.wallets.find(w => w.id === state.activeWalletId)
   const [sourcePerf, setSourcePerf] = useState<any[]>([])
