@@ -10,7 +10,12 @@ import time, json, sqlite3, os, sys, signal, urllib.request, hashlib
 DB = "/opt/ares/Vantage/data/vantage.db"
 HELIUS_KEY = os.environ.get("HELIUS_API_KEY", "")
 BIRDEYE_KEY = os.environ.get("BIRDEYE_KEY", "")
+ALCHEMY_KEY = os.environ.get("ALCHEMY_API_KEY", "")
 JUPITER = "https://quote-api.jup.ag/v6"
+ALCHEMY_RPC = {
+    "solana": f"https://solana-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}",
+    "eth": f"https://eth-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}",
+}
 VANTAGE_URL = "http://localhost:8001/api/trading/orders"
 VANTAGE_KEY = open(os.path.expanduser("~/.vantage_key")).read().strip()
 
@@ -149,6 +154,57 @@ def track_open_positions_for_exits():
     except Exception as e:
         print(f"  Position tracking failed: {e}")
 
+def get_alchemy_token_metadata(mint):
+    """Fetch token metadata from Alchemy — holder count, supply, contract details."""
+    if not ALCHEMY_KEY:
+        return None
+    try:
+        req = urllib.request.Request(
+            f"https://solana-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}/getNFTs?owner={mint}",
+            headers={"accept": "application/json"}
+        )
+        # For token info, use Alchemy's getTokenMetadata endpoint if available
+        # or fall back to DAS (Digital Asset Standard)
+        return json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
+    except:
+        return None
+
+def check_wallet_positions(wallet_address):
+    """Get current holdings for a wallet via Alchemy."""
+    if not ALCHEMY_KEY:
+        return []
+    try:
+        # Get all token balances for wallet
+        req = urllib.request.Request(
+            f"https://solana-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}/getTokenBalances?address={wallet_address}",
+            headers={"accept": "application/json"}
+        )
+        data = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
+        return data.get("tokenBalances", [])
+    except:
+        return []
+
+def simulate_transaction_alchemy(tx_payload):
+    """Simulate a transaction before execution via Alchemy RPC."""
+    if not ALCHEMY_KEY:
+        return None
+    try:
+        payload = json.dumps({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "simulateTransaction",
+            "params": [tx_payload, {"signers": []}]
+        }).encode()
+        req = urllib.request.Request(
+            ALCHEMY_RPC["solana"],
+            data=payload,
+            headers={"Content-Type": "application/json"}
+        )
+        resp = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
+        return resp.get("result", {})
+    except:
+        return None
+
 def resolve_symbol_to_mint(symbol):
     """Resolve token symbol (e.g. '$COPE') to mint address.
     - If symbol is already 44-char base58 mint, return it
@@ -262,16 +318,30 @@ def run():
                 if not safe:
                     continue
 
-                # Get current price for entry logging
+                # Get current price for entry logging (try Alchemy first, then Birdeye)
+                entry_price = 0
                 try:
                     req = urllib.request.Request(
-                        f"https://public-api.birdeye.so/defi/price?address={mint}",
-                        headers={"X-API-KEY": BIRDEYE_KEY, "accept": "application/json"}
+                        f"https://solana-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}/getAsset?id={mint}",
+                        headers={"accept": "application/json"}
                     )
-                    price_data = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
-                    entry_price = float(price_data.get("data", {}).get("value", 0))
+                    alchemy_data = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
+                    if alchemy_data.get("result", {}).get("token_info"):
+                        entry_price = float(alchemy_data["result"]["token_info"].get("price_info", {}).get("value", 0))
                 except:
-                    entry_price = 0
+                    pass
+
+                # Fallback to Birdeye if Alchemy lookup failed
+                if entry_price == 0:
+                    try:
+                        req = urllib.request.Request(
+                            f"https://public-api.birdeye.so/defi/price?address={mint}",
+                            headers={"X-API-KEY": BIRDEYE_KEY, "accept": "application/json"}
+                        )
+                        price_data = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
+                        entry_price = float(price_data.get("data", {}).get("value", 0))
+                    except:
+                        entry_price = 0
 
                 # Execute buy
                 print(f"  🚀 EXECUTING: Buy {TRADE_AMOUNT_SOL:.3f} SOL of {symbol}")
