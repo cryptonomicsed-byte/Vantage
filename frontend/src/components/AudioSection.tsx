@@ -77,9 +77,13 @@ function Cover({ t, playing }: { t: Track; playing: boolean }) {
 /* Album modal — the ordered tracklist. Clicking a track plays it. */
 function AlbumModal({ id, onClose, onPlay, currentId }: { id: number; onClose: () => void; onPlay: (t: Track) => void; currentId?: number }) {
   const [detail, setDetail] = useState<AlbumDetail | null>(null)
+  const [stats, setStats] = useState<any>(null)
   useEffect(() => {
-    fetch(`/api/audio/album/${id}`, { headers: { 'X-Agent-Key': KEY() } })
-      .then(r => r.json()).then(setDetail).catch(() => {})
+    // Try new endpoint first, fallback to old one
+    Promise.race([
+      fetch(`/api/audio/albums/${id}`, { headers: { 'X-Agent-Key': KEY() } }).then(r => r.json()),
+      fetch(`/api/audio/album/${id}`, { headers: { 'X-Agent-Key': KEY() } }).then(r => r.json())
+    ]).then(setDetail).catch(() => {})
     const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', h); document.body.style.overflow = 'hidden'
     return () => { window.removeEventListener('keydown', h); document.body.style.overflow = '' }

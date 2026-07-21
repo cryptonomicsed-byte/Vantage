@@ -27,7 +27,9 @@ export default function SpotifyPlayer() {
   const [showLeftPanel, setShowLeftPanel] = useState(true)
   const [showRightPanel, setShowRightPanel] = useState(true)
   const [showBottomBar, setShowBottomBar] = useState(true)
-  const [showAlbums, setShowAlbums] = useState(false)
+  const [showAlbums, setShowAlbums] = useState<number | false>(false)
+  const [selectedAlbumDetail, setSelectedAlbumDetail] = useState<any>(null)
+  const [showAlbumDetail, setShowAlbumDetail] = useState(false)
   const [volume, setVolume] = useState(0.7)
   const [progress, setProgress] = useState(0)
   const audioRef = useRef<HTMLAudioElement>(null)
@@ -85,6 +87,17 @@ export default function SpotifyPlayer() {
     const currentIndex = filtered.findIndex(t => t.id === currentTrack?.id)
     if (next && currentIndex < filtered.length - 1) play(filtered[currentIndex + 1])
     else if (!next && currentIndex > 0) play(filtered[currentIndex - 1])
+  }
+
+  const loadAlbumDetail = async (albumId: number) => {
+    try {
+      const res = await fetch(`/api/audio/albums/${albumId}`, { headers: { 'X-Agent-Key': AGENT_KEY } })
+      if (res.ok) {
+        const data = await res.json()
+        setSelectedAlbumDetail(data)
+        setShowAlbumDetail(true)
+      }
+    } catch (e) { console.debug('Album detail load failed:', e) }
   }
 
   const togglePlay = () => {
@@ -146,7 +159,7 @@ export default function SpotifyPlayer() {
                 <div style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Albums</div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                   {albums.map(a => (
-                    <div key={a.id} onClick={() => setShowAlbums(a.id === (showAlbums as number))} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 6, cursor: 'pointer', fontSize: 11, color: showAlbums === a.id ? '#fff' : 'var(--muted)' }}>
+                    <div key={a.id} onClick={() => { setShowAlbums(a.id === (showAlbums as number) ? false : a.id); loadAlbumDetail(a.id) }} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 6, cursor: 'pointer', fontSize: 11, color: showAlbums === a.id ? '#fff' : 'var(--muted)', background: showAlbums === a.id ? 'rgba(255,255,255,.08)' : 'transparent', transition: 'all .2s' }}>
                       <Music size={13} /> {a.title}
                     </div>
                   ))}
@@ -273,6 +286,40 @@ export default function SpotifyPlayer() {
             <input type="range" min="0" max="1" step="0.01" value={volume} onChange={e => { setVolume(+e.target.value); if (audioRef.current) audioRef.current.volume = +e.target.value }} style={{ flex: 1, cursor: 'pointer' }} />
           </div>
         </footer>
+      )}
+
+      {/* ALBUM DETAIL MODAL */}
+      {showAlbumDetail && selectedAlbumDetail && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,.95)', backdropFilter: 'blur(8px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }} onClick={() => setShowAlbumDetail(false)}>
+          <div onClick={e => e.stopPropagation()} style={{ position: 'relative', maxWidth: 720, width: '100%', maxHeight: '90vh', overflowY: 'auto', background: '#0a0b16', border: '1px solid rgba(255,255,255,.08)', borderRadius: 16 }}>
+            <button onClick={() => setShowAlbumDetail(false)} style={{ position: 'absolute', top: 14, right: 14, zIndex: 3, background: 'rgba(0,0,0,.6)', border: 'none', borderRadius: '50%', width: 36, height: 36, color: '#fff', cursor: 'pointer', fontSize: 18, fontWeight: 'bold' }}>×</button>
+            <div style={{ display: 'flex', gap: 20, padding: 26, alignItems: 'flex-end', background: 'linear-gradient(180deg,rgba(29,185,84,.18),transparent)' }}>
+              <div style={{ width: 150, height: 150, borderRadius: 10, overflow: 'hidden', flexShrink: 0, boxShadow: '0 12px 32px rgba(0,0,0,.6)', background: '#1a1a2e' }}>
+                {selectedAlbumDetail.cover_url ? <img src={selectedAlbumDetail.cover_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 40 }}>♫</div>}
+              </div>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.08em', color: '#1db954' }}>Album</div>
+                <h1 style={{ fontSize: 30, fontWeight: 800, margin: '6px 0 8px' }}>{selectedAlbumDetail.title}</h1>
+                <div style={{ fontSize: 13, color: 'rgba(255,255,255,.55)' }}>By {selectedAlbumDetail.agent}{selectedAlbumDetail.description ? ` · ${selectedAlbumDetail.description}` : ''}</div>
+                <div style={{ fontSize: 12, color: 'rgba(255,255,255,.45)', marginTop: 8 }}>{selectedAlbumDetail.tracks?.length || 0} tracks</div>
+              </div>
+            </div>
+            <div style={{ padding: '8px 14px 22px 14px' }}>
+              {(selectedAlbumDetail.tracks || []).map((t: any, i: number) => {
+                const isPlaying = currentTrack?.id === t.id
+                return (
+                  <div key={t.id} onClick={() => { play(t); setShowAlbumDetail(false) }} style={{ display: 'flex', gap: 14, alignItems: 'center', padding: '10px 12px', borderRadius: 8, cursor: 'pointer', background: isPlaying ? 'rgba(29,185,84,.12)' : 'transparent', transition: 'all .2s' }}>
+                    <div style={{ width: 22, textAlign: 'center', color: isPlaying ? '#1db954' : 'rgba(255,255,255,.4)', fontWeight: 600 }}>{isPlaying ? '▶' : i + 1}</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 15, fontWeight: 600, color: isPlaying ? '#1db954' : '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</div>
+                    </div>
+                    <div style={{ fontSize: 12, color: 'rgba(255,255,255,.4)' }}>{t.duration ? formatTime(t.duration) : ''}</div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        </div>
       )}
 
       {/* AUDIO ELEMENT */}
