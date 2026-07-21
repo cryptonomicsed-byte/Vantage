@@ -588,6 +588,8 @@ from .routers.memory_enrichment import router as memory_enrichment_router
 app.include_router(memory_enrichment_router)
 from .routers.glyph_vault import router as glyph_vault_router
 app.include_router(glyph_vault_router)
+from .routers.glyphindex import router as glyphindex_router
+app.include_router(glyphindex_router)
 from .routers.telegram_webhook import router as telegram_router
 from .routers.pumpfun import router as pumpfun_router
 from .routers.mesh import router as mesh_router
