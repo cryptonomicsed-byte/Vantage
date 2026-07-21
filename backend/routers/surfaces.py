@@ -388,3 +388,120 @@ async def audio_album(sid: int, _caller: dict = Depends(get_agent)):
             (sid,),
         )).fetchall()]
     return {**dict(s), "tracks": tracks, "track_count": len(tracks)}
+
+
+# ── Analytics ────────────────────────────────────────────────────────────────
+
+class CinemaAnalytics(BaseModel):
+    watch_duration_sec: int = 0
+    completion_pct: float = 0.0  # 0-1
+    seek_count: int = 0
+    device_type: str = "web"
+    referrer: str = ""
+
+class AudioAnalytics(BaseModel):
+    listen_duration_sec: int = 0
+    completion_pct: float = 0.0
+    skip_count: int = 0
+    replay_count: int = 0
+    device_type: str = "web"
+
+@router.post("/cinema/{bid}/analytics", operation_id="log_cinema_view")
+async def log_cinema_analytics(bid: int, data: CinemaAnalytics, agent: dict = Depends(get_agent)):
+    """Log detailed viewing analytics for a title."""
+    async with get_db() as db:
+        await db.execute(
+            """INSERT INTO cinema_analytics
+               (broadcast_id, agent_id, watch_duration_sec, completion_pct, seek_count, device_type, referrer)
+               VALUES (?,?,?,?,?,?,?)""",
+            (bid, agent.get("id"), data.watch_duration_sec, min(1.0, data.completion_pct),
+             data.seek_count, data.device_type[:50], data.referrer[:200])
+        )
+        await db.commit()
+    return {"status": "logged", "broadcast_id": bid}
+
+@router.get("/cinema/{bid}/stats", operation_id="get_cinema_stats")
+async def get_cinema_stats(bid: int, agent: dict = Depends(get_agent)):
+    """Get analytics stats for a title."""
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+
+        # Overall stats
+        stats = await (await db.execute(
+            """SELECT COUNT(*) as total_views, AVG(completion_pct) as avg_completion,
+                      AVG(watch_duration_sec) as avg_duration, SUM(seek_count) as total_seeks
+               FROM cinema_analytics WHERE broadcast_id=?""",
+            (bid,)
+        )).fetchone()
+        stats = dict(stats) if stats else {}
+
+        # Device breakdown
+        devices = [dict(r) for r in await (await db.execute(
+            """SELECT device_type, COUNT(*) as views FROM cinema_analytics
+               WHERE broadcast_id=? GROUP BY device_type ORDER BY views DESC""",
+            (bid,)
+        )).fetchall()]
+
+        # Completion distribution (segmented)
+        segments = [dict(r) for r in await (await db.execute(
+            """SELECT
+                 CASE WHEN completion_pct < 0.25 THEN '0-25%'
+                      WHEN completion_pct < 0.5 THEN '25-50%'
+                      WHEN completion_pct < 0.75 THEN '50-75%'
+                      ELSE '75-100%' END as segment,
+                 COUNT(*) as count
+               FROM cinema_analytics WHERE broadcast_id=?
+               GROUP BY segment ORDER BY segment""",
+            (bid,)
+        )).fetchall()]
+
+    return {
+        "broadcast_id": bid,
+        "total_views": stats.get("total_views", 0),
+        "avg_completion_pct": round(stats.get("avg_completion", 0) * 100, 1),
+        "avg_watch_duration_sec": int(stats.get("avg_duration", 0)),
+        "total_seeks": stats.get("total_seeks", 0),
+        "device_breakdown": {d["device_type"]: d["views"] for d in devices},
+        "completion_distribution": {s["segment"]: s["count"] for s in segments}
+    }
+
+@router.post("/audio/{track_id}/analytics", operation_id="log_audio_listen")
+async def log_audio_analytics(track_id: str, data: AudioAnalytics, agent: dict = Depends(get_agent)):
+    """Log detailed listening analytics for a track."""
+    async with get_db() as db:
+        await db.execute(
+            """INSERT INTO audio_analytics
+               (track_id, agent_id, listen_duration_sec, completion_pct, skip_count, replay_count, device_type)
+               VALUES (?,?,?,?,?,?,?)""",
+            (track_id, agent.get("id"), data.listen_duration_sec, min(1.0, data.completion_pct),
+             data.skip_count, data.replay_count, data.device_type[:50])
+        )
+        await db.commit()
+    return {"status": "logged", "track_id": track_id}
+
+@router.get("/audio/{track_id}/stats", operation_id="get_audio_stats")
+async def get_audio_stats(track_id: str, agent: dict = Depends(get_agent)):
+    """Get analytics stats for an audio track."""
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+
+        # Overall stats
+        stats = await (await db.execute(
+            """SELECT COUNT(*) as total_plays, AVG(completion_pct) as avg_completion,
+                      SUM(skip_count) as total_skips, SUM(replay_count) as total_replays
+               FROM audio_analytics WHERE track_id=?""",
+            (track_id,)
+        )).fetchone()
+        stats = dict(stats) if stats else {}
+
+        total_plays = stats.get("total_plays", 0)
+        skip_rate = (stats.get("total_skips", 0) / total_plays * 100) if total_plays > 0 else 0
+
+    return {
+        "track_id": track_id,
+        "total_plays": total_plays,
+        "avg_completion_pct": round(stats.get("avg_completion", 0) * 100, 1),
+        "skip_rate_pct": round(skip_rate, 1),
+        "total_skips": stats.get("total_skips", 0),
+        "replay_rate": round(stats.get("total_replays", 0) / max(1, total_plays), 2)
+    }

@@ -165,6 +165,25 @@ CREATE TABLE IF NOT EXISTS audio_analytics (
 CREATE INDEX IF NOT EXISTS idx_audio_analytics_track ON audio_analytics(track_id);
 CREATE INDEX IF NOT EXISTS idx_audio_analytics_listened_at ON audio_analytics(listened_at);
 
+CREATE TABLE IF NOT EXISTS audio_tracks (
+    id TEXT PRIMARY KEY,
+    agent_id INTEGER NOT NULL REFERENCES agents(id),
+    album_id INTEGER REFERENCES audio_albums(id),
+    title TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    duration_sec INTEGER DEFAULT 0,
+    is_ai_generated BOOLEAN DEFAULT FALSE,
+    generation_prompt TEXT DEFAULT '',
+    license_type TEXT DEFAULT 'CC-BY-SA-4.0',
+    play_count INTEGER DEFAULT 0,
+    bpm INTEGER DEFAULT 0,
+    musical_key TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_audio_tracks_agent ON audio_tracks(agent_id);
+CREATE INDEX IF NOT EXISTS idx_audio_tracks_album ON audio_tracks(album_id);
+
 CREATE TABLE IF NOT EXISTS audio_albums (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id INTEGER NOT NULL REFERENCES agents(id),
@@ -320,6 +339,25 @@ CREATE TABLE IF NOT EXISTS audio_analytics (
 
 CREATE INDEX IF NOT EXISTS idx_audio_analytics_track ON audio_analytics(track_id);
 CREATE INDEX IF NOT EXISTS idx_audio_analytics_listened_at ON audio_analytics(listened_at);
+
+CREATE TABLE IF NOT EXISTS audio_tracks (
+    id TEXT PRIMARY KEY,
+    agent_id INTEGER NOT NULL REFERENCES agents(id),
+    album_id INTEGER REFERENCES audio_albums(id),
+    title TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    duration_sec INTEGER DEFAULT 0,
+    is_ai_generated BOOLEAN DEFAULT FALSE,
+    generation_prompt TEXT DEFAULT '',
+    license_type TEXT DEFAULT 'CC-BY-SA-4.0',
+    play_count INTEGER DEFAULT 0,
+    bpm INTEGER DEFAULT 0,
+    musical_key TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC')
+);
+
+CREATE INDEX IF NOT EXISTS idx_audio_tracks_agent ON audio_tracks(agent_id);
+CREATE INDEX IF NOT EXISTS idx_audio_tracks_album ON audio_tracks(album_id);
 
 CREATE TABLE IF NOT EXISTS audio_albums (
     id SERIAL PRIMARY KEY,

@@ -25,7 +25,7 @@ def get_duration(path):
     except: return 0
 
 @router.post("/upload")
-async def upload(file: UploadFile = File(...), title: str = Form("Untitled"), prompt: str = Form(""), license: str = Form("CC-BY-SA-4.0"), x_agent_key: str = Header(...)):
+async def upload(file: UploadFile = File(...), title: str = Form("Untitled"), prompt: str = Form(""), license: str = Form("CC-BY-SA-4.0"), album_id: str = Form(None), x_agent_key: str = Header(...)):
     agent = get_agent(x_agent_key)
     if not agent: raise HTTPException(401)
     tid = str(uuid.uuid4())[:12]
@@ -35,9 +35,9 @@ async def upload(file: UploadFile = File(...), title: str = Form("Untitled"), pr
     dur = get_duration(fpath)
     import sqlite3
     db = sqlite3.connect(str(DB))
-    db.execute("INSERT INTO audio_tracks (id,agent_id,title,file_path,duration_sec,is_ai_generated,generation_prompt,license_type) VALUES (?,?,?,?,?,?,?,?)", (tid, agent["id"], title, str(fpath), dur, bool(prompt), prompt, license))
+    db.execute("INSERT INTO audio_tracks (id,agent_id,album_id,title,file_path,duration_sec,is_ai_generated,generation_prompt,license_type) VALUES (?,?,?,?,?,?,?,?,?)", (tid, agent["id"], album_id, title, str(fpath), dur, bool(prompt), prompt, license))
     db.commit(); db.close()
-    return {"track_id": tid, "title": title, "agent": agent["name"], "duration": dur}
+    return {"track_id": tid, "title": title, "agent": agent["name"], "duration": dur, "album_id": album_id}
 
 @router.get("/tracks")
 async def list_tracks(q: str = Query(""), limit: int = Query(50)):
@@ -70,3 +70,57 @@ async def listen(track_id: str = Form(...), x_agent_key: str = Header(...)):
     db.execute("UPDATE audio_tracks SET play_count=play_count+1 WHERE id=?", (track_id,))
     db.commit(); db.close()
     return {"status": "listening"}
+
+@router.post("/albums")
+async def create_album(title: str = Form(...), description: str = Form(""), cover_url: str = Form(""), x_agent_key: str = Header(...)):
+    agent = get_agent(x_agent_key)
+    if not agent: raise HTTPException(401)
+    import sqlite3
+    db = sqlite3.connect(str(DB))
+    db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
+    db.execute("INSERT INTO audio_albums (agent_id,title,description,cover_url) VALUES (?,?,?,?)", (agent["id"], title, description, cover_url))
+    db.commit()
+    album_id = db.execute("SELECT last_insert_rowid() as id").fetchone()["id"]
+    db.close()
+    return {"album_id": album_id, "title": title, "agent": agent["name"]}
+
+@router.get("/albums")
+async def list_albums(agent_name: str = Query(""), limit: int = Query(50)):
+    import sqlite3
+    db = sqlite3.connect(str(DB))
+    db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
+    sql = "SELECT a.*, a2.name as agent_name, COUNT(t.id) as track_count FROM audio_albums a JOIN agents a2 ON a.agent_id=a2.id LEFT JOIN audio_tracks t ON t.album_id=a.id"
+    params = []
+    if agent_name:
+        sql += " WHERE a2.name LIKE ?"; params.append(f"%{agent_name}%")
+    sql += " GROUP BY a.id ORDER BY a.created_at DESC LIMIT ?"; params.append(limit)
+    rows = db.execute(sql, params).fetchall(); db.close()
+    return [{"id": r["id"], "title": r["title"], "description": r["description"], "agent": r["agent_name"], "cover_url": r["cover_url"], "track_count": r["track_count"], "created_at": r["created_at"]} for r in rows]
+
+@router.get("/albums/{album_id}")
+async def get_album(album_id: int):
+    import sqlite3
+    db = sqlite3.connect(str(DB))
+    db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
+    album = db.execute("SELECT a.*, a2.name as agent_name FROM audio_albums a JOIN agents a2 ON a.agent_id=a2.id WHERE a.id=?", (album_id,)).fetchone()
+    if not album: raise HTTPException(404)
+    tracks = db.execute("SELECT t.*, a.name as agent_name FROM audio_tracks t JOIN agents a ON t.agent_id=a.id WHERE t.album_id=? ORDER BY t.created_at ASC", (album_id,)).fetchall()
+    db.close()
+    return {
+        "id": album["id"],
+        "title": album["title"],
+        "description": album["description"],
+        "agent": album["agent_name"],
+        "cover_url": album["cover_url"],
+        "tracks": [{"id": t["id"], "title": t["title"], "duration": t["duration_sec"], "url": f"/media/audio/{Path(t['file_path']).name}"} for t in tracks]
+    }
+
+@router.post("/albums/{album_id}/tracks")
+async def add_track_to_album(album_id: int, track_id: str = Form(...), x_agent_key: str = Header(...)):
+    agent = get_agent(x_agent_key)
+    if not agent: raise HTTPException(401)
+    import sqlite3
+    db = sqlite3.connect(str(DB))
+    db.execute("UPDATE audio_tracks SET album_id=? WHERE id=?", (album_id, track_id))
+    db.commit(); db.close()
+    return {"status": "added", "track_id": track_id, "album_id": album_id}

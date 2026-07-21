@@ -826,6 +826,17 @@ async def scan_status(owner: str, name: str, scan_id: int, agent: dict = Depends
     if row["status"] in ("complete", "error") or not settings.STRIX_RUNNER_URL or not row["runner_run_id"]:
         return {**row, "findings": json.loads(row["findings_json"])}
 
+    # Check timeout: if scan has been running for >5 min, mark as errored
+    if row["started_at"]:
+        try:
+            started = datetime.fromisoformat(row["started_at"].replace("Z", "+00:00"))
+            elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+            if elapsed > 300:  # 5 minutes
+                await _update_scan_row(scan_id, status="error", completed_at=datetime.now(timezone.utc).isoformat(), findings_json=json.dumps([{"severity": 0.95, "title": "Scan timeout", "message": f"Scan exceeded 5 minute limit after {int(elapsed)} seconds"}]))
+                return {**row, "status": "error", "completed_at": datetime.now(timezone.utc).isoformat(), "findings": [{"severity": 0.95, "title": "Scan timeout", "message": f"Scan exceeded 5 minute limit after {int(elapsed)} seconds"}]}
+        except Exception as e:
+            logger.warning(f"Failed to check scan timeout: {e}")
+
     try:
         async with httpx.AsyncClient(timeout=10) as cl:
             r = await cl.get(f"{settings.STRIX_RUNNER_URL}/run/{row['runner_run_id']}")
