@@ -1,0 +1,37 @@
+# Template for the Degen Scalping Loop (Pump.fun profit-split strategy)
+# Copy to /etc/systemd/system/vantage-degen-loop.service and fill in real values.
+# Never commit the resolved unit or any .env file.
+
+[Unit]
+Description=Vantage Degen Loop — Pump.fun Scalping with Profit-Split
+After=network.target vantage.service
+StartLimitInterval=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ares/Vantage
+ExecStart=/opt/ares/venv/bin/python pipeline/degen_loop.py
+Restart=always
+RestartSec=10
+
+# Load secrets from .env (VANTAGE_KEY, WALLET, etc)
+EnvironmentFile=/opt/ares/Vantage/.env
+Environment=VANTAGE_URL=http://localhost:8001
+Environment=DB_PATH=/opt/ares/Vantage/data/vantage.db
+
+# Unprivileged user / group
+User=ares
+Group=ares
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ares/Vantage/data
+
+# Logs
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vantage-degen-loop
+
+[Install]
+WantedBy=multi-user.target

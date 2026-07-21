@@ -1,0 +1,37 @@
+# Template for Pump.fun Trader Daemon
+# Copy to /etc/systemd/system/vantage-pumpfun-trader.service and fill in real values.
+# Never commit the resolved unit or any .env file.
+
+[Unit]
+Description=Vantage Pump.fun Trader — Auto-Execute Pumpfun Signals with SL/TP
+After=network.target vantage.service
+StartLimitInterval=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ares/Vantage
+ExecStart=/opt/ares/venv/bin/python daemons/ares_pumpfun_trader.py --daemon
+Restart=always
+RestartSec=10
+
+# Load secrets from .env (HELIUS_API_KEY, BIRDEYE_KEY, VANTAGE_KEY, etc)
+EnvironmentFile=/opt/ares/Vantage/.env
+Environment=DB=/opt/ares/Vantage/data/vantage.db
+Environment=VANTAGE_URL=http://localhost:8001/api/trading/orders
+
+# Unprivileged user / group
+User=ares
+Group=ares
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ares/Vantage/data
+
+# Logs
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vantage-pumpfun-trader
+
+[Install]
+WantedBy=multi-user.target
