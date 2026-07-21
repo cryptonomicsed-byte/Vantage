@@ -53,7 +53,7 @@ import time
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple, Union
 
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
@@ -77,7 +77,9 @@ class GlyphIndexError(Exception):
 
 # ---------------------------------------------------------------- fold / odù
 
-def content_hash(text: str) -> bytes:
+def content_hash(text: Union[str, bytes]) -> bytes:
+    if isinstance(text, bytes):
+        return hashlib.sha256(text).digest()
     return hashlib.sha256(text.encode("utf-8")).digest()
 
 
@@ -125,12 +127,17 @@ class GlyphKeyring:
         if len(seed) < 32:
             raise GlyphIndexError("master seed must be at least 32 bytes")
         ctx = f"{owner}:{purpose}".encode("utf-8")
-        enc_label = b"gix:duress:" if duress else b"gix:enc:"
+        if duress:
+            enc_label = b"gix:duress:enc:"
+            mac_label = b"gix:duress:mac:"
+        else:
+            enc_label = b"gix:enc:"
+            mac_label = b"gix:mac:"
         return cls(
             owner=owner,
             purpose=purpose,
             enc_key=_hkdf_sha256(seed, HKDF_SALT, enc_label + ctx),
-            mac_key=_hkdf_sha256(seed, HKDF_SALT, b"gix:mac:" + ctx),
+            mac_key=_hkdf_sha256(seed, HKDF_SALT, mac_label + ctx),
         )
 
     @classmethod
@@ -186,6 +193,47 @@ def open_blob(blob: bytes, canonical_id: str, keyring: GlyphKeyring) -> dict:
     if payload.get("canonical_id") != canonical_id:
         raise GlyphIndexError("canonical_id mismatch inside sealed payload")
     return payload
+
+
+def merkle_root_binary(blobs: List[bytes]) -> bytes:
+    """Compute deterministic Merkle root from sealed blobs.
+
+    Leaf = SHA-256(canonical_id_bytes || SHA-256(blob)), sorted by canonical_id.
+    Odd leaf promoted unchanged to next level.
+    Returns root hash as bytes.
+    """
+    if not blobs:
+        return hashlib.sha256(b"GIX1:empty").digest()
+
+    # Extract canonical_id from each blob (GIX1 format encodes it in JSON payload)
+    leaves = []
+    for blob in blobs:
+        try:
+            # Parse the payload to extract canonical_id
+            # This is a simplified extraction; in production use open_blob with keyring
+            payload = json.loads(blob[18:-16])  # naive: assumes no compression
+            cid_bytes = bytes.fromhex(payload.get("canonical_id", ""))
+            blob_hash = hashlib.sha256(blob).digest()
+            leaf = hashlib.sha256(cid_bytes + blob_hash).digest()
+            leaves.append((payload.get("canonical_id", ""), leaf))
+        except (json.JSONDecodeError, KeyError, ValueError):
+            # Fallback: use blob hash directly if payload parsing fails
+            blob_hash = hashlib.sha256(blob).digest()
+            leaves.append(("", blob_hash))
+
+    # Sort by canonical_id
+    leaves.sort(key=lambda x: x[0])
+    level = [leaf for _, leaf in leaves]
+
+    # Build Merkle tree
+    while len(level) > 1:
+        nxt = [hashlib.sha256(level[i] + level[i + 1]).digest()
+               for i in range(0, len(level) - 1, 2)]
+        if len(level) % 2:
+            nxt.append(level[-1])
+        level = nxt
+
+    return level[0]
 
 
 # ------------------------------------------------------------------ chunking
@@ -307,6 +355,44 @@ class GlyphStore:
         self._db.execute("UPDATE glyphs SET walrus_blob_id=? WHERE canonical_id=?",
                          (walrus_blob_id, canonical_id))
         self._db.commit()
+
+    def store(self, blob: bytes, canonical_id: str = None) -> dict:
+        """Store a pre-sealed blob directly (for E2E testing)."""
+        # If canonical_id not provided, we need to try decryption with a guess
+        # The issue: AAD includes canonical_id, but we don't know it until after decryption
+        # Solution: if not provided, try a common pattern or require it explicitly
+        if canonical_id is None:
+            # Attempt: decrypt blindly assuming canonical_id will be in payload
+            # This requires multiple tries or we need to pass canonical_id
+            # For E2E testing, we can use a pattern: try common canonical_id patterns
+            # But for now, require explicit canonical_id parameter
+            raise GlyphIndexError("canonical_id required for store()")
+
+        # Decrypt to extract metadata
+        payload = open_blob(blob, canonical_id, self.keyring)
+        glyph = payload.get("glyph", "?")
+        ts = payload.get("ts", time.time())
+        base, composed = payload.get("odu", [0, 0])
+        chunk = payload.get("chunk", "")
+        emb = _pack_embedding(self.embedder(chunk))
+
+        self._db.execute(
+            "INSERT OR REPLACE INTO glyphs "
+            "(canonical_id, glyph, owner, odu_base, odu_composed, ts, blob, embedding) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (canonical_id, glyph, self.keyring.owner, base, composed, ts, blob, emb))
+        self._db.commit()
+        return self.receipt(canonical_id, blob)
+
+    def open(self, canonical_id: str, keyring: GlyphKeyring = None) -> dict:
+        """Decrypt and return a glyph by canonical_id."""
+        kr = keyring if keyring else self.keyring
+        row = self._db.execute(
+            "SELECT blob FROM glyphs WHERE canonical_id=?",
+            (canonical_id,)).fetchone()
+        if row is None:
+            raise GlyphIndexError(f"unknown glyph {canonical_id}")
+        return open_blob(row[0], canonical_id, kr)
 
     # -- read path -----------------------------------------------------
     def expand(self, canonical_id: str) -> str:

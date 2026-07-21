@@ -194,7 +194,7 @@ class TestGlyphIndexE2E:
                 "odu": list(odu_link(digest1)),
             }
             blob1 = seal_blob(payload1, digest1.hex(), keyring)
-            store.store(blob1)
+            store.store(blob1, digest1.hex())
 
             # Retrieve and verify
             retrieved = store.open(digest1.hex(), keyring)
