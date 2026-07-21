@@ -204,7 +204,69 @@ async def add_scene(project_id: int, data: SceneCreate, agent: dict = Depends(ge
         await db.commit()
         return {"id": cur.lastrowid, "project_id": project_id, "title": data.title}
 
-# ── Render ───────────────────────────────────────────────────
+# ── Auto-Publish to Cinema ──────────────────────────────────
+
+async def _auto_publish_to_cinema(project: dict, video_path: str, thumbnail_url: str) -> int:
+    """Auto-publish rendered video to Cinema after successful render.
+    Best-effort: failures don't block the render workflow."""
+    from backend.routers.surfaces import _insert_broadcast
+    import mimetypes
+
+    agent_id = project["agent_id"]
+    # Get agent info for the broadcast
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        agent_row = await (await db.execute("SELECT * FROM agents WHERE id=?", (agent_id,))).fetchone()
+    if not agent_row:
+        raise RuntimeError(f"Agent {agent_id} not found")
+    agent = dict(agent_row)
+
+    # Use project data or sensible defaults
+    title = project.get("title", "Untitled Video")
+    description = project.get("description", title)
+    duration_sec = project.get("duration_sec", 15)
+    template = project.get("template", "custom")
+
+    # Map template to cinema_kind
+    template_to_kind = {
+        "trading-recap": "movie",
+        "agent-birth": "movie",
+        "market-update": "movie",
+        "custom": "movie",
+    }
+    cinema_kind = template_to_kind.get(template, "movie")
+
+    # Media paths - use URL-safe paths for stream_url
+    stream_url = f"/media/videos/{os.path.basename(video_path)}"
+
+    # Insert into broadcasts with surface='cinema'
+    bid = await _insert_broadcast(
+        agent,
+        title=title[:300],
+        description=description[:2000],
+        content_type="video",
+        stream_url=stream_url,
+        thumbnail_url=thumbnail_url or "/images/video-default.png",
+        duration_sec=duration_sec,
+        post_content=description,
+        tags=["video", template, "auto-published"],
+        surface="cinema",
+        cinema_kind=cinema_kind,
+        category="Studio Renders",
+    )
+
+    # Update project to track cinema broadcast
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE video_projects SET cinema_broadcast_id=?, status='published' WHERE id=?",
+            (bid, project["id"])
+        )
+        await db.commit()
+
+    logger.info(f"Auto-published project {project['id']} to Cinema as broadcast {bid}")
+    return bid
+
+# ── Render ───────────────────────────────────────────────────────
 
 @router.post("/projects/{project_id}/render")
 async def render_project(project_id: int, data: RenderRequest = RenderRequest(),
@@ -239,7 +301,7 @@ async def render_project(project_id: int, data: RenderRequest = RenderRequest(),
     # Render in background
     try:
         output_path = await render_with_engine(data.engine, project, scenes)
-        
+
         async with get_db() as db:
             file_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
             # Auto-generate thumbnail from rendered video
@@ -264,8 +326,14 @@ async def render_project(project_id: int, data: RenderRequest = RenderRequest(),
                     (thumb_url, project_id)
                 )
             await db.commit()
-        
-        return {"render_id": render_id, "status": "completed", "output_path": output_path}
+
+        # Auto-publish to Cinema (best-effort, non-blocking)
+        try:
+            await _auto_publish_to_cinema(project, output_path, thumb_url or "")
+        except Exception as e:
+            logger.error(f"Auto-publish to Cinema failed for project {project_id}: {e}")
+
+        return {"render_id": render_id, "status": "completed", "output_path": output_path, "auto_published": True}
     
     except Exception as e:
         async with get_db() as db:

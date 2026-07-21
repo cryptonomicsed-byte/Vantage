@@ -83,17 +83,37 @@ class MemoryIngestRequest(BaseModel):
 # ── Helpers ─────────────────────────────────────────────────────────────
 
 def _log_activity(action: str, repo: str, detail: str = "", agent: str = "vantage-agent"):
-    """Record an activity event."""
-    _activity_feed.append({
+    """Record an activity event. Writes to both memory (fast) and DB (persistent)."""
+    event = {
         "action": action,
         "repo": repo,
         "detail": detail,
         "agent": agent,
         "ts": int(time.time()),
         "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
+    }
+    _activity_feed.append(event)
     if len(_activity_feed) > _activity_max:
         _activity_feed.pop(0)
+
+    # Persist to DB in background (non-blocking)
+    import asyncio as _asyncio
+    try:
+        _asyncio.create_task(_persist_activity(event))
+    except Exception:
+        pass  # Silently fail if async context not available
+
+async def _persist_activity(event: dict):
+    """Persist activity event to database (background task)."""
+    try:
+        async with get_db() as db:
+            await db.execute(
+                "INSERT INTO code_activity (action, repo, detail, agent_name, created_at) VALUES (?,?,?,?,?)",
+                (event["action"], event["repo"], event["detail"][:500], event["agent"], event["timestamp"])
+            )
+            await db.commit()
+    except Exception as e:
+        logger.debug(f"Activity persistence background task failed: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -902,8 +922,23 @@ async def create_pr(owner: str, name: str, req: CreatePRRequest, agent: dict = D
 
 @router.get("/activity")
 async def activity(limit: int = Query(20, ge=1, le=100), agent: dict = Depends(get_agent)):
-    """Recent activity feed — pushes, scans, PRs, repo creation."""
-    return {"activity": list(reversed(_activity_feed[-limit:])), "total": len(_activity_feed)}
+    """Recent activity feed — pushes, scans, PRs, repo creation.
+    Returns most recent from database (persists across restarts), with in-memory cache as fallback."""
+    try:
+        async with get_db() as db:
+            db.row_factory = aiosqlite.Row
+            rows = await (await db.execute(
+                "SELECT action, repo, detail, agent_name as agent, created_at as timestamp FROM code_activity ORDER BY created_at DESC LIMIT ?",
+                (limit,)
+            )).fetchall()
+        if rows:
+            db_activity = [dict(r) for r in rows]
+            return {"activity": db_activity, "total": len(db_activity), "source": "database"}
+    except Exception as e:
+        logger.debug(f"Activity DB lookup failed, falling back to memory: {e}")
+
+    # Fallback to in-memory cache if DB query fails
+    return {"activity": list(reversed(_activity_feed[-limit:])), "total": len(_activity_feed), "source": "memory"}
 
 
 @router.get("/stats")

@@ -122,6 +122,59 @@ CREATE TABLE IF NOT EXISTS agent_follows (
 
 CREATE INDEX IF NOT EXISTS idx_follows_follower ON agent_follows(follower_id);
 CREATE INDEX IF NOT EXISTS idx_follows_following ON agent_follows(following_id);
+
+CREATE TABLE IF NOT EXISTS code_activity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    detail TEXT DEFAULT '',
+    agent_name TEXT DEFAULT 'vantage-agent',
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_code_activity_created_at ON code_activity(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_code_activity_action ON code_activity(action);
+
+CREATE TABLE IF NOT EXISTS cinema_analytics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    broadcast_id INTEGER NOT NULL REFERENCES broadcasts(id),
+    agent_id INTEGER,
+    viewed_at TEXT DEFAULT (datetime('now')),
+    watch_duration_sec INTEGER DEFAULT 0,
+    completion_pct REAL DEFAULT 0,
+    seek_count INTEGER DEFAULT 0,
+    device_type TEXT DEFAULT 'web',
+    referrer TEXT DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_cinema_analytics_broadcast ON cinema_analytics(broadcast_id);
+CREATE INDEX IF NOT EXISTS idx_cinema_analytics_viewed_at ON cinema_analytics(viewed_at);
+
+CREATE TABLE IF NOT EXISTS audio_analytics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    track_id TEXT NOT NULL,
+    agent_id INTEGER,
+    listened_at TEXT DEFAULT (datetime('now')),
+    listen_duration_sec INTEGER DEFAULT 0,
+    completion_pct REAL DEFAULT 0,
+    skip_count INTEGER DEFAULT 0,
+    replay_count INTEGER DEFAULT 0,
+    device_type TEXT DEFAULT 'web'
+);
+
+CREATE INDEX IF NOT EXISTS idx_audio_analytics_track ON audio_analytics(track_id);
+CREATE INDEX IF NOT EXISTS idx_audio_analytics_listened_at ON audio_analytics(listened_at);
+
+CREATE TABLE IF NOT EXISTS audio_albums (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id INTEGER NOT NULL REFERENCES agents(id),
+    title TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    cover_url TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_audio_albums_agent ON audio_albums(agent_id);
 """
 
 POSTGRES_DDL = """
@@ -225,6 +278,59 @@ CREATE TABLE IF NOT EXISTS agent_follows (
 
 CREATE INDEX IF NOT EXISTS idx_follows_follower ON agent_follows(follower_id);
 CREATE INDEX IF NOT EXISTS idx_follows_following ON agent_follows(following_id);
+
+CREATE TABLE IF NOT EXISTS code_activity (
+    id SERIAL PRIMARY KEY,
+    action TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    detail TEXT DEFAULT '',
+    agent_name TEXT DEFAULT 'vantage-agent',
+    created_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC')
+);
+
+CREATE INDEX IF NOT EXISTS idx_code_activity_created_at ON code_activity(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_code_activity_action ON code_activity(action);
+
+CREATE TABLE IF NOT EXISTS cinema_analytics (
+    id SERIAL PRIMARY KEY,
+    broadcast_id INTEGER NOT NULL REFERENCES broadcasts(id),
+    agent_id INTEGER,
+    viewed_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC'),
+    watch_duration_sec INTEGER DEFAULT 0,
+    completion_pct REAL DEFAULT 0,
+    seek_count INTEGER DEFAULT 0,
+    device_type TEXT DEFAULT 'web',
+    referrer TEXT DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_cinema_analytics_broadcast ON cinema_analytics(broadcast_id);
+CREATE INDEX IF NOT EXISTS idx_cinema_analytics_viewed_at ON cinema_analytics(viewed_at);
+
+CREATE TABLE IF NOT EXISTS audio_analytics (
+    id SERIAL PRIMARY KEY,
+    track_id TEXT NOT NULL,
+    agent_id INTEGER,
+    listened_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC'),
+    listen_duration_sec INTEGER DEFAULT 0,
+    completion_pct REAL DEFAULT 0,
+    skip_count INTEGER DEFAULT 0,
+    replay_count INTEGER DEFAULT 0,
+    device_type TEXT DEFAULT 'web'
+);
+
+CREATE INDEX IF NOT EXISTS idx_audio_analytics_track ON audio_analytics(track_id);
+CREATE INDEX IF NOT EXISTS idx_audio_analytics_listened_at ON audio_analytics(listened_at);
+
+CREATE TABLE IF NOT EXISTS audio_albums (
+    id SERIAL PRIMARY KEY,
+    agent_id INTEGER NOT NULL REFERENCES agents(id),
+    title TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    cover_url TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC')
+);
+
+CREATE INDEX IF NOT EXISTS idx_audio_albums_agent ON audio_albums(agent_id);
 """
 
 
