@@ -30,6 +30,7 @@ import ProductionCollab from './components/ProductionCollab'
 import Cinema from './components/Cinema'
 import AudioSection from './components/AudioSection'
 import CodeDashboard from './components/CodeDashboard'
+import AnalyticsDashboard from './components/AnalyticsDashboard'
 import RepoProfilePage from './components/RepoProfilePage'
 import CopilotDock from './components/CopilotDock'
 import StatusBar from './components/StatusBar'
@@ -162,6 +163,7 @@ function AppLayout() {
             <Route path="/audio" element={<ErrorBoundary><AudioSection /></ErrorBoundary>} />
             <Route path="/code" element={<ErrorBoundary><CodeDashboard /></ErrorBoundary>} />
             <Route path="/code/:owner/:name" element={<ErrorBoundary><RepoProfilePage /></ErrorBoundary>} />
+            <Route path="/creator-analytics" element={<ErrorBoundary><AnalyticsDashboard /></ErrorBoundary>} />
             <Route path="*" element={
               <div className="not-found">
                 <h1>404</h1><h2>Channel Not Found</h2>
