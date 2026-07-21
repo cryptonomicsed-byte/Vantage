@@ -382,7 +382,25 @@ async def get_wallet_trace(request: Request, chain: str, address: str, limit: in
 # keys. ──────────────────────────────────────────────────────────────────
 import sys as _sys
 _sys.path.insert(0, "/opt/ares")
-import api_key_pool as _akp
+try:
+    import api_key_pool as _akp
+except ImportError:
+    # api_key_pool is a VPS-only module under /opt/ares. Off-VPS (CI, local dev)
+    # degrade gracefully so `backend.main` still imports and the app boots — the
+    # helius key falls back to the HELIUS_API_KEY env var and error reporting is
+    # a no-op. On the VPS the real rotating-key pool is used unchanged.
+    import os as _os
+
+    class _AkpFallback:
+        @staticmethod
+        def get_key(*_a, **_k):
+            return _os.environ.get("HELIUS_API_KEY", "")
+
+        @staticmethod
+        def report_error(*_a, **_k):
+            pass
+
+    _akp = _AkpFallback()
 from backend import wallet_naming as _wn
 
 _SOL_MINT = "So111111111111111111" "11111111111111111112"  # wrapped SOL mint, split to avoid secret-scanner false positive

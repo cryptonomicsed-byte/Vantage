@@ -24,7 +24,13 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 
 sys.path.insert(0, "/opt/ares")
-import social_tracker  # noqa: E402  (reuses _extract_mentions/post_signal/init_db)
+try:
+    import social_tracker  # noqa: E402  (reuses _extract_mentions/post_signal/init_db)
+except ImportError:
+    # social_tracker is a VPS-only module under /opt/ares. Off-VPS (CI, local
+    # dev) the group-ingest path no-ops, but the router still mounts so the app
+    # boots and every other telegram route works.
+    social_tracker = None
 
 router = APIRouter(prefix="/api/telegram", tags=["telegram"])
 DB = Path("/opt/ares/Vantage/data/vantage.db")
@@ -133,6 +139,8 @@ def ingest_watchlist_group_message(text, chat_username, chat_title, post_url):
     """If this message came from one of our tracked Telegram GROUPS, run it
     through the same mention-extraction + PnL-backtracking pipeline the
     channel scanner uses, so group alpha lands in the money-flow graph."""
+    if social_tracker is None:  # VPS-only dependency absent — nothing to ingest
+        return
     db = social_tracker.init_db()
     hit = _find_group_account(db, chat_username, chat_title)
     if not hit:
