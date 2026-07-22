@@ -94,15 +94,63 @@ async def compute_factor(req: ComputeRequest, agent: dict = Depends(get_agent)):
     except Exception as exc:
         raise HTTPException(422, f"compute failed: {exc}")
 
-    def _json_safe(v: float) -> Optional[float]:
-        return None if pd.isna(v) or v in (float("inf"), float("-inf")) else float(v)
+    return {"alpha_id": req.alpha_id, "result": _df_to_json(out)}
+
+
+def _json_safe_scalar(v: float) -> Optional[float]:
+    return None if pd.isna(v) or v in (float("inf"), float("-inf")) else float(v)
+
+
+def _df_to_json(out: pd.DataFrame) -> dict[str, dict[str, Optional[float]]]:
+    return {
+        ts.isoformat(): {col: _json_safe_scalar(v) for col, v in row.items()}
+        for ts, row in out.iterrows()
+    }
+
+
+class LiveComputeRequest(BaseModel):
+    alpha_id: str
+    symbols: list[str]
+    interval: str = "1d"
+    limit: int = 200
+
+
+@router.post("/compute-live")
+async def compute_factor_live(req: LiveComputeRequest, agent: dict = Depends(get_agent)):
+    """Compute one alpha over Vantage's own live OHLCV data — no panel to build.
+
+    Fetches from backend.market_sources.ohlc() (Kraken/Binance/CoinGecko,
+    60s-cached, no auth) for every symbol, assembles the wide panel, computes.
+    Symbols with no data available are silently dropped from the panel.
+    """
+    reg = _get_registry()
+    try:
+        alpha = reg.get(req.alpha_id)
+    except KeyError:
+        raise HTTPException(404, f"unknown alpha_id: {req.alpha_id}")
+
+    required = set(alpha.meta.get("columns_required", []))
+    from backend.factors.live_panel import build_live_panel
+    panel = await build_live_panel(req.symbols, req.interval, req.limit)
+    missing = required - panel.keys()
+    if missing:
+        raise HTTPException(
+            422,
+            f"live panel missing required column(s) {sorted(missing)} — "
+            f"only {sorted(panel.keys())} available",
+        )
+    if not panel or panel[next(iter(panel))].empty:
+        raise HTTPException(422, "no live data returned for any requested symbol")
+
+    try:
+        out = reg.compute(req.alpha_id, panel)
+    except Exception as exc:
+        raise HTTPException(422, f"compute failed: {exc}")
 
     return {
         "alpha_id": req.alpha_id,
-        "result": {
-            ts.isoformat(): {col: _json_safe(v) for col, v in row.items()}
-            for ts, row in out.iterrows()
-        },
+        "symbols_used": sorted(panel[next(iter(panel))].columns),
+        "result": _df_to_json(out),
     }
 
 
@@ -195,3 +243,44 @@ async def validate_walk_forward(req: ValidateRequest, n_windows: int = 4, agent:
     equity = _equity_curve_from_trades(records, req.initial_capital)
     result = walk_forward_analysis(equity, records, n_windows=n_windows)
     return result
+
+
+# ── Validate the CALLING agent's own real trade history ─────────────────────
+# No panel/trades payload to build — reads backend.trading_orders directly via
+# the same avg-cost book logic GET /api/trading/positions already uses.
+
+@router.get("/validate-my-trades")
+async def validate_my_trades(
+    method: str = "monte-carlo",
+    symbol: Optional[str] = None,
+    initial_capital: float = 10000.0,
+    n_simulations: int = 1000,
+    n_windows: int = 4,
+    seed: int = 42,
+    agent: dict = Depends(get_agent),
+):
+    """Statistically validate the calling agent's own closed trades.
+
+    method: monte-carlo | bootstrap | walk-forward
+    symbol: optional filter to one symbol's trade history
+    """
+    from backend.backtest.vantage_adapter import load_trade_records
+    records = await load_trade_records(agent["id"], symbol=symbol)
+    if not records:
+        raise HTTPException(404, "no closed (SELL) trades found for this agent yet")
+
+    if method == "monte-carlo":
+        from backend.backtest.validation import monte_carlo_test
+        result = monte_carlo_test(records, initial_capital, n_simulations=n_simulations, seed=seed)
+    elif method == "bootstrap":
+        from backend.backtest.validation import bootstrap_sharpe_ci
+        equity = _equity_curve_from_trades(records, initial_capital)
+        result = bootstrap_sharpe_ci(equity, n_bootstrap=n_simulations, seed=seed)
+    elif method == "walk-forward":
+        from backend.backtest.validation import walk_forward_analysis
+        equity = _equity_curve_from_trades(records, initial_capital)
+        result = walk_forward_analysis(equity, records, n_windows=n_windows)
+    else:
+        raise HTTPException(422, "method must be monte-carlo | bootstrap | walk-forward")
+
+    return {"agent": agent["name"], "n_trades": len(records), "method": method, **result}
