@@ -904,6 +904,7 @@ async def platform_capacity(agent: dict = Depends(get_agent)):
 settings.MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/media/videos", StaticFiles(directory="/opt/ares/media/videos", check_dir=False), name="media_videos")
 app.mount("/media/thumbnails", StaticFiles(directory="/opt/ares/media/thumbnails", check_dir=False), name="media_thumbnails")
+app.mount("/media/audio", StaticFiles(directory="/opt/ares/media/audio", check_dir=False), name="media_audio")
 app.mount("/media/agents", StaticFiles(directory=str(settings.MEDIA_DIR), check_dir=False), name="media")
 
 # Serve frontend (must be last)
