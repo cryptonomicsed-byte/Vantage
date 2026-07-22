@@ -1051,6 +1051,10 @@ async def disable_live_strategy(strategy_id: int, agent: dict = Depends(get_agen
         return {"id": strategy_id, "live": False}
 
 SOL_MINT = "So111111111111111111" "11111111111111111112"  # wrapped SOL mint, split to avoid secret-scanner false positive
+# ares_rpc_proxy.py (/opt/ares/ares_rpc_proxy.py, systemd: ares-rpc.service) —
+# a dedicated Chainstack Solana endpoint, entirely separate from Helius's
+# quota. Already used by intel.py's chain health check under the same name.
+ARES_RPC_PROXY = "http://localhost:9861"
 
 def _decode_private_key_bytes(plaintext_key: str) -> bytes:
     """Wallet private keys in this codebase are stored as hex (see
@@ -1188,6 +1192,27 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent)):
     helius_key = os.environ.get("HELIUS_API_KEY", "")
     owner = str(keypair.pubkey())
 
+    async def _solana_rpc(client: httpx.AsyncClient, method: str, params: list) -> dict:
+        """Try the already-running Chainstack proxy (ares_rpc_proxy.py,
+        :9861 — a separate provider/quota from Helius, also used by
+        intel.py's health check) first; fall back to Helius directly only
+        if the proxy itself fails. Real redundancy across two independent
+        providers instead of one shared-quota single point of failure —
+        Helius alone was getting rate-limited under this VPS's ~10+ daemons
+        all polling it continuously, incorrectly blocking live user trades
+        that were never the actual problem.
+        """
+        payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        try:
+            r = await client.post(f"{ARES_RPC_PROXY}/api/rpc/solana", json=payload, timeout=8.0)
+            body = r.json()
+            if "result" in body:
+                return body
+        except Exception:
+            pass
+        r = await client.post(f"https://mainnet.helius-rpc.com/?api-key={helius_key}", json=payload)
+        return r.json()
+
     zero_amount_reason: str | None = None
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -1195,9 +1220,7 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent)):
                 # quantity from the daemon is a SOL amount for buys — cap to
                 # actual on-chain SOL balance minus a small fee buffer so a
                 # stale/optimistic bot estimate can never overdraw the wallet.
-                bal_r = await client.post(f"https://mainnet.helius-rpc.com/?api-key={helius_key}",
-                                           json={"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [owner]})
-                bal_body = bal_r.json()
+                bal_body = await _solana_rpc(client, "getBalance", [owner])
                 if "result" not in bal_body:
                     # A real RPC failure (rate limit, timeout, malformed
                     # response) was previously indistinguishable from a
@@ -1206,9 +1229,11 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent)):
                     # incorrectly rejecting real, funded wallets whenever
                     # Helius rate-limited or hiccuped. Confirmed happening
                     # live: same API key, same failure mode, during this
-                    # session's own diagnostics ("max usage reached").
+                    # session's own diagnostics ("max usage reached") — and
+                    # both providers failing at once is a real, rare event
+                    # worth surfacing distinctly, not silently swallowing.
                     rpc_err = (bal_body.get("error") or {}).get("message", "unknown RPC error")
-                    raise HTTPException(502, f"Balance check failed (Helius getBalance): {rpc_err}")
+                    raise HTTPException(502, f"Balance check failed (getBalance, both RPC providers): {rpc_err}")
                 sol_balance_lamports = (bal_body["result"] or {}).get("value") or 0
                 requested_lamports = int((order["quantity"] or 0) * 1e9)
                 fee_buffer_lamports = 5_000_000  # ~0.005 SOL for fees/rent
@@ -1229,13 +1254,13 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent)):
                 # actual on-chain balance and decimals here and cap the sell to
                 # what's really held. This is the authoritative check; nothing
                 # upstream is trusted for the raw base-unit amount.
-                tok_r = await client.post(f"https://mainnet.helius-rpc.com/?api-key={helius_key}",
-                                           json={"jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner",
-                                                 "params": [owner, {"mint": token_mint}, {"encoding": "jsonParsed"}]})
-                tok_body = tok_r.json()
+                tok_body = await _solana_rpc(
+                    client, "getTokenAccountsByOwner",
+                    [owner, {"mint": token_mint}, {"encoding": "jsonParsed"}],
+                )
                 if "result" not in tok_body:
                     rpc_err = (tok_body.get("error") or {}).get("message", "unknown RPC error")
-                    raise HTTPException(502, f"Balance check failed (Helius getTokenAccountsByOwner): {rpc_err}")
+                    raise HTTPException(502, f"Balance check failed (getTokenAccountsByOwner, both RPC providers): {rpc_err}")
                 accounts = (tok_body["result"] or {}).get("value") or []
                 held_base_units = 0
                 decimals = 0

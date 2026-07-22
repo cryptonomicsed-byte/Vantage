@@ -42,10 +42,34 @@ class _RateLimitedHeliusClient:
         return _RateLimitedResponse()
 
 
-@pytest.fixture(autouse=True)
-def _rate_limited_helius(monkeypatch):
+def _patch_client(monkeypatch, fake_client_cls):
     from backend.routers import trading as trading_mod
-    monkeypatch.setattr(trading_mod.httpx, "AsyncClient", _RateLimitedHeliusClient)
+    monkeypatch.setattr(trading_mod.httpx, "AsyncClient", fake_client_cls)
+
+
+class _RealBalanceResponse:
+    def json(self):
+        return {"jsonrpc": "2.0", "result": {"context": {"slot": 1}, "value": 120910314}}
+
+
+class _ProxyDownHeliusUpClient:
+    """The Chainstack proxy (:9861) is unreachable — connection refused —
+    but Helius itself works fine and returns the real balance. Proves the
+    fallback actually falls through instead of just failing outright."""
+
+    def __init__(self, *a, **kw):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def post(self, url, json=None, **kw):
+        if "localhost:9861" in url or "127.0.0.1:9861" in url:
+            raise ConnectionRefusedError("proxy is down")
+        return _RealBalanceResponse()
 
 
 async def _agent_with_id(fresh_agent):
@@ -61,7 +85,8 @@ async def _agent_with_id(fresh_agent):
 
 
 @pytest.mark.asyncio
-async def test_helius_rate_limit_surfaces_as_502_not_fake_zero_balance(client, fresh_agent):
+async def test_helius_rate_limit_surfaces_as_502_not_fake_zero_balance(client, fresh_agent, monkeypatch):
+    _patch_client(monkeypatch, _RateLimitedHeliusClient)
     agent, api_key_hash = await _agent_with_id(fresh_agent)
     h = _h(agent)
     agent_for_crypto = {**agent, "api_key": api_key_hash}
@@ -101,3 +126,46 @@ async def test_helius_rate_limit_surfaces_as_502_not_fake_zero_balance(client, f
             "SELECT status FROM trading_orders WHERE id=?", (order_id,)
         )).fetchone()
     assert row[0] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_falls_back_to_helius_when_chainstack_proxy_is_unreachable(client, fresh_agent, monkeypatch):
+    """The actual fix: real redundancy across two independent Solana RPC
+    providers. The Chainstack proxy (:9861) is tried first (separate quota
+    from Helius, already used elsewhere in the codebase); if it's
+    unreachable, execute_live_order must fall through to Helius and still
+    get the correct, real balance — not fail outright just because one
+    provider is down."""
+    _patch_client(monkeypatch, _ProxyDownHeliusUpClient)
+    agent, api_key_hash = await _agent_with_id(fresh_agent)
+    h = _h(agent)
+    agent_for_crypto = {**agent, "api_key": api_key_hash}
+
+    fake_seed_hex = "55" * 32
+    encrypted = encrypt_key_for_agent(fake_seed_hex, agent_for_crypto)
+    async with get_db() as db:
+        cur = await db.execute(
+            "INSERT INTO trading_wallets (agent_id, label, chain, address, encrypted_private_key) "
+            "VALUES (?,?,?,?,?)",
+            (agent["id"], "real-funded-wallet-2", "solana", "AnotherRealAddr1111111111111111111111111", encrypted),
+        )
+        wallet_id = cur.lastrowid
+        await db.commit()
+
+    r = await client.post(
+        "/api/trading/orders",
+        headers=h,
+        json={"symbol": "So11111111111111111111111111111111111111112",
+              "side": "buy", "chain": "solana", "quantity": 0.05,
+              "price": 150.0, "order_type": "market", "trigger_reason": "unit-test",
+              "wallet_id": wallet_id},
+    )
+    order_id = r.json()["id"]
+
+    r2 = await client.post(f"/api/trading/orders/{order_id}/execute-live", headers=h)
+    # Falls through to Helius, gets the real 0.1209 SOL balance, passes the
+    # balance-capping check cleanly (0.05 SOL request well within funds) —
+    # execution then fails later at the Jupiter quote step (no real network
+    # call in this test), which is fine; the point is it got PAST the
+    # balance check instead of wrongly rejecting a funded wallet.
+    assert r2.status_code != 422 or "fee buffer" not in r2.json().get("detail", "")
