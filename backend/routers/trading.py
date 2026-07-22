@@ -1105,6 +1105,20 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent)):
       - the order's USD-equivalent size must not exceed the strategy's
         max_position_size_usd (defense in depth beyond what the bot already caps)
     """
+    async def _fail(db, reason: str) -> None:
+        # Every 422 below is a durable reason this specific pending order
+        # can never execute (as opposed to 404/409, which mean there's no
+        # such order-in-this-state to update at all) — mark it failed with
+        # why instead of leaving it stuck in 'pending' forever with zero
+        # trace, the same defect already found and fixed for the balance-
+        # capping zero-amount path.
+        await db.execute(
+            "UPDATE trading_orders SET status='failed', error=? WHERE id=?",
+            (reason[:500], order_id),
+        )
+        await db.commit()
+        raise HTTPException(422, reason)
+
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         order = await (await db.execute(
@@ -1115,25 +1129,38 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent)):
         if order["status"] != "pending":
             raise HTTPException(409, f"Order is '{order['status']}'; only pending orders can be executed")
         if order["chain"] != "solana":
-            raise HTTPException(422, "Live execution currently only supports chain='solana'")
+            await _fail(db, f"Live execution currently only supports chain='solana' (order.chain={order['chain']!r})")
 
         if order["strategy_id"]:
             strat = await (await db.execute(
                 "SELECT armed, live, max_position_size_usd FROM trading_strategies WHERE id=?",
                 (order["strategy_id"],))).fetchone()
             if not strat or not strat["armed"] or not strat["live"]:
-                raise HTTPException(422, "Linked strategy is not armed+live — refusing to execute")
+                await _fail(db, "Linked strategy is not armed+live — refusing to execute")
             est_usd = (order["quantity"] or 0) * (order["price"] or 0)
             if strat["max_position_size_usd"] and est_usd > strat["max_position_size_usd"] * 1.05:
-                raise HTTPException(422, f"Order size ${est_usd:.2f} exceeds strategy cap "
-                                          f"${strat['max_position_size_usd']:.2f}")
+                await _fail(db, f"Order size ${est_usd:.2f} exceeds strategy cap "
+                                f"${strat['max_position_size_usd']:.2f}")
 
         wallet = await (await db.execute(
             "SELECT * FROM trading_wallets WHERE id=? AND agent_id=?",
             (order["wallet_id"], agent["id"]))).fetchone()
         if not wallet or not wallet["encrypted_private_key"]:
-            raise HTTPException(422, "No wallet/private key available for this order")
+            await _fail(db, "No wallet/private key available for this order")
         wallet = dict(wallet)
+        if wallet["chain"] != "solana":
+            # Defense in depth, independent of quick_trade's own fix: this
+            # function only ever validated order["chain"], never the actual
+            # wallet's chain. Any 32-byte key (an Ethereum private key is
+            # also 32 bytes) decodes as *some* valid-looking Solana keypair
+            # via Keypair.from_seed — silently the wrong one, holding 0 SOL,
+            # with no error at all until the balance check "coincidentally"
+            # fails. Reject at the source instead of one step downstream.
+            await _fail(
+                db,
+                f"Wallet '{wallet['label']}' is a {wallet['chain']} wallet — "
+                "live execution only supports Solana wallets right now",
+            )
 
     try:
         plaintext_key = decrypt_key_for_agent(wallet["encrypted_private_key"], agent)
@@ -1303,9 +1330,28 @@ async def quick_trade(data: QuickTrade, agent: dict = Depends(get_agent)):
     if data.quantity <= 0:
         raise HTTPException(422, "quantity must be positive")
 
+    # The order's chain must reflect the SELECTED WALLET's real chain, not
+    # be hardcoded — the terminal's wallet picker lists every wallet
+    # (Solana/Ethereum/Sui/Hyperliquid, no chain filter), and execute_live_
+    # order only ever validates order.chain, never wallet.chain. Hardcoding
+    # "solana" here silently mislabeled every non-Solana wallet's order as
+    # Solana; execute_live_order would then reinterpret that wallet's real
+    # (Ethereum/Sui/etc.) private key as Solana key material — any 32-byte
+    # key decodes as *some* valid-looking Solana keypair, just the wrong
+    # one, holding 0 SOL, completely disconnected from the wallet the user
+    # actually funded. Real production bug: "I chose the wallet with funds
+    # but it's not working" was this exact silent chain mismatch.
+    async with get_db() as db:
+        wallet_row = await (await db.execute(
+            "SELECT chain FROM trading_wallets WHERE id=? AND agent_id=?",
+            (data.wallet_id, agent["id"]))).fetchone()
+    if not wallet_row:
+        raise HTTPException(404, "Wallet not found for this agent")
+    wallet_chain = wallet_row[0]
+
     order = await create_order(
         OrderCreate(
-            symbol=data.mint, side=data.side, chain="solana",
+            symbol=data.mint, side=data.side, chain=wallet_chain,
             quantity=data.quantity, order_type="market", price=data.price,
             wallet_id=data.wallet_id, trigger_reason=data.trigger_reason,
             strategy_id=data.strategy_id,
