@@ -1,0 +1,22 @@
+Vantage
+Copyright 2026 Vantage contributors.
+
+This product bundles the alpha factor zoo and statistical backtest validation
+modules (backend/factors/, backend/backtest/) extracted from Vibe-Trading
+(https://github.com/HKUDS/Vibe-Trading), MIT License, Copyright (c) 2026
+Vibe-Trading Contributors.
+
+backend/factors/zoo/qlib158/ additionally bundles Microsoft Qlib feature
+definitions under the Apache 2.0 license. See
+backend/factors/zoo/qlib158/NOTICE and LICENSE.md for the upstream NOTICE
+and attribution.
+
+Mathematical formulas reimplemented as factual mathematical content (not
+copyrightable) in backend/factors/zoo/:
+
+  - Kakushadze, Z. (2015) "101 Formulaic Alphas" (arXiv:1601.00991)
+    See backend/factors/zoo/alpha101/LICENSE.md
+  - Guotai Junan Securities (2014) "191 Short-period Trading Alpha Factors"
+    See backend/factors/zoo/gtja191/LICENSE.md
+  - Fama-French five-factor model, Carhart momentum, Hou-Xue-Zhang q-factor
+    See backend/factors/zoo/academic/LICENSE.md
