@@ -1,7 +1,9 @@
 """Agent Audio Platform — clean working router."""
 import json, uuid, subprocess
 from pathlib import Path
-from fastapi import APIRouter, UploadFile, File, Form, Query, HTTPException, Header
+from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, HTTPException, Header
+
+from ..deps import get_agent as _get_agent_dep
 
 router = APIRouter(prefix="/api/audio", tags=["audio"])
 AUDIO_DIR = Path("/opt/ares/media/audio")
@@ -10,14 +12,6 @@ AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 COVER_DIR.mkdir(parents=True, exist_ok=True)
 DB = Path("/opt/ares/Vantage/data/vantage.db")
 
-def get_agent(key):
-    import sqlite3
-    db = sqlite3.connect(str(DB))
-    db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
-    r = db.execute("SELECT id, name FROM agents WHERE api_key=?", (key,)).fetchone()
-    db.close()
-    return dict(r) if r else None
-
 def get_duration(path):
     try:
         out = subprocess.check_output(["ffprobe","-v","error","-show_entries","format=duration","-of","default=noprint_wrappers=1:nokey=1",str(path)], stderr=subprocess.DEVNULL)
@@ -25,9 +19,7 @@ def get_duration(path):
     except: return 0
 
 @router.post("/upload")
-async def upload(file: UploadFile = File(...), title: str = Form("Untitled"), prompt: str = Form(""), license: str = Form("CC-BY-SA-4.0"), album_id: str = Form(None), x_agent_key: str = Header(...)):
-    agent = get_agent(x_agent_key)
-    if not agent: raise HTTPException(401)
+async def upload(file: UploadFile = File(...), title: str = Form("Untitled"), prompt: str = Form(""), license: str = Form("CC-BY-SA-4.0"), album_id: str = Form(None), agent: dict = Depends(_get_agent_dep)):
     tid = str(uuid.uuid4())[:12]
     ext = file.filename.split(".")[-1] if file.filename else "mp3"
     fpath = AUDIO_DIR / f"{tid}.{ext}"
@@ -60,9 +52,7 @@ async def now_playing():
     return [{"agent": r["agent_name"], "track": r["track_title"], "track_id": r["track_id"], "started_at": r["started_at"]} for r in rows]
 
 @router.post("/listen")
-async def listen(track_id: str = Form(...), x_agent_key: str = Header(...)):
-    agent = get_agent(x_agent_key)
-    if not agent: raise HTTPException(401)
+async def listen(track_id: str = Form(...), agent: dict = Depends(_get_agent_dep)):
     import sqlite3
     db = sqlite3.connect(str(DB))
     db.execute("UPDATE listening_activity SET is_active=0 WHERE agent_id=?", (agent["id"],))
@@ -72,9 +62,7 @@ async def listen(track_id: str = Form(...), x_agent_key: str = Header(...)):
     return {"status": "listening"}
 
 @router.post("/albums")
-async def create_album(title: str = Form(...), description: str = Form(""), cover_url: str = Form(""), x_agent_key: str = Header(...)):
-    agent = get_agent(x_agent_key)
-    if not agent: raise HTTPException(401)
+async def create_album(title: str = Form(...), description: str = Form(""), cover_url: str = Form(""), agent: dict = Depends(_get_agent_dep)):
     import sqlite3
     db = sqlite3.connect(str(DB))
     db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
@@ -116,9 +104,7 @@ async def get_album(album_id: int):
     }
 
 @router.post("/albums/{album_id}/tracks")
-async def add_track_to_album(album_id: int, track_id: str = Form(...), x_agent_key: str = Header(...)):
-    agent = get_agent(x_agent_key)
-    if not agent: raise HTTPException(401)
+async def add_track_to_album(album_id: int, track_id: str = Form(...), agent: dict = Depends(_get_agent_dep)):
     import sqlite3
     db = sqlite3.connect(str(DB))
     db.execute("UPDATE audio_tracks SET album_id=? WHERE id=?", (album_id, track_id))
