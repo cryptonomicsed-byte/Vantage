@@ -1185,6 +1185,15 @@ CREATE TABLE IF NOT EXISTS external_conversations (
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_orders_agent ON trading_orders(agent_id, status)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_orders_strategy ON trading_orders(strategy_id)")
+        # notes existed on production (added out-of-band at some point) but was
+        # never captured here — a fresh install's trading_orders table was
+        # missing it entirely, so POST /api/trading/orders (which always
+        # inserts data.notes) crashed with "no column named notes" on any new
+        # database. Caught writing a test against a fresh temp DB.
+        try:
+            await db.execute("ALTER TABLE trading_orders ADD COLUMN notes TEXT DEFAULT ''")
+        except Exception:
+            pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS trading_strategies (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
