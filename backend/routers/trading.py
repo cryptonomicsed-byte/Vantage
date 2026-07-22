@@ -1160,6 +1160,7 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent)):
     helius_key = os.environ.get("HELIUS_API_KEY", "")
     owner = str(keypair.pubkey())
 
+    zero_amount_reason: str | None = None
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             if side == "buy":
@@ -1172,6 +1173,16 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent)):
                 requested_lamports = int((order["quantity"] or 0) * 1e9)
                 fee_buffer_lamports = 5_000_000  # ~0.005 SOL for fees/rent
                 amount_lamports = min(requested_lamports, max(0, sol_balance_lamports - fee_buffer_lamports))
+                if amount_lamports <= 0:
+                    if requested_lamports <= 0:
+                        zero_amount_reason = (
+                            f"order.quantity ({order['quantity']}) is zero or invalid — no SOL amount to buy with"
+                        )
+                    else:
+                        zero_amount_reason = (
+                            f"wallet balance {sol_balance_lamports / 1e9:.6f} SOL is at or below the "
+                            f"{fee_buffer_lamports / 1e9:.3f} SOL fee buffer — nothing available to spend"
+                        )
             else:
                 # quantity from the daemon is a human-unit token amount — the
                 # daemon never knows the mint's real decimals, so re-derive the
@@ -1189,16 +1200,33 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent)):
                     held_base_units += int(amt["amount"])
                     decimals = int(amt["decimals"])
                 if held_base_units <= 0:
-                    raise HTTPException(422, f"Wallet holds no {token_mint} — nothing to sell on-chain")
-                requested_base_units = int((order["quantity"] or 0) * (10 ** decimals))
-                amount_lamports = min(requested_base_units, held_base_units)
+                    zero_amount_reason = f"wallet holds no {token_mint} — nothing to sell on-chain"
+                else:
+                    requested_base_units = int((order["quantity"] or 0) * (10 ** decimals))
+                    amount_lamports = min(requested_base_units, held_base_units)
+                    if amount_lamports <= 0:
+                        zero_amount_reason = (
+                            f"order.quantity ({order['quantity']}) rounds to zero base units at "
+                            f"{decimals} decimals for {token_mint} — quantity too small to represent on-chain"
+                        )
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(502, f"Balance check failed: {e}")
 
-    if amount_lamports <= 0:
-        raise HTTPException(422, "Order quantity resolves to a zero/invalid on-chain amount after balance capping")
+    if zero_amount_reason:
+        # Record the failure so the order doesn't sit in 'pending' forever
+        # with no trace of why — previously this raised straight to the HTTP
+        # caller without ever touching the order row, silently accumulating
+        # unresolvable pending orders (e.g. every buy while a wallet sits at
+        # 0 SOL, indistinguishable from any other zero-amount cause).
+        async with get_db() as db:
+            await db.execute(
+                "UPDATE trading_orders SET status='failed', error=? WHERE id=?",
+                (zero_amount_reason[:500], order_id),
+            )
+            await db.commit()
+        raise HTTPException(422, f"Order quantity resolves to a zero/invalid on-chain amount: {zero_amount_reason}")
 
     try:
         quote = await _jupiter_quote(input_mint, output_mint, amount_lamports)
