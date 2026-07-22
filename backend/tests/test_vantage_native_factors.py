@@ -119,3 +119,25 @@ def test_extras_align_intraday_signal_onto_daily_close_same_day(registry):
     )
     # today's row must actually pick up today's (later-timestamped) signal
     assert not out.loc[close_idx[-1]].isna().all()
+
+
+def test_sentiment_tone_momentum_survives_all_neutral_quiet_window(registry):
+    """Real production bug: worldmonitor_finance was reporting NEUTRAL / 0.0
+    tone for every symbol simultaneously (a genuinely quiet news window),
+    which the direction-sign multiplication in build_sentiment_panel
+    correctly turns into an identical 0.0 across every column — no
+    cross-sectional variance, so zscore(tone) is NaN by design (same
+    failure mode as degen_pump_density's buy_count). That NaN used to
+    poison momentum via multiplication, wiping the whole factor even
+    though momentum itself was perfectly computable from real price data."""
+    idx = pd.date_range("2026-01-01", periods=10, freq="D")
+    close = pd.DataFrame(
+        {"BTC": [50000 + i * 10 for i in range(10)], "ETH": [3000 + i for i in range(10)]},
+        index=idx,
+    )
+    tone = pd.DataFrame({"BTC": [0.0] * 10, "ETH": [0.0] * 10}, index=idx)  # identical -> degenerate
+    out = registry.compute(
+        "vantage_sentiment_tone_momentum",
+        {"close": close, "news_tone": tone},
+    )
+    assert not out.isna().all().all()

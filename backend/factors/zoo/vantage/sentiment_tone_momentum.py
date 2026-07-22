@@ -1,6 +1,6 @@
 """Sentiment-Tone Momentum.
 
-Formula: delta(close, 5) * (1 + zscore(news_tone))
+Formula: delta(close, 5) * (1 + zscore(news_tone).fillna(0))
 
 Price momentum, amplified or dampened by GDELT-derived news tone
 (worldmonitor_finance in signal_pool). A symbol with rising price AND
@@ -50,4 +50,10 @@ def compute(panel: dict) -> pd.DataFrame:
     tone = align_to_price_index(panel["news_tone"], close.index).fillna(0.0)
 
     momentum = delta(close, 5)
-    return momentum * (1.0 + zscore(tone))
+    # A quiet news window (every symbol at 0 tone, or otherwise identical)
+    # has no cross-sectional variance -> zscore is NaN by base.py's own
+    # "never silent zero" contract (same failure mode as degen_pump_density's
+    # buy_count). fillna(0) so "no differentiating tone signal" contributes
+    # no amplification instead of nuking a momentum value that's perfectly
+    # valid on its own.
+    return momentum * (1.0 + zscore(tone).fillna(0.0))
