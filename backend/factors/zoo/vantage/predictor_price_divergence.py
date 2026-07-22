@@ -19,6 +19,7 @@ from __future__ import annotations
 import pandas as pd
 
 from backend.factors.base import delta, rank
+from backend.factors.signal_panel import align_to_price_index
 
 ALPHA_ID = "vantage_predictor_price_divergence"
 
@@ -46,11 +47,11 @@ def compute(panel: dict) -> pd.DataFrame:
     close = panel["close"]
     predictor_signal = panel["predictor_direction"] * panel["predictor_conviction"]
 
-    # Extras panels are sparse/live (event-driven, not one row per price bar);
-    # reindex onto the price panel's timeline and hold the last known reading
-    # forward so a stale-but-real signal still participates instead of NaN-ing
-    # out the whole row.
-    predictor_signal = predictor_signal.reindex(close.index, method="ffill")
+    # Extras panels are sparse/live (event-driven, not one row per price bar)
+    # and land at whatever time-of-day the signal arrived; align onto the
+    # price panel's (daily, midnight-anchored) timeline by calendar day
+    # rather than exact timestamp — see align_to_price_index's docstring.
+    predictor_signal = align_to_price_index(predictor_signal, close.index)
 
     momentum = delta(close, 5)
     return rank(predictor_signal) - rank(momentum)

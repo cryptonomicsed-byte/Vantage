@@ -90,3 +90,32 @@ def test_sentiment_tone_momentum_handles_missing_tone_as_zero(registry):
     )
     assert out.shape == close.shape
     assert not out.isna().all().all()
+
+
+def test_extras_align_intraday_signal_onto_daily_close_same_day(registry):
+    """Real production bug: signal_pool buckets land at whatever time-of-day
+    the signal arrived (e.g. today 20:45), while daily OHLCV bars are
+    midnight-anchored (today 00:00) — earlier in the same calendar day. A
+    naive reindex(close.index, method="ffill") requires source <= target,
+    so today's intraday signal could never satisfy today's daily bar and
+    every row went all-NaN in production against real live data. Both
+    factors now use signal_panel.align_to_price_index, which collapses
+    same-day intraday buckets down to the calendar day first."""
+    close_idx = pd.date_range("2026-07-13", "2026-07-22", freq="D")
+    close = pd.DataFrame(
+        {"BTC": range(60000, 60010), "ETH": range(3000, 3010)}, index=close_idx
+    )
+    # predictor signals only exist *today*, timestamped in the afternoon —
+    # strictly later in the day than the daily bar's own midnight timestamp.
+    intraday_idx = pd.to_datetime([
+        "2026-07-22 20:45:00", "2026-07-22 21:00:00", "2026-07-22 21:15:00",
+    ])
+    conv = pd.DataFrame({"BTC": [0.8, 0.9, 0.85], "ETH": [0.5, 0.4, 0.45]}, index=intraday_idx)
+    direction = pd.DataFrame({"BTC": [1, 1, 1], "ETH": [-1, -1, -1]}, index=intraday_idx)
+
+    out = registry.compute(
+        "vantage_predictor_price_divergence",
+        {"close": close, "predictor_conviction": conv, "predictor_direction": direction},
+    )
+    # today's row must actually pick up today's (later-timestamped) signal
+    assert not out.loc[close_idx[-1]].isna().all()

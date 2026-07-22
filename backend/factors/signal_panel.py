@@ -28,6 +28,29 @@ _DIRECTION_SIGN = {"BUY": 1.0, "SELL": -1.0, "NEUTRAL": 0.0, "LONG": 1.0, "SHORT
 _PUMP_PCT_RE = re.compile(r"([+-]?\d+(?:\.\d+)?)\s*%")
 
 
+def align_to_price_index(extras_df: pd.DataFrame, price_index: pd.DatetimeIndex) -> pd.DataFrame:
+    """Align an intraday, event-driven extras panel onto a (usually daily,
+    midnight-anchored) OHLCV index.
+
+    signal_pool buckets land at whatever time-of-day the signal actually
+    arrived (e.g. 2026-07-22 20:45:00), while daily OHLCV bars are stamped
+    at midnight (2026-07-22 00:00:00) — later in the same calendar day.
+    A plain reindex(price_index, method="ffill") requires a source
+    timestamp <= the target, so "today's" 20:45 signal can never satisfy
+    "today's" 00:00 daily bar and every row NaNs out (a real production bug
+    caught testing this against live data). Fixing this by collapsing
+    same-day intraday buckets down to the calendar day before reindexing,
+    so same-day readings land exactly on the daily bar instead of one
+    ffill-timestep behind it.
+    """
+    if extras_df.empty:
+        return extras_df.reindex(price_index)
+    daily = extras_df.copy()
+    daily.index = daily.index.normalize()
+    daily = daily.groupby(daily.index).last()
+    return daily.reindex(price_index, method="ffill")
+
+
 def _direction_sign(direction: str) -> float:
     return _DIRECTION_SIGN.get(str(direction or "").upper(), 0.0)
 

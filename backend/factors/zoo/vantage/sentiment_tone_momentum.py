@@ -21,6 +21,7 @@ from __future__ import annotations
 import pandas as pd
 
 from backend.factors.base import delta, zscore
+from backend.factors.signal_panel import align_to_price_index
 
 ALPHA_ID = "vantage_sentiment_tone_momentum"
 
@@ -38,14 +39,15 @@ __alpha_meta__ = {
     'min_warmup_bars': 6,
     'notes': (
         'news_tone from worldmonitor_finance is event-driven and sparse — '
-        'forward-filled onto the price timeline before use.'
+        'aligned onto the (daily) price timeline by calendar day before use, '
+        'see signal_panel.align_to_price_index.'
     ),
 }
 
 
 def compute(panel: dict) -> pd.DataFrame:
     close = panel["close"]
-    tone = panel["news_tone"].reindex(close.index, method="ffill").fillna(0.0)
+    tone = align_to_price_index(panel["news_tone"], close.index).fillna(0.0)
 
     momentum = delta(close, 5)
     return momentum * (1.0 + zscore(tone))
