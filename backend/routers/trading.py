@@ -1197,7 +1197,19 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent)):
                 # stale/optimistic bot estimate can never overdraw the wallet.
                 bal_r = await client.post(f"https://mainnet.helius-rpc.com/?api-key={helius_key}",
                                            json={"jsonrpc": "2.0", "id": 1, "method": "getBalance", "params": [owner]})
-                sol_balance_lamports = ((bal_r.json().get("result") or {}).get("value")) or 0
+                bal_body = bal_r.json()
+                if "result" not in bal_body:
+                    # A real RPC failure (rate limit, timeout, malformed
+                    # response) was previously indistinguishable from a
+                    # genuinely empty wallet: (body.get("result") or {}).get
+                    # ("value") or 0 silently turned *any* error into "0 SOL",
+                    # incorrectly rejecting real, funded wallets whenever
+                    # Helius rate-limited or hiccuped. Confirmed happening
+                    # live: same API key, same failure mode, during this
+                    # session's own diagnostics ("max usage reached").
+                    rpc_err = (bal_body.get("error") or {}).get("message", "unknown RPC error")
+                    raise HTTPException(502, f"Balance check failed (Helius getBalance): {rpc_err}")
+                sol_balance_lamports = (bal_body["result"] or {}).get("value") or 0
                 requested_lamports = int((order["quantity"] or 0) * 1e9)
                 fee_buffer_lamports = 5_000_000  # ~0.005 SOL for fees/rent
                 amount_lamports = min(requested_lamports, max(0, sol_balance_lamports - fee_buffer_lamports))
@@ -1220,7 +1232,11 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent)):
                 tok_r = await client.post(f"https://mainnet.helius-rpc.com/?api-key={helius_key}",
                                            json={"jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner",
                                                  "params": [owner, {"mint": token_mint}, {"encoding": "jsonParsed"}]})
-                accounts = ((tok_r.json().get("result") or {}).get("value")) or []
+                tok_body = tok_r.json()
+                if "result" not in tok_body:
+                    rpc_err = (tok_body.get("error") or {}).get("message", "unknown RPC error")
+                    raise HTTPException(502, f"Balance check failed (Helius getTokenAccountsByOwner): {rpc_err}")
+                accounts = (tok_body["result"] or {}).get("value") or []
                 held_base_units = 0
                 decimals = 0
                 for acc in accounts:
