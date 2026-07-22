@@ -144,6 +144,75 @@ async def compute_factor_live(req: LiveComputeRequest, agent: dict = Depends(get
     }
 
 
+# ── Vantage-native factors: OHLCV blended with Vantage's own signal_pool ────
+# (predictor conviction, GDELT news tone, pump.fun attention density). See
+# backend/factors/zoo/vantage/ and backend/factors/signal_panel.py.
+
+class VantageNativeComputeRequest(BaseModel):
+    alpha_id: str
+    symbols: list[str] = []
+    interval: str = "1d"
+    limit: int = 200
+    lookback_seconds: int = 3600
+    bucket_seconds: int = 900
+
+
+@router.post("/compute-vantage-native")
+async def compute_factor_vantage_native(
+    req: VantageNativeComputeRequest, agent: dict = Depends(get_agent),
+):
+    """Compute one of the vantage/ zoo factors, assembling whichever
+    extras panel(s) its metadata declares via extras_required — predictor
+    conviction/direction, news tone, or degen pump-attention density —
+    plus live OHLCV if the factor also declares columns_required.
+    """
+    reg = _get_registry()
+    try:
+        alpha = reg.get(req.alpha_id)
+    except KeyError:
+        raise HTTPException(404, f"unknown alpha_id: {req.alpha_id}")
+    if alpha.zoo != "vantage":
+        raise HTTPException(422, f"{req.alpha_id} is not a vantage/ zoo factor")
+
+    panel: dict[str, Any] = {}
+
+    if "close" in alpha.meta.get("columns_required", []):
+        from backend.factors.live_panel import build_live_panel
+        if not req.symbols:
+            raise HTTPException(422, f"{req.alpha_id} requires columns_required close — symbols must not be empty")
+        panel.update(await build_live_panel(req.symbols, req.interval, req.limit))
+        if not panel or panel.get("close", pd.DataFrame()).empty:
+            raise HTTPException(422, "no live OHLCV returned for any requested symbol")
+
+    extras = set(alpha.meta.get("extras_required", []))
+    if {"predictor_conviction", "predictor_direction"} & extras:
+        from backend.factors.signal_panel import build_predictor_panel
+        panel.update(await build_predictor_panel(req.symbols, req.lookback_seconds, req.bucket_seconds))
+    if "news_tone" in extras:
+        from backend.factors.signal_panel import build_sentiment_panel
+        panel.update(await build_sentiment_panel(req.symbols, req.lookback_seconds, req.bucket_seconds))
+    if {"degen_buy_count", "degen_pump_pct"} & extras:
+        from backend.factors.signal_panel import build_degen_panel
+        panel.update(await build_degen_panel(req.lookback_seconds, req.bucket_seconds))
+
+    missing_extra = extras - panel.keys()
+    if missing_extra:
+        raise HTTPException(422, f"no extras panel builder wired for {sorted(missing_extra)}")
+    if any(panel[k].empty for k in extras if k in panel):
+        raise HTTPException(
+            422,
+            "signal_pool has no recent rows for the requested extras in this "
+            f"lookback window ({req.lookback_seconds}s) — try widening it",
+        )
+
+    try:
+        out = reg.compute(req.alpha_id, panel)
+    except Exception as exc:
+        raise HTTPException(422, f"compute failed: {exc}")
+
+    return {"alpha_id": req.alpha_id, "result": _df_to_json(out)}
+
+
 # ── Statistical validation (Monte Carlo / bootstrap / walk-forward) ────────
 
 class TradeIn(BaseModel):
