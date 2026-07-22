@@ -405,6 +405,7 @@ async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent)
     response = {
         "id": wallet_id, "label": label, "chain": chain,
         "address": address, "system": system,
+        "mnemonic": result.get("mnemonic", ""),
         "warning": "Private key encrypted at rest. Store the mnemonic safely.",
     }
     if "ifascript" in result:
