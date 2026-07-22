@@ -40,6 +40,24 @@ def test_degen_pump_density_needs_no_ohlcv(registry):
     assert (out["KET"] > out["BOP"]).all()
 
 
+def test_degen_pump_density_survives_degenerate_buy_count(registry):
+    """Real production bug: ogun_degen posts one row per token per scan
+    cycle, so buy_count is often identical across every tracked token in a
+    bucket (no cross-sectional variance) -> zscore(buy_count) is NaN by
+    base.py's own "never silent zero" contract. Adding that NaN to a
+    perfectly valid zscore(pump_pct) used to poison the whole factor via
+    pandas NaN-propagation. Verifies the fillna(0) guard actually holds."""
+    idx = pd.to_datetime(["2026-01-01T00:00:00"])
+    buy_count = pd.DataFrame({"A": [12], "B": [12], "C": [12]}, index=idx)  # identical
+    pump_pct = pd.DataFrame({"A": [10261], "B": [118], "C": [308]}, index=idx)  # varies
+    out = registry.compute(
+        "vantage_degen_pump_density",
+        {"degen_buy_count": buy_count, "degen_pump_pct": pump_pct},
+    )
+    assert not out.isna().any().any()
+    assert out.loc[idx[0], "A"] > out.loc[idx[0], "B"]  # A has by far the biggest pump
+
+
 def test_predictor_price_divergence_uses_extras(registry):
     alpha = registry.get("vantage_predictor_price_divergence")
     assert alpha.meta["columns_required"] == ["close"]
