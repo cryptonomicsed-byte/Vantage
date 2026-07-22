@@ -94,10 +94,14 @@ async def compute_factor(req: ComputeRequest, agent: dict = Depends(get_agent)):
     except Exception as exc:
         raise HTTPException(422, f"compute failed: {exc}")
 
+    def _json_safe(v: float) -> Optional[float]:
+        return None if pd.isna(v) or v in (float("inf"), float("-inf")) else float(v)
+
     return {
         "alpha_id": req.alpha_id,
         "result": {
-            ts.isoformat(): row.to_dict() for ts, row in out.iterrows()
+            ts.isoformat(): {col: _json_safe(v) for col, v in row.items()}
+            for ts, row in out.iterrows()
         },
     }
 
