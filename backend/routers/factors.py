@@ -51,16 +51,6 @@ async def list_factors(
     return {"count": len(ids), "ids": ids}
 
 
-@router.get("/{alpha_id}")
-async def get_factor_meta(alpha_id: str, agent: dict = Depends(get_agent)):
-    """Metadata for one factor: formula, required columns, universe, etc."""
-    try:
-        alpha = _get_registry().get(alpha_id)
-    except KeyError:
-        raise HTTPException(404, f"unknown alpha_id: {alpha_id}")
-    return {"id": alpha.id, "zoo": alpha.zoo, "meta": alpha.meta}
-
-
 class ComputeRequest(BaseModel):
     alpha_id: str
     # panel[column][date_iso][symbol] = float — wide-format OHLCV columns
@@ -284,3 +274,17 @@ async def validate_my_trades(
         raise HTTPException(422, "method must be monte-carlo | bootstrap | walk-forward")
 
     return {"agent": agent["name"], "n_trades": len(records), "method": method, **result}
+
+
+# Registered last: a bare single-segment path param would otherwise swallow
+# every more specific route above it (list, compute, compute-live,
+# validate/*, validate-my-trades) since FastAPI/Starlette match in
+# registration order within a router.
+@router.get("/{alpha_id}")
+async def get_factor_meta(alpha_id: str, agent: dict = Depends(get_agent)):
+    """Metadata for one factor: formula, required columns, universe, etc."""
+    try:
+        alpha = _get_registry().get(alpha_id)
+    except KeyError:
+        raise HTTPException(404, f"unknown alpha_id: {alpha_id}")
+    return {"id": alpha.id, "zoo": alpha.zoo, "meta": alpha.meta}
