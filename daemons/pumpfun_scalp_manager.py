@@ -91,28 +91,30 @@ class RpcCheckFailed(Exception):
 def _rpc_getTokenAccountsByOwner(owner: str, mint: str) -> dict:
     """Helius only -- Chainstack's current plan hard-rejects this method
     entirely (-32602 'Method requires plan upgrade'), confirmed live, not
-    a transient error worth retrying there. Helius gets its own retry/
-    backoff since this key is shared across ~10+ daemons on this VPS and
-    routinely 429s under load."""
+    a transient error worth retrying there. This is now a genuine last
+    resort (get_buy_amount_from_tx covers the common case via Chainstack's
+    getTransaction instead) -- a single attempt, no in-call backoff sleep:
+    blocking this connection open for up to 20s waiting on a shared,
+    routinely-429'd key was itself colliding with this same connection's
+    own busy_timeout window on the next write, wedging every cycle. The
+    daemon's normal 20s cycle already provides the retry cadence."""
     payload = json.dumps({
         "jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner",
         "params": [owner, {"mint": mint}, {"encoding": "jsonParsed"}],
     }).encode()
-    last_err = None
-    for attempt in range(4):
-        try:
-            req = urllib.request.Request(
-                f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}",
-                data=payload, headers={"Content-Type": "application/json"},
-            )
-            body = json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
-            if "result" in body:
-                return body
-            last_err = body.get("error")
-        except Exception as e:
-            last_err = e
-        time.sleep(2 * (attempt + 1))
-    raise RpcCheckFailed(f"getTokenAccountsByOwner failed after retries: {last_err}")
+    try:
+        req = urllib.request.Request(
+            f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}",
+            data=payload, headers={"Content-Type": "application/json"},
+        )
+        body = json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
+        if "result" in body:
+            return body
+        raise RpcCheckFailed(f"getTokenAccountsByOwner error: {body.get('error')}")
+    except RpcCheckFailed:
+        raise
+    except Exception as e:
+        raise RpcCheckFailed(f"getTokenAccountsByOwner failed: {e}")
 
 
 def get_token_balance(owner: str, mint: str) -> tuple[int, int]:
