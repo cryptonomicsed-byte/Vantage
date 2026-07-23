@@ -11,13 +11,23 @@ DB = "/opt/ares/Vantage/data/vantage.db"
 HELIUS_KEY = os.environ.get("HELIUS_API_KEY", "")
 BIRDEYE_KEY = os.environ.get("BIRDEYE_KEY", "")
 ALCHEMY_KEY = os.environ.get("ALCHEMY_API_KEY", "")
-JUPITER = "https://quote-api.jup.ag/v6"
+# This daemon only ever creates orders via the Vantage API (below) — it
+# never calls Jupiter directly, so this constant was unused dead code
+# pointing at Jupiter's dead v6 endpoints. Actual execution happens in
+# backend/routers/trading.py's execute_live_order, already on v1.
 ALCHEMY_RPC = {
     "solana": f"https://solana-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}",
     "eth": f"https://eth-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}",
 }
 VANTAGE_URL = "http://localhost:8001/api/trading/orders"
 VANTAGE_KEY = open(os.path.expanduser("~/.vantage_key")).read().strip()
+# Which funded Solana wallet this daemon trades from — execute_live_order
+# rejects any order with no wallet_id ("No wallet/private key available
+# for this order"), and this was never set anywhere in this file, so
+# every order this daemon created could only ever sit pending forever
+# even after the field-name fix below. Must be a real trading_wallets.id
+# for an agent this daemon's VANTAGE_KEY belongs to.
+PUMPFUN_WALLET_ID = os.environ.get("PUMPFUN_WALLET_ID", "")
 
 # ── Degen Safety Filters ───────────────────────────────────────────
 MIN_VOLUME_24H = 10000      # $10K minimum 24h volume
@@ -46,15 +56,37 @@ def has_been_executed(sig_id):
     return r is not None
 
 def create_order(symbol, side, conviction, sig_id, mint=None):
-    """Create a buy/sell order via Vantage trading API."""
+    """Create a buy/sell order via Vantage trading API.
+
+    Fixed three real bugs that made every order 422 or silently strand:
+      - OrderCreate has no "type"/"amount"/"source" fields — the model
+        expects "order_type"/"quantity", and "source" isn't a field at
+        all. Every call here was rejected by FastAPI's own validation.
+      - symbol was sent as "TICKER/USDC" (a display pair string), but
+        execute_live_order treats order.symbol as the literal mint
+        address for non-SOL legs (see trading.py's own comment on this).
+        A pair string was never a valid mint and would fail on-chain
+        resolution even if the order had been accepted.
+      - wallet_id was never set at all — execute_live_order immediately
+        rejects any order with no wallet ("No wallet/private key
+        available"), so even a fully-valid order could never execute.
+    """
+    if not mint:
+        print(f"  Order skipped: no mint resolved for {symbol} — can't trade a display ticker on-chain")
+        return None
+    if not PUMPFUN_WALLET_ID:
+        print("  Order skipped: PUMPFUN_WALLET_ID not set — nothing to sign with")
+        return None
+
     payload = json.dumps({
-        "symbol": f"{symbol}/USDC",
+        "symbol": mint,
         "side": side,
-        "type": "market",
-        "amount": TRADE_AMOUNT_SOL if side == "buy" else TRADE_AMOUNT_SOL,
+        "order_type": "market",
+        "quantity": TRADE_AMOUNT_SOL,
         "chain": "solana",
-        "notes": f"Pumpfun {side} — sig_{sig_id} — conviction={conviction:.2f}" + (f" | mint={mint}" if mint else ""),
-        "source": "ares_pumpfun_trader",
+        "wallet_id": int(PUMPFUN_WALLET_ID),
+        "trigger_reason": f"pumpfun_sig_{sig_id}",
+        "notes": f"Pumpfun {side} — sig_{sig_id} — conviction={conviction:.2f} | mint={mint} | display={symbol}",
     }).encode()
     try:
         req = urllib.request.Request(VANTAGE_URL, data=payload, headers={
