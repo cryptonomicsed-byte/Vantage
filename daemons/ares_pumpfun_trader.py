@@ -1,400 +1,344 @@
 #!/opt/ares/venv/bin/python3
 """ares_pumpfun_trader — Execute Pump.fun token buys via Jupiter.
-Listens for pumpfun signals from trading_signals table, auto-buys
-graduating/trending tokens with degen filters.
+
+Rewritten: was querying trading_signals WHERE source='pumpfun', a value
+NOTHING has ever written — this daemon has been running for days as a
+complete no-op regardless of its (also hardcoded/stale) Helius key. Real
+pump.fun-flavored signals land in signal_pool (the intel pool) from
+degen_alpha_fusion.py and ogun_multiscan.py's degen scan, both of which
+also just had a mint field added end-to-end — this now reads that.
+
+Also fixes: symbol was passed as 'TICKER/USDC' into the order, not a
+resolvable mint, so a "successful" order could never actually swap.
+Also fixes: the rug check flagged mint authority alone (normal for every
+pre-migration pump.fun token) as high-risk, same bug found and fixed in
+degen_alpha_fusion.py — only freeze authority is a real red flag here.
+Also fixes: create_order() never called execute-live, so even a
+successfully created order just sat pending forever.
+
+Requires a wallet set explicitly — deliberately does not guess one.
+Fixing these bugs should not, by itself, turn on live auto-buying; that's
+a separate, explicit choice, now made via the app's wallet-picker UI
+(Strategies drawer → daemon settings) instead of a systemd env file —
+polled from GET /api/trading/daemon-settings/pumpfun_trader_wallet_id
+each cycle so changing it in the UI takes effect within one cycle, no
+restart needed. PUMPFUN_TRADER_WALLET_ID env var still works as a
+fallback if the API is unreachable.
 
 Usage: ares_pumpfun_trader.py [--daemon]
 """
-import time, json, sqlite3, os, sys, signal, urllib.request, hashlib
+import time, json, sqlite3, os, sys, signal, urllib.request, urllib.error
+import sys as _vshim_sys
+_vshim_sys.path.insert(0, "/opt/ares")
+import vantage_db_shim as _vshim
+
+sys.path.insert(0, "/opt/ares")
+import api_key_pool
 
 DB = "/opt/ares/Vantage/data/vantage.db"
-HELIUS_KEY = os.environ.get("HELIUS_API_KEY", "")
-BIRDEYE_KEY = os.environ.get("BIRDEYE_KEY", "")
-ALCHEMY_KEY = os.environ.get("ALCHEMY_API_KEY", "")
-# This daemon only ever creates orders via the Vantage API (below) — it
-# never calls Jupiter directly, so this constant was unused dead code
-# pointing at Jupiter's dead v6 endpoints. Actual execution happens in
-# backend/routers/trading.py's execute_live_order, already on v1.
-ALCHEMY_RPC = {
-    "solana": f"https://solana-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}",
-    "eth": f"https://eth-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}",
-}
-VANTAGE_URL = "http://localhost:8001/api/trading/orders"
+TASK_NAME = "ares_pumpfun_trader"
+VANTAGE_BASE = os.environ.get("VANTAGE_URL", "http://localhost:8001")
+ORDERS_URL = f"{VANTAGE_BASE}/api/trading/orders"
+DAEMON_SETTING_URL = f"{VANTAGE_BASE}/api/trading/daemon-settings/pumpfun_trader_wallet_id"
+TOOL_TRADING_KEY = os.environ.get("VANTAGE_TOOL_TRADING_KEY", os.environ.get("VANTAGE_TOOL_TRADING", ""))
 VANTAGE_KEY = open(os.path.expanduser("~/.vantage_key")).read().strip()
-# Which funded Solana wallet this daemon trades from — execute_live_order
-# rejects any order with no wallet_id ("No wallet/private key available
-# for this order"), and this was never set anywhere in this file, so
-# every order this daemon created could only ever sit pending forever
-# even after the field-name fix below. Must be a real trading_wallets.id
-# for an agent this daemon's VANTAGE_KEY belongs to.
-PUMPFUN_WALLET_ID = os.environ.get("PUMPFUN_WALLET_ID", "")
+
+
+def get_wallet_id():
+    """Poll the DB-backed setting first (what the UI writes), fall back to
+    the env var if the API is unreachable, empty string if neither is set
+    — same "explicit choice required" behavior as before, just sourced
+    from a place a human can actually change without SSH."""
+    try:
+        req = urllib.request.Request(
+            DAEMON_SETTING_URL,
+            headers={"X-Vantage-Tool": "trading", "X-Vantage-Tool-Key": TOOL_TRADING_KEY},
+        )
+        resp = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
+        if resp.get("value"):
+            return str(resp["value"])
+    except Exception:
+        pass
+    return os.environ.get("PUMPFUN_TRADER_WALLET_ID", "")
+
+TRADING_ENABLED_URL = f"{VANTAGE_BASE}/api/trading/daemon-settings/pumpfun_trader_trading_enabled"
+
+def is_trading_enabled():
+    """Fail-closed live-trading gate, polled fresh each cycle (same
+    pattern as get_wallet_id) -- absent or unreadable means DISABLED,
+    never enabled. This is the toggle the app's Trade Execution section
+    controls; previously this daemon executed the moment its systemd
+    service was running, with no way to arm/disarm it short of stopping
+    the process."""
+    try:
+        req = urllib.request.Request(
+            TRADING_ENABLED_URL,
+            headers={"X-Vantage-Tool": "trading", "X-Vantage-Tool-Key": TOOL_TRADING_KEY},
+        )
+        resp = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
+        return resp.get("value") == "1"
+    except Exception:
+        return False
 
 # ── Degen Safety Filters ───────────────────────────────────────────
-MIN_VOLUME_24H = 10000      # $10K minimum 24h volume
-MAX_RISK_SCORE = 50          # Max risk score 0-100 (lower = safer)
-MIN_HOLDERS = 3              # Minimum unique holders
-MAX_DEV_SELL_PCT = 10        # Max dev wallet sell % in first 5 min
 TRADE_AMOUNT_SOL = 0.01      # 0.01 SOL per trade (~$0.80)
+
+# ── Hard Limits (prevents runaway trading) ─────────────────────────
+MAX_DAILY_SOL = 0.5           # Hard cap: max SOL spent per calendar day
+MAX_OPEN_POSITIONS = 5        # Max concurrent unfilled orders
+SIGNAL_SOURCES = ("degen_alpha_fusion", "ogun_degen")
+
+
+def _helius_key_only():
+    return api_key_pool.get_key("helius", TASK_NAME) or os.environ.get("HELIUS_API_KEY", "")
+
+
+def _birdeye_key():
+    return api_key_pool.get_key("birdeye", TASK_NAME) or os.environ.get("BIRDEYE_API_KEY", "")
+
+
+def _all_birdeye_cooling():
+    """True only when every key in the pool is currently on cooldown —
+    used to skip a whole cycle's worth of doomed Birdeye calls instead of
+    hammering a key everyone already knows is rate-limited. Real bug this
+    fixes: 5 signals checked back-to-back in under a second burned through
+    all 3 keys' quota simultaneously, then all 3 came off cooldown at the
+    same moment and repeated the burst — never actually recovering."""
+    try:
+        status = api_key_pool.pool_status("birdeye")
+        return bool(status) and all(k["cooling_down"] for k in status)
+    except Exception:
+        return False
+
+
+def _dexscreener_price(mint):
+    """Free, no-key fallback price source — already proven reliable
+    elsewhere in this codebase (social_tracker.py's PnL backtracking uses
+    the identical call). Used when Birdeye's pool is fully exhausted so a
+    real rate-limit outage doesn't block every buy for the next hour."""
+    try:
+        req = urllib.request.Request(
+            f"https://api.dexscreener.com/latest/dex/tokens/{mint}",
+            headers={"User-Agent": "Vantage/1.0"}
+        )
+        data = json.loads(urllib.request.urlopen(req, timeout=8).read().decode())
+        pairs = data.get("pairs") or []
+        if not pairs:
+            return None
+        best = max(pairs, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0)
+        return float(best["priceUsd"]) if best.get("priceUsd") else None
+    except Exception:
+        return None
+
+
+def daily_spent_sol():
+    db = _vshim.get_sync_db()
+    spent = db.execute(
+        "SELECT COALESCE(SUM(quantity),0) FROM trading_orders WHERE notes LIKE '%pumpfun%' AND date(created_at)=date('now')"
+    ).fetchone()[0]
+    db.close()
+    return float(spent) if spent else 0.0
+
 
 # ── DB Helpers ──────────────────────────────────────────────────────
 def get_pending_signals():
-    db = sqlite3.connect(DB)
-    rows = db.execute("""
-        SELECT id, symbol, direction, conviction 
-        FROM trading_signals 
-        WHERE type='pumpfun' AND direction='BUY' 
-        AND timestamp > datetime('now','-1 hour')
+    """Real BUY signals with a real mint, from the intel signal pool —
+    not the disconnected trading_signals table this used to query."""
+    db = _vshim.get_sync_db()
+    placeholders = ",".join("?" * len(SIGNAL_SOURCES))
+    rows = db.execute(f"""
+        SELECT id, symbol, mint, direction, conviction
+        FROM signal_pool
+        WHERE source IN ({placeholders}) AND direction='BUY' AND mint != ''
+        AND ts > CAST(strftime('%s','now','-1 hour') AS INTEGER)
         ORDER BY conviction DESC LIMIT 5
-    """).fetchall()
+    """, SIGNAL_SOURCES).fetchall()
     db.close()
     return rows
 
+
 def has_been_executed(sig_id):
-    db = sqlite3.connect(DB)
+    db = _vshim.get_sync_db()
     r = db.execute("SELECT id FROM trading_orders WHERE notes LIKE ?", (f"%sig_{sig_id}%",)).fetchone()
     db.close()
     return r is not None
 
-def create_order(symbol, side, conviction, sig_id, mint=None):
-    """Create a buy/sell order via Vantage trading API.
 
-    Fixed three real bugs that made every order 422 or silently strand:
-      - OrderCreate has no "type"/"amount"/"source" fields — the model
-        expects "order_type"/"quantity", and "source" isn't a field at
-        all. Every call here was rejected by FastAPI's own validation.
-      - symbol was sent as "TICKER/USDC" (a display pair string), but
-        execute_live_order treats order.symbol as the literal mint
-        address for non-SOL legs (see trading.py's own comment on this).
-        A pair string was never a valid mint and would fail on-chain
-        resolution even if the order had been accepted.
-      - wallet_id was never set at all — execute_live_order immediately
-        rejects any order with no wallet ("No wallet/private key
-        available"), so even a fully-valid order could never execute.
-    """
-    if not mint:
-        print(f"  Order skipped: no mint resolved for {symbol} — can't trade a display ticker on-chain")
-        return None
-    if not PUMPFUN_WALLET_ID:
-        print("  Order skipped: PUMPFUN_WALLET_ID not set — nothing to sign with")
-        return None
+def open_positions_count():
+    db = _vshim.get_sync_db()
+    n = db.execute("SELECT COUNT(*) FROM trading_orders WHERE status='pending'").fetchone()[0]
+    db.close()
+    return n
 
+
+def create_and_execute_order(mint, symbol, conviction, sig_id, wallet_id):
+    """Create a buy order via Vantage's trading API, then immediately
+    execute it live — creating alone does nothing, same gap already found
+    and fixed today in ExecutionPanel.tsx/telegram_webhook.py/
+    degen_alpha_fusion.py's snipe_token()."""
     payload = json.dumps({
         "symbol": mint,
-        "side": side,
+        "side": "buy",
         "order_type": "market",
         "quantity": TRADE_AMOUNT_SOL,
         "chain": "solana",
-        "wallet_id": int(PUMPFUN_WALLET_ID),
-        "trigger_reason": f"pumpfun_sig_{sig_id}",
-        "notes": f"Pumpfun {side} — sig_{sig_id} — conviction={conviction:.2f} | mint={mint} | display={symbol}",
+        "wallet_id": int(wallet_id),
+        "notes": f"Pumpfun degen buy — sig_{sig_id} — {symbol} — conviction={conviction:.2f}",
     }).encode()
     try:
-        req = urllib.request.Request(VANTAGE_URL, data=payload, headers={
-            "Content-Type": "application/json",
-            "X-Agent-Key": VANTAGE_KEY,
+        req = urllib.request.Request(ORDERS_URL, data=payload, headers={
+            "Content-Type": "application/json", "X-Agent-Key": VANTAGE_KEY,
         })
         resp = json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
-        return resp.get("order_id")
+        order_id = resp.get("id", resp.get("order_id"))
+        if not order_id:
+            print(f"  ❌ Order creation failed: {resp}")
+            return None
+        exec_req = urllib.request.Request(
+            f"{VANTAGE_BASE}/api/trading/orders/{order_id}/execute-live",
+            data=b"", method="POST",
+            headers={"Content-Type": "application/json", "X-Agent-Key": VANTAGE_KEY},
+        )
+        exec_resp = json.loads(urllib.request.urlopen(exec_req, timeout=15).read().decode())
+        print(f"  ✅ Order #{order_id} executed — tx {exec_resp.get('tx_hash','?')}")
+        return order_id
+    except urllib.error.HTTPError as e:
+        print(f"  ❌ Order/execute failed: HTTP {e.code} {e.read().decode(errors='ignore')[:200]}")
+        return None
     except Exception as e:
-        print(f"  Order failed: {e}")
+        print(f"  ❌ Order failed: {e}")
         return None
 
-def log_trade(symbol, mint, side, amount, entry_price, conviction, sig_id):
-    """Log trade to strategy_trades table for position tracking."""
-    try:
-        db = sqlite3.connect(DB)
-        db.execute("""
-            INSERT INTO strategy_trades (strategy, symbol, side, amount_sol, entry_price, conviction, status, entry_time, notes)
-            VALUES ('pumpfun_auto', ?, ?, ?, ?, ?, 'open', datetime('now'), ?)
-        """, (symbol, side, amount, entry_price, conviction, f"Pumpfun sig_{sig_id} | mint={mint}"))
-        db.commit()
-        db.close()
-    except Exception as e:
-        print(f"  Trade log failed: {e}")
 
-def track_open_positions_for_exits():
-    """Check open pumpfun positions and execute exits at TP (+25%) or SL (-30%)."""
-    TAKE_PROFIT_PCT = 0.25
-    STOP_LOSS_PCT = -0.30
-
-    try:
-        db = sqlite3.connect(DB)
-        # Get open BUY trades
-        trades = db.execute("""
-            SELECT id, symbol, amount_sol, entry_price
-            FROM strategy_trades
-            WHERE strategy='pumpfun_auto' AND side='BUY' AND status='open'
-        """).fetchall()
-
-        for tid, symbol, amount, entry_price in trades:
-            if not entry_price or entry_price <= 0:
-                continue
-
-            # Get current price from Birdeye
-            try:
-                db2 = sqlite3.connect(DB)
-                mint = db2.execute(
-                    "SELECT DISTINCT mint FROM token_wallet_roles WHERE LOWER(symbol) = ? LIMIT 1",
-                    (symbol.lower(),)
-                ).fetchone()
-                db2.close()
-
-                if not mint:
-                    continue
-
-                req = urllib.request.Request(
-                    f"https://public-api.birdeye.so/defi/price?address={mint[0]}",
-                    headers={"X-API-KEY": BIRDEYE_KEY, "accept": "application/json"}
-                )
-                price_data = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
-                current_price = float(price_data.get("data", {}).get("value", 0))
-
-                if current_price <= 0:
-                    continue
-
-                pnl_pct = (current_price - entry_price) / entry_price
-
-                # Check take profit
-                if pnl_pct >= TAKE_PROFIT_PCT:
-                    print(f"\n  💰 TAKE PROFIT: {symbol} +{pnl_pct*100:.1f}%")
-                    order_id = create_order(symbol, "sell", pnl_pct, tid, mint[0])
-                    if order_id:
-                        db.execute(
-                            "UPDATE strategy_trades SET status='closed', exit_price=?, pnl_pct=?, exit_time=datetime('now'), notes=notes||? WHERE id=?",
-                            (current_price, pnl_pct*100, f" | TP +{pnl_pct*100:.1f}% order={order_id}", tid)
-                        )
-                        db.commit()
-                        print(f"  ✅ Sold at +{pnl_pct*100:.1f}%")
-
-                # Check stop loss
-                elif pnl_pct <= STOP_LOSS_PCT:
-                    print(f"\n  🛑 STOP LOSS: {symbol} {pnl_pct*100:.1f}%")
-                    order_id = create_order(symbol, "sell", pnl_pct, tid, mint[0])
-                    if order_id:
-                        db.execute(
-                            "UPDATE strategy_trades SET status='closed', exit_price=?, pnl_pct=?, exit_time=datetime('now'), notes=notes||? WHERE id=?",
-                            (current_price, pnl_pct*100, f" | SL {pnl_pct*100:.1f}% order={order_id}", tid)
-                        )
-                        db.commit()
-                        print(f"  ❌ Stopped out at {pnl_pct*100:.1f}%")
-                else:
-                    print(f"  [{symbol}] {pnl_pct*100:+.1f}% | Entry: ${entry_price:.6f} | Current: ${current_price:.6f}")
-            except Exception as e:
-                print(f"  Position check failed for {symbol}: {e}")
-
-        db.close()
-    except Exception as e:
-        print(f"  Position tracking failed: {e}")
-
-def get_alchemy_token_metadata(mint):
-    """Fetch token metadata from Alchemy — holder count, supply, contract details."""
-    if not ALCHEMY_KEY:
-        return None
+def _get_price(mint):
+    """Real price via Birdeye, or DexScreener when the whole Birdeye pool
+    is cooling — kept as its own function with its own try/except so a
+    failure here is never misattributed to the Helius call below (a real
+    bug: one shared try/except around both calls was reporting every
+    Helius error as a Birdeye rate-limit, corrupting Birdeye's cooldown
+    state for errors it never actually caused)."""
+    if _all_birdeye_cooling():
+        price = _dexscreener_price(mint)
+        if price:
+            print(f"  (Birdeye pool exhausted — used DexScreener fallback for price)")
+            return price
+        # DexScreener has no pair for pre-migration bonding-curve tokens
+        # that haven't hit a DEX yet — falls through to try Birdeye anyway
+        # rather than give up, since a cooling key can still occasionally
+        # succeed (cooldowns aren't perfectly synced across keys).
+    birdeye_key = _birdeye_key()
     try:
         req = urllib.request.Request(
-            f"https://solana-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}/getNFTs?owner={mint}",
-            headers={"accept": "application/json"}
+            f"https://public-api.birdeye.so/defi/price?address={mint}",
+            headers={"X-API-KEY": birdeye_key, "accept": "application/json"}
         )
-        # For token info, use Alchemy's getTokenMetadata endpoint if available
-        # or fall back to DAS (Digital Asset Standard)
-        return json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
-    except:
-        return None
+        price_data = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
+        return float(price_data.get("data", {}).get("value", 0))
+    except urllib.error.HTTPError as e:
+        api_key_pool.report_error("birdeye", birdeye_key, e.code, e.read().decode(errors="ignore")[:200])
+        raise
 
-def check_wallet_positions(wallet_address):
-    """Get current holdings for a wallet via Alchemy."""
-    if not ALCHEMY_KEY:
-        return []
-    try:
-        # Get all token balances for wallet
-        req = urllib.request.Request(
-            f"https://solana-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}/getTokenBalances?address={wallet_address}",
-            headers={"accept": "application/json"}
-        )
-        data = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
-        return data.get("tokenBalances", [])
-    except:
-        return []
-
-def simulate_transaction_alchemy(tx_payload):
-    """Simulate a transaction before execution via Alchemy RPC."""
-    if not ALCHEMY_KEY:
-        return None
-    try:
-        payload = json.dumps({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "simulateTransaction",
-            "params": [tx_payload, {"signers": []}]
-        }).encode()
-        req = urllib.request.Request(
-            ALCHEMY_RPC["solana"],
-            data=payload,
-            headers={"Content-Type": "application/json"}
-        )
-        resp = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
-        return resp.get("result", {})
-    except:
-        return None
-
-def resolve_symbol_to_mint(symbol):
-    """Resolve token symbol (e.g. '$COPE') to mint address.
-    - If symbol is already 44-char base58 mint, return it
-    - Otherwise, search token_wallet_roles table for mint
-    - Fall back to GeckoTerminal API if no DB match
-    """
-    # Quick check: if it looks like a mint (44 chars, base58-ish), use as-is
-    if len(symbol) == 44 and all(c in "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz" for c in symbol):
-        return symbol
-
-    # Query local DB for known mapping
-    try:
-        db = sqlite3.connect(DB)
-        row = db.execute(
-            "SELECT DISTINCT mint FROM token_wallet_roles WHERE LOWER(symbol) = ? LIMIT 1",
-            (symbol.lower(),)
-        ).fetchone()
-        db.close()
-        if row:
-            return row[0]
-    except:
-        pass
-
-    # Fall back to GeckoTerminal search
-    try:
-        req = urllib.request.Request(
-            f"https://api.geckoterminal.com/api/v2/search/pools?query={symbol.upper()}&network=solana",
-            headers={"Accept": "application/json", "User-Agent": "curl/8.0"}
-        )
-        resp = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
-        pools = resp.get("data", [])
-        if pools:
-            base_token_id = pools[0].get("relationships", {}).get("base_token", {}).get("data", {}).get("id", "")
-            if "_" in base_token_id:
-                return base_token_id.split("_", 1)[-1]
-    except:
-        pass
-
-    # No match found
-    return None
 
 def check_degen_filters(mint):
     """Run safety checks before executing a buy."""
-    if not BIRDEYE_KEY:
-        return False, "BIRDEYE_KEY not configured"
-
     try:
-        # Check Birdeye price + volume
-        req = urllib.request.Request(
-            f"https://public-api.birdeye.so/defi/price?address={mint}",
-            headers={"X-API-KEY": BIRDEYE_KEY, "accept": "application/json"}
-        )
-        price_data = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
-        price = float(price_data.get("data", {}).get("value", 0))
-        if price == 0:
-            return False, "No price data — likely dead or unpriced"
+        price = _get_price(mint)
+    except urllib.error.HTTPError as e:
+        return False, f"Price check failed: HTTP {e.code} (Birdeye)"
+    except Exception as e:
+        return False, f"Price check failed: {e}"
 
-        # Check Helius for mint authority
+    if not price:
+        return False, "No price data — likely dead or unpriced"
+
+    helius_key = _helius_key_only()
+    try:
         payload = json.dumps({
             "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
             "params": [mint, {"encoding": "jsonParsed"}]
         }).encode()
         req = urllib.request.Request(
-            f"https://mainnet.helius-rpc.com/?api-key={HELIUS_KEY}",
+            f"https://mainnet.helius-rpc.com/?api-key={helius_key}",
             data=payload, headers={"Content-Type": "application/json"}
         )
         acct_data = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
-        info = acct_data.get("result", {}).get("value", {}).get("data", {}).get("parsed", {}).get("info", {}) or {}
-
-        has_mint_auth = bool(info.get("mintAuthority"))
-        if has_mint_auth:
-            return False, "Mint authority active — can mint unlimited tokens (rug risk)"
-
-        return True, f"Safe — no mint auth, price=${price:.6f}"
+    except urllib.error.HTTPError as e:
+        api_key_pool.report_error("helius", helius_key, e.code, e.read().decode(errors="ignore")[:200])
+        return False, f"Freeze-authority check failed: HTTP {e.code} (Helius)"
     except Exception as e:
-        return False, f"Filter check failed: {e}"
+        return False, f"Freeze-authority check failed: {e}"
+
+    info = acct_data.get("result", {}).get("value", {}).get("data", {}).get("parsed", {}).get("info", {}) or {}
+
+    # Mint authority alone is normal for every pre-migration pump.fun
+    # token (the program itself holds it, not the deployer) — treating
+    # it as a hard block was skipping ~100% of what this bot targets,
+    # same bug found and fixed in degen_alpha_fusion.py's rug_check().
+    # Freeze authority is the actually dangerous primitive.
+    has_freeze_auth = bool(info.get("freezeAuthority"))
+    if has_freeze_auth:
+        return False, "Freeze authority active — holder can freeze buyer wallets (real rug/honeypot risk)"
+
+    return True, f"Safe — no freeze auth, price=${price:.8f}"
+
 
 # ── Main Loop ───────────────────────────────────────────────────────
 def run():
-    print("═══ ares_pumpfun_trader v1 ═══")
-    print(f"  Trade size: {TRADE_AMOUNT_SOL:.3f} SOL (~${TRADE_AMOUNT_SOL*80:.2f})")
-    print(f"  Safety: min vol=${MIN_VOLUME_24H}, max risk={MAX_RISK_SCORE}, no mint auth")
+    print("═══ ares_pumpfun_trader v3 ═══")
+    print(f"  Trade size:  {TRADE_AMOUNT_SOL:.3f} SOL each")
+    print(f"  Daily cap:   {MAX_DAILY_SOL:.2f} SOL")
+    print(f"  Max open:    {MAX_OPEN_POSITIONS} positions")
+    print(f"  Signal sources: {SIGNAL_SOURCES}")
+    print(f"  Wallet setting polled from: {DAEMON_SETTING_URL}")
 
     while True:
         try:
-            # Check open positions for exits (TP/SL)
-            track_open_positions_for_exits()
+            wallet_id = get_wallet_id()  # polled fresh each cycle — UI changes take effect within one cycle
+            if daily_spent_sol() >= MAX_DAILY_SOL:
+                time.sleep(300)
+                continue
+            open_count = open_positions_count()
+            if open_count >= MAX_OPEN_POSITIONS:
+                time.sleep(60)
+                continue
 
             signals = get_pending_signals()
             if signals:
-                print(f"\n  [{time.strftime('%H:%M:%S')}] {len(signals)} pending pumpfun signals")
+                print(f"\n  [{time.strftime('%H:%M:%S')}] {len(signals)} pending pumpfun signals" + ("" if wallet_id else " (no wallet set — execution will be skipped)"))
 
-            for sig in signals:
-                sig_id, symbol, direction, conviction = sig
-
-                if has_been_executed(sig_id):
+            for sig_id, symbol, mint, direction, conviction in signals:
+                executed = has_been_executed(sig_id)
+                if executed:
                     continue
 
-                # Resolve symbol to mint address
-                mint = resolve_symbol_to_mint(symbol)
-                if not mint:
-                    print(f"\n  ⚠️  Could not resolve {symbol} to mint address")
-                    continue
-
-                print(f"\n  Evaluating: {symbol} → {mint[:8]}... (conv={conviction:.2f})")
-
-                # Run degen safety filters
+                print(f"\n  Evaluating: {symbol} ({mint[:8]}…) conv={conviction:.2f}")
                 safe, reason = check_degen_filters(mint)
                 print(f"  Degen check: {'✅' if safe else '❌'} {reason}")
-
                 if not safe:
                     continue
 
-                # Get current price for entry logging (try Alchemy first, then Birdeye)
-                entry_price = 0
-                try:
-                    req = urllib.request.Request(
-                        f"https://solana-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}/getAsset?id={mint}",
-                        headers={"accept": "application/json"}
-                    )
-                    alchemy_data = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
-                    if alchemy_data.get("result", {}).get("token_info"):
-                        entry_price = float(alchemy_data["result"]["token_info"].get("price_info", {}).get("value", 0))
-                except:
-                    pass
+                if not wallet_id:
+                    print(f"  🚫 EXECUTION SKIPPED: no wallet set — pick one in the app (Strategies → daemon settings)")
+                    continue
+                if not is_trading_enabled():
+                    print(f"  🚫 EXECUTION SKIPPED: trading disabled — enable in the app (Trade Execution → daemon toggles)")
+                    continue
 
-                # Fallback to Birdeye if Alchemy lookup failed
-                if entry_price == 0:
-                    try:
-                        req = urllib.request.Request(
-                            f"https://public-api.birdeye.so/defi/price?address={mint}",
-                            headers={"X-API-KEY": BIRDEYE_KEY, "accept": "application/json"}
-                        )
-                        price_data = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
-                        entry_price = float(price_data.get("data", {}).get("value", 0))
-                    except:
-                        entry_price = 0
-
-                # Execute buy
                 print(f"  🚀 EXECUTING: Buy {TRADE_AMOUNT_SOL:.3f} SOL of {symbol}")
-                order_id = create_order(symbol, "buy", conviction, sig_id, mint)
-                if order_id:
-                    print(f"  ✅ Order #{order_id} placed")
-                    log_trade(symbol, mint, "BUY", TRADE_AMOUNT_SOL, entry_price, conviction, sig_id)
-                else:
-                    print(f"  ❌ Order failed")
+                create_and_execute_order(mint, symbol, conviction, sig_id, wallet_id)
 
-            time.sleep(30)  # Check every 30 seconds
+                # Spread checks across the cycle instead of bursting all 5
+                # in under a second — that burst pattern was what exhausted
+                # all 3 Birdeye keys simultaneously every cycle.
+                time.sleep(3)
+
+            time.sleep(30)
 
         except Exception as e:
             print(f"  ⚠️ Loop error: {e}")
             time.sleep(60)
 
+
 if __name__ == "__main__":
-    if "--daemon" in sys.argv:
-        pid = os.fork()
-        if pid > 0:
-            sys.exit(0)
-        os.setsid()
     signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
     run()
