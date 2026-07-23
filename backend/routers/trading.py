@@ -1050,7 +1050,7 @@ async def disable_live_strategy(strategy_id: int, agent: dict = Depends(get_agen
             raise HTTPException(404, "Strategy not found")
         return {"id": strategy_id, "live": False}
 
-SOL_MINT = "So111111111111111111" "11111111111111111112"  # wrapped SOL mint, split to avoid secret-scanner false positive
+SOL_MINT = "So1111111111111111111" "1111111111111111111112"  # wrapped SOL mint, split to avoid secret-scanner false positive
 # ares_rpc_proxy.py (/opt/ares/ares_rpc_proxy.py, systemd: ares-rpc.service) —
 # a dedicated Chainstack Solana endpoint, entirely separate from Helius's
 # quota. Already used by intel.py's chain health check under the same name.

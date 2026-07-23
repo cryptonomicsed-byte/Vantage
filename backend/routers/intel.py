@@ -385,7 +385,7 @@ _sys.path.insert(0, "/opt/ares")
 import api_key_pool as _akp
 from backend import wallet_naming as _wn
 
-_SOL_MINT = "So111111111111111111" "11111111111111111112"  # wrapped SOL mint, split to avoid secret-scanner false positive
+_SOL_MINT = "So1111111111111111111" "1111111111111111111112"  # wrapped SOL mint, split to avoid secret-scanner false positive
 
 async def _dexscreener_token_info(mint: str) -> dict:
     try:
