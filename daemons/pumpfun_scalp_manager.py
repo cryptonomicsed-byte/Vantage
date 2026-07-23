@@ -36,7 +36,6 @@ ENABLED_SETTING_URL = f"{VANTAGE_BASE}/api/trading/daemon-settings/pumpfun_trade
 TOOL_TRADING_KEY = os.environ.get("VANTAGE_TOOL_TRADING_KEY", os.environ.get("VANTAGE_TOOL_TRADING", ""))
 VANTAGE_KEY = open(os.path.expanduser("~/.vantage_key")).read().strip()
 HELIUS_API_KEY = os.environ.get("HELIUS_API_KEY", "")
-CHAINSTACK_PROXY = "http://localhost:9861"
 
 TRADE_AMOUNT_SOL = 0.01
 MAX_DAILY_SOL = 0.3
@@ -81,32 +80,46 @@ def is_trading_enabled() -> bool:
     return _get_setting(ENABLED_SETTING_URL) == "1"
 
 
-def _rpc(method: str, params: list) -> dict:
-    """Chainstack proxy first, Helius fallback -- same redundancy pattern
-    used everywhere else in this codebase for real on-chain reads."""
-    payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-    try:
-        req = urllib.request.Request(
-            f"{CHAINSTACK_PROXY}/api/rpc/solana",
-            data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        body = json.loads(urllib.request.urlopen(req, timeout=8).read().decode())
-        if "result" in body:
-            return body
-    except Exception:
-        pass
-    req = urllib.request.Request(
-        f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}",
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-    return json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
+class RpcCheckFailed(Exception):
+    """Raised when a balance check could not be confirmed either way --
+    callers must NEVER treat this as '0 held'. That exact silent-failure-
+    as-zero bug was already found and fixed once this session in
+    trading.py's execute_live_order; this is the same class of bug and
+    gets the same fix here."""
+
+
+def _rpc_getTokenAccountsByOwner(owner: str, mint: str) -> dict:
+    """Helius only -- Chainstack's current plan hard-rejects this method
+    entirely (-32602 'Method requires plan upgrade'), confirmed live, not
+    a transient error worth retrying there. Helius gets its own retry/
+    backoff since this key is shared across ~10+ daemons on this VPS and
+    routinely 429s under load."""
+    payload = json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner",
+        "params": [owner, {"mint": mint}, {"encoding": "jsonParsed"}],
+    }).encode()
+    last_err = None
+    for attempt in range(4):
+        try:
+            req = urllib.request.Request(
+                f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}",
+                data=payload, headers={"Content-Type": "application/json"},
+            )
+            body = json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
+            if "result" in body:
+                return body
+            last_err = body.get("error")
+        except Exception as e:
+            last_err = e
+        time.sleep(2 * (attempt + 1))
+    raise RpcCheckFailed(f"getTokenAccountsByOwner failed after retries: {last_err}")
 
 
 def get_token_balance(owner: str, mint: str) -> tuple[int, int]:
-    """Returns (base_units_held, decimals). (0, 0) if none found."""
-    body = _rpc("getTokenAccountsByOwner", [owner, {"mint": mint}, {"encoding": "jsonParsed"}])
+    """Returns (base_units_held, decimals). Raises RpcCheckFailed on any
+    real error -- NEVER silently returns (0, 0) for a check that failed,
+    only for a check that genuinely succeeded and found nothing."""
+    body = _rpc_getTokenAccountsByOwner(owner, mint)
     accounts = (body.get("result") or {}).get("value") or []
     held, decimals = 0, 0
     for acc in accounts:
@@ -205,9 +218,33 @@ def try_buy(conn, wallet_id: str, wallet_addr: str):
     if not order_id:
         return
 
-    held, decimals = get_token_balance(wallet_addr, mint)
+    # Money is already spent (order_id above was actually broadcast) -- from
+    # here on we must record SOMETHING no matter what, never silently drop
+    # a real position just because the balance check itself had trouble.
+    try:
+        held, decimals = get_token_balance(wallet_addr, mint)
+    except RpcCheckFailed as e:
+        log(f"    buy broadcast (order #{order_id}) but balance check failed ({e}) -- "
+            f"recording as pending_reconcile instead of losing the position")
+        conn.execute("""
+            INSERT INTO pumpfun_scalp_positions
+                (mint, symbol, wallet_id, status, entry_mcap_usd, entry_sol_spent,
+                 entry_token_base_units, decimals, buy_order_id, notes, last_checked_at)
+            VALUES (?, ?, ?, 'pending_reconcile', ?, ?, 0, 0, ?, ?, datetime('now'))
+        """, (mint, symbol, wallet_id, entry_mcap, TRADE_AMOUNT_SOL, order_id, str(e)[:300]))
+        conn.commit()
+        return
+
     if held <= 0:
-        log(f"    buy tx sent but on-chain balance shows 0 -- not recording a position (settlement lag or failed swap)")
+        log(f"    buy tx sent (order #{order_id}) but confirmed on-chain balance is genuinely 0 -- "
+            f"recording as pending_reconcile (swap may have failed on-chain)")
+        conn.execute("""
+            INSERT INTO pumpfun_scalp_positions
+                (mint, symbol, wallet_id, status, entry_mcap_usd, entry_sol_spent,
+                 entry_token_base_units, decimals, buy_order_id, notes, last_checked_at)
+            VALUES (?, ?, ?, 'pending_reconcile', ?, ?, 0, 0, ?, 'confirmed zero balance after buy', datetime('now'))
+        """, (mint, symbol, wallet_id, entry_mcap, TRADE_AMOUNT_SOL, order_id))
+        conn.commit()
         return
 
     conn.execute("""
@@ -218,6 +255,29 @@ def try_buy(conn, wallet_id: str, wallet_addr: str):
     """, (mint, symbol, wallet_id, entry_mcap, TRADE_AMOUNT_SOL, held, decimals, order_id))
     conn.commit()
     log(f"    position opened: {held} base units ({decimals} dec) at entry mcap ${entry_mcap:.0f}")
+
+
+def reconcile_pending(conn, wallet_addr: str):
+    """Retry balance checks for positions that couldn't be confirmed at
+    buy time -- promotes to a real 'open' position as soon as the check
+    succeeds, instead of leaving real money unmanaged forever."""
+    rows = conn.execute(
+        "SELECT id, mint FROM pumpfun_scalp_positions WHERE status='pending_reconcile'"
+    ).fetchall()
+    for pos_id, mint in rows:
+        try:
+            held, decimals = get_token_balance(wallet_addr, mint)
+        except RpcCheckFailed as e:
+            log(f"  reconcile retry failed for position #{pos_id} ({mint[:8]}...): {e}")
+            continue
+        if held <= 0:
+            continue
+        conn.execute(
+            "UPDATE pumpfun_scalp_positions SET status='open', entry_token_base_units=?, decimals=? WHERE id=?",
+            (held, decimals, pos_id),
+        )
+        conn.commit()
+        log(f"  reconciled position #{pos_id} ({mint[:8]}...): {held} base units ({decimals} dec)")
 
 
 def manage_positions(conn, wallet_addr: str):
@@ -242,7 +302,12 @@ def manage_positions(conn, wallet_addr: str):
 
         # Stop loss -- sell everything actually held right now.
         if pct_gain <= STOP_LOSS_PCT:
-            held, held_decimals = get_token_balance(wallet_addr, mint)
+            try:
+                held, held_decimals = get_token_balance(wallet_addr, mint)
+            except RpcCheckFailed as e:
+                log(f"  STOP LOSS trigger for {symbol} but balance check failed ({e}) -- "
+                    f"retrying next cycle rather than guessing")
+                continue
             if held <= 0:
                 conn.execute(
                     "UPDATE pumpfun_scalp_positions SET status='closed_stop', closed_at=datetime('now') WHERE id=?",
@@ -305,6 +370,7 @@ def run():
 
             conn = db_conn()
             try:
+                reconcile_pending(conn, wallet_addr)
                 manage_positions(conn, wallet_addr)
                 try_buy(conn, wallet_id, wallet_addr)
             finally:
