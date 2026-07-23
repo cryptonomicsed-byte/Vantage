@@ -1,0 +1,18 @@
+[Unit]
+Description=Polymarket Trading Daemon — prediction market orders → Vantage
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/ares/Vantage
+EnvironmentFile=/opt/ares/.env
+ExecStart=/opt/ares/venv/bin/python3 /opt/ares/Vantage/daemons/polymarket_trader.py
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
