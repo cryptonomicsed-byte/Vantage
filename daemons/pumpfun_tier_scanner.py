@@ -71,9 +71,22 @@ def classify_tier(market_cap_usd: float) -> str:
 
 
 async def fetch_sol_usd_price() -> float:
-    """CoinGecko simple price — free, no key. Falls back to the last known
-    value (module-level cache) on any failure rather than blocking the
-    whole scanner on a transient network error."""
+    """Vantage's own multi-source price endpoint first (already has its own
+    fallback chain), then raw CoinGecko as a second-level fallback, then the
+    last known cached value if both fail — never blocks the scanner on a
+    transient network error."""
+    try:
+        req = urllib.request.Request(
+            "http://localhost:8001/api/trading/markets/SOL/price",
+            headers={"User-Agent": "Vantage/1.0"},
+        )
+        data = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
+        price = float(data.get("price", 0) or 0)
+        if price > 0:
+            return price
+    except Exception as e:
+        log(f"  Vantage price endpoint failed, trying CoinGecko: {e}")
+
     try:
         req = urllib.request.Request(
             "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
