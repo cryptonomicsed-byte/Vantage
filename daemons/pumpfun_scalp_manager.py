@@ -305,25 +305,92 @@ def reconcile_pending(conn, wallet_addr: str):
         "SELECT id, mint, buy_tx_hash FROM pumpfun_scalp_positions WHERE status='pending_reconcile'"
     ).fetchall()
     for pos_id, mint, tx_hash in rows:
-        held = decimals = None
-        if tx_hash and tx_hash != "?":
-            amount = get_buy_amount_from_tx(tx_hash, mint, wallet_addr)
-            if amount is not None:
-                held, decimals = amount
-        if held is None:
-            try:
-                held, decimals = get_token_balance(wallet_addr, mint)
-            except RpcCheckFailed as e:
-                log(f"  reconcile retry failed for position #{pos_id} ({mint[:8]}...): {e}")
+        try:
+            held = decimals = None
+            if tx_hash and tx_hash != "?":
+                amount = get_buy_amount_from_tx(tx_hash, mint, wallet_addr)
+                if amount is not None:
+                    held, decimals = amount
+            if held is None:
+                try:
+                    held, decimals = get_token_balance(wallet_addr, mint)
+                except RpcCheckFailed as e:
+                    log(f"  reconcile retry failed for position #{pos_id} ({mint[:8]}...): {e}")
+                    continue
+            if held <= 0:
                 continue
+            conn.execute(
+                "UPDATE pumpfun_scalp_positions SET status='open', entry_token_base_units=?, decimals=? WHERE id=?",
+                (held, decimals, pos_id),
+            )
+            conn.commit()
+            log(f"  reconciled position #{pos_id} ({mint[:8]}...): {held} base units ({decimals} dec)")
+        except Exception as e:
+            log(f"  reconcile of position #{pos_id} ({mint[:8]}...) failed, rolling back: {e}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+
+
+def _manage_one_position(conn, wallet_addr, pos_id, mint, symbol, wallet_id,
+                          entry_mcap, entry_base_units, decimals, t1, t2, t3, status):
+    cur = conn.execute(
+        "SELECT market_cap_usd FROM pumpfun_premigration_tokens WHERE mint=?", (mint,)
+    ).fetchone()
+    if not cur or not cur[0] or not entry_mcap:
+        return  # no live price data this cycle -- never guess, just wait
+    current_mcap = float(cur[0])
+    pct_gain = (current_mcap - entry_mcap) / entry_mcap * 100.0
+
+    conn.execute("UPDATE pumpfun_scalp_positions SET last_checked_at=datetime('now') WHERE id=?", (pos_id,))
+    conn.commit()  # must land even on a quiet cycle where no branch below commits anything else
+
+    # Stop loss -- sell everything actually held right now.
+    if pct_gain <= STOP_LOSS_PCT:
+        try:
+            held, held_decimals = get_token_balance(wallet_addr, mint)
+        except RpcCheckFailed as e:
+            log(f"  STOP LOSS trigger for {symbol} but balance check failed ({e}) -- "
+                f"retrying next cycle rather than guessing")
+            return
         if held <= 0:
+            conn.execute(
+                "UPDATE pumpfun_scalp_positions SET status='closed_stop', closed_at=datetime('now') WHERE id=?",
+                (pos_id,),
+            )
+            conn.commit()
+            return
+        qty = held / (10 ** held_decimals)
+        log(f"  STOP LOSS {symbol} ({mint[:8]}...) {pct_gain:.0f}% -- selling all remaining ({qty:.4f})")
+        sell_order_id, _ = create_and_execute_order(mint, "sell", qty, wallet_id,
+                                      f"Pumpfun scalp STOP LOSS -- {symbol} -- {pct_gain:.0f}%")
+        if sell_order_id:
+            conn.execute(
+                "UPDATE pumpfun_scalp_positions SET status='closed_stop', stopped_out=1, closed_at=datetime('now') WHERE id=?",
+                (pos_id,),
+            )
+            conn.commit()
+        return
+
+    done_flags = {"tranche1_done": t1, "tranche2_done": t2, "tranche3_done": t3}
+    for field, threshold, fraction in TRANCHES:
+        if done_flags[field]:
             continue
-        conn.execute(
-            "UPDATE pumpfun_scalp_positions SET status='open', entry_token_base_units=?, decimals=? WHERE id=?",
-            (held, decimals, pos_id),
-        )
-        conn.commit()
-        log(f"  reconciled position #{pos_id} ({mint[:8]}...): {held} base units ({decimals} dec)")
+        if pct_gain < threshold:
+            break  # tranches are sequential -- can't hit tier 2 logic before tier 1
+        qty = (entry_base_units * fraction) / (10 ** decimals)
+        log(f"  TAKE PROFIT {symbol} ({mint[:8]}...) +{pct_gain:.0f}% >= {threshold:.0f}% -- selling {fraction*100:.0f}% of original ({qty:.4f})")
+        sell_order_id, _ = create_and_execute_order(mint, "sell", qty, wallet_id,
+                                      f"Pumpfun scalp tranche {field} -- {symbol} -- +{pct_gain:.0f}%")
+        if sell_order_id:
+            new_status = "moonbag" if field == "tranche3_done" else status
+            conn.execute(
+                f"UPDATE pumpfun_scalp_positions SET {field}=1, status=? WHERE id=?",
+                (new_status, pos_id),
+            )
+            conn.commit()
+        break  # only ever act on one tranche per cycle per position
 
 
 def manage_positions(conn, wallet_addr: str):
@@ -335,63 +402,19 @@ def manage_positions(conn, wallet_addr: str):
 
     for (pos_id, mint, symbol, wallet_id, entry_mcap, entry_base_units,
          decimals, t1, t2, t3, status) in rows:
-
-        cur = conn.execute(
-            "SELECT market_cap_usd FROM pumpfun_premigration_tokens WHERE mint=?", (mint,)
-        ).fetchone()
-        if not cur or not cur[0] or not entry_mcap:
-            continue  # no live price data this cycle -- never guess, just wait
-        current_mcap = float(cur[0])
-        pct_gain = (current_mcap - entry_mcap) / entry_mcap * 100.0
-
-        conn.execute("UPDATE pumpfun_scalp_positions SET last_checked_at=datetime('now') WHERE id=?", (pos_id,))
-        conn.commit()  # must land even on a quiet cycle where no branch below commits anything else
-
-        # Stop loss -- sell everything actually held right now.
-        if pct_gain <= STOP_LOSS_PCT:
+        try:
+            _manage_one_position(conn, wallet_addr, pos_id, mint, symbol, wallet_id,
+                                  entry_mcap, entry_base_units, decimals, t1, t2, t3, status)
+        except Exception as e:
+            # One position's DB contention or transient error must never
+            # abort evaluation of the rest -- found live: a single failed
+            # commit here silently skipped every other open position for
+            # the whole cycle, delaying real stop-loss/take-profit checks.
+            log(f"  position #{pos_id} ({mint[:8]}...) check failed, rolling back: {e}")
             try:
-                held, held_decimals = get_token_balance(wallet_addr, mint)
-            except RpcCheckFailed as e:
-                log(f"  STOP LOSS trigger for {symbol} but balance check failed ({e}) -- "
-                    f"retrying next cycle rather than guessing")
-                continue
-            if held <= 0:
-                conn.execute(
-                    "UPDATE pumpfun_scalp_positions SET status='closed_stop', closed_at=datetime('now') WHERE id=?",
-                    (pos_id,),
-                )
-                conn.commit()
-                continue
-            qty = held / (10 ** held_decimals)
-            log(f"  STOP LOSS {symbol} ({mint[:8]}...) {pct_gain:.0f}% -- selling all remaining ({qty:.4f})")
-            sell_order_id, _ = create_and_execute_order(mint, "sell", qty, wallet_id,
-                                          f"Pumpfun scalp STOP LOSS -- {symbol} -- {pct_gain:.0f}%")
-            if sell_order_id:
-                conn.execute(
-                    "UPDATE pumpfun_scalp_positions SET status='closed_stop', stopped_out=1, closed_at=datetime('now') WHERE id=?",
-                    (pos_id,),
-                )
-                conn.commit()
-            continue
-
-        done_flags = {"tranche1_done": t1, "tranche2_done": t2, "tranche3_done": t3}
-        for field, threshold, fraction in TRANCHES:
-            if done_flags[field]:
-                continue
-            if pct_gain < threshold:
-                break  # tranches are sequential -- can't hit tier 2 logic before tier 1
-            qty = (entry_base_units * fraction) / (10 ** decimals)
-            log(f"  TAKE PROFIT {symbol} ({mint[:8]}...) +{pct_gain:.0f}% >= {threshold:.0f}% -- selling {fraction*100:.0f}% of original ({qty:.4f})")
-            sell_order_id, _ = create_and_execute_order(mint, "sell", qty, wallet_id,
-                                          f"Pumpfun scalp tranche {field} -- {symbol} -- +{pct_gain:.0f}%")
-            if sell_order_id:
-                new_status = "moonbag" if field == "tranche3_done" else status
-                conn.execute(
-                    f"UPDATE pumpfun_scalp_positions SET {field}=1, status=? WHERE id=?",
-                    (new_status, pos_id),
-                )
-                conn.commit()
-            break  # only ever act on one tranche per cycle per position
+                conn.rollback()
+            except Exception:
+                pass
 
 
 def run():
