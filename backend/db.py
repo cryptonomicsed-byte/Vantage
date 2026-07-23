@@ -1415,6 +1415,7 @@ CREATE TABLE IF NOT EXISTS external_conversations (
                 tranche3_done INTEGER DEFAULT 0,
                 stopped_out INTEGER DEFAULT 0,
                 buy_order_id INTEGER,
+                buy_tx_hash TEXT DEFAULT '',
                 notes TEXT DEFAULT '',
                 opened_at TEXT DEFAULT (datetime('now')),
                 closed_at TEXT,

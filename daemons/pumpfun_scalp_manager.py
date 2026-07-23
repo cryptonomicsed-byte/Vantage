@@ -129,6 +129,39 @@ def get_token_balance(owner: str, mint: str) -> tuple[int, int]:
     return held, decimals
 
 
+CHAINSTACK_PROXY = "http://localhost:9861"
+
+
+def get_buy_amount_from_tx(tx_hash: str, mint: str, owner: str) -> tuple[int, int] | None:
+    """Derive the exact bought amount directly from the buy transaction's
+    own postTokenBalances via Chainstack's getTransaction (works fine on
+    this plan, unlike getTokenAccountsByOwner) -- avoids the shared,
+    heavily-contended Helius key entirely for the common case. Returns
+    None if the tx isn't confirmed yet or the mint/owner aren't in it."""
+    payload = json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "getTransaction",
+        "params": [tx_hash, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}],
+    }).encode()
+    try:
+        req = urllib.request.Request(
+            f"{CHAINSTACK_PROXY}/api/rpc/solana", data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        body = json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
+    except Exception:
+        return None
+    result = body.get("result")
+    if not result:
+        return None  # not confirmed/found yet -- caller should retry later
+    if (result.get("meta") or {}).get("err") is not None:
+        return (0, 0)  # confirmed but the swap itself failed on-chain
+    for bal in (result.get("meta") or {}).get("postTokenBalances") or []:
+        if bal.get("owner") == owner and bal.get("mint") == mint:
+            amt = bal["uiTokenAmount"]
+            return int(amt["amount"]), int(amt["decimals"])
+    return (0, 0)  # confirmed, no error, but owner holds none -- genuinely empty
+
+
 def get_wallet_address(wallet_id: str) -> str:
     conn = db_conn()
     row = conn.execute("SELECT address FROM trading_wallets WHERE id=?", (wallet_id,)).fetchone()
@@ -150,7 +183,7 @@ def create_and_execute_order(mint: str, side: str, quantity: float, wallet_id: s
         order_id = resp.get("id", resp.get("order_id"))
         if not order_id:
             log(f"    order creation failed: {resp}")
-            return None
+            return None, None
         exec_req = urllib.request.Request(
             f"{VANTAGE_BASE}/api/trading/orders/{order_id}/execute-live",
             data=b"", method="POST",
@@ -159,13 +192,13 @@ def create_and_execute_order(mint: str, side: str, quantity: float, wallet_id: s
         exec_resp = json.loads(urllib.request.urlopen(exec_req, timeout=20).read().decode())
         tx_hash = exec_resp.get("tx_hash", "?")
         log(f"    order #{order_id} ({side}) executed -- tx {tx_hash}")
-        return order_id
+        return order_id, tx_hash
     except urllib.error.HTTPError as e:
         log(f"    order/execute failed: HTTP {e.code} {e.read().decode(errors='ignore')[:300]}")
-        return None
+        return None, None
     except Exception as e:
         log(f"    order failed: {e}")
-        return None
+        return None, None
 
 
 def daily_spent_sol(conn) -> float:
@@ -211,7 +244,7 @@ def try_buy(conn, wallet_id: str, wallet_addr: str):
     mint, symbol, entry_mcap, score = candidate
     log(f"  candidate: {symbol} ({mint[:8]}...) mcap=${entry_mcap:.0f} score={score:.1f}")
 
-    order_id = create_and_execute_order(
+    order_id, tx_hash = create_and_execute_order(
         mint, "buy", TRADE_AMOUNT_SOL, wallet_id,
         f"Pumpfun scalp entry -- {symbol} -- score={score:.1f} entry_mcap=${entry_mcap:.0f}",
     )
@@ -220,56 +253,67 @@ def try_buy(conn, wallet_id: str, wallet_addr: str):
 
     # Money is already spent (order_id above was actually broadcast) -- from
     # here on we must record SOMETHING no matter what, never silently drop
-    # a real position just because the balance check itself had trouble.
-    try:
-        held, decimals = get_token_balance(wallet_addr, mint)
-    except RpcCheckFailed as e:
-        log(f"    buy broadcast (order #{order_id}) but balance check failed ({e}) -- "
-            f"recording as pending_reconcile instead of losing the position")
+    # a real position. Prefer deriving the bought amount straight from the
+    # buy tx's own postTokenBalances (Chainstack, uncontended) over a live
+    # balance query (Helius, shared VPS-wide key, easily 429s) -- but the
+    # tx may not be confirmed yet the instant after broadcast, so fall
+    # back to pending_reconcile and let the next cycles retry either way.
+    amount = get_buy_amount_from_tx(tx_hash, mint, wallet_addr) if tx_hash and tx_hash != "?" else None
+    if amount is None:
+        log(f"    buy broadcast (order #{order_id}, tx {tx_hash}) not confirmed yet -- "
+            f"recording as pending_reconcile")
         conn.execute("""
             INSERT INTO pumpfun_scalp_positions
                 (mint, symbol, wallet_id, status, entry_mcap_usd, entry_sol_spent,
-                 entry_token_base_units, decimals, buy_order_id, notes, last_checked_at)
+                 entry_token_base_units, decimals, buy_order_id, buy_tx_hash, last_checked_at)
             VALUES (?, ?, ?, 'pending_reconcile', ?, ?, 0, 0, ?, ?, datetime('now'))
-        """, (mint, symbol, wallet_id, entry_mcap, TRADE_AMOUNT_SOL, order_id, str(e)[:300]))
+        """, (mint, symbol, wallet_id, entry_mcap, TRADE_AMOUNT_SOL, order_id, tx_hash))
         conn.commit()
         return
 
+    held, decimals = amount
     if held <= 0:
-        log(f"    buy tx sent (order #{order_id}) but confirmed on-chain balance is genuinely 0 -- "
-            f"recording as pending_reconcile (swap may have failed on-chain)")
+        log(f"    buy tx confirmed (order #{order_id}) but the swap itself failed or left a 0 balance -- "
+            f"recording as pending_reconcile for a later retry, not discarding")
         conn.execute("""
             INSERT INTO pumpfun_scalp_positions
                 (mint, symbol, wallet_id, status, entry_mcap_usd, entry_sol_spent,
-                 entry_token_base_units, decimals, buy_order_id, notes, last_checked_at)
-            VALUES (?, ?, ?, 'pending_reconcile', ?, ?, 0, 0, ?, 'confirmed zero balance after buy', datetime('now'))
-        """, (mint, symbol, wallet_id, entry_mcap, TRADE_AMOUNT_SOL, order_id))
+                 entry_token_base_units, decimals, buy_order_id, buy_tx_hash, notes, last_checked_at)
+            VALUES (?, ?, ?, 'pending_reconcile', ?, ?, 0, 0, ?, ?, 'confirmed zero balance after buy', datetime('now'))
+        """, (mint, symbol, wallet_id, entry_mcap, TRADE_AMOUNT_SOL, order_id, tx_hash))
         conn.commit()
         return
 
     conn.execute("""
         INSERT INTO pumpfun_scalp_positions
             (mint, symbol, wallet_id, status, entry_mcap_usd, entry_sol_spent,
-             entry_token_base_units, decimals, buy_order_id, last_checked_at)
-        VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, datetime('now'))
-    """, (mint, symbol, wallet_id, entry_mcap, TRADE_AMOUNT_SOL, held, decimals, order_id))
+             entry_token_base_units, decimals, buy_order_id, buy_tx_hash, last_checked_at)
+        VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, datetime('now'))
+    """, (mint, symbol, wallet_id, entry_mcap, TRADE_AMOUNT_SOL, held, decimals, order_id, tx_hash))
     conn.commit()
     log(f"    position opened: {held} base units ({decimals} dec) at entry mcap ${entry_mcap:.0f}")
 
 
 def reconcile_pending(conn, wallet_addr: str):
-    """Retry balance checks for positions that couldn't be confirmed at
-    buy time -- promotes to a real 'open' position as soon as the check
-    succeeds, instead of leaving real money unmanaged forever."""
+    """Retry confirming positions that couldn't be resolved at buy time --
+    promotes to a real 'open' position as soon as the tx confirms (or, if
+    it has no tx_hash on record for some reason, falls back to a live
+    Helius balance check). Never leaves real money unmanaged forever."""
     rows = conn.execute(
-        "SELECT id, mint FROM pumpfun_scalp_positions WHERE status='pending_reconcile'"
+        "SELECT id, mint, buy_tx_hash FROM pumpfun_scalp_positions WHERE status='pending_reconcile'"
     ).fetchall()
-    for pos_id, mint in rows:
-        try:
-            held, decimals = get_token_balance(wallet_addr, mint)
-        except RpcCheckFailed as e:
-            log(f"  reconcile retry failed for position #{pos_id} ({mint[:8]}...): {e}")
-            continue
+    for pos_id, mint, tx_hash in rows:
+        held = decimals = None
+        if tx_hash and tx_hash != "?":
+            amount = get_buy_amount_from_tx(tx_hash, mint, wallet_addr)
+            if amount is not None:
+                held, decimals = amount
+        if held is None:
+            try:
+                held, decimals = get_token_balance(wallet_addr, mint)
+            except RpcCheckFailed as e:
+                log(f"  reconcile retry failed for position #{pos_id} ({mint[:8]}...): {e}")
+                continue
         if held <= 0:
             continue
         conn.execute(
@@ -318,8 +362,9 @@ def manage_positions(conn, wallet_addr: str):
                 continue
             qty = held / (10 ** held_decimals)
             log(f"  STOP LOSS {symbol} ({mint[:8]}...) {pct_gain:.0f}% -- selling all remaining ({qty:.4f})")
-            if create_and_execute_order(mint, "sell", qty, wallet_id,
-                                          f"Pumpfun scalp STOP LOSS -- {symbol} -- {pct_gain:.0f}%"):
+            sell_order_id, _ = create_and_execute_order(mint, "sell", qty, wallet_id,
+                                          f"Pumpfun scalp STOP LOSS -- {symbol} -- {pct_gain:.0f}%")
+            if sell_order_id:
                 conn.execute(
                     "UPDATE pumpfun_scalp_positions SET status='closed_stop', stopped_out=1, closed_at=datetime('now') WHERE id=?",
                     (pos_id,),
@@ -335,8 +380,9 @@ def manage_positions(conn, wallet_addr: str):
                 break  # tranches are sequential -- can't hit tier 2 logic before tier 1
             qty = (entry_base_units * fraction) / (10 ** decimals)
             log(f"  TAKE PROFIT {symbol} ({mint[:8]}...) +{pct_gain:.0f}% >= {threshold:.0f}% -- selling {fraction*100:.0f}% of original ({qty:.4f})")
-            if create_and_execute_order(mint, "sell", qty, wallet_id,
-                                          f"Pumpfun scalp tranche {field} -- {symbol} -- +{pct_gain:.0f}%"):
+            sell_order_id, _ = create_and_execute_order(mint, "sell", qty, wallet_id,
+                                          f"Pumpfun scalp tranche {field} -- {symbol} -- +{pct_gain:.0f}%")
+            if sell_order_id:
                 new_status = "moonbag" if field == "tranche3_done" else status
                 conn.execute(
                     f"UPDATE pumpfun_scalp_positions SET {field}=1, status=? WHERE id=?",
