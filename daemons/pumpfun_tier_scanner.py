@@ -274,6 +274,40 @@ async def run() -> None:
                 await ws.send(json.dumps({"method": "subscribeNewToken"}))
                 await ws.send(json.dumps({"method": "subscribeMigration"}))
                 log("subscribed to new-token + migration events")
+
+                # subscribeTokenTrade only fires once, at the moment a
+                # "create" event for that mint is seen -- it is NOT
+                # remembered by PumpPortal across connections. Every
+                # reconnect (network blip, or this whole process
+                # restarting) silently drops trade updates for every mint
+                # already being tracked unless we explicitly re-subscribe
+                # here. Found live: this caused every currently-held scalp
+                # position's price feed to freeze at its buy-moment value
+                # for hours after a routine restart -- the exit-strategy
+                # was evaluating a stale 0%-gain snapshot the whole time
+                # and could never have fired a stop/take-profit correctly.
+                resub_mints = set()
+                try:
+                    rows = conn.execute(
+                        "SELECT mint FROM pumpfun_premigration_tokens WHERE evicted=0 AND migrated=0"
+                    ).fetchall()
+                    resub_mints.update(r[0] for r in rows)
+                except Exception as e:
+                    log(f"  could not load tier-tracked mints to resubscribe: {e}")
+                try:
+                    rows = conn.execute(
+                        "SELECT DISTINCT mint FROM pumpfun_scalp_positions WHERE status IN ('open','moonbag','pending_reconcile')"
+                    ).fetchall()
+                    resub_mints.update(r[0] for r in rows)
+                except Exception as e:
+                    log(f"  could not load held-position mints to resubscribe: {e}")
+
+                tracked_mints.clear()
+                if resub_mints:
+                    await ws.send(json.dumps({"method": "subscribeTokenTrade", "keys": list(resub_mints)}))
+                    tracked_mints.update(resub_mints)
+                    log(f"  re-subscribed to trade updates for {len(resub_mints)} known mint(s)")
+
                 backoff = 5
                 maint_task = asyncio.create_task(maintenance_loop(ws))
                 try:
