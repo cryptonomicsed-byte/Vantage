@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, Waypoints, ListOrdered, Share2, Flame } from 'lucide-react'
+import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, Waypoints, ListOrdered, Share2, Flame, Brain } from 'lucide-react'
 import Top5Degen from './Top5Degen'
 import MoneyFlowGraph from '../MoneyFlowGraph'
 import { TokenLink, WalletLink } from './EntityProfileCard'
+import AgentIntel from './AgentIntel'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Analytics — the deep-dive lenses behind Trading's default Dashboard tab. These
@@ -796,6 +797,7 @@ const INTEL_TABS = [
   { id: 'health',    label: 'Health',    icon: Activity },
   { id: 'sources',   label: 'Sources',   icon: Database },
   { id: 'intel',     label: 'Raw Intel', icon: BarChart3 },
+  { id: 'agent-intel', label: 'Agent Intel', icon: Brain },
 ]
 
 export default function MarketIntel() {
@@ -825,6 +827,7 @@ export default function MarketIntel() {
       {tab === 'health' && <AresHealth />}
       {tab === 'sources' && <AresSources />}
       {tab === 'intel' && <AresIntel />}
+      {tab === 'agent-intel' && <AgentIntel />}
     </div>
   )
 }
