@@ -2,12 +2,13 @@
 import asyncio
 import hashlib as _hlib
 import hmac
+import json
 import logging
 import time as _time
 from typing import Optional
 
 import aiosqlite
-from fastapi import Header, HTTPException, Request
+from fastapi import Depends, Header, HTTPException, Request
 
 from .config import settings
 from .db import DB_PATH, get_db
@@ -142,6 +143,69 @@ async def get_vault_connector(x_vault_connector_key: Optional[str] = Header(None
         raise HTTPException(status_code=401, detail="Invalid or revoked connector key")
     connector = dict(row)
     return connector
+
+
+# ── Human accounts (separate identity layer, bridged to agents only via
+# scoped agent_grants rows — agents stay sovereign; a human never gets
+# implicit access to an agent just by holding a session) ──────────────────────
+
+async def get_human(x_human_session: Optional[str] = Header(None)) -> dict:
+    """Auth for a logged-in human. Modeled 1:1 on get_agent(): raw session
+    token hashed client-presented-once, only the hash is ever stored/compared.
+    Returns the humans row dict. Does NOT grant any agent access by itself —
+    see require_scope() for that."""
+    if not x_human_session:
+        raise HTTPException(status_code=401, detail="X-Human-Session header required")
+    token_hash = _hlib.sha256(x_human_session.encode()).hexdigest()
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        row = await (await db.execute(
+            """SELECT h.* FROM human_sessions s JOIN humans h ON h.id = s.human_id
+               WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > datetime('now')""",
+            (token_hash,),
+        )).fetchone()
+    if not row:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    return dict(row)
+
+
+async def get_human_optional(x_human_session: Optional[str] = Header(None)) -> Optional[dict]:
+    """Same lookup as get_human() but returns None instead of raising when no
+    session is presented or it's invalid/expired — for endpoints (like genesis
+    spawn) that work both for a raw agent key AND, optionally, a human who's
+    doing the birthing through the UI."""
+    if not x_human_session:
+        return None
+    try:
+        return await get_human(x_human_session)
+    except HTTPException:
+        return None
+
+
+def require_scope(scope: str):
+    """Dependency factory: a human may only act through a specific agent if
+    they hold a live, non-revoked grant on that agent that includes `scope`.
+    Reads agent_id from the path — use on routes shaped .../{agent_id}/...
+    This is the ONLY mechanism by which a human's request is allowed to
+    touch an agent's resources; presenting a valid human session alone is
+    never sufficient."""
+    async def _dep(agent_id: int, human: dict = Depends(get_human)) -> dict:
+        async with get_db() as db:
+            db.row_factory = aiosqlite.Row
+            row = await (await db.execute(
+                "SELECT scopes FROM agent_grants WHERE human_id=? AND agent_id=? AND revoked_at IS NULL",
+                (human["id"], agent_id),
+            )).fetchone()
+        if not row:
+            raise HTTPException(status_code=403, detail=f"No grant on this agent for scope '{scope}'")
+        try:
+            scopes = json.loads(row["scopes"])
+        except Exception:
+            scopes = []
+        if scope not in scopes and "admin_full" not in scopes:
+            raise HTTPException(status_code=403, detail=f"Grant missing scope '{scope}' for this agent")
+        return human
+    return _dep
 
 
 # ── System tool authentication (infrastructure daemons posting signals) ────────

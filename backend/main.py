@@ -582,6 +582,10 @@ from .routers.orchestrator import router as orchestrator_router
 from .routers.collectives import router as collectives_router
 from .routers.genesis import router as genesis_router
 app.include_router(genesis_router)
+from .routers.human_auth import router as human_auth_router
+app.include_router(human_auth_router)
+from .routers.agent_links import router as agent_links_router
+app.include_router(agent_links_router)
 app.include_router(collectives_router)
 app.include_router(orchestrator_router)
 from .routers.memory_enrichment import router as memory_enrichment_router
@@ -600,8 +604,9 @@ app.include_router(pumpfun_router)
 app.include_router(telegram_router)
 from .routers.manifesto import router as manifesto_router
 app.include_router(manifesto_router)
-from .routers.copilot import router as copilot_router
+from .routers.copilot import router as copilot_router, agent_scoped_router as copilot_agent_scoped_router
 app.include_router(copilot_router)
+app.include_router(copilot_agent_scoped_router)
 from .routers.pine import router as pine_router
 app.include_router(pine_router)
 

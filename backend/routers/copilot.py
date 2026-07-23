@@ -7,13 +7,17 @@ from typing import Optional
 import aiosqlite, httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from backend.db import DB_PATH
-from backend.deps import get_agent, _parse_body
+from backend.deps import get_agent, _parse_body, require_scope
 from backend.config import settings
 from backend import market_sources as ms
 from ..db import get_db
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/copilot", tags=["copilot"])
+# Separate router (different prefix) for the human-facing per-agent chat
+# endpoint, which needs to live at /api/agents/{agent_id}/copilot/chat, not
+# nested under /api/copilot.
+agent_scoped_router = APIRouter(prefix="/api/agents", tags=["copilot"])
 ARES = "http://localhost:9861"
 
 # ── Symbol aliases ──
@@ -221,13 +225,16 @@ async def whoami(agent: dict = Depends(get_agent)):
     }
 
 
-# ── Chat endpoint ──
-@router.post("/chat")
-async def copilot_chat(request: Request, agent: dict = Depends(get_agent)):
-    body = await _parse_body(request)
-    text = (body.get("text") or "").strip()
-    if not text:
-        raise HTTPException(400, "text field is required")
+# ── Chat dispatch — shared by an agent's own key and a human acting through
+# a scoped grant on some other agent ──
+async def _dispatch_chat(agent_row: dict, text: str) -> dict:
+    """If the agent has a configured cognition_url, that's meant to be a real
+    LLM/agent brain (e.g. an Omo-Koda2 kernel instance) to route to instead of
+    this regex parser -- NOT wired yet, that integration is coordinated
+    separately (see agents.cognition_url in backend/db.py). Falls through to
+    the existing intent parser either way for now."""
+    if agent_row.get("cognition_url"):
+        pass  # TODO(cross-repo): route to agent_row["cognition_url"] once that contract is agreed
 
     parsed = parse_intent(text)
     action = parsed["action"]
@@ -247,13 +254,42 @@ async def copilot_chat(request: Request, agent: dict = Depends(get_agent)):
     elif action != "unknown":
         target, data = await _handle_intent(action, groups, text)
 
-    result = {
+    return {
         "action": action if action != "unknown" else ("place_trade" if action in ("buy","sell") else action),
         "target": target,
         "data": data,
         "confidence": confidence,
     }
+
+
+# ── Chat endpoint (agent's own key — unchanged) ──
+@router.post("/chat")
+async def copilot_chat(request: Request, agent: dict = Depends(get_agent)):
+    body = await _parse_body(request)
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "text field is required")
+    result = await _dispatch_chat(agent, text)
     return {"query": text, "intent": result}
+
+
+# ── Chat endpoint (human acting through a granted agent) ──
+@agent_scoped_router.post("/{agent_id}/copilot/chat")
+async def copilot_chat_as_human(agent_id: int, request: Request,
+                                 human: dict = Depends(require_scope("copilot_chat"))):
+    body = await _parse_body(request)
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "text field is required")
+
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        agent_row = await (await db.execute("SELECT * FROM agents WHERE id=?", (agent_id,))).fetchone()
+    if not agent_row:
+        raise HTTPException(404, "Agent not found")
+
+    result = await _dispatch_chat(dict(agent_row), text)
+    return {"query": text, "intent": result, "agent_id": agent_id}
 
 # ── Execute endpoint ──
 @router.post("/execute")

@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, Query
 from backend.db import DB_PATH
-from backend.deps import get_agent
+from backend.deps import get_agent, get_human_optional
 from backend.config import settings
 from ..db import get_db
 
@@ -161,11 +161,23 @@ async def _init_genesis_db():
 # ─── 1. AGENT GENESIS — Spawn a child agent ─────────────────────
 
 @router.post("/spawn", summary="Spawn a new child agent from parent")
-async def spawn_agent(data: GenesisRequest, parent: dict = Depends(get_agent)):
+async def spawn_agent(
+    data: GenesisRequest,
+    parent: dict = Depends(get_agent),
+    birthing_human: dict | None = Depends(get_human_optional),
+):
     """
     Any agent can spawn a child agent with a specific purpose, archetype, and skills.
     The child inherits the parent's collective memberships at a reduced weight.
     E2E: input validated, DB written, audit logged, feed published.
+
+    If an X-Human-Session is also presented (a human birthing an agent via the
+    Vantage UI's "Create Agent" flow, using some existing agent as the required
+    parent), the new agent automatically gets installed into that human's
+    Copilot section via a narrow starter grant (copilot_chat + view_state only
+    -- never full access; the human escalates explicitly later, or the agent
+    itself re-scopes it). Purely additive: agent-to-agent spawning with no
+    human session attached is completely unaffected.
     """
     # Validate archetype
     arch = AGENT_ARCHETYPES.get(data.archetype)
@@ -203,14 +215,22 @@ async def spawn_agent(data: GenesisRequest, parent: dict = Depends(get_agent)):
         
         # Register as an agent in Vantage
         try:
-            await db.execute(
+            cur = await db.execute(
                 "INSERT INTO agents (name, api_key, bio) VALUES (?,?,?)",
                 (data.name, key_hash, f"{arch['description']}: {data.purpose[:200]}")
             )
+            new_agent_id = cur.lastrowid
         except aiosqlite.IntegrityError:
             await db.execute("DELETE FROM genesis_lineage WHERE child_name=?", (data.name,))
             raise HTTPException(409, f"Agent name '{data.name}' already taken")
-        
+
+        if birthing_human is not None:
+            await db.execute(
+                """INSERT INTO agent_grants (human_id, agent_id, scopes, granted_by)
+                   VALUES (?, ?, '["copilot_chat","view_state"]', 'birth')""",
+                (birthing_human["id"], new_agent_id),
+            )
+
         await db.commit()
     
     # Log audit
@@ -226,11 +246,13 @@ async def spawn_agent(data: GenesisRequest, parent: dict = Depends(get_agent)):
     return {
         "status": "born",
         "name": data.name,
+        "agent_id": new_agent_id,
         "archetype": data.archetype,
         "generation": gen,
         "skills": all_skills,
         "api_key": api_key,  # Only shown once at birth
         "purpose": data.purpose,
+        "installed_in_copilot": birthing_human is not None,
     }
 
 # ─── 2. AUTO-DISCOVER — Find agents by skill gap ─────────────────

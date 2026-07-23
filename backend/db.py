@@ -278,11 +278,53 @@ async def init_agents_db() -> None:
             ("active_profile", "TEXT DEFAULT ''"),
             ("tier",           "INTEGER DEFAULT 0"),
             ("reputation",     "REAL DEFAULT 0.0"),
+            ("cognition_url",  "TEXT DEFAULT NULL"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")
             except Exception:
                 pass
+        # Human accounts — separate identity layer from agents (dual-auth model).
+        # An agent's X-Agent-Key is unchanged/sovereign; a human links to agents
+        # only via explicit, scoped agent_grants rows below.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS humans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                display_name TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                last_login_at TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS human_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                human_id INTEGER NOT NULL REFERENCES humans(id) ON DELETE CASCADE,
+                token_hash TEXT UNIQUE NOT NULL,
+                created_at TEXT DEFAULT (datetime('now')),
+                expires_at TEXT NOT NULL,
+                revoked_at TEXT
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_human_sessions_human ON human_sessions(human_id)")
+        # Scoped grants — the ONLY bridge letting a human act through an agent.
+        # granted_by: 'birth' (auto, on genesis spawn) | 'link' (human proved
+        # ownership via raw key) | 'agent_explicit' (agent itself re-scoped it).
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS agent_grants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                human_id INTEGER NOT NULL REFERENCES humans(id) ON DELETE CASCADE,
+                agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+                scopes TEXT NOT NULL DEFAULT '[]',
+                granted_by TEXT NOT NULL DEFAULT 'birth',
+                created_at TEXT DEFAULT (datetime('now')),
+                revoked_at TEXT,
+                UNIQUE(human_id, agent_id)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_agent_grants_human ON agent_grants(human_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_agent_grants_agent ON agent_grants(agent_id)")
         # view_events migration
         try:
             await db.execute("ALTER TABLE view_events ADD COLUMN watch_seconds REAL DEFAULT 0")
