@@ -8,11 +8,17 @@ candidates and manages their exits per the owner's exact spec:
     +500% -> sell 10% of the original buy
     remaining 15% -> moonbag, held forever (no further scheduled sells)
 
-Candidates come from pumpfun_premigration_tokens (pumpfun_tier_scanner.py's
-live table) -- real-time market cap already tracked there per trade, so
-that table doubles as this daemon's price feed too (mcap ratio == price
-ratio pre-migration, since token supply is fixed on the bonding curve).
-No separate Birdeye/DexScreener price calls needed for open positions.
+Candidates are discovered via pumpfun_premigration_tokens (pumpfun_tier_scanner.py's
+live table) for tiering/scoring, but PRICE for anything we actually hold
+money in is read directly on-chain every cycle (get_current_mcap_usd) --
+NOT from that table. Found live and the hard way: PumpPortal's per-mint
+trade subscription doesn't survive reconnects, and it also misses trades
+routed through aggregators (GMGN confirmed live) -- so its mcap tracking
+can silently freeze while a position's on-chain price keeps moving. Three
+real positions blew through the -60% stop loss undetected for hours
+before this was caught and fixed. Direct on-chain reads (bonding-curve
+account pre-migration, Jupiter quote post-migration) don't depend on any
+one WebSocket feed's coverage or uptime.
 
 Reuses the exact same wallet + trading-enabled daemon-settings gate the
 owner already armed for ares_pumpfun_trader.py (pumpfun_trader_wallet_id /
@@ -23,11 +29,13 @@ Buys and sells both go through Vantage's own orders API + execute-live,
 exactly like ares_pumpfun_trader.py -- that endpoint already handles
 Jupiter quoting/signing/broadcast with Chainstack+Helius RPC redundancy.
 """
-import time, json, os, sys, signal, urllib.request, urllib.error
+import time, json, os, sys, signal, struct, base64, urllib.request, urllib.error
 
 import sys as _vshim_sys
 _vshim_sys.path.insert(0, "/opt/ares")
 import vantage_db_shim as _vshim
+
+from solders.pubkey import Pubkey
 
 VANTAGE_BASE = os.environ.get("VANTAGE_URL", "http://localhost:8001")
 ORDERS_URL = f"{VANTAGE_BASE}/api/trading/orders"
@@ -49,6 +57,12 @@ TRANCHES = [
     ("tranche3_done", 500.0, 0.10),   # +500% -> sell 10% of original (-> moonbag)
 ]
 STOP_LOSS_PCT = -60.0
+
+PUMP_PROGRAM = Pubkey.from_string("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
+PUMPFUN_TOKEN_DECIMALS = 6  # protocol-fixed for every pump.fun-launched token
+SOL_MINT = "So11111111111111111111111111111111111111112"
+SOL_PRICE_REFRESH_SECONDS = 60
+_sol_price_cache = {"value": 150.0, "updated_at": 0.0}
 
 
 def log(msg: str) -> None:
@@ -132,6 +146,114 @@ def get_token_balance(owner: str, mint: str) -> tuple[int, int]:
 
 
 CHAINSTACK_PROXY = "http://localhost:9861"
+
+
+def fetch_sol_usd_price() -> float:
+    """Vantage's own multi-source price endpoint (has its own fallback
+    chain already), CoinGecko as a second-level fallback, cached value if
+    both fail. Same approach as pumpfun_tier_scanner.py's fetcher."""
+    try:
+        req = urllib.request.Request(
+            "http://localhost:8001/api/trading/markets/SOL/price",
+            headers={"User-Agent": "Vantage/1.0"},
+        )
+        data = json.loads(urllib.request.urlopen(req, timeout=5).read().decode())
+        price = float(data.get("price", 0) or 0)
+        if price > 0:
+            return price
+    except Exception:
+        pass
+    try:
+        req = urllib.request.Request(
+            "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
+            headers={"User-Agent": "Vantage/1.0"},
+        )
+        data = json.loads(urllib.request.urlopen(req, timeout=8).read().decode())
+        price = float(data.get("solana", {}).get("usd", 0))
+        return price if price > 0 else _sol_price_cache["value"]
+    except Exception:
+        return _sol_price_cache["value"]
+
+
+def get_sol_usd_price() -> float:
+    if time.time() - _sol_price_cache["updated_at"] > SOL_PRICE_REFRESH_SECONDS:
+        _sol_price_cache["value"] = fetch_sol_usd_price()
+        _sol_price_cache["updated_at"] = time.time()
+    return _sol_price_cache["value"]
+
+
+def get_bonding_curve_state(mint: str) -> dict | None:
+    """Reads pump.fun's own on-chain bonding-curve account directly --
+    ground truth regardless of whether any WebSocket feed saw the trade
+    that produced it. Returns None if the account doesn't exist (e.g. not
+    a pump.fun-launched mint) or the read fails."""
+    try:
+        mint_pk = Pubkey.from_string(mint)
+        bonding_curve, _ = Pubkey.find_program_address([b"bonding-curve", bytes(mint_pk)], PUMP_PROGRAM)
+        payload = json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+            "params": [str(bonding_curve), {"encoding": "base64"}],
+        }).encode()
+        req = urllib.request.Request(
+            f"{CHAINSTACK_PROXY}/api/rpc/solana", data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        body = json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
+        val = (body.get("result") or {}).get("value")
+        if not val:
+            return None
+        raw = base64.b64decode(val["data"][0])
+        if len(raw) < 8 + 40 + 1:
+            return None
+        vt, vs, rt, rs, supply = struct.unpack_from("<QQQQQ", raw, 8)
+        complete = bool(raw[8 + 40])
+        return {"vt": vt, "vs": vs, "rt": rt, "rs": rs, "supply": supply, "complete": complete}
+    except Exception as e:
+        log(f"    bonding-curve read failed for {mint[:8]}...: {e}")
+        return None
+
+
+def get_jupiter_price_sol(mint: str) -> float | None:
+    """Quote selling 1 whole token (1e6 raw units -- every pump.fun token
+    is 6 decimals) for SOL via Jupiter -- the same aggregator used for
+    real trades, so it reflects whatever AMM the token now actually lives
+    on post-migration. Returns SOL per whole token, or None on failure."""
+    try:
+        req = urllib.request.Request(
+            "https://api.jup.ag/swap/v1/quote"
+            f"?inputMint={mint}&outputMint={SOL_MINT}&amount={10**PUMPFUN_TOKEN_DECIMALS}&slippageBps=300",
+            headers={"User-Agent": "Vantage/1.0"},
+        )
+        data = json.loads(urllib.request.urlopen(req, timeout=8).read().decode())
+        out_amount = int(data.get("outAmount") or 0)
+        return out_amount / 1e9 if out_amount > 0 else None
+    except Exception as e:
+        log(f"    Jupiter price quote failed for {mint[:8]}...: {e}")
+        return None
+
+
+def get_current_mcap_usd(mint: str) -> tuple[float, bool] | None:
+    """Returns (mcap_usd, migrated) using direct on-chain data, or None if
+    it can't be determined this cycle (never guess -- caller should just
+    wait for the next cycle rather than act on a stale/fabricated value).
+    Pre-migration: bonding-curve virtual reserves (mcap ratio == price
+    ratio, since supply is fixed). Post-migration (curve 'complete'):
+    reserves are zeroed by the program, so price comes from a live
+    Jupiter quote against whatever AMM it graduated to instead."""
+    state = get_bonding_curve_state(mint)
+    if state is None:
+        return None
+    sol_usd = get_sol_usd_price()
+    supply_ui = state["supply"] / (10 ** PUMPFUN_TOKEN_DECIMALS)
+    if state["complete"]:
+        price_sol = get_jupiter_price_sol(mint)
+        if price_sol is None:
+            return None
+        return price_sol * supply_ui * sol_usd, True
+    if state["vt"] <= 0:
+        return None
+    mcap_sol = (state["vs"] / state["vt"]) * state["supply"] / 1e9
+    return mcap_sol * sol_usd, False
 
 
 def get_buy_amount_from_tx(tx_hash: str, mint: str, owner: str) -> tuple[int, int] | None:
@@ -243,8 +365,23 @@ def try_buy(conn, wallet_id: str, wallet_addr: str):
     candidate = pick_candidate(conn)
     if not candidate:
         return
-    mint, symbol, entry_mcap, score = candidate
-    log(f"  candidate: {symbol} ({mint[:8]}...) mcap=${entry_mcap:.0f} score={score:.1f}")
+    mint, symbol, stale_mcap, score = candidate
+
+    # The tier table's mcap can be stale or simply wrong for this mint
+    # (PumpPortal reconnect gaps, GMGN-routed trades it never saw) --
+    # verify on-chain, right before spending real money, rather than
+    # trust it blindly. Also skip anything that already migrated: this
+    # strategy targets pre-migration bonding-curve plays specifically.
+    result = get_current_mcap_usd(mint)
+    if result is None:
+        log(f"  candidate {symbol} ({mint[:8]}...) picked but on-chain price check failed -- skipping this cycle")
+        return
+    entry_mcap, migrated = result
+    if migrated:
+        log(f"  candidate {symbol} ({mint[:8]}...) already migrated on-chain -- skipping (not a pre-migration play anymore)")
+        return
+
+    log(f"  candidate: {symbol} ({mint[:8]}...) tier_mcap=${stale_mcap:.0f} onchain_mcap=${entry_mcap:.0f} score={score:.1f}")
 
     order_id, tx_hash = create_and_execute_order(
         mint, "buy", TRADE_AMOUNT_SOL, wallet_id,
@@ -335,12 +472,22 @@ def reconcile_pending(conn, wallet_addr: str):
 
 def _manage_one_position(conn, wallet_addr, pos_id, mint, symbol, wallet_id,
                           entry_mcap, entry_base_units, decimals, t1, t2, t3, status):
-    cur = conn.execute(
-        "SELECT market_cap_usd FROM pumpfun_premigration_tokens WHERE mint=?", (mint,)
-    ).fetchone()
-    if not cur or not cur[0] or not entry_mcap:
-        return  # no live price data this cycle -- never guess, just wait
-    current_mcap = float(cur[0])
+    if not entry_mcap:
+        return
+    result = get_current_mcap_usd(mint)
+    if result is None:
+        return  # couldn't determine current price this cycle -- never guess, just wait
+    current_mcap, migrated = result
+    if migrated:
+        # Best-effort only -- this daemon's own exit logic already uses
+        # get_current_mcap_usd() directly regardless of this flag, but
+        # keeping the tier table's own record in sync helps anything else
+        # reading it (e.g. the /pumpfun/premigration API).
+        try:
+            conn.execute("UPDATE pumpfun_premigration_tokens SET migrated=1 WHERE mint=?", (mint,))
+            conn.commit()
+        except Exception:
+            pass
     pct_gain = (current_mcap - entry_mcap) / entry_mcap * 100.0
 
     conn.execute("UPDATE pumpfun_scalp_positions SET last_checked_at=datetime('now') WHERE id=?", (pos_id,))
