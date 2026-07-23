@@ -1309,14 +1309,23 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent)):
         sig = keypair.sign_message(to_bytes_versioned(tx.message))
         signed_tx = VersionedTransaction.populate(tx.message, [sig])
 
+        # The actual broadcast step — was hitting Helius directly with no
+        # fallback at all, the exact same class of bug already fixed for
+        # the balance checks above, just in the one step that matters most
+        # (a rate-limited balance check merely blocks a trade; a rate-
+        # limited broadcast silently fails a trade that already passed
+        # every check). Confirmed live: a real 0.01 SOL test order got a
+        # valid quote and a signed tx, then failed here with "max usage
+        # reached" — same Helius quota, same failure mode, one call later.
         async with httpx.AsyncClient(timeout=15.0) as client:
-            rpc_r = await client.post(
-                f"https://mainnet.helius-rpc.com/?api-key={helius_key}",
-                json={"jsonrpc": "2.0", "id": 1, "method": "sendTransaction",
-                      "params": [b64encode(bytes(signed_tx)).decode(),
-                                 {"encoding": "base64", "skipPreflight": True, "preflightCommitment": "processed"}]},
+            rpc_result = await _solana_rpc(
+                client, "sendTransaction",
+                [b64encode(bytes(signed_tx)).decode(),
+                 {"encoding": "base64", "skipPreflight": True, "preflightCommitment": "processed"}],
             )
-        rpc_result = rpc_r.json()
+            if "result" not in rpc_result:
+                rpc_err = (rpc_result.get("error") or {}).get("message", "unknown RPC error")
+                raise HTTPException(502, f"Swap broadcast failed (sendTransaction, both RPC providers): {rpc_err}")
     except HTTPException:
         raise
     except Exception as e:
