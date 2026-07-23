@@ -299,6 +299,7 @@ def manage_positions(conn, wallet_addr: str):
         pct_gain = (current_mcap - entry_mcap) / entry_mcap * 100.0
 
         conn.execute("UPDATE pumpfun_scalp_positions SET last_checked_at=datetime('now') WHERE id=?", (pos_id,))
+        conn.commit()  # must land even on a quiet cycle where no branch below commits anything else
 
         # Stop loss -- sell everything actually held right now.
         if pct_gain <= STOP_LOSS_PCT:
