@@ -68,6 +68,7 @@ class OrderCreate(BaseModel):
     signal_id: Optional[int] = None
     strategy_id: Optional[int] = None
     notes: str = ""
+    slippage_bps: Optional[int] = None
 
 class OrderUpdate(BaseModel):
     status: Optional[str] = None
@@ -435,12 +436,12 @@ async def reveal_wallet_key(wallet_id: int, agent: dict = Depends(get_agent)):
 async def create_order(data: OrderCreate, agent: dict = Depends(get_agent)):
     async with get_db() as db:
         cur = await db.execute(
-            """INSERT INTO trading_orders 
-               (agent_id, wallet_id, order_type, side, symbol, chain, quantity, price, trigger_reason, signal_id, strategy_id, notes, status)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            """INSERT INTO trading_orders
+               (agent_id, wallet_id, order_type, side, symbol, chain, quantity, price, trigger_reason, signal_id, strategy_id, notes, slippage_bps, status)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (agent["id"], data.wallet_id, data.order_type, data.side.upper(),
              data.symbol, data.chain, data.quantity, data.price,
-             data.trigger_reason, data.signal_id, data.strategy_id, data.notes, "pending")
+             data.trigger_reason, data.signal_id, data.strategy_id, data.notes, data.slippage_bps, "pending")
         )
         order_id = cur.lastrowid
         await db.commit()
@@ -1298,7 +1299,8 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent)):
         raise HTTPException(422, f"Order quantity resolves to a zero/invalid on-chain amount: {zero_amount_reason}")
 
     try:
-        quote = await _jupiter_quote(input_mint, output_mint, amount_lamports)
+        order_slippage_bps = order["slippage_bps"] if order["slippage_bps"] else 300
+        quote = await _jupiter_quote(input_mint, output_mint, amount_lamports, slippage_bps=order_slippage_bps)
         if quote.get("error"):
             raise HTTPException(422, f"Jupiter quote error: {quote['error']}")
         tx_b64 = await _jupiter_swap_tx(quote, str(keypair.pubkey()))

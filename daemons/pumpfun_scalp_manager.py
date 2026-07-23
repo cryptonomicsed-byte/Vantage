@@ -293,11 +293,17 @@ def get_wallet_address(wallet_id: str) -> str:
     return row[0] if row else ""
 
 
+PUMPFUN_SLIPPAGE_BPS = 1500  # 15% -- found live: two of five real buys reverted on-chain
+                             # (InstructionError Custom 6001, a slippage-exceeded style
+                             # error) at the platform default of 300bps/3%, which is too
+                             # tight for pre-migration bonding-curve tokens this volatile.
+
+
 def create_and_execute_order(mint: str, side: str, quantity: float, wallet_id: str, notes: str):
     payload = json.dumps({
         "symbol": mint, "side": side, "order_type": "market",
         "quantity": quantity, "chain": "solana", "wallet_id": int(wallet_id),
-        "notes": notes,
+        "notes": notes, "slippage_bps": PUMPFUN_SLIPPAGE_BPS,
     }).encode()
     try:
         req = urllib.request.Request(ORDERS_URL, data=payload, headers={

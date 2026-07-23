@@ -1194,6 +1194,10 @@ CREATE TABLE IF NOT EXISTS external_conversations (
             await db.execute("ALTER TABLE trading_orders ADD COLUMN notes TEXT DEFAULT ''")
         except Exception:
             pass
+        try:
+            await db.execute("ALTER TABLE trading_orders ADD COLUMN slippage_bps INTEGER")
+        except Exception:
+            pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS trading_strategies (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
