@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react'
 import { Send, Bot, MessageSquare, TrendingUp, DollarSign, Bell, Navigation, AlertTriangle, X, Loader } from 'lucide-react'
+import { hasHumanSession, getHumanSession, listMyAgents, LinkedAgent } from '../utils/humanSession'
 
 type Message = {
   role: 'user' | 'assistant'
@@ -279,6 +280,15 @@ export default function CopilotChat() {
   const bottomRef = useRef<HTMLDivElement>(null)
   const apiKey = localStorage.getItem('vantage_api_key') || ''
 
+  // If the human is logged in and has agents linked/birthed to their account
+  // (see backend agent_grants), let them pick one to actually talk to instead
+  // of the anonymous viewer identity — this is the "Copilot IS your agent"
+  // door the owner asked for. null = talking as the plain viewer (unchanged
+  // default behavior); otherwise chat routes through the scoped per-agent
+  // endpoint with the human's session, not X-Agent-Key.
+  const [linkedAgents, setLinkedAgents] = useState<LinkedAgent[]>([])
+  const [selectedAgentId, setSelectedAgentId] = useState<number | null>(null)
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
@@ -291,6 +301,13 @@ export default function CopilotChat() {
       .then(d => d && setAgentName(d.agent || ''))
       .catch(() => {})
   }, [apiKey])
+
+  useEffect(() => {
+    if (!hasHumanSession()) return
+    listMyAgents().then(agents => {
+      setLinkedAgents(agents.filter(a => a.scopes.includes('copilot_chat')))
+    })
+  }, [])
 
   async function loadAlerts() {
     if (!apiKey) return
@@ -315,9 +332,18 @@ export default function CopilotChat() {
     }
 
     try {
-      const r = await fetch('/api/copilot/chat', {
+      const url = selectedAgentId != null
+        ? `/api/agents/${selectedAgentId}/copilot/chat`
+        : '/api/copilot/chat'
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (selectedAgentId != null) {
+        headers['X-Human-Session'] = getHumanSession() || ''
+      } else {
+        headers['X-Agent-Key'] = apiKey
+      }
+      const r = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Agent-Key': apiKey },
+        headers,
         body: JSON.stringify({ text: query }),
       })
       if (!r.ok) {
@@ -391,6 +417,25 @@ export default function CopilotChat() {
           </button>
         )}
       </div>
+
+      {linkedAgents.length > 0 && (
+        <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+          <span style={{ color: 'var(--muted)' }}>Talking to:</span>
+          <select
+            value={selectedAgentId ?? ''}
+            onChange={e => setSelectedAgentId(e.target.value === '' ? null : Number(e.target.value))}
+            style={{
+              background: 'rgba(8,8,16,0.6)', border: '1px solid var(--border)', borderRadius: 6,
+              color: 'var(--muted-hi)', fontSize: 12, padding: '4px 8px', fontFamily: 'Inter, sans-serif',
+            }}
+          >
+            <option value="">Myself ({agentName || 'viewer'})</option>
+            {linkedAgents.map(a => (
+              <option key={a.agent_id} value={a.agent_id}>{a.name}</option>
+            ))}
+          </select>
+        </div>
+      )}
 
       {showAlerts && (
         <div className="glass" style={{ marginBottom: 16, padding: 12, maxHeight: 200, overflowY: 'auto' }}>

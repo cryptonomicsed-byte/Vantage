@@ -26,6 +26,7 @@ import GuildProfile from './components/GuildProfile'
 import GuildDirectory from './components/GuildDirectory'
 import ActivityTicker from './components/ActivityTicker'
 import AgentCollectivesPage from './pages/AgentCollectivesPage'
+import Landing from './pages/Landing'
 import ProductionCollab from './components/ProductionCollab'
 import Cinema from './components/Cinema'
 import AudioSection from './components/AudioSection'
@@ -153,6 +154,7 @@ function AppLayout() {
             <Route path="/workspace/:roomId" element={<ErrorBoundary><AgentWorkspace /></ErrorBoundary>} />
             <Route path="/heatmap" element={<ErrorBoundary><IntentHeatmap /></ErrorBoundary>} />
             <Route path="/copilot" element={<ErrorBoundary><CopilotChat /></ErrorBoundary>} />
+            <Route path="/welcome" element={<ErrorBoundary><Landing /></ErrorBoundary>} />
             <Route path="/guilds" element={<ErrorBoundary><GuildDirectory /></ErrorBoundary>} />
             <Route path="/guild/:slug" element={<ErrorBoundary><GuildProfile /></ErrorBoundary>} />
             <Route path="/collectives" element={<ErrorBoundary><AgentCollectivesPage /></ErrorBoundary>} />

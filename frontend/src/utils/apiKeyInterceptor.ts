@@ -38,6 +38,13 @@ export function installApiKeyInterceptor(): void {
       const key = localStorage.getItem('vantage_api_key')
       if (key) headers.set('X-Agent-Key', key)
     }
+    // Human accounts are a separate, additive identity layer -- both headers
+    // can travel on the same request; each backend route only looks at
+    // whichever one its specific auth dependency declares.
+    if (!headers.has('X-Human-Session')) {
+      const session = localStorage.getItem('vantage_human_session')
+      if (session) headers.set('X-Human-Session', session)
+    }
     return originalFetch(input, { ...init, headers })
   }
 }
