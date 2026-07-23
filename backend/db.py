@@ -1357,6 +1357,46 @@ CREATE TABLE IF NOT EXISTS external_conversations (
         await db.execute("CREATE INDEX IF NOT EXISTS idx_wallet_edges_a ON wallet_edges(chain, address_a)")
         await db.commit()
 
+    # ── Pump.fun pre-migration tier scanner ─────────────────────
+    # Live-tracked bonding-curve tokens (pumpfun_tier_scanner.py), not the
+    # post-migration GeckoTerminal-trending tokens degen_alpha_fusion.py/
+    # ogun_multiscan.py track — those can only ever see tokens that already
+    # have a DEX pool, i.e. already migrated, despite both files' own
+    # comments claiming "pre-migration." This table is upstream of that gap:
+    # real-time via PumpPortal's WebSocket, updated on every trade, tiered
+    # by live USD market cap (5-10k / 10-20k / .../ 50-60k) with eviction
+    # rules tuned to how fast pump.fun actually moves (60s of no trades once
+    # a token clears 10k mcap means it's dead; a brand-new sub-10k launch
+    # gets a longer 5-10min grace window since it may not have traded yet).
+    async with get_db() as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS pumpfun_premigration_tokens (
+                mint TEXT PRIMARY KEY,
+                symbol TEXT DEFAULT '',
+                name TEXT DEFAULT '',
+                deployer TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                last_trade_at TEXT DEFAULT (datetime('now')),
+                v_tokens_in_curve REAL DEFAULT 0,
+                v_sol_in_curve REAL DEFAULT 0,
+                market_cap_sol REAL DEFAULT 0,
+                market_cap_usd REAL DEFAULT 0,
+                tier TEXT DEFAULT '',
+                buy_count INTEGER DEFAULT 0,
+                sell_count INTEGER DEFAULT 0,
+                unique_buyers TEXT DEFAULT '[]',
+                unique_sellers TEXT DEFAULT '[]',
+                volume_sol_total REAL DEFAULT 0,
+                score REAL DEFAULT 0,
+                manipulation_flags TEXT DEFAULT '[]',
+                migrated INTEGER DEFAULT 0,
+                evicted INTEGER DEFAULT 0
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_pumpfun_tier ON pumpfun_premigration_tokens(tier, evicted, migrated)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_pumpfun_last_trade ON pumpfun_premigration_tokens(last_trade_at)")
+        await db.commit()
+
     # ── Pine Script library ─────────────────────────────────
     async with get_db() as db:
         await db.execute("""

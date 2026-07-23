@@ -1470,6 +1470,36 @@ DAEMON_SETTING_KEYS = {
     "solana_engine_trading_enabled",
 }
 
+@router.get("/pumpfun/premigration")
+async def pumpfun_premigration_board(agent: dict = Depends(get_agent)):
+    """Live, tiered pre-migration pump.fun board (pumpfun_tier_scanner.py) —
+    real bonding-curve tokens tracked in real time via PumpPortal, not the
+    post-migration GeckoTerminal-trending tokens degen_alpha_fusion.py/
+    ogun_multiscan.py surface. Grouped by USD market-cap tier (5-10k through
+    50-60k), ranked by score within each tier — a manipulation flag doesn't
+    hide a token, it deprioritizes it (score already reflects the penalty),
+    so the caller can still see it and decide.
+    """
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            """SELECT mint, symbol, name, market_cap_usd, tier, buy_count, sell_count,
+                      volume_sol_total, score, manipulation_flags, last_trade_at, created_at
+               FROM pumpfun_premigration_tokens
+               WHERE evicted=0 AND migrated=0 AND tier != ''
+               ORDER BY tier, score DESC"""
+        )).fetchall()
+
+    _tier_labels = ["5-10k", "10-20k", "20-30k", "30-40k", "40-50k", "50-60k"]
+    tiers: dict[str, list] = {label: [] for label in _tier_labels}
+    for r in rows:
+        d = dict(r)
+        d["manipulation_flags"] = json.loads(d["manipulation_flags"] or "[]")
+        tiers.setdefault(d["tier"], []).append(d)
+
+    return {"tiers": tiers, "total_tracked": len(rows)}
+
+
 @router.get("/daemon-settings")
 async def list_daemon_settings(agent: dict = Depends(get_agent)):
     async with get_db() as db:
