@@ -1397,6 +1397,34 @@ CREATE TABLE IF NOT EXISTS external_conversations (
         await db.execute("CREATE INDEX IF NOT EXISTS idx_pumpfun_last_trade ON pumpfun_premigration_tokens(last_trade_at)")
         await db.commit()
 
+    # ── pump.fun scalp exit-strategy positions ───────────────
+    async with get_db() as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS pumpfun_scalp_positions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mint TEXT NOT NULL,
+                symbol TEXT DEFAULT '',
+                wallet_id INTEGER NOT NULL,
+                status TEXT DEFAULT 'open',
+                entry_mcap_usd REAL,
+                entry_sol_spent REAL,
+                entry_token_base_units INTEGER,
+                decimals INTEGER DEFAULT 6,
+                tranche1_done INTEGER DEFAULT 0,
+                tranche2_done INTEGER DEFAULT 0,
+                tranche3_done INTEGER DEFAULT 0,
+                stopped_out INTEGER DEFAULT 0,
+                buy_order_id INTEGER,
+                notes TEXT DEFAULT '',
+                opened_at TEXT DEFAULT (datetime('now')),
+                closed_at TEXT,
+                last_checked_at TEXT
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_scalp_status ON pumpfun_scalp_positions(status)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_scalp_mint ON pumpfun_scalp_positions(mint)")
+        await db.commit()
+
     # ── Pine Script library ─────────────────────────────────
     async with get_db() as db:
         await db.execute("""
