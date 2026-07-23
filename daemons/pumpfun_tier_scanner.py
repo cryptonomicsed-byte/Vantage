@@ -256,10 +256,17 @@ async def run() -> None:
             if time.time() - _sol_price_cache["updated_at"] > SOL_PRICE_REFRESH_SECONDS:
                 _sol_price_cache["value"] = await fetch_sol_usd_price()
                 _sol_price_cache["updated_at"] = time.time()
-            n = sweep_evictions(conn)
-            score_and_flag(conn)
-            if n:
-                log(f"  evicted {n} stale token(s)")
+            try:
+                n = sweep_evictions(conn)
+                score_and_flag(conn)
+                if n:
+                    log(f"  evicted {n} stale token(s)")
+            except Exception as e:
+                log(f"  maintenance sweep failed, rolling back: {e}")
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
 
     while True:
         try:
@@ -280,30 +287,44 @@ async def run() -> None:
                         if not mint:
                             continue
 
-                        if tx_type == "create":
-                            symbol = event.get("symbol") or mint[:8]
-                            name = event.get("name", "")
-                            deployer = event.get("traderPublicKey", "")
-                            v_tokens = float(event.get("vTokensInBondingCurve") or 0)
-                            v_sol = float(event.get("vSolInBondingCurve") or 0)
-                            mcap_sol = float(event.get("marketCapSol") or 0)
-                            upsert_new_token(conn, mint, symbol, name, deployer, v_tokens, v_sol,
-                                              mcap_sol, _sol_price_cache["value"])
-                            if mint not in tracked_mints:
-                                tracked_mints.add(mint)
-                                await ws.send(json.dumps({"method": "subscribeTokenTrade", "keys": [mint]}))
+                        try:
+                            if tx_type == "create":
+                                symbol = event.get("symbol") or mint[:8]
+                                name = event.get("name", "")
+                                deployer = event.get("traderPublicKey", "")
+                                v_tokens = float(event.get("vTokensInBondingCurve") or 0)
+                                v_sol = float(event.get("vSolInBondingCurve") or 0)
+                                mcap_sol = float(event.get("marketCapSol") or 0)
+                                upsert_new_token(conn, mint, symbol, name, deployer, v_tokens, v_sol,
+                                                  mcap_sol, _sol_price_cache["value"])
+                                if mint not in tracked_mints:
+                                    tracked_mints.add(mint)
+                                    await ws.send(json.dumps({"method": "subscribeTokenTrade", "keys": [mint]}))
 
-                        elif tx_type in ("buy", "sell"):
-                            trader = event.get("traderPublicKey", "")
-                            v_tokens = float(event.get("vTokensInBondingCurve") or 0)
-                            v_sol = float(event.get("vSolInBondingCurve") or 0)
-                            mcap_sol = float(event.get("marketCapSol") or 0)
-                            apply_trade(conn, mint, tx_type, trader, v_tokens, v_sol,
-                                        mcap_sol, _sol_price_cache["value"])
+                            elif tx_type in ("buy", "sell"):
+                                trader = event.get("traderPublicKey", "")
+                                v_tokens = float(event.get("vTokensInBondingCurve") or 0)
+                                v_sol = float(event.get("vSolInBondingCurve") or 0)
+                                mcap_sol = float(event.get("marketCapSol") or 0)
+                                apply_trade(conn, mint, tx_type, trader, v_tokens, v_sol,
+                                            mcap_sol, _sol_price_cache["value"])
 
-                        elif "migrat" in tx_type.lower() or event.get("pool") == "migrated":
-                            mark_migrated(conn, mint)
-                            tracked_mints.discard(mint)
+                            elif "migrat" in tx_type.lower() or event.get("pool") == "migrated":
+                                mark_migrated(conn, mint)
+                                tracked_mints.discard(mint)
+                        except Exception as e:
+                            # A write failure (e.g. transient "database is
+                            # locked" from another daemon) must not leave
+                            # this long-lived connection wedged in a
+                            # never-committed transaction forever -- that
+                            # self-inflicted deadlock silently blocked every
+                            # write for hours until the service was
+                            # restarted, discovered live on this VPS.
+                            log(f"  event write failed, rolling back: {e}")
+                            try:
+                                conn.rollback()
+                            except Exception:
+                                pass
                 finally:
                     maint_task.cancel()
         except Exception as e:
