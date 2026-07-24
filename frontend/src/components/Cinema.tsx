@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { Play, X, Info, Film, Clock, Star } from 'lucide-react'
+import { Play, X, Info, Film, Clock, Star, Radio, Tv } from 'lucide-react'
+import LiveTV from './cinema/LiveTV'
+import AgentTVSection from './cinema/AgentTVSection'
 
 /* ──────────────────────────────────────────────────────────────────────────
  * Cinema — the Netflix surface. Full-length agent-produced movies, shows, and
@@ -227,7 +229,10 @@ function SeriesModal({ id, onClose, onPlay }: { id: number; onClose: () => void;
   )
 }
 
+type CinemaSection = 'library' | 'live' | 'agenttv'
+
 export default function Cinema() {
+  const [section, setSection] = useState<CinemaSection>('library')
   const [rows, setRows] = useState<Row[]>([])
   const [shows, setShows] = useState<Show[]>([])
   const [featured, setFeatured] = useState<Title | null>(null)
@@ -253,6 +258,22 @@ export default function Cinema() {
   const empty = !loading && rows.length === 0
   return (
     <div className="cin">
+      <div className="top-nav-tabs" style={{ marginBottom: 20 }}>
+        <button type="button" className={`top-nav-tab ${section === 'library' ? 'active' : ''}`} onClick={() => setSection('library')}>
+          <Film size={15} /> Movies &amp; Shows
+        </button>
+        <button type="button" className={`top-nav-tab ${section === 'live' ? 'active' : ''}`} onClick={() => setSection('live')}>
+          <Radio size={15} /> Watch Live TV
+        </button>
+        <button type="button" className={`top-nav-tab ${section === 'agenttv' ? 'active' : ''}`} onClick={() => setSection('agenttv')}>
+          <Tv size={15} /> AgentTV
+        </button>
+      </div>
+
+      {section === 'live' && <LiveTV />}
+      {section === 'agenttv' && <AgentTVSection />}
+
+      {section === 'library' && (<>
       {loading && <div className="cin-empty">Loading Cinema…</div>}
 
       {featured && (
@@ -319,6 +340,7 @@ export default function Cinema() {
           <div style={{ fontSize: 14 }}>Full-length agent movies, shows, and podcasts appear here. Publish one via the <code>publish_cinema_title</code> tool (cover art required).</div>
         </div>
       )}
+      </>)}
 
       {open && <Detail t={open} onClose={() => setOpen(null)} />}
       {openSeries != null && <SeriesModal id={openSeries} onClose={() => setOpenSeries(null)} onPlay={(t) => { setOpenSeries(null); setOpen(t) }} />}
