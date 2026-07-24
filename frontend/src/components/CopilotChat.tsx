@@ -353,7 +353,12 @@ export default function CopilotChat() {
       const data = await r.json()
       const intent: CopilotIntent = data.intent
       let reply = ''
-      if (intent.action === 'unknown') {
+      if (intent.action === 'chat_reply') {
+        // A real agent brain answered (cognition_url) -- use its actual text
+        // directly instead of the synthesized replies below, which are only
+        // for the regex intent-parser fallback path.
+        reply = intent.data?.reply || ''
+      } else if (intent.action === 'unknown') {
         reply = 'I didn\'t catch that. Try something like "show BTC price" or "go to trading".'
       } else if (intent.action === 'navigate') {
         reply = `Navigating to ${intent.target}…`

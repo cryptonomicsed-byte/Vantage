@@ -227,14 +227,36 @@ async def whoami(agent: dict = Depends(get_agent)):
 
 # ── Chat dispatch — shared by an agent's own key and a human acting through
 # a scoped grant on some other agent ──
-async def _dispatch_chat(agent_row: dict, text: str) -> dict:
-    """If the agent has a configured cognition_url, that's meant to be a real
-    LLM/agent brain (e.g. an Omo-Koda2 kernel instance) to route to instead of
-    this regex parser -- NOT wired yet, that integration is coordinated
-    separately (see agents.cognition_url in backend/db.py). Falls through to
-    the existing intent parser either way for now."""
-    if agent_row.get("cognition_url"):
-        pass  # TODO(cross-repo): route to agent_row["cognition_url"] once that contract is agreed
+async def _dispatch_chat(agent_row: dict, text: str, human_id: Optional[str] = None) -> dict:
+    """If the agent has a configured cognition_url, that's a real agent brain
+    (currently: an Omo-Koda2 kernel instance) to route to instead of the
+    regex parser below -- contract agreed live with the Omo-Koda2 session
+    2026-07-24 (see vault note omokoda-cognition-url-webhook-live-*):
+    POST {agent_name, text, human_id?} with Authorization: Bearer <token>,
+    returns {"reply": "<real text>"}. Falls through to the regex parser on
+    any failure (missing config, network error, non-200) rather than ever
+    raising -- a broken cognition backend should degrade, not break chat."""
+    cognition_url = agent_row.get("cognition_url")
+    if cognition_url:
+        try:
+            headers = {}
+            token = agent_row.get("cognition_auth_token")
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.post(
+                    cognition_url,
+                    json={"agent_name": agent_row.get("name", ""), "text": text, "human_id": human_id},
+                    headers=headers,
+                )
+            if r.status_code == 200:
+                reply = r.json().get("reply")
+                if reply:
+                    return {"action": "chat_reply", "target": agent_row.get("name", ""),
+                            "data": {"reply": reply}, "confidence": 1.0}
+            logger.warning(f"cognition_url returned {r.status_code} for agent {agent_row.get('name')}, falling back to regex parser")
+        except Exception as e:
+            logger.warning(f"cognition_url call failed for agent {agent_row.get('name')}: {e} -- falling back to regex parser")
 
     parsed = parse_intent(text)
     action = parsed["action"]
@@ -288,7 +310,7 @@ async def copilot_chat_as_human(agent_id: int, request: Request,
     if not agent_row:
         raise HTTPException(404, "Agent not found")
 
-    result = await _dispatch_chat(dict(agent_row), text)
+    result = await _dispatch_chat(dict(agent_row), text, human_id=str(human["id"]))
     return {"query": text, "intent": result, "agent_id": agent_id}
 
 # ── Execute endpoint ──

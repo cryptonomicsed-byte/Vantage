@@ -279,6 +279,7 @@ async def init_agents_db() -> None:
             ("tier",           "INTEGER DEFAULT 0"),
             ("reputation",     "REAL DEFAULT 0.0"),
             ("cognition_url",  "TEXT DEFAULT NULL"),
+            ("cognition_auth_token", "TEXT DEFAULT NULL"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")
