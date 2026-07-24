@@ -18,7 +18,11 @@ FRANKENSTREAM_BASE = "http://localhost:3034"
 
 async def _forward(method: str, path: str, **kwargs) -> dict:
     try:
-        async with httpx.AsyncClient(timeout=40.0) as client:
+        # Provider fetches now route through Tor (see franken-stream's own
+        # ares-frankenstream.service config) -- genuinely slower than a
+        # direct connection, confirmed live (~70s for a full multi-provider
+        # search vs ~22s before). 120s gives real margin over that.
+        async with httpx.AsyncClient(timeout=120.0) as client:
             r = await client.request(method, f"{FRANKENSTREAM_BASE}{path}", **kwargs)
             if r.status_code >= 400:
                 detail = r.text
