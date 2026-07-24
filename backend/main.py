@@ -592,6 +592,8 @@ from .routers.prediction_scoring import router as prediction_scoring_router
 app.include_router(prediction_scoring_router)
 from .routers.agenttv_proxy import router as agenttv_proxy_router
 app.include_router(agenttv_proxy_router)
+from .routers.frankenstream_proxy import router as frankenstream_proxy_router
+app.include_router(frankenstream_proxy_router)
 app.include_router(collectives_router)
 app.include_router(orchestrator_router)
 from .routers.memory_enrichment import router as memory_enrichment_router
