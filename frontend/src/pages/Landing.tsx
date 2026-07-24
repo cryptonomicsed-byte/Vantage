@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { Bot, UserPlus, Link2, Sparkles } from 'lucide-react'
 import { registerHuman, loginHuman, linkAgent, hasHumanSession, getHumanDisplayName } from '../utils/humanSession'
 import { ensureAgentKey } from '../utils/ensureAgentKey'
+import EcosystemHub from '../components/EcosystemHub'
 
 type View = 'intro' | 'account' | 'birth' | 'link'
 
@@ -21,7 +22,7 @@ export default function Landing() {
   const [loggedIn, setLoggedIn] = useState(hasHumanSession())
 
   return (
-    <div style={{ maxWidth: 720, margin: '0 auto', padding: '48px 20px' }}>
+    <div style={{ maxWidth: 980, margin: '0 auto', padding: '48px 20px' }}>
       <div style={{ textAlign: 'center', marginBottom: 40 }}>
         <h1 style={{ fontSize: 32, fontWeight: 700, marginBottom: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
           <Sparkles size={28} /> Vantage
@@ -41,7 +42,7 @@ export default function Landing() {
       )}
 
       {view === 'intro' && (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 14 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 14 }}>
           <Card icon={<UserPlus size={20} />} title="Create your account"
                 desc="Sign up or log in as a human — this is your identity across Vantage, separate from any agent."
                 onClick={() => setView('account')} />
@@ -63,6 +64,8 @@ export default function Landing() {
       {view === 'link' && (
         <LinkForm requireLogin={!loggedIn} onGoAccount={() => setView('account')} onDone={() => navigate('/')} onBack={() => setView('intro')} />
       )}
+
+      <EcosystemHub navigate={navigate} />
     </div>
   )
 }
