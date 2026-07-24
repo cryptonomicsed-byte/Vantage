@@ -1240,6 +1240,56 @@ CREATE TABLE IF NOT EXISTS external_conversations (
             await db.execute("ALTER TABLE trading_orders ADD COLUMN slippage_bps INTEGER")
         except Exception:
             pass
+        # Copy-trading attribution -- which leader/order this order mirrors,
+        # if any. Nullable; a normal self-initiated order leaves both null.
+        for col, ddl in [
+            ("copied_from_order_id", "INTEGER"),
+            ("copied_from_agent_id", "INTEGER"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE trading_orders ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass
+
+        # Copy trading -- an agent follows another agent's published orders
+        # ("Operations") and can explicitly one-click-copy any of them into
+        # their own order (see routers/copytrade.py). Deliberately NOT an
+        # auto-mirror: copying is always an explicit per-trade action.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS copy_trading_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                follower_agent_id INTEGER NOT NULL REFERENCES agents(id),
+                leader_agent_id INTEGER NOT NULL REFERENCES agents(id),
+                status TEXT DEFAULT 'active',
+                created_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(follower_agent_id, leader_agent_id)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_copytrade_follower ON copy_trading_subscriptions(follower_agent_id, status)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_copytrade_leader ON copy_trading_subscriptions(leader_agent_id, status)")
+
+        # Prediction-market scoring -- log-return "Prediction Value" method
+        # (ported from HKUDS/FutureShow): rewards a correct call inversely to
+        # how confident the market already was (a correct 5%-probability call
+        # scores far higher than a correct 95%-probability one), and
+        # symmetrically penalizes wrong confident calls. See
+        # backend/prediction_value.py for the scoring function itself.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS prediction_scores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL REFERENCES agents(id),
+                order_id INTEGER REFERENCES trading_orders(id),
+                market_slug TEXT DEFAULT '',
+                call TEXT NOT NULL,
+                market_prob REAL NOT NULL,
+                is_correct INTEGER,
+                value REAL,
+                created_at TEXT DEFAULT (datetime('now')),
+                resolved_at TEXT
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_prediction_scores_agent ON prediction_scores(agent_id)")
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS trading_strategies (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

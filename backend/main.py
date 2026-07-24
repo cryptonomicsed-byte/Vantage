@@ -586,6 +586,10 @@ from .routers.human_auth import router as human_auth_router
 app.include_router(human_auth_router)
 from .routers.agent_links import router as agent_links_router
 app.include_router(agent_links_router)
+from .routers.copytrade import router as copytrade_router
+app.include_router(copytrade_router)
+from .routers.prediction_scoring import router as prediction_scoring_router
+app.include_router(prediction_scoring_router)
 app.include_router(collectives_router)
 app.include_router(orchestrator_router)
 from .routers.memory_enrichment import router as memory_enrichment_router
