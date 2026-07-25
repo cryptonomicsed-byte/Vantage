@@ -52,3 +52,23 @@ async def resolve_embed(request: Request):
     if not url:
         raise HTTPException(422, "url is required")
     return await _forward("POST", "/api/embed", json={"url": url, "base_url": body.get("base_url")})
+
+
+@router.get("/trending")
+async def trending(window: str = "week", media_type: str = "all"):
+    return await _forward("GET", f"/api/trending?window={window}&media_type={media_type}")
+
+
+@router.get("/now-playing")
+async def now_playing():
+    return await _forward("GET", "/api/now-playing")
+
+
+@router.get("/live/countries")
+async def live_countries():
+    return await _forward("GET", "/api/live/countries")
+
+
+@router.get("/live/channels/{country_code}")
+async def live_channels(country_code: str):
+    return await _forward("GET", f"/api/live/channels/{country_code}")
