@@ -50,12 +50,26 @@ def _hkdf_sha256(seed: bytes, salt: bytes, info: bytes, length: int = 32) -> byt
     return okm[:length]
 
 
-def _seed_aes_key(agent_id: int) -> bytes:
+def _seed_aes_key(principal: str) -> bytes:
+    """principal is any stable string identifying whose seed this is --
+    "agent:{id}" for individual agents, "instance:vantage" for the
+    deployment's own identity. One encryption path for both."""
     if not settings.SEED_MASTER_KEY:
         raise RuntimeError(
             "VANTAGE_SEED_MASTER_KEY is not set -- cannot encrypt/decrypt "
-            "agent seeds. Set it in the environment (never in the DB)."
+            "seeds. Set it in the environment (never in the DB)."
         )
+    return _hkdf_sha256(
+        settings.SEED_MASTER_KEY.encode("utf-8"),
+        _SEED_ENC_SALT,
+        f"seed:{principal}".encode("utf-8"),
+        32,
+    )
+
+
+def _legacy_agent_aes_key(agent_id: int) -> bytes:
+    """Pre-refactor key derivation (info="agent-seed:{id}") -- needed only
+    to decrypt+migrate rows written before the principal-string refactor."""
     return _hkdf_sha256(
         settings.SEED_MASTER_KEY.encode("utf-8"),
         _SEED_ENC_SALT,
@@ -64,21 +78,30 @@ def _seed_aes_key(agent_id: int) -> bytes:
     )
 
 
-def _encrypt_seed(agent_id: int, seed: bytes) -> str:
-    key = _seed_aes_key(agent_id)
+def _encrypt_seed(principal: str, seed: bytes) -> str:
+    key = _seed_aes_key(principal)
     nonce = os.urandom(12)
-    ct = AESGCM(key).encrypt(nonce, seed, associated_data=str(agent_id).encode())
+    ct = AESGCM(key).encrypt(nonce, seed, associated_data=principal.encode())
     return base64.b64encode(nonce + ct).decode("ascii")
 
 
-def _decrypt_seed(agent_id: int, enc_b64: str) -> bytes:
-    key = _seed_aes_key(agent_id)
+def _decrypt_seed(principal: str, enc_b64: str, legacy_agent_id: Optional[int] = None) -> bytes:
     raw = base64.b64decode(enc_b64)
     nonce, ct = raw[:12], raw[12:]
-    return AESGCM(key).decrypt(nonce, ct, associated_data=str(agent_id).encode())
+    try:
+        key = _seed_aes_key(principal)
+        return AESGCM(key).decrypt(nonce, ct, associated_data=principal.encode())
+    except Exception:
+        if legacy_agent_id is None:
+            raise
+        # Pre-refactor rows used a different key AND a different
+        # associated_data (str(agent_id), not "agent:{id}").
+        legacy_key = _legacy_agent_aes_key(legacy_agent_id)
+        return AESGCM(legacy_key).decrypt(nonce, ct, associated_data=str(legacy_agent_id).encode())
 
 
 async def get_or_create_sealed_seed(agent_id: int) -> bytes:
+    principal = f"agent:{agent_id}"
     async with get_db() as db:
         cur = await db.execute(
             "SELECT sealed_seed_enc, sealed_seed_hex FROM agents WHERE id = ?", (agent_id,)
@@ -87,14 +110,28 @@ async def get_or_create_sealed_seed(agent_id: int) -> bytes:
         enc, legacy_hex = (row[0], row[1]) if row else (None, None)
 
         if enc:
-            return _decrypt_seed(agent_id, enc)
+            try:
+                key = _seed_aes_key(principal)
+                raw = base64.b64decode(enc)
+                return AESGCM(key).decrypt(raw[:12], raw[12:], associated_data=principal.encode())
+            except Exception:
+                # Pre-refactor row (different key AND associated_data) --
+                # decrypt via the legacy path, then re-encrypt in place so
+                # future reads take the fast path above.
+                seed = _decrypt_seed(principal, enc, legacy_agent_id=agent_id)
+                enc_new = _encrypt_seed(principal, seed)
+                await db.execute(
+                    "UPDATE agents SET sealed_seed_enc = ? WHERE id = ?", (enc_new, agent_id)
+                )
+                await db.commit()
+                return seed
 
         if legacy_hex:
             # One-time migration: encrypt the pre-audit plaintext seed in
             # place (same bytes -> same derived keys -> no identity churn),
             # then clear the plaintext column.
             seed = bytes.fromhex(legacy_hex)
-            enc_new = _encrypt_seed(agent_id, seed)
+            enc_new = _encrypt_seed(principal, seed)
             await db.execute(
                 "UPDATE agents SET sealed_seed_enc = ?, sealed_seed_hex = NULL WHERE id = ?",
                 (enc_new, agent_id),
@@ -103,7 +140,7 @@ async def get_or_create_sealed_seed(agent_id: int) -> bytes:
             return seed
 
         seed = secrets.token_bytes(32)
-        enc_new = _encrypt_seed(agent_id, seed)
+        enc_new = _encrypt_seed(principal, seed)
         await db.execute(
             "UPDATE agents SET sealed_seed_enc = ? WHERE id = ?", (enc_new, agent_id)
         )
@@ -111,12 +148,58 @@ async def get_or_create_sealed_seed(agent_id: int) -> bytes:
         return seed
 
 
+async def get_or_create_instance_seed(instance_slug: str = "vantage") -> bytes:
+    """Same encrypted-seed pattern as agents, but for the deployment's own
+    identity (federation trust, Buzz peer-discovery announcements) --
+    stored in instance_identity, not agents, since this isn't any one
+    agent's key."""
+    principal = f"instance:{instance_slug}"
+    async with get_db() as db:
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS instance_identity ("
+            " slug TEXT PRIMARY KEY, sealed_seed_enc TEXT NOT NULL,"
+            " nostr_pubkey_hex TEXT, created_at TEXT DEFAULT (datetime('now')))"
+        )
+        cur = await db.execute(
+            "SELECT sealed_seed_enc FROM instance_identity WHERE slug = ?", (instance_slug,)
+        )
+        row = await cur.fetchone()
+        if row and row[0]:
+            return _decrypt_seed(principal, row[0])
+
+        seed = secrets.token_bytes(32)
+        enc_new = _encrypt_seed(principal, seed)
+        await db.execute(
+            "INSERT INTO instance_identity (slug, sealed_seed_enc) VALUES (?, ?)",
+            (instance_slug, enc_new),
+        )
+        await db.commit()
+        return seed
+
+
+def _derive_keypair_from_seed(seed: bytes) -> PrivateKey:
+    privkey_bytes = _hkdf_sha256(seed, BUZZ_HKDF_SALT, BUZZ_HKDF_INFO, 32)
+    return PrivateKey(privkey_bytes)
+
+
 async def derive_buzz_keypair(agent_id: int) -> PrivateKey:
     """Returns a coincurve PrivateKey. Use public_key_xonly_hex() for the
     NIP-01 pubkey."""
     seed = await get_or_create_sealed_seed(agent_id)
-    privkey_bytes = _hkdf_sha256(seed, BUZZ_HKDF_SALT, BUZZ_HKDF_INFO, 32)
-    return PrivateKey(privkey_bytes)
+    return _derive_keypair_from_seed(seed)
+
+
+async def derive_instance_keypair(instance_slug: str = "vantage") -> PrivateKey:
+    """The deployment's own Nostr identity -- distinct from any agent's."""
+    seed = await get_or_create_instance_seed(instance_slug)
+    pk = _derive_keypair_from_seed(seed)
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE instance_identity SET nostr_pubkey_hex = ? WHERE slug = ?",
+            (public_key_xonly_hex(pk), instance_slug),
+        )
+        await db.commit()
+    return pk
 
 
 def public_key_xonly_hex(pk: PrivateKey) -> str:
