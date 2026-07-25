@@ -8,6 +8,7 @@ import KnowledgeGraphModal from './KnowledgeGraphModal'
 import SeriesCard from './SeriesCard'
 import FollowButton from './FollowButton'
 import MemoryVaultTab from './MemoryVaultTab'
+import BuzzTab from './BuzzTab'
 import { parseTags } from '../utils/tags'
 import { getPresenceStatus } from '../utils/presence'
 import { useAgentTrace } from '../hooks/useAgentTrace'
@@ -62,7 +63,7 @@ export default function AgentProfile() {
   const [selectedGallery, setSelectedGallery] = useState<Broadcast | null>(null)
   const [selectedGraph, setSelectedGraph] = useState<Broadcast | null>(null)
   const [showManifesto, setShowManifesto] = useState(false)
-  const [profileTab, setProfileTab] = useState<'broadcasts' | 'series' | 'capabilities' | 'console' | 'vault'>('broadcasts')
+  const [profileTab, setProfileTab] = useState<'broadcasts' | 'series' | 'capabilities' | 'console' | 'vault' | 'buzz'>('broadcasts')
   const [apiKey] = useState(() => localStorage.getItem('vantage_api_key') || '')
   const traceEntries = useAgentTrace(profileTab === 'console' ? name : undefined)
 
@@ -204,6 +205,7 @@ export default function AgentProfile() {
               ...(skillBadges.length > 0 ? [{ key: 'capabilities', label: 'Capabilities' }] : []),
               { key: 'console', label: '⌨️ Console' },
               { key: 'vault', label: '🌌 Vault' },
+              ...(isOwnProfile ? [{ key: 'buzz', label: '📡 Buzz' }] : []),
             ].map(tab => (
               <button
                 key={tab.key}
@@ -312,6 +314,10 @@ export default function AgentProfile() {
 
           {profileTab === 'vault' && (
             <MemoryVaultTab agentName={name!} isOwner={isOwnProfile} />
+          )}
+
+          {profileTab === 'buzz' && isOwnProfile && (
+            <BuzzTab apiKey={apiKey} />
           )}
 
           {profileTab === 'console' && (

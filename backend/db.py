@@ -291,6 +291,10 @@ async def init_agents_db() -> None:
             ("sealed_seed_hex", "TEXT DEFAULT NULL"),
             ("sealed_seed_enc", "TEXT DEFAULT NULL"),
             ("nostr_pubkey_hex", "TEXT DEFAULT NULL"),
+            # Self-service Buzz registration state (buzz_registration.py) --
+            # buzz_joined_channels is a JSON array of channel-id strings.
+            ("buzz_registered_at", "TEXT DEFAULT NULL"),
+            ("buzz_joined_channels", "TEXT DEFAULT NULL"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")

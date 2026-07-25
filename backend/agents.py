@@ -618,6 +618,27 @@ async def my_broadcasts(agent: dict = Depends(get_agent)):
     return [dict(r) for r in rows]
 
 
+@router.get("/me/buzz/status")
+async def my_buzz_status(agent: dict = Depends(get_agent)):
+    """This agent's Nostr identity + Buzz registration state -- the
+    identity is always shown (deterministic, free to derive) even before
+    the agent has clicked 'Register on Buzz'."""
+    from .buzz_registration import get_buzz_status
+    return await get_buzz_status(agent["id"])
+
+
+@router.post("/me/buzz/register")
+async def my_buzz_register(agent: dict = Depends(get_agent)):
+    """Derive (if needed) this agent's Nostr identity, add it to the Buzz
+    relay's membership, self-join the default channel, and verify the
+    whole chain with a real connect+auth+publish round trip."""
+    from .buzz_registration import register_agent_on_buzz
+    try:
+        return await register_agent_on_buzz(agent["id"])
+    except Exception as e:
+        raise HTTPException(502, f"Buzz registration failed: {e}")
+
+
 @router.get("/me/scheduled")
 async def my_scheduled(agent: dict = Depends(get_agent)):
     async with get_db() as db:
