@@ -26,6 +26,8 @@ export default function StreamBrowse() {
 
   const [resolving, setResolving] = useState<string | null>(null)
   const [embedUrl, setEmbedUrl] = useState<string | null>(null)
+  const [alternates, setAlternates] = useState<{ provider: string; url: string }[]>([])
+  const [activeProvider, setActiveProvider] = useState<string | null>(null)
   const [nowPlaying, setNowPlaying] = useState<string | null>(null)
   const [error, setError] = useState('')
 
@@ -86,6 +88,8 @@ export default function StreamBrowse() {
     setResolving(item.url)
     setError('')
     setEmbedUrl(null)
+    setAlternates([])
+    setActiveProvider(null)
     try {
       const r = await fetch('/api/cinema/livetv/embed', {
         method: 'POST',
@@ -95,12 +99,19 @@ export default function StreamBrowse() {
       const data = await r.json()
       if (!r.ok || !data.embed_url) { setError('Could not resolve a playable stream for this title -- try another.'); return }
       setEmbedUrl(data.embed_url)
+      setAlternates(data.alternates || [])
+      setActiveProvider((data.alternates && data.alternates[0]?.provider) || null)
       setNowPlaying(item.title)
     } catch {
       setError('Network error resolving stream.')
     } finally {
       setResolving(null)
     }
+  }
+
+  function switchProvider(alt: { provider: string; url: string }) {
+    setEmbedUrl(alt.url)
+    setActiveProvider(alt.provider)
   }
 
   return (
@@ -122,9 +133,25 @@ export default function StreamBrowse() {
 
       {embedUrl && (
         <div style={{ marginBottom: 24, borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)' }}>
-          <iframe src={embedUrl} allowFullScreen style={{ width: '100%', height: 500, border: 'none', background: '#000' }} />
+          <iframe key={embedUrl} src={embedUrl} allowFullScreen style={{ width: '100%', height: 500, border: 'none', background: '#000' }} />
           <div style={{ padding: '8px 14px', background: 'rgba(8,8,16,0.7)', fontSize: 13 }}>
             Now playing: <strong style={{ color: 'var(--purple-bright)' }}>{nowPlaying}</strong>
+            {alternates.length > 1 && (
+              <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 11, color: 'var(--muted)' }}>Player not working? Try:</span>
+                {alternates.map(alt => (
+                  <button
+                    key={alt.provider}
+                    className="btn btn-ghost btn-sm"
+                    disabled={alt.provider === activeProvider}
+                    onClick={() => switchProvider(alt)}
+                    style={{ fontSize: 11, opacity: alt.provider === activeProvider ? 0.5 : 1 }}
+                  >
+                    {alt.provider}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
