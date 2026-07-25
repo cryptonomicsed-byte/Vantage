@@ -27,14 +27,15 @@ import { PosterRow, PosterItem, POSTER_ROW_CSS } from './PosterRow'
 // handlers fire a popup/popunder ad BEFORE any video appears -- confirmed
 // vidlink.pro AND multiembed.mov both do this. Sandboxing (iframe
 // `sandbox` attribute, no allow-popups/allow-top-navigation) fully blocks
-// it, but ALSO breaks vidlink.pro's video entirely (it detects the
-// sandbox attribute's mere presence and refuses to initialize -- true
-// even with every other permission token granted). The other 4 providers
-// never render video either way, so sandboxing them costs nothing and
-// blocks their popups for free. Net: sandbox everything except
-// vidlink.pro, which is deliberately left open as the one provider that
-// actually plays video, accepting its popup risk (mitigated by the
-// beforeunload guard below for the top-navigation variant of that risk).
+// it. vidcore.org (the new default, see franken-stream's tmdb_embed.py)
+// tolerates sandboxing fine -- real video, zero popups, sandboxed or not,
+// confirmed with real force-clicks on the <video> element. vidlink.pro
+// remains the sole exception: it detects the mere presence of a
+// `sandbox` attribute (any token combination) and refuses to initialize
+// its video at all, so it's deliberately left unsandboxed as a fallback,
+// accepting its popup risk (mitigated by the beforeunload guard below
+// for the top-navigation variant of that risk). The other 3 providers
+// never render video either way, so sandboxing them costs nothing.
 const SANDBOXED_EXCEPTIONS = new Set(['vidlink.pro'])
 const SAFE_SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-presentation'
 
