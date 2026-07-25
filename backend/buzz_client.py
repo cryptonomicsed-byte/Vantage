@@ -1,0 +1,101 @@
+"""Minimal Nostr client for Buzz: NIP-01 events + NIP-42 auth, enough to
+connect, authenticate, and publish/subscribe. Stdlib json + websockets +
+coincurve only -- no pynostr dependency."""
+import hashlib
+import json
+import time
+import uuid
+from typing import Optional
+
+import websockets
+from coincurve import PrivateKey
+
+from .buzz_identity import public_key_xonly_hex, sign_event_id
+
+
+def _event_id(pubkey_hex: str, created_at: int, kind: int, tags: list, content: str) -> str:
+    # NIP-01 serialization: [0, pubkey, created_at, kind, tags, content]
+    ser = json.dumps(
+        [0, pubkey_hex, created_at, kind, tags, content],
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(ser.encode("utf-8")).hexdigest()
+
+
+def build_event(pk: PrivateKey, kind: int, content: str, tags: Optional[list] = None) -> dict:
+    pubkey_hex = public_key_xonly_hex(pk)
+    tags = tags or []
+    created_at = int(time.time())
+    eid = _event_id(pubkey_hex, created_at, kind, tags, content)
+    sig_hex = sign_event_id(pk, eid)
+    return {
+        "id": eid,
+        "pubkey": pubkey_hex,
+        "created_at": created_at,
+        "kind": kind,
+        "tags": tags,
+        "content": content,
+        "sig": sig_hex,
+    }
+
+
+class BuzzSession:
+    def __init__(self, relay_ws_url: str, pk: PrivateKey):
+        self.relay_ws_url = relay_ws_url
+        self.pk = pk
+        self.ws = None
+        self.authed = False
+
+    async def connect(self):
+        self.ws = await websockets.connect(self.relay_ws_url, open_timeout=10)
+
+    async def close(self):
+        if self.ws:
+            await self.ws.close()
+
+    async def _recv_json(self, timeout=10):
+        raw = await self.ws.recv()
+        return json.loads(raw)
+
+    async def authenticate(self):
+        """NIP-42: relay proactively sends ["AUTH", <challenge>], client
+        replies ["AUTH", <kind-22242-event-tagged-with-relay+challenge>]."""
+        msg = await self._recv_json()
+        if msg[0] != "AUTH":
+            raise RuntimeError(f"expected proactive AUTH challenge, got: {msg}")
+        challenge = msg[1]
+        auth_event = build_event(
+            self.pk,
+            kind=22242,
+            content="",
+            tags=[["relay", self.relay_ws_url], ["challenge", challenge]],
+        )
+        await self.ws.send(json.dumps(["AUTH", auth_event]))
+        ack = await self._recv_json()
+        # Relay replies ["OK", <event_id>, true/false, <message>]
+        if ack[0] == "OK" and ack[2]:
+            self.authed = True
+            return ack
+        raise RuntimeError(f"NIP-42 auth failed: {ack}")
+
+    async def publish(self, kind: int, content: str, tags: Optional[list] = None) -> dict:
+        event = build_event(self.pk, kind, content, tags)
+        await self.ws.send(json.dumps(["EVENT", event]))
+        ack = await self._recv_json()
+        return {"event": event, "ack": ack}
+
+    async def subscribe(self, filters: list, sub_id: Optional[str] = None) -> str:
+        sub_id = sub_id or uuid.uuid4().hex[:16]
+        await self.ws.send(json.dumps(["REQ", sub_id] + filters))
+        return sub_id
+
+    async def recv_until_eose(self, sub_id: str, max_events=50):
+        events = []
+        while len(events) < max_events:
+            msg = await self._recv_json()
+            if msg[0] == "EVENT" and msg[1] == sub_id:
+                events.append(msg[2])
+            elif msg[0] == "EOSE" and msg[1] == sub_id:
+                break
+        return events
