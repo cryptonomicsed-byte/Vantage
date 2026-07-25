@@ -114,6 +114,20 @@ class Settings(BaseSettings):
     TOOL_SECURITY: str = ""  # security_bridge, strix_runner, atomic_daemon → /api/security/scan-result
     TOOL_INTEL: str = ""     # worldmonitor_bridge, data feeds → /api/intel/signals/ingest
 
+    # Master key for encrypting agents.sealed_seed_enc (Buzz/Nostr identity
+    # seeds) at rest. Lives only in env/secrets-manager, never in the DB --
+    # per-agent AES-256-GCM keys are HKDF-derived from this + agent_id, so a
+    # DB compromise alone (without this env var) cannot recover any seed.
+    # Set via VANTAGE_SEED_MASTER_KEY.
+    SEED_MASTER_KEY: str = ""
+
+    @field_validator("SEED_MASTER_KEY")
+    @classmethod
+    def validate_seed_master_key(cls, v: str) -> str:
+        if v and len(v) < 32:
+            raise ValueError("VANTAGE_SEED_MASTER_KEY must be at least 32 characters if set")
+        return v
+
     @field_validator("TOOL_TRADING", "TOOL_SECURITY", "TOOL_INTEL")
     @classmethod
     def validate_tool_keys(cls, v: str, info) -> str:

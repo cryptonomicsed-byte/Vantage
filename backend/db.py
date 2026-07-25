@@ -282,9 +282,14 @@ async def init_agents_db() -> None:
             ("cognition_auth_token", "TEXT DEFAULT NULL"),
             # Sealed seed for HKDF-derived purpose-specific keys (Buzz/Nostr
             # identity first; same one-seed-many-purposes pattern as
-            # Omo-Koda2's BIPON39). Hex-encoded 32 random bytes, generated
-            # lazily on first use, never derived from api_key.
+            # Omo-Koda2's BIPON39). sealed_seed_hex (plaintext hex) is the
+            # legacy/pre-audit column, kept only so existing rows can be
+            # migrated to the encrypted one; new code must use
+            # sealed_seed_enc (AES-256-GCM, base64 nonce||ciphertext,
+            # key derived from settings.SEED_MASTER_KEY, never stored in
+            # the DB). Never derived from api_key.
             ("sealed_seed_hex", "TEXT DEFAULT NULL"),
+            ("sealed_seed_enc", "TEXT DEFAULT NULL"),
             ("nostr_pubkey_hex", "TEXT DEFAULT NULL"),
         ]:
             try:
