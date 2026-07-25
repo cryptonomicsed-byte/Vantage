@@ -3105,6 +3105,40 @@ async def get_federation_identity():
     return {"pubkey": public_key_xonly_hex(pk), "url": settings.PUBLIC_URL}
 
 
+@router.post("/federation/buzz/announce", tags=["federation"])
+async def trigger_buzz_announce():
+    """Manually (re-)publish this instance's kind:30166 announcement to the
+    Buzz relay -- the gossip loop also does this every 5 min, this is for
+    on-demand triggering (e.g. right after a URL change) without waiting."""
+    from .federation_buzz_discovery import publish_federation_announcement
+    ack = await publish_federation_announcement()
+    return {"ok": True, "relay_ack": ack}
+
+
+@router.post("/federation/buzz/discover", tags=["federation"])
+async def trigger_buzz_discover():
+    """Manually query the Buzz relay for other instances' kind:30166
+    announcements and upsert them as federation_peers."""
+    from .federation_buzz_discovery import discover_peers_via_buzz
+    new_count = await discover_peers_via_buzz()
+    return {"ok": True, "new_peers": new_count}
+
+
+@router.post("/federation/buzz/social-intro", tags=["federation"])
+async def trigger_social_intro(request: Request, x_admin_key: Optional[str] = Header(None)):
+    """Publish a real, human-readable introduction post -- the actual
+    discovery/distribution play (Buzz's own users noticing a real
+    participant). Admin-gated since this is a public broadcast, not
+    routine infra traffic."""
+    if not (settings.ADMIN_KEY and x_admin_key == settings.ADMIN_KEY):
+        raise HTTPException(401, "X-Admin-Key required")
+    body = await _parse_body(request)
+    channel_id = body.get("channel_id")
+    from .federation_buzz_discovery import publish_social_intro
+    ack = await publish_social_intro(channel_id=channel_id)
+    return {"ok": True, "relay_ack": ack}
+
+
 @router.get("/federation/peers")
 async def get_federation_peers():
     """List known Vantage federation peers. Response body is BIP340

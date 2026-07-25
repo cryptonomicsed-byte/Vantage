@@ -413,6 +413,18 @@ async def _federation_gossip_loop():
         except Exception as exc:
             logger.warning("Federation gossip loop error: %s", exc)
 
+        # Nostr-based peer discovery, riding the same Buzz relay used for
+        # agent chat. Best-effort: relay being down/unconfigured must never
+        # break the HTTP-based gossip above, which is the primary mechanism.
+        try:
+            from .federation_buzz_discovery import publish_federation_announcement, discover_peers_via_buzz
+            await publish_federation_announcement()
+            new_via_buzz = await discover_peers_via_buzz()
+            if new_via_buzz:
+                logger.info("Federation: discovered %d new peer(s) via Buzz kind:30166", new_via_buzz)
+        except Exception as exc:
+            logger.debug("Federation Buzz discovery skipped this cycle: %s", exc)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
