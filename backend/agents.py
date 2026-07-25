@@ -3429,16 +3429,26 @@ async def federated_ask(
     }
 
 
-# ── Federated Identity (DID-style challenge/response) ────────────────────────
+# ── Federated Identity (Nostr-signed, self-verifying) ─────────────────────────
+#
+# Replaces the old 3-hop DID-style challenge/response (GET /challenge ->
+# POST /auth -> this instance calling BACK to the claimed origin instance's
+# /verify-identity to ask "is this really your agent?"). That callback hop
+# is unnecessary once an agent has its own Nostr keypair (buzz_identity.py):
+# a BIP340 schnorr signature is self-verifying proof of key ownership, no
+# third party needs to vouch for it. Old endpoints removed outright --
+# zero live traffic (federation was dormant), no deprecation window needed.
+#
+# Shadow agents are now keyed by the Nostr pubkey itself, not a claimed
+# agent_name -- stronger than the old flow, which trusted whatever name
+# string was presented as long as *some* origin instance vouched for it.
 
-@router.get("/federation/challenge", tags=["federation"])
-async def federation_challenge():
-    """
-    Issue a short-lived nonce for cross-instance identity verification.
-    An agent on a remote instance signs this nonce with HMAC-SHA256(api_key_hash, nonce)
-    and submits it to POST /federation/auth.
-    """
-    # Purge expired nonces first
+@router.get("/federation/nostr-challenge", tags=["federation"])
+async def federation_nostr_challenge():
+    """Issue a short-lived nonce. A remote agent signs it with their own
+    Nostr keypair (BIP340 schnorr) and submits the signed event to
+    POST /federation/nostr-auth -- verified locally, no network round trip
+    to any other instance."""
     now = datetime.utcnow()
     expired = [n for n, exp in list(_federation_nonces.items())
                if datetime.fromisoformat(exp) < now]
@@ -3448,56 +3458,68 @@ async def federation_challenge():
     nonce = secrets.token_hex(32)
     expires_at = (now + timedelta(minutes=5)).isoformat() + "Z"
     _federation_nonces[nonce] = expires_at
-    return {"nonce": nonce, "expires_at": expires_at, "algorithm": "HMAC-SHA256"}
+    return {"nonce": nonce, "expires_at": expires_at, "algorithm": "BIP340-schnorr"}
 
 
-@router.post("/federation/auth", tags=["federation"])
-async def federation_auth(request: Request):
+@router.post("/federation/nostr-auth", tags=["federation"])
+async def federation_nostr_auth(request: Request):
     """
-    Authenticate an agent from a remote Vantage instance.
-    Flow:
-      1. Remote agent calls GET /federation/challenge → gets a nonce
-      2. Remote agent computes sig = HMAC-SHA256(SHA256(api_key), nonce)
-      3. This endpoint verifies by asking the peer instance to validate the sig
-      4. On success, creates/upserts a local shadow agent and returns a local API key
+    Verify a remote agent's Nostr-signed proof of identity, entirely
+    locally -- no callback to any other instance.
 
-    Body: { agent_name, peer_instance_url, nonce, signature }
+    Body: { agent_name (display only), peer_instance_url (informational),
+            event: {id, pubkey, created_at, kind, tags, content, sig} }
+    The event must be tagged ["challenge", <nonce>] with a nonce from
+    GET /federation/nostr-challenge, kind 22242 (NIP-42-style auth event,
+    same convention already used for Buzz relay auth).
     """
+    import hashlib as _hl, json as _js
+    from coincurve import PublicKeyXOnly
+
     body = await _parse_body(request)
-    agent_name = str(body.get("agent_name", "")).strip()
+    agent_name = str(body.get("agent_name", ""))[:100].strip()
     peer_url = str(body.get("peer_instance_url", "")).strip().rstrip("/")
-    nonce = str(body.get("nonce", "")).strip()
-    signature = str(body.get("signature", "")).strip()
+    event = body.get("event") or {}
 
-    if not all([agent_name, peer_url, nonce, signature]):
-        raise HTTPException(400, "agent_name, peer_instance_url, nonce and signature are all required")
+    required = ["id", "pubkey", "created_at", "kind", "tags", "content", "sig"]
+    if not all(k in event for k in required):
+        raise HTTPException(400, f"event must include: {', '.join(required)}")
 
-    # Validate nonce exists and is not expired
-    exp_str = _federation_nonces.pop(nonce, None)
+    challenge_tag = next((t[1] for t in event.get("tags", []) if len(t) > 1 and t[0] == "challenge"), None)
+    if not challenge_tag:
+        raise HTTPException(400, "event must have a ['challenge', <nonce>] tag")
+
+    exp_str = _federation_nonces.pop(challenge_tag, None)
     if not exp_str:
-        raise HTTPException(401, "Unknown or expired nonce — call GET /federation/challenge first")
+        raise HTTPException(401, "Unknown or expired nonce — call GET /federation/nostr-challenge first")
     if datetime.fromisoformat(exp_str.rstrip("Z")) < datetime.utcnow():
         raise HTTPException(401, "Nonce has expired")
 
-    # Ask the peer instance to verify the signature
-    try:
-        async with httpx.AsyncClient(timeout=8) as hc:
-            resp = await hc.post(
-                f"{peer_url}/api/agents/federation/verify-identity",
-                json={"agent_name": agent_name, "nonce": nonce, "signature": signature},
-            )
-        if resp.status_code != 200:
-            raise HTTPException(401, f"Peer instance rejected identity: {resp.status_code}")
-        peer_data = resp.json()
-        if not peer_data.get("verified"):
-            raise HTTPException(401, "Peer instance could not verify identity")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(502, f"Could not reach peer instance: {e}")
+    # Recompute the NIP-01 event id from the serialized fields -- this is
+    # what's actually signed, so a mismatch here means either a forged id
+    # or the client hashed something other than what it claims to have sent.
+    ser = _js.dumps(
+        [0, event["pubkey"], event["created_at"], event["kind"], event["tags"], event["content"]],
+        separators=(",", ":"), ensure_ascii=False,
+    )
+    expected_id = _hl.sha256(ser.encode("utf-8")).hexdigest()
+    if expected_id != event["id"]:
+        raise HTTPException(401, "Event id does not match its serialized content")
 
-    # Upsert shadow agent (prefixed name avoids collision with local agents)
-    shadow_name = f"fed:{agent_name}@{peer_url.replace('https://','').replace('http://','')[:40]}"
+    try:
+        xonly = PublicKeyXOnly(bytes.fromhex(event["pubkey"]))
+        sig_ok = xonly.verify(bytes.fromhex(event["sig"]), bytes.fromhex(event["id"]))
+    except Exception:
+        sig_ok = False
+    if not sig_ok:
+        raise HTTPException(401, "Schnorr signature does not verify against the claimed pubkey")
+
+    pubkey = event["pubkey"]
+    # Shadow agent keyed by pubkey, not the claimed name -- the pubkey IS
+    # the identity; agent_name is display-only.
+    shadow_name = f"fed:{pubkey[:16]}"
+    if peer_url:
+        shadow_name += f"@{peer_url.replace('https://','').replace('http://','')[:30]}"
     local_key = secrets.token_hex(24)
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
@@ -3505,52 +3527,23 @@ async def federation_auth(request: Request):
             existing = await cur.fetchone()
         if existing:
             return {
-                "ok": True,
-                "local_agent_name": shadow_name,
-                "local_api_key": existing["api_key"],
-                "federated": True,
-                "peer_instance": peer_url,
+                "ok": True, "local_agent_name": shadow_name, "local_api_key": existing["api_key"],
+                "federated": True, "nostr_pubkey": pubkey, "peer_instance": peer_url or None,
             }
+        bio = f"Federated identity, Nostr pubkey {pubkey}"
+        if agent_name:
+            bio += f" (claims name '{agent_name}')"
+        if peer_url:
+            bio += f", from {peer_url}"
         await db.execute(
-            "INSERT INTO agents (name, api_key, bio) VALUES (?,?,?)",
-            (shadow_name, local_key, f"Federated identity from {peer_url}"),
+            "INSERT INTO agents (name, api_key, bio, nostr_pubkey_hex) VALUES (?,?,?,?)",
+            (shadow_name, local_key, bio, pubkey),
         )
         await db.commit()
     return {
-        "ok": True,
-        "local_agent_name": shadow_name,
-        "local_api_key": local_key,
-        "federated": True,
-        "peer_instance": peer_url,
+        "ok": True, "local_agent_name": shadow_name, "local_api_key": local_key,
+        "federated": True, "nostr_pubkey": pubkey, "peer_instance": peer_url or None,
     }
-
-
-@router.post("/federation/verify-identity", tags=["federation"])
-async def verify_federated_identity(request: Request):
-    """
-    Called by remote instances to verify one of our agents' identity signatures.
-    This is the peer-side handler for the federation auth flow.
-    Body: { agent_name, nonce, signature }
-    """
-    body = await _parse_body(request)
-    agent_name = str(body.get("agent_name", "")).strip()
-    nonce = str(body.get("nonce", "")).strip()
-    signature = str(body.get("signature", "")).strip()
-
-    if not all([agent_name, nonce, signature]):
-        return {"verified": False, "reason": "Missing fields"}
-
-    async with get_db() as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT api_key FROM agents WHERE name=? AND jail_mode=0", (agent_name,)) as cur:
-            row = await cur.fetchone()
-    if not row:
-        return {"verified": False, "reason": "Agent not found"}
-
-    key = _hashlib.sha256(row["api_key"].encode()).hexdigest().encode()
-    expected = _hmac_mod.new(key, nonce.encode(), _hashlib.sha256).hexdigest()
-    verified = _hmac_mod.compare_digest(expected, signature)
-    return {"verified": verified, "agent_name": agent_name}
 
 
 # ── Phase D: In-App Creation Pipeline ────────────────────────────────────────
