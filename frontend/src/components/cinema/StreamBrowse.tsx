@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Search, Loader, Check } from 'lucide-react'
+import { Search, Loader, Check, Maximize2, Minimize2 } from 'lucide-react'
 import { PosterRow, PosterItem, POSTER_ROW_CSS } from './PosterRow'
 
 // "Stream" tab -- Netflix-style browse for movies/TV, backed by TMDB
@@ -7,6 +7,12 @@ import { PosterRow, PosterItem, POSTER_ROW_CSS } from './PosterRow'
 // embed-provider players (vidlink.pro etc) on click. Separate from the
 // "Live TV" tab (iptv-org channels) entirely -- this is on-demand
 // movies/shows, that's linear broadcast TV.
+//
+// Layout: player is pinned in a fixed-height header region; the browse
+// grid below scrolls independently in its own flex child (not
+// position:sticky -- two stacked sticky elements with different top
+// offsets was overlapping/z-fighting). Click the expand icon to enlarge
+// the player without leaving the page.
 //
 // Auto-fallback note: these embed sites return HTTP 200 with real HTML
 // even when the actual video fails to initialize (confirmed live: some
@@ -16,6 +22,21 @@ import { PosterRow, PosterItem, POSTER_ROW_CSS } from './PosterRow'
 // available -- the auto-advance below is a timed rotation through the
 // candidate list, not a real success/failure detector. It stops the
 // moment the user confirms a provider is working, or manually picks one.
+//
+// Per-provider sandbox: live-tested (Playwright) which providers' click
+// handlers fire a popup/popunder ad BEFORE any video appears -- confirmed
+// vidlink.pro AND multiembed.mov both do this. Sandboxing (iframe
+// `sandbox` attribute, no allow-popups/allow-top-navigation) fully blocks
+// it, but ALSO breaks vidlink.pro's video entirely (it detects the
+// sandbox attribute's mere presence and refuses to initialize -- true
+// even with every other permission token granted). The other 4 providers
+// never render video either way, so sandboxing them costs nothing and
+// blocks their popups for free. Net: sandbox everything except
+// vidlink.pro, which is deliberately left open as the one provider that
+// actually plays video, accepting its popup risk (mitigated by the
+// beforeunload guard below for the top-navigation variant of that risk).
+const SANDBOXED_EXCEPTIONS = new Set(['vidlink.pro'])
+const SAFE_SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-presentation'
 
 const AUTO_ADVANCE_MS = 9000
 
@@ -41,6 +62,7 @@ export default function StreamBrowse() {
   const [providerIndex, setProviderIndex] = useState(0)
   const [autoAdvancing, setAutoAdvancing] = useState(false)
   const [nowPlaying, setNowPlaying] = useState<string | null>(null)
+  const [expanded, setExpanded] = useState(false)
   const [error, setError] = useState('')
   const autoTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -51,19 +73,10 @@ export default function StreamBrowse() {
     }
   }, [])
 
-  // Best-effort top-navigation guard: these embed providers can inject a
-  // top-level redirect (window.top.location = ...) as an ad-monetization
-  // hijack. The standard browser defense is the iframe `sandbox` attribute
-  // (without allow-top-navigation/allow-popups) -- tested live and found
-  // it breaks the one provider (vidlink.pro) that actually plays video at
-  // all: EVERY sandbox token combination, including a maximally permissive
-  // one, drops the <video> element entirely (the player detects sandboxing
-  // and refuses to initialize). So sandboxing isn't usable here without
-  // regressing playback. This beforeunload listener is a partial fallback:
-  // it can't stop a window.open() popup (that never fires beforeunload),
-  // but it does intercept an actual top-frame navigation attempt and lets
-  // the user cancel it via the browser's native "leave site?" prompt,
-  // active only while a player is on screen.
+  // Best-effort top-navigation guard for the one unsandboxed provider
+  // (vidlink.pro) -- see module docstring. Can't stop window.open popups
+  // (those don't fire beforeunload), but does intercept a top-frame
+  // navigation hijack via the browser's native "leave site?" prompt.
   useEffect(() => {
     if (!embedUrl) return
     const guard = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = '' }
@@ -178,79 +191,101 @@ export default function StreamBrowse() {
   }
 
   const activeProvider = alternates[providerIndex]?.provider
+  const sandboxAttr = activeProvider && !SANDBOXED_EXCEPTIONS.has(activeProvider) ? SAFE_SANDBOX : undefined
 
   return (
-    <div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
-        <input
-          placeholder="Search movies and shows…"
-          value={query}
-          onChange={e => { setQuery(e.target.value); if (!e.target.value.trim()) setSearchResults(null) }}
-          onKeyDown={e => e.key === 'Enter' && search()}
-          style={{ flex: 1, padding: '10px 14px', background: 'rgba(8,8,16,0.6)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--muted-hi)', fontSize: 14 }}
-        />
-        <button className="btn btn-primary" disabled={searching || !query.trim()} onClick={search}>
-          {searching ? <Loader size={14} className="spin" /> : <Search size={14} />} Search
-        </button>
+    <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 220px)', minHeight: 400 }}>
+      {/* Pinned header: search + player. Does not scroll with the browse grid below. */}
+      <div style={{ flexShrink: 0 }}>
+        <div style={{ display: 'flex', gap: 8, marginBottom: embedUrl ? 12 : 20 }}>
+          <input
+            placeholder="Search movies and shows…"
+            value={query}
+            onChange={e => { setQuery(e.target.value); if (!e.target.value.trim()) setSearchResults(null) }}
+            onKeyDown={e => e.key === 'Enter' && search()}
+            style={{ flex: 1, padding: '10px 14px', background: 'rgba(8,8,16,0.6)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--muted-hi)', fontSize: 14 }}
+          />
+          <button className="btn btn-primary" disabled={searching || !query.trim()} onClick={search}>
+            {searching ? <Loader size={14} className="spin" /> : <Search size={14} />} Search
+          </button>
+        </div>
+
+        {error && <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>{error}</p>}
+
+        {embedUrl && (
+          <div style={{ marginBottom: 16, borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)', boxShadow: '0 8px 24px rgba(0,0,0,0.4)' }}>
+            <div style={{ position: 'relative' }}>
+              <iframe
+                key={embedUrl}
+                src={embedUrl}
+                allowFullScreen
+                sandbox={sandboxAttr}
+                style={{ width: '100%', height: expanded ? '70vh' : 260, border: 'none', background: '#000', display: 'block', transition: 'height 0.2s ease' }}
+              />
+              <button
+                onClick={() => setExpanded(e => !e)}
+                title={expanded ? 'Collapse player' : 'Expand player'}
+                style={{ position: 'absolute', top: 8, right: 8, background: 'rgba(0,0,0,0.6)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 6, padding: 6, cursor: 'pointer', color: '#fff', display: 'flex' }}
+              >
+                {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+              </button>
+            </div>
+            <div style={{ padding: '8px 14px', background: 'rgba(8,8,16,0.85)', fontSize: 13 }}>
+              Now playing: <strong style={{ color: 'var(--purple-bright)' }}>{nowPlaying}</strong>
+              {alternates.length > 1 && (
+                <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  {autoAdvancing ? (
+                    <>
+                      <Loader size={11} className="spin" />
+                      <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+                        Trying {activeProvider}… auto-switching if this doesn't play
+                      </span>
+                      <button className="btn btn-primary btn-sm" onClick={keepThisOne} style={{ fontSize: 11 }}>
+                        <Check size={11} /> This works, keep it
+                      </button>
+                    </>
+                  ) : (
+                    <span style={{ fontSize: 11, color: 'var(--muted)' }}>Not working? Try:</span>
+                  )}
+                  {alternates.map((alt, i) => (
+                    <button
+                      key={alt.provider}
+                      className="btn btn-ghost btn-sm"
+                      disabled={i === providerIndex && !autoAdvancing}
+                      onClick={() => switchProvider(i)}
+                      style={{ fontSize: 11, opacity: i === providerIndex ? (autoAdvancing ? 1 : 0.5) : 1 }}
+                    >
+                      {alt.provider}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
-      {error && <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>{error}</p>}
-
-      {embedUrl && (
-        <div style={{ marginBottom: 24, borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)', position: 'sticky', top: 16, zIndex: 20, background: 'var(--bg, #0a0a12)', boxShadow: '0 8px 24px rgba(0,0,0,0.5)' }}>
-          <iframe key={embedUrl} src={embedUrl} allowFullScreen style={{ width: '100%', height: 500, border: 'none', background: '#000' }} />
-          <div style={{ padding: '8px 14px', background: 'rgba(8,8,16,0.85)', fontSize: 13 }}>
-            Now playing: <strong style={{ color: 'var(--purple-bright)' }}>{nowPlaying}</strong>
-            {alternates.length > 1 && (
-              <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                {autoAdvancing ? (
-                  <>
-                    <Loader size={11} className="spin" />
-                    <span style={{ fontSize: 11, color: 'var(--muted)' }}>
-                      Trying {activeProvider}… auto-switching if this doesn't play
-                    </span>
-                    <button className="btn btn-primary btn-sm" onClick={keepThisOne} style={{ fontSize: 11 }}>
-                      <Check size={11} /> This works, keep it
-                    </button>
-                  </>
-                ) : (
-                  <span style={{ fontSize: 11, color: 'var(--muted)' }}>Not working? Try:</span>
-                )}
-                {alternates.map((alt, i) => (
-                  <button
-                    key={alt.provider}
-                    className="btn btn-ghost btn-sm"
-                    disabled={i === providerIndex && !autoAdvancing}
-                    onClick={() => switchProvider(i)}
-                    style={{ fontSize: 11, opacity: i === providerIndex ? (autoAdvancing ? 1 : 0.5) : 1 }}
-                  >
-                    {alt.provider}
-                  </button>
-                ))}
-              </div>
+      {/* Independently scrolling browse region -- player above stays put. */}
+      <div style={{ flex: 1, overflowY: 'auto', paddingRight: 4 }}>
+        {searchResults !== null ? (
+          <PosterRow title={`Search results for "${query}"`} items={searchResults} resolvingUrl={resolving} onSelect={watch} />
+        ) : (
+          <>
+            {loading && <p style={{ fontSize: 13, color: 'var(--muted)' }}><Loader size={14} className="spin" /> Loading…</p>}
+            {!loading && trending.length === 0 && (
+              <p style={{ fontSize: 13, color: 'var(--muted)' }}>
+                No data -- TMDB may be unreachable right now.
+              </p>
             )}
-          </div>
-        </div>
-      )}
-
-      {searchResults !== null ? (
-        <PosterRow title={`Search results for "${query}"`} items={searchResults} resolvingUrl={resolving} onSelect={watch} />
-      ) : (
-        <>
-          {loading && <p style={{ fontSize: 13, color: 'var(--muted)' }}><Loader size={14} className="spin" /> Loading…</p>}
-          {!loading && trending.length === 0 && (
-            <p style={{ fontSize: 13, color: 'var(--muted)' }}>
-              No data -- TMDB may be unreachable right now.
-            </p>
-          )}
-          <PosterRow title="Trending This Week" items={trending} resolvingUrl={resolving} onSelect={watch} />
-          <PosterRow title="New Releases" items={newReleases} resolvingUrl={resolving} onSelect={watch} />
-          <PosterRow title="Coming Soon" items={upcoming} resolvingUrl={resolving} onSelect={watch} />
-          {genres.map(g => (
-            <PosterRow key={g.id} title={g.name} items={genreRows[g.id] || []} resolvingUrl={resolving} onSelect={watch} />
-          ))}
-        </>
-      )}
+            <PosterRow title="Trending This Week" items={trending} resolvingUrl={resolving} onSelect={watch} />
+            <PosterRow title="New Releases" items={newReleases} resolvingUrl={resolving} onSelect={watch} />
+            <PosterRow title="Coming Soon" items={upcoming} resolvingUrl={resolving} onSelect={watch} />
+            {genres.map(g => (
+              <PosterRow key={g.id} title={g.name} items={genreRows[g.id] || []} resolvingUrl={resolving} onSelect={watch} />
+            ))}
+          </>
+        )}
+      </div>
     </div>
   )
 }
