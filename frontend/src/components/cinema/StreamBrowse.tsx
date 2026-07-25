@@ -1,12 +1,23 @@
-import React, { useState, useEffect } from 'react'
-import { Search, Loader } from 'lucide-react'
+import React, { useState, useEffect, useRef } from 'react'
+import { Search, Loader, Check } from 'lucide-react'
 import { PosterRow, PosterItem, POSTER_ROW_CSS } from './PosterRow'
 
 // "Stream" tab -- Netflix-style browse for movies/TV, backed by TMDB
 // (search/trending/now_playing/upcoming/discover-by-genre) resolved to
-// embed-provider players (vidsrc.to etc) on click. Separate from the
+// embed-provider players (vidlink.pro etc) on click. Separate from the
 // "Live TV" tab (iptv-org channels) entirely -- this is on-demand
 // movies/shows, that's linear broadcast TV.
+//
+// Auto-fallback note: these embed sites return HTTP 200 with real HTML
+// even when the actual video fails to initialize (confirmed live: some
+// run anti-automation JS that swaps in a fake page client-side, after
+// load). Cross-origin iframes can't be inspected from parent JS (same-
+// origin policy), so there is no reliable "did it actually play" signal
+// available -- the auto-advance below is a timed rotation through the
+// candidate list, not a real success/failure detector. It stops the
+// moment the user confirms a provider is working, or manually picks one.
+
+const AUTO_ADVANCE_MS = 9000
 
 interface Genre { id: number; name: string }
 
@@ -27,9 +38,11 @@ export default function StreamBrowse() {
   const [resolving, setResolving] = useState<string | null>(null)
   const [embedUrl, setEmbedUrl] = useState<string | null>(null)
   const [alternates, setAlternates] = useState<{ provider: string; url: string }[]>([])
-  const [activeProvider, setActiveProvider] = useState<string | null>(null)
+  const [providerIndex, setProviderIndex] = useState(0)
+  const [autoAdvancing, setAutoAdvancing] = useState(false)
   const [nowPlaying, setNowPlaying] = useState<string | null>(null)
   const [error, setError] = useState('')
+  const autoTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     if (!document.getElementById(STYLE_ID)) {
@@ -37,6 +50,26 @@ export default function StreamBrowse() {
       document.head.appendChild(el)
     }
   }, [])
+
+  // Best-effort top-navigation guard: these embed providers can inject a
+  // top-level redirect (window.top.location = ...) as an ad-monetization
+  // hijack. The standard browser defense is the iframe `sandbox` attribute
+  // (without allow-top-navigation/allow-popups) -- tested live and found
+  // it breaks the one provider (vidlink.pro) that actually plays video at
+  // all: EVERY sandbox token combination, including a maximally permissive
+  // one, drops the <video> element entirely (the player detects sandboxing
+  // and refuses to initialize). So sandboxing isn't usable here without
+  // regressing playback. This beforeunload listener is a partial fallback:
+  // it can't stop a window.open() popup (that never fires beforeunload),
+  // but it does intercept an actual top-frame navigation attempt and lets
+  // the user cancel it via the browser's native "leave site?" prompt,
+  // active only while a player is on screen.
+  useEffect(() => {
+    if (!embedUrl) return
+    const guard = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = '' }
+    window.addEventListener('beforeunload', guard)
+    return () => window.removeEventListener('beforeunload', guard)
+  }, [embedUrl])
 
   useEffect(() => {
     Promise.all([
@@ -61,6 +94,26 @@ export default function StreamBrowse() {
         .catch(() => {})
     })
   }, [genres])
+
+  // Auto-advance: while enabled, silently rotate to the next candidate
+  // provider on a timer. Clears itself once the user locks in a provider
+  // or manually switches (both set autoAdvancing=false).
+  useEffect(() => {
+    if (autoTimer.current) clearTimeout(autoTimer.current)
+    if (!autoAdvancing || alternates.length === 0) return
+    autoTimer.current = setTimeout(() => {
+      setProviderIndex(i => {
+        const next = i + 1
+        if (next >= alternates.length) {
+          setAutoAdvancing(false) // exhausted the list, stop silently
+          return i
+        }
+        setEmbedUrl(alternates[next].url)
+        return next
+      })
+    }, AUTO_ADVANCE_MS)
+    return () => { if (autoTimer.current) clearTimeout(autoTimer.current) }
+  }, [autoAdvancing, providerIndex, alternates])
 
   async function search() {
     if (!query.trim() || searching) return
@@ -89,7 +142,8 @@ export default function StreamBrowse() {
     setError('')
     setEmbedUrl(null)
     setAlternates([])
-    setActiveProvider(null)
+    setProviderIndex(0)
+    setAutoAdvancing(false)
     try {
       const r = await fetch('/api/cinema/livetv/embed', {
         method: 'POST',
@@ -100,8 +154,12 @@ export default function StreamBrowse() {
       if (!r.ok || !data.embed_url) { setError('Could not resolve a playable stream for this title -- try another.'); return }
       setEmbedUrl(data.embed_url)
       setAlternates(data.alternates || [])
-      setActiveProvider((data.alternates && data.alternates[0]?.provider) || null)
+      setProviderIndex(0)
       setNowPlaying(item.title)
+      // Start auto-rotating in the background if there's more than one
+      // candidate -- see the module docstring for why this is a timed
+      // rotation, not a real failure detector.
+      setAutoAdvancing((data.alternates || []).length > 1)
     } catch {
       setError('Network error resolving stream.')
     } finally {
@@ -109,10 +167,17 @@ export default function StreamBrowse() {
     }
   }
 
-  function switchProvider(alt: { provider: string; url: string }) {
-    setEmbedUrl(alt.url)
-    setActiveProvider(alt.provider)
+  function switchProvider(index: number) {
+    setAutoAdvancing(false)
+    setProviderIndex(index)
+    setEmbedUrl(alternates[index].url)
   }
+
+  function keepThisOne() {
+    setAutoAdvancing(false)
+  }
+
+  const activeProvider = alternates[providerIndex]?.provider
 
   return (
     <div>
@@ -132,20 +197,32 @@ export default function StreamBrowse() {
       {error && <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>{error}</p>}
 
       {embedUrl && (
-        <div style={{ marginBottom: 24, borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)' }}>
+        <div style={{ marginBottom: 24, borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)', position: 'sticky', top: 16, zIndex: 20, background: 'var(--bg, #0a0a12)', boxShadow: '0 8px 24px rgba(0,0,0,0.5)' }}>
           <iframe key={embedUrl} src={embedUrl} allowFullScreen style={{ width: '100%', height: 500, border: 'none', background: '#000' }} />
-          <div style={{ padding: '8px 14px', background: 'rgba(8,8,16,0.7)', fontSize: 13 }}>
+          <div style={{ padding: '8px 14px', background: 'rgba(8,8,16,0.85)', fontSize: 13 }}>
             Now playing: <strong style={{ color: 'var(--purple-bright)' }}>{nowPlaying}</strong>
             {alternates.length > 1 && (
               <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                <span style={{ fontSize: 11, color: 'var(--muted)' }}>Player not working? Try:</span>
-                {alternates.map(alt => (
+                {autoAdvancing ? (
+                  <>
+                    <Loader size={11} className="spin" />
+                    <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+                      Trying {activeProvider}… auto-switching if this doesn't play
+                    </span>
+                    <button className="btn btn-primary btn-sm" onClick={keepThisOne} style={{ fontSize: 11 }}>
+                      <Check size={11} /> This works, keep it
+                    </button>
+                  </>
+                ) : (
+                  <span style={{ fontSize: 11, color: 'var(--muted)' }}>Not working? Try:</span>
+                )}
+                {alternates.map((alt, i) => (
                   <button
                     key={alt.provider}
                     className="btn btn-ghost btn-sm"
-                    disabled={alt.provider === activeProvider}
-                    onClick={() => switchProvider(alt)}
-                    style={{ fontSize: 11, opacity: alt.provider === activeProvider ? 0.5 : 1 }}
+                    disabled={i === providerIndex && !autoAdvancing}
+                    onClick={() => switchProvider(i)}
+                    style={{ fontSize: 11, opacity: i === providerIndex ? (autoAdvancing ? 1 : 0.5) : 1 }}
                   >
                     {alt.provider}
                   </button>

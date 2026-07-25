@@ -5,7 +5,11 @@ import Hls from 'hls.js'
 // "Live TV" tab -- pure iptv-org channel browser (real HLS, zero
 // scraping), separate from the "Stream" tab (on-demand movies/TV via
 // TMDB+embed providers). Channels grouped by iptv-org's own `group`
-// metadata (Movies/News/Sports/etc), grid layout with logos, TV-app style.
+// metadata (Movies/News/Sports/etc -- some channels carry compound
+// groups like "Documentary;News", split into individual categories
+// below), grid layout with logos, TV-app style. Category nav is sticky
+// so jumping between sections doesn't require re-scrolling past a long
+// flat list.
 
 interface Country { name: string; code: string; flag: string }
 interface Channel { title: string; url: string; group: string; logo: string }
@@ -32,6 +36,21 @@ function HlsPlayer({ src }: { src: string }) {
   }, [src])
 
   return <video ref={videoRef} controls autoPlay style={{ width: '100%', height: 500, background: '#000' }} />
+}
+
+function ChannelCard({ c, onClick }: { c: Channel; onClick: () => void }) {
+  return (
+    <div
+      className="channel-card glass"
+      onClick={onClick}
+      style={{ padding: 14, cursor: 'pointer', borderRadius: 10, border: '1px solid var(--border)', transition: 'all 0.15s ease', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, textAlign: 'center' }}
+    >
+      {c.logo
+        ? <img src={c.logo} alt="" style={{ width: 48, height: 48, objectFit: 'contain' }} />
+        : <div style={{ width: 48, height: 48, borderRadius: 8, background: 'rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Play size={16} color="var(--muted)" /></div>}
+      <div style={{ fontSize: 12, lineHeight: 1.3 }}>{c.title}</div>
+    </div>
+  )
 }
 
 export default function LiveTV() {
@@ -63,13 +82,34 @@ export default function LiveTV() {
       .finally(() => setChannelsLoading(false))
   }, [countryCode])
 
-  const groups = useMemo(() => {
-    const set = new Set<string>()
-    channels.forEach(c => set.add(c.group || 'Other'))
-    return ['All', ...Array.from(set).sort()]
+  // iptv-org groups are sometimes compound ("Documentary;News") -- split
+  // each channel into every category it belongs to, not just its first tag.
+  const channelsByCategory = useMemo(() => {
+    const map: Record<string, Channel[]> = {}
+    for (const c of channels) {
+      const cats = (c.group || 'Other').split(';').map(s => s.trim()).filter(Boolean)
+      for (const cat of cats.length ? cats : ['Other']) {
+        if (!map[cat]) map[cat] = []
+        map[cat].push(c)
+      }
+    }
+    return map
   }, [channels])
 
-  const filtered = activeGroup === 'All' ? channels : channels.filter(c => (c.group || 'Other') === activeGroup)
+  const categories = useMemo(
+    () => Object.keys(channelsByCategory).sort((a, b) => channelsByCategory[b].length - channelsByCategory[a].length),
+    [channelsByCategory]
+  )
+
+  function jumpTo(cat: string) {
+    setActiveGroup(cat)
+    if (cat === 'All') return
+    requestAnimationFrame(() => {
+      document.getElementById(`livetv-section-${cat}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  }
+
+  const totalShown = activeGroup === 'All' ? channels.length : (channelsByCategory[activeGroup] || []).length
 
   return (
     <div>
@@ -84,49 +124,67 @@ export default function LiveTV() {
           ))}
         </select>
         {channelsLoading && <Loader size={14} className="spin" />}
-        <span style={{ fontSize: 12, color: 'var(--muted)' }}>{filtered.length} channels</span>
+        <span style={{ fontSize: 12, color: 'var(--muted)' }}>{totalShown} channels</span>
       </div>
 
       {liveStream && (
-        <div style={{ marginBottom: 24, borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)' }}>
+        <div style={{ marginBottom: 24, borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)', position: 'sticky', top: 16, zIndex: 20, background: 'var(--bg, #0a0a12)', boxShadow: '0 8px 24px rgba(0,0,0,0.5)' }}>
           <HlsPlayer src={liveStream.url} />
-          <div style={{ padding: '8px 14px', background: 'rgba(8,8,16,0.7)', fontSize: 13 }}>
+          <div style={{ padding: '8px 14px', background: 'rgba(8,8,16,0.85)', fontSize: 13 }}>
             Now playing: <strong style={{ color: 'var(--purple-bright)' }}>{liveStream.title}</strong>
           </div>
         </div>
       )}
 
-      {groups.length > 1 && (
-        <div style={{ display: 'flex', gap: 6, marginBottom: 16, overflowX: 'auto', paddingBottom: 4 }}>
-          {groups.map(g => (
+      {categories.length > 1 && (
+        <div style={{
+          position: 'sticky', top: liveStream ? 0 : 0, zIndex: 15,
+          background: 'var(--bg, #0a0a12)', paddingTop: 4, paddingBottom: 8,
+          display: 'flex', gap: 6, marginBottom: 16, overflowX: 'auto',
+        }}>
+          <button
+            onClick={() => jumpTo('All')}
+            className={activeGroup === 'All' ? 'btn btn-primary btn-sm' : 'btn btn-ghost btn-sm'}
+            style={{ whiteSpace: 'nowrap' }}
+          >
+            All
+          </button>
+          {categories.map(cat => (
             <button
-              key={g}
-              onClick={() => setActiveGroup(g)}
-              className={g === activeGroup ? 'btn btn-primary btn-sm' : 'btn btn-ghost btn-sm'}
+              key={cat}
+              onClick={() => jumpTo(cat)}
+              className={cat === activeGroup ? 'btn btn-primary btn-sm' : 'btn btn-ghost btn-sm'}
               style={{ whiteSpace: 'nowrap' }}
             >
-              {g}
+              {cat} <span style={{ opacity: 0.6, fontSize: 10 }}>({channelsByCategory[cat].length})</span>
             </button>
           ))}
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12 }}>
-        {filtered.map((c, i) => (
-          <div
-            key={i}
-            className="channel-card glass"
-            onClick={() => setLiveStream({ url: c.url, title: c.title })}
-            style={{ padding: 14, cursor: 'pointer', borderRadius: 10, border: '1px solid var(--border)', transition: 'all 0.15s ease', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, textAlign: 'center' }}
-          >
-            {c.logo
-              ? <img src={c.logo} alt="" style={{ width: 48, height: 48, objectFit: 'contain' }} />
-              : <div style={{ width: 48, height: 48, borderRadius: 8, background: 'rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Play size={16} color="var(--muted)" /></div>}
-            <div style={{ fontSize: 12, lineHeight: 1.3 }}>{c.title}</div>
-            <div style={{ fontSize: 10, color: 'var(--muted)' }}>{c.group}</div>
+      {activeGroup === 'All' ? (
+        // Sectioned view: a labeled row per category, so scrolling shows
+        // real structure instead of one giant unsorted grid.
+        categories.map(cat => (
+          <div key={cat} id={`livetv-section-${cat}`} style={{ marginBottom: 28, scrollMarginTop: 90 }}>
+            <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 10, color: 'var(--muted-hi)' }}>
+              {cat} <span style={{ fontWeight: 400, color: 'var(--muted)', fontSize: 12 }}>({channelsByCategory[cat].length})</span>
+            </h3>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12 }}>
+              {channelsByCategory[cat].map((c, i) => (
+                <ChannelCard key={cat + i} c={c} onClick={() => setLiveStream({ url: c.url, title: c.title })} />
+              ))}
+            </div>
           </div>
-        ))}
-      </div>
+        ))
+      ) : (
+        // Single-category filtered view
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12 }}>
+          {(channelsByCategory[activeGroup] || []).map((c, i) => (
+            <ChannelCard key={i} c={c} onClick={() => setLiveStream({ url: c.url, title: c.title })} />
+          ))}
+        </div>
+      )}
     </div>
   )
 }
