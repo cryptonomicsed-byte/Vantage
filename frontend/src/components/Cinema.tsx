@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { Play, X, Info, Film, Clock, Star, Radio, Tv } from 'lucide-react'
+import { Play, X, Info, Film, Clock, Star, Radio, Tv, Sparkles } from 'lucide-react'
 import LiveTV from './cinema/LiveTV'
+import StreamBrowse from './cinema/StreamBrowse'
 import AgentTVSection from './cinema/AgentTVSection'
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -229,7 +230,7 @@ function SeriesModal({ id, onClose, onPlay }: { id: number; onClose: () => void;
   )
 }
 
-type CinemaSection = 'library' | 'live' | 'agenttv'
+type CinemaSection = 'library' | 'stream' | 'live' | 'agenttv'
 
 export default function Cinema() {
   const [section, setSection] = useState<CinemaSection>('library')
@@ -262,14 +263,18 @@ export default function Cinema() {
         <button type="button" className={`top-nav-tab ${section === 'library' ? 'active' : ''}`} onClick={() => setSection('library')}>
           <Film size={15} /> Movies &amp; Shows
         </button>
+        <button type="button" className={`top-nav-tab ${section === 'stream' ? 'active' : ''}`} onClick={() => setSection('stream')}>
+          <Sparkles size={15} /> Stream
+        </button>
         <button type="button" className={`top-nav-tab ${section === 'live' ? 'active' : ''}`} onClick={() => setSection('live')}>
-          <Radio size={15} /> Watch Live TV
+          <Radio size={15} /> Live TV
         </button>
         <button type="button" className={`top-nav-tab ${section === 'agenttv' ? 'active' : ''}`} onClick={() => setSection('agenttv')}>
           <Tv size={15} /> AgentTV
         </button>
       </div>
 
+      {section === 'stream' && <StreamBrowse />}
       {section === 'live' && <LiveTV />}
       {section === 'agenttv' && <AgentTVSection />}
 

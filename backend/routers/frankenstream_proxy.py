@@ -64,6 +64,21 @@ async def now_playing():
     return await _forward("GET", "/api/now-playing")
 
 
+@router.get("/upcoming")
+async def upcoming():
+    return await _forward("GET", "/api/upcoming")
+
+
+@router.get("/genres")
+async def genres(media_type: str = "movie"):
+    return await _forward("GET", f"/api/genres?media_type={media_type}")
+
+
+@router.get("/discover")
+async def discover(genre_id: int, media_type: str = "movie"):
+    return await _forward("GET", f"/api/discover?genre_id={genre_id}&media_type={media_type}")
+
+
 @router.get("/live/countries")
 async def live_countries():
     return await _forward("GET", "/api/live/countries")
