@@ -414,11 +414,28 @@ async def init_agents_db() -> None:
             ("flagged",            "INTEGER DEFAULT 0"),
             ("failure_count",      "INTEGER DEFAULT 0"),
             ("circuit_open_until", "TEXT DEFAULT NULL"),
+            # Nostr-backed trust upgrade: TOFU-pinned per-peer pubkey
+            # (replaces the shared FEDERATION_KEY HMAC secret) and how
+            # this peer was first found (manual POST vs Buzz kind:30166
+            # discovery).
+            ("nostr_pubkey",       "TEXT DEFAULT NULL"),
+            ("discovered_via",     "TEXT DEFAULT 'manual'"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE federation_peers ADD COLUMN {col} {ddl}")
             except Exception:
                 pass
+        # Instance-level Nostr identity (federation trust, Buzz peer
+        # announcements) -- see backend/buzz_identity.py's
+        # get_or_create_instance_seed(). Singleton table, not agents.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS instance_identity (
+                slug TEXT PRIMARY KEY,
+                sealed_seed_enc TEXT NOT NULL,
+                nostr_pubkey_hex TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
         # Token milestones table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS token_milestones (

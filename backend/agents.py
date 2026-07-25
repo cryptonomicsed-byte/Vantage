@@ -31,7 +31,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.responses import JSONResponse, StreamingResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, StreamingResponse, PlainTextResponse, Response
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -3093,14 +3093,42 @@ async def verify_broadcast_signature(broadcast_id: int, agent: dict = Depends(ge
 
 # ── Phase C: Federation ───────────────────────────────────────────────────────
 
+@router.get("/federation/identity")
+async def get_federation_identity():
+    """This instance's own Nostr identity -- peers pin this pubkey (TOFU) on
+    first contact, then verify all future manifest signatures against it.
+    Replaces the shared FEDERATION_KEY HMAC secret with per-instance
+    asymmetric keys: compromising one peer's key no longer compromises the
+    whole federation."""
+    from .buzz_identity import derive_instance_keypair, public_key_xonly_hex
+    pk = await derive_instance_keypair()
+    return {"pubkey": public_key_xonly_hex(pk), "url": settings.PUBLIC_URL}
+
+
 @router.get("/federation/peers")
 async def get_federation_peers():
-    """List known Vantage federation peers."""
+    """List known Vantage federation peers. Response body is BIP340
+    schnorr-signed with this instance's Nostr identity (X-Peer-Signature
+    header, hex) -- peers that have already pinned our pubkey via
+    /federation/identity can verify this locally, no shared secret."""
+    from .buzz_identity import derive_instance_keypair, sign_event_id
+    import hashlib as _hl, json as _js
+
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM federation_peers ORDER BY last_seen DESC") as cur:
             peers = [dict(r) for r in await cur.fetchall()]
-    return {"peers": peers, "federation_enabled": settings.FEDERATION_ENABLED}
+    payload = {"peers": peers, "federation_enabled": settings.FEDERATION_ENABLED}
+    # Sign the EXACT bytes that go over the wire, not a re-derived
+    # serialization -- the verifier (gossip loop) hashes resp.content
+    # (the raw response body it actually received), so signing anything
+    # else would never verify.
+    body_bytes = _js.dumps(payload, default=str).encode()
+    digest_hex = _hl.sha256(body_bytes).hexdigest()
+    pk = await derive_instance_keypair()
+    sig_hex = sign_event_id(pk, digest_hex)
+    return Response(content=body_bytes, media_type="application/json",
+                     headers={"X-Peer-Signature": sig_hex})
 
 
 @router.post("/federation/peers")

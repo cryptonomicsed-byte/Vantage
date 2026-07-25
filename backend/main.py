@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 
 import aiosqlite
 import httpx
+from coincurve import PublicKeyXOnly
 from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -229,8 +230,10 @@ async def _federation_gossip_loop():
     - Per-peer circuit breaker: skip peers that have failed 3+ consecutive times
       until 30 minutes have elapsed since the breaker opened.
     - Rate limit peer discovery: at most 10 new peer inserts per loop run.
-    - Signed peer manifest: if X-Peer-Signature header is present, verify HMAC-SHA256
-      with settings.FEDERATION_KEY; bad signature → −20 reputation and skip discovery.
+    - Signed peer manifest: X-Peer-Signature is a BIP340 schnorr sig over the
+      response body, verified against the peer's Nostr pubkey (TOFU-pinned on
+      first contact via GET /federation/identity, not re-trusted if it later
+      changes); bad signature → −20 reputation and skip discovery.
     - Reputation gate: only insert newly discovered peers if the referring peer has
       reputation ≥ 30.0.
     """
@@ -244,7 +247,7 @@ async def _federation_gossip_loop():
             async with get_db() as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
-                    "SELECT id, url, name, reputation, failure_count, circuit_open_until "
+                    "SELECT id, url, name, reputation, failure_count, circuit_open_until, nostr_pubkey "
                     "FROM federation_peers WHERE flagged=0"
                 ) as cur:
                     peers = [dict(r) for r in await cur.fetchall()]
@@ -279,19 +282,43 @@ async def _federation_gossip_loop():
                         if resp.status_code != 200:
                             raise Exception(f"HTTP {resp.status_code}")
 
+                        # TOFU pubkey pin: first contact learns+stores the
+                        # peer's Nostr pubkey via /federation/identity; every
+                        # manifest after that must verify against the PINNED
+                        # key, not whatever key shows up on a given request
+                        # (a changed key on a known peer is suspicious, not
+                        # auto-trusted -- same model as SSH host keys).
+                        pinned_pubkey = peer.get("nostr_pubkey")
+                        if not pinned_pubkey:
+                            try:
+                                id_resp = await hc.get(f"{peer['url']}/api/agents/federation/identity")
+                                if id_resp.status_code == 200:
+                                    pinned_pubkey = id_resp.json().get("pubkey")
+                                    if pinned_pubkey:
+                                        async with get_db() as db:
+                                            await db.execute(
+                                                "UPDATE federation_peers SET nostr_pubkey=? WHERE id=?",
+                                                (pinned_pubkey, peer_id),
+                                            )
+                                            await db.commit()
+                            except Exception:
+                                pinned_pubkey = None
+
                         sig_header = resp.headers.get("X-Peer-Signature", "")
                         sig_invalid = False
-                        if sig_header and _settings.FEDERATION_KEY:
-                            expected = hmac.new(
-                                _settings.FEDERATION_KEY.encode(),
-                                resp.content,
-                                hashlib.sha256,
-                            ).hexdigest()
-                            if not hmac.compare_digest(expected, sig_header.strip()):
+                        if sig_header and pinned_pubkey:
+                            try:
+                                digest_hex = hashlib.sha256(resp.content).hexdigest()
+                                xonly = PublicKeyXOnly(bytes.fromhex(pinned_pubkey))
+                                sig_invalid = not xonly.verify(bytes.fromhex(sig_header.strip()), bytes.fromhex(digest_hex))
+                            except Exception:
                                 sig_invalid = True
+                            if sig_invalid:
                                 logger.warning(
-                                    "Federation peer %s sent invalid manifest signature — "
-                                    "penalising reputation −20 and skipping discovery",
+                                    "Federation peer %s sent a manifest signature that doesn't "
+                                    "verify against its pinned pubkey — penalising reputation "
+                                    "−20 and skipping discovery (possible impersonation or key "
+                                    "rotation; re-register the peer to re-pin if this is expected)",
                                     peer["url"],
                                 )
 

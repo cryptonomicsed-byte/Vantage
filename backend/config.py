@@ -143,8 +143,11 @@ class Settings(BaseSettings):
             return None
         return _hashlib.sha256(self.ADMIN_KEY.encode()).hexdigest()
 
-    # Federation signing key — HMAC-SHA256 key for peer manifest verification (optional)
-    FEDERATION_KEY: str = ""
+    # Federation peer-manifest trust: retired the shared FEDERATION_KEY HMAC
+    # secret (2026-07-25) in favor of per-instance Nostr identity (BIP340
+    # schnorr, TOFU-pinned pubkeys) -- see buzz_identity.derive_instance_keypair()
+    # and GET /federation/identity. One compromised peer's key no longer
+    # compromises the whole federation, which a shared secret could not offer.
 
     # Optional: OpenRouter API key — enables true vector semantic search in memory vault.
     # Falls back to wildcard FTS5 if not set. Set via VANTAGE_OPENROUTER_KEY env var.
@@ -196,7 +199,10 @@ _UNIMPLEMENTED_FLAGS = {
     "WALRUS_ENABLED": settings.WALRUS_ENABLED,
     "SUI_ENABLED": settings.SUI_ENABLED,
     "SEAL_ENABLED": settings.SEAL_ENABLED,
-    "FEDERATION_ENABLED": settings.FEDERATION_ENABLED,
+    # FEDERATION_ENABLED removed 2026-07-25: the feature is fully
+    # implemented (gossip loop, peer CRUD, feed/ask aggregation, now
+    # Nostr-backed trust) -- this guard was stale, left over from before
+    # the feature was actually built. Re-enabled for real.
 }
 for _flag, _val in _UNIMPLEMENTED_FLAGS.items():
     if _val:
