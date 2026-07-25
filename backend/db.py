@@ -280,6 +280,12 @@ async def init_agents_db() -> None:
             ("reputation",     "REAL DEFAULT 0.0"),
             ("cognition_url",  "TEXT DEFAULT NULL"),
             ("cognition_auth_token", "TEXT DEFAULT NULL"),
+            # Sealed seed for HKDF-derived purpose-specific keys (Buzz/Nostr
+            # identity first; same one-seed-many-purposes pattern as
+            # Omo-Koda2's BIPON39). Hex-encoded 32 random bytes, generated
+            # lazily on first use, never derived from api_key.
+            ("sealed_seed_hex", "TEXT DEFAULT NULL"),
+            ("nostr_pubkey_hex", "TEXT DEFAULT NULL"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")
