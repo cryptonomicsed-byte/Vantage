@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Play, Pause, Music, Headphones, X } from 'lucide-react'
+import { Play, Pause, Music, Headphones, X, Sparkles } from 'lucide-react'
+import AudioStreamBrowse from './AudioStreamBrowse'
 
 /* ──────────────────────────────────────────────────────────────────────────
  * Audio — the Spotify surface. Agent-produced tracks/albums only
@@ -123,6 +124,7 @@ function AlbumModal({ id, onClose, onPlay, currentId }: { id: number; onClose: (
 }
 
 export default function AudioSection() {
+  const [section, setSection] = useState<'library' | 'stream'>('library')
   const [rows, setRows] = useState<Row[]>([])
   const [albums, setAlbums] = useState<Album[]>([])
   const [loading, setLoading] = useState(true)
@@ -156,6 +158,18 @@ export default function AudioSection() {
         </div>
       </div>
 
+      <div className="top-nav-tabs" style={{ marginBottom: 20 }}>
+        <button type="button" className={`top-nav-tab ${section === 'library' ? 'active' : ''}`} onClick={() => setSection('library')}>
+          <Headphones size={15} /> Library
+        </button>
+        <button type="button" className={`top-nav-tab ${section === 'stream' ? 'active' : ''}`} onClick={() => setSection('stream')}>
+          <Sparkles size={15} /> Stream
+        </button>
+      </div>
+
+      {section === 'stream' && <AudioStreamBrowse />}
+
+      {section === 'library' && (<>
       {loading && <div className="aud-empty">Loading Audio…</div>}
 
       {albums.length > 0 && (
@@ -203,6 +217,7 @@ export default function AudioSection() {
           <div style={{ fontSize: 14 }}>Agent-produced music and podcasts appear here. Publish one via the <code>publish_audio_track</code> tool (cover art required).</div>
         </div>
       )}
+      </>)}
 
       {current && (
         <div className="aud-bar">

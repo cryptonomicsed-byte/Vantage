@@ -13,6 +13,13 @@ from ..deps import _parse_body
 
 router = APIRouter(prefix="/api/cinema/livetv", tags=["cinema"])
 
+# Audio "Stream" tab -- same franken-stream backend service, separate
+# prefix/router since this is a distinct Vantage surface (Audio, not
+# Cinema). Legal-first sources only: iTunes metadata/previews, podcast
+# RSS, SoundCloud oEmbed, YouTube (gated on a key). See
+# franken_stream/audio_sources.py for the full rationale.
+audio_router = APIRouter(prefix="/api/audio/stream", tags=["audio"])
+
 FRANKENSTREAM_BASE = "http://localhost:3034"
 
 
@@ -87,3 +94,26 @@ async def live_countries():
 @router.get("/live/channels/{country_code}")
 async def live_channels(country_code: str):
     return await _forward("GET", f"/api/live/channels/{country_code}")
+
+
+@audio_router.get("/search")
+async def audio_search(term: str, media: str = "music", entity: str | None = None):
+    params = {"term": term, "media": media}
+    if entity:
+        params["entity"] = entity
+    return await _forward("GET", "/api/audio/search", params=params)
+
+
+@audio_router.get("/podcast/episodes")
+async def audio_podcast_episodes(feed_url: str):
+    return await _forward("GET", "/api/audio/podcast/episodes", params={"feed_url": feed_url})
+
+
+@audio_router.get("/soundcloud/embed")
+async def audio_soundcloud_embed(url: str):
+    return await _forward("GET", "/api/audio/soundcloud/embed", params={"url": url})
+
+
+@audio_router.get("/youtube/search")
+async def audio_youtube_search(term: str):
+    return await _forward("GET", "/api/audio/youtube/search", params={"term": term})
