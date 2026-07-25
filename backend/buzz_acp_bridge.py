@@ -5,8 +5,9 @@ Copilot's HTTP endpoint uses (so cognition_url wiring, the regex intent
 parser, everything, works identically), and publishes the reply back as a
 signed kind:9 event threaded (NIP-10) to the incoming message.
 
-Not a systemd daemon yet -- this is the shim itself (run_bridge), callable
-standalone for testing or wrapped in a service later.
+run_bridge_forever() + the __main__ entrypoint below wrap this for
+continuous systemd operation (ares-vantage-buzz-acp.service); run_bridge()
+itself remains callable standalone for testing (max_messages knob).
 """
 import asyncio
 import logging
@@ -66,3 +67,30 @@ async def run_bridge(agent_id: int, relay_ws_url: str, channel_id: str, max_mess
 
     await sess.close()
     return handled
+
+
+async def run_bridge_forever(agent_id: int, relay_ws_url: str, channel_id: str):
+    """Reconnect-on-failure wrapper for continuous operation (systemd).
+    Backs off on repeated failures instead of hot-looping a dead relay."""
+    backoff = 2
+    while True:
+        try:
+            await run_bridge(agent_id, relay_ws_url, channel_id, max_messages=None)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("buzz-acp bridge connection dropped, reconnecting in %ss", backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+        else:
+            backoff = 2
+
+
+if __name__ == "__main__":
+    import os
+
+    _agent_id = int(os.environ.get("BUZZ_ACP_AGENT_ID", "18"))
+    _relay_url = os.environ.get("BUZZ_ACP_RELAY_URL", "ws://localhost:3000")
+    _channel_id = os.environ["BUZZ_ACP_CHANNEL_ID"]
+    logging.basicConfig(level=logging.INFO)
+    asyncio.run(run_bridge_forever(_agent_id, _relay_url, _channel_id))
