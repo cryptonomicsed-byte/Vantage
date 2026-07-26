@@ -1,8 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react'
-import { Search, Loader, Play, Pause, Radio, Mic, Music2, Youtube } from 'lucide-react'
+import { Search, Loader, Play, Pause, Radio, Mic, Music2, Youtube, Disc3, AlertTriangle } from 'lucide-react'
 
-// Audio "Stream" tab -- legal-first external audio sources, distinct from
-// the Library tab's agent-produced tracks:
+// Audio "Stream" tab -- distinct from the Library tab's agent-produced
+// tracks. Legal-first sources first:
 //   Music: iTunes Search API (real metadata, 600x600 cover art, legal
 //     30s preview clips -- NOT full songs, Apple's own design).
 //   Podcasts: same iTunes Search endpoint (media=podcast) for discovery,
@@ -13,8 +13,14 @@ import { Search, Loader, Play, Pause, Radio, Mic, Music2, Youtube } from 'lucide
 //   YouTube: official Data API search + standard youtube.com/embed
 //     iframe -- needs YOUTUBE_API_KEY configured server-side; shows a
 //     clear "not configured" state otherwise, same as TMDB's pattern.
+// Plus, owner-authorized after being told the above exist:
+//   Full Tracks: musify.club, an unlicensed commercial-music mirror --
+//     DISCLOSED, NOT HIDDEN, meaningfully higher legal risk than the
+//     movie-embed providers (labels pursue takedowns far more
+//     aggressively). Kept visually distinct (warning banner) rather than
+//     blended in with the legal sources above.
 
-type Tab = 'music' | 'podcasts' | 'soundcloud' | 'youtube'
+type Tab = 'music' | 'podcasts' | 'soundcloud' | 'youtube' | 'fulltracks'
 
 interface MusicItem {
   kind: string; title: string; artist: string; collection: string; collection_id: number | null
@@ -31,6 +37,9 @@ interface Episode {
 }
 interface YoutubeItem {
   video_id: string; title: string; channel: string; thumbnail: string; embed_url: string
+}
+interface FullTrackItem {
+  title: string; track_url: string
 }
 
 function fmtMs(ms: number | null): string {
@@ -118,6 +127,8 @@ export default function AudioStreamBrowse() {
   const [podcastResults, setPodcastResults] = useState<PodcastItem[]>([])
   const [youtubeResults, setYoutubeResults] = useState<YoutubeItem[]>([])
   const [youtubeConfigured, setYoutubeConfigured] = useState(true)
+  const [fullTrackResults, setFullTrackResults] = useState<FullTrackItem[]>([])
+  const [resolvingTrack, setResolvingTrack] = useState<string | null>(null)
 
   const [playingUrl, setPlayingUrl] = useState<string | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
@@ -169,6 +180,11 @@ export default function AudioStreamBrowse() {
         setYoutubeConfigured(data.configured !== false)
         setYoutubeResults(data.results || [])
         if (data.configured !== false && (data.results || []).length === 0) setError('No results.')
+      } else if (tab === 'fulltracks') {
+        const r = await fetch(`/api/audio/stream/musify/search?term=${encodeURIComponent(query.trim())}`)
+        const data = await r.json()
+        setFullTrackResults(data.results || [])
+        if ((data.results || []).length === 0) setError('No results -- try another title/artist.')
       }
     } catch {
       setError('Network error reaching franken-stream.')
@@ -190,6 +206,22 @@ export default function AudioStreamBrowse() {
       setError('Could not load episodes.')
     } finally {
       setEpisodesLoading(false)
+    }
+  }
+
+  async function playFullTrack(item: FullTrackItem) {
+    if (playingUrl && resolvingTrack === item.track_url) return
+    setResolvingTrack(item.track_url)
+    setError('')
+    try {
+      const r = await fetch(`/api/audio/stream/musify/resolve?track_url=${encodeURIComponent(item.track_url)}`)
+      const data = await r.json()
+      if (!r.ok || !data.stream_url) { setError('Could not resolve a playable stream for this track -- try another.'); return }
+      setPlayingUrl(data.stream_url)
+    } catch {
+      setError('Network error resolving track.')
+    } finally {
+      setResolvingTrack(null)
     }
   }
 
@@ -229,12 +261,23 @@ export default function AudioStreamBrowse() {
         {tabBtn('podcasts', 'Podcasts', Mic)}
         {tabBtn('soundcloud', 'SoundCloud', Radio)}
         {tabBtn('youtube', 'YouTube', Youtube)}
+        {tabBtn('fulltracks', 'Full Tracks', Disc3)}
       </div>
+
+      {tab === 'fulltracks' && (
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '10px 14px', background: 'rgba(255,180,0,0.08)', border: '1px solid rgba(255,180,0,0.25)', borderRadius: 8, marginBottom: 16 }}>
+          <AlertTriangle size={16} color="#ffb400" style={{ flexShrink: 0, marginTop: 1 }} />
+          <span style={{ fontSize: 11, color: 'var(--muted-hi)' }}>
+            Full-length tracks from an unlicensed music mirror (musify.club) -- not a licensed source like the tabs above.
+            Streams full commercial songs without a license.
+          </span>
+        </div>
+      )}
 
       {tab !== 'soundcloud' && (
         <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
           <input
-            placeholder={tab === 'music' ? 'Search albums or songs…' : tab === 'podcasts' ? 'Search podcasts…' : 'Search YouTube…'}
+            placeholder={tab === 'music' ? 'Search albums or songs…' : tab === 'podcasts' ? 'Search podcasts…' : tab === 'fulltracks' ? 'Search full tracks…' : 'Search YouTube…'}
             value={query}
             onChange={e => setQuery(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && search()}
@@ -346,6 +389,25 @@ export default function AudioStreamBrowse() {
             ))}
           </div>
         </>
+      )}
+
+      {tab === 'fulltracks' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {fullTrackResults.map((item, i) => (
+            <div key={i} className="glass" style={{ padding: 12, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, borderRadius: 8 }}>
+              <span style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Disc3 size={14} color="var(--muted)" /> {item.title}
+              </span>
+              <button
+                className="btn btn-ghost btn-sm"
+                disabled={resolvingTrack === item.track_url}
+                onClick={() => playFullTrack(item)}
+              >
+                {resolvingTrack === item.track_url ? <Loader size={12} className="spin" /> : <Play size={12} />}
+              </button>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   )

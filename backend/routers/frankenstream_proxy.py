@@ -122,3 +122,17 @@ async def audio_soundcloud_embed(url: str):
 @audio_router.get("/youtube/search")
 async def audio_youtube_search(term: str):
     return await _forward("GET", "/api/audio/youtube/search", params={"term": term})
+
+
+@audio_router.get("/musify/search")
+async def audio_musify_search(term: str):
+    """Full-length music via musify.club -- DISCLOSED, NOT HIDDEN:
+    unlicensed commercial-music mirror, meaningfully higher legal risk
+    than the movie-embed providers. Owner-authorized after being told
+    the legal-first alternatives exist."""
+    return await _forward("GET", "/api/audio/musify/search", params={"term": term})
+
+
+@audio_router.get("/musify/resolve")
+async def audio_musify_resolve(track_url: str):
+    return await _forward("GET", "/api/audio/musify/resolve", params={"track_url": track_url})
