@@ -1,18 +1,19 @@
 import React, { useState, useEffect } from 'react'
 import { NavLink, Link } from 'react-router-dom'
-import { Users, Code2, Briefcase, CandlestickChart, Film, Music, Clapperboard, Settings, Shield } from 'lucide-react'
+import { Users, Code2, CandlestickChart, Clapperboard, Settings, Shield } from 'lucide-react'
 import NotificationPanel from './NotificationPanel'
 import SearchPanel from './SearchPanel'
 import PlatformWeather from './PlatformWeather'
 
+// 2026-07-27: Cinema/Audio folded into Studio (one bottom tab, three
+// SubNav rows inside -- Collab/Cinema/Audio, see utils/navigation.ts),
+// Gigs removed as its own tab (Marketplace/Rankings moved into Swarm's
+// SubNav instead, since they're swarm-wide concerns).
 const SECONDARY_NAV = [
   { icon: Users,            label: 'Swarm',       to: '/swarm'       },
   { icon: Code2,            label: 'Code',        to: '/code'        },
-  { icon: Briefcase,        label: 'Gigs',        to: '/market'      },
   { icon: CandlestickChart, label: 'Trading',     to: '/trading'     },
   { icon: Clapperboard,     label: 'Studio',      to: '/video'       },
-  { icon: Film,             label: 'Cinema',      to: '/cinema'      },
-  { icon: Music,            label: 'Audio',       to: '/audio'       },
 ]
 
 function useUnreadDMs(): number {
