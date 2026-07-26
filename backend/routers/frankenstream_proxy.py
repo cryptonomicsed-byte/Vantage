@@ -8,6 +8,7 @@ sites whose availability rots quickly -- some results will be dead links,
 that's inherent to this class of source, not a bug in this proxy."""
 import httpx
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
 from ..deps import _parse_body
 
@@ -158,9 +159,64 @@ async def audio_genres():
 
 @audio_router.get("/resolve-full-track")
 async def audio_resolve_full_track(title: str, artist: str = ""):
-    return await _forward("GET", "/api/audio/resolve-full-track", params={"title": title, "artist": artist})
+    result = await _forward("GET", "/api/audio/resolve-full-track", params={"title": title, "artist": artist})
+    # franken-stream returns a relative stream_url pointing at ITS OWN
+    # /api/audio/proxy-stream -- rewrite it to Vantage's own passthrough
+    # route (below) so the browser only ever talks to Vantage's origin,
+    # not franken-stream's directly (which isn't publicly exposed anyway).
+    if result.get("stream_url", "").startswith("/api/audio/proxy-stream"):
+        from urllib.parse import quote
+        result["stream_url"] = f"/api/audio/stream/proxy-stream?title={quote(title)}&artist={quote(artist)}"
+    return result
 
 
 @audio_router.get("/jamendo/search")
 async def audio_jamendo_search(term: str):
     return await _forward("GET", "/api/audio/jamendo/search", params={"term": term})
+
+
+@audio_router.get("/proxy-stream")
+async def audio_proxy_stream(request: Request, title: str, artist: str = ""):
+    """Raw byte passthrough (not the generic JSON _forward helper) --
+    franken-stream's own /api/audio/proxy-stream already does the real
+    fix here (streams audio server-to-server so musify.club's
+    Origin-header hotlink check never sees a browser's cross-origin
+    request); this just relays those bytes one hop further, forwarding
+    Range requests both ways so seeking still works through Vantage."""
+    headers = {}
+    range_header = request.headers.get("range")
+    if range_header:
+        headers["Range"] = range_header
+
+    client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
+    upstream_req = client.build_request(
+        "GET", f"{FRANKENSTREAM_BASE}/api/audio/proxy-stream",
+        params={"title": title, "artist": artist}, headers=headers,
+    )
+    upstream_resp = await client.send(upstream_req, stream=True)
+
+    if upstream_resp.status_code >= 400:
+        detail = (await upstream_resp.aread()).decode(errors="replace")
+        await upstream_resp.aclose()
+        await client.aclose()
+        raise HTTPException(upstream_resp.status_code, detail)
+
+    async def body_iterator():
+        try:
+            async for chunk in upstream_resp.aiter_bytes(65536):
+                yield chunk
+        finally:
+            await upstream_resp.aclose()
+            await client.aclose()
+
+    passthrough_headers = {}
+    for h in ("content-type", "content-length", "content-range", "accept-ranges"):
+        if h in upstream_resp.headers:
+            passthrough_headers[h] = upstream_resp.headers[h]
+
+    return StreamingResponse(
+        body_iterator(),
+        status_code=upstream_resp.status_code,
+        headers=passthrough_headers,
+        media_type=upstream_resp.headers.get("content-type", "audio/mpeg"),
+    )
