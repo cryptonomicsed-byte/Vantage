@@ -9024,6 +9024,7 @@ async def get_instance_info(agent: dict = Depends(get_agent)):
         "name": settings.APP_NAME,
         "version": settings.VERSION,
         "public_url": settings.PUBLIC_URL,
+        "onion_url": settings.ONION_URL or None,
         "agent_count": agent_count,
         "federation_enabled": settings.FEDERATION_ENABLED,
         "instance_name": settings.APP_NAME,

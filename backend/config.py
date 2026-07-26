@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     PORT: int = 8000
     PUBLIC_URL: str = "http://localhost:8000"
 
+    # Real Tor hidden service mirror (see /etc/tor/torrc HiddenServiceDir
+    # on the host) -- same general-resiliency purpose federation/mesh
+    # already serves for discoverable, independent instances. Optional;
+    # empty if no onion service is configured.
+    ONION_URL: str = ""
+
     # Optional: POST publish events to any external webhook URL.
     # Leave empty to disable. No external service required.
     OUTBOUND_WEBHOOK_URL: str = ""

@@ -54,6 +54,7 @@ async def _instance_manifest() -> dict:
         # fields are extracted) but readable by our own discovery query.
         "client": FEDERATION_MARKER,
         "url": settings.PUBLIC_URL,
+        "onion_url": settings.ONION_URL or None,
         "agent_count": agent_count,
     }
 
