@@ -6,17 +6,54 @@ this router just forwards a curated subset of its API so Vantage's own
 Cinema "AgentTV" tab can talk to it through Vantage's existing auth model
 instead of exposing a second public port.
 
-Known limitation (disclosed, not hidden): Seemplify's own LLM/video-gen/
-Theta/Solana integrations are currently mocked/placeholder upstream -- this
-proxy faithfully reflects whatever it returns, mocked or not."""
+2026-07-26: replaced the old Theta/Solana pilot-voting pipeline with a lean
+always-on ChannelLoop (see Seemplify's src/loop/channel-loop.js) -- real
+DeepSeek-scripted, Piper-TTS-narrated, ffmpeg-composited 3min segments with
+a 30s filler while the next one renders, looping forever. No blockchain CDN,
+no on-chain voting program. /now-playing + /media below expose that; the
+governance/pilots routes stay for the existing off-chain thumbs-up/down
+signal, unchanged."""
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
 from ..deps import get_agent, _parse_body
 
 router = APIRouter(prefix="/api/cinema/agenttv", tags=["cinema"])
 
 SEEMPLIFY_BASE = "http://localhost:3033"
+
+
+@router.get("/now-playing")
+async def now_playing():
+    return await _forward("GET", "/agenttv/now-playing")
+
+
+@router.get("/media/{filename}")
+async def media(filename: str):
+    """Passthrough for the generated segment/filler mp4s Seemplify serves
+    from its own /media/agenttv static route -- keeps everything behind
+    Vantage's single public port instead of exposing 3033 directly."""
+    if "/" in filename or ".." in filename:
+        raise HTTPException(400, "invalid filename")
+    try:
+        client = httpx.AsyncClient(timeout=30.0)
+        req = client.build_request("GET", f"{SEEMPLIFY_BASE}/media/agenttv/{filename}")
+        r = await client.send(req, stream=True)
+        if r.status_code >= 400:
+            await r.aclose()
+            await client.aclose()
+            raise HTTPException(r.status_code, "media not found")
+
+        async def stream():
+            async for chunk in r.aiter_bytes():
+                yield chunk
+            await r.aclose()
+            await client.aclose()
+
+        return StreamingResponse(stream(), media_type=r.headers.get("content-type", "video/mp4"))
+    except httpx.RequestError as e:
+        raise HTTPException(502, f"AgentTV (Seemplify) media unreachable: {e}")
 
 
 async def _forward(method: str, path: str, **kwargs) -> dict:

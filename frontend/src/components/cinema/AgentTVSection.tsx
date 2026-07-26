@@ -1,18 +1,84 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { Tv, Send, ThumbsUp, ThumbsDown } from 'lucide-react'
 
 // AgentTV -- Vantage's window into Seemplify (Agent.TV2), a separate
-// agentic pipeline: submit a pilot idea, it runs Researcher -> Scriptor ->
-// VideoGen -> Streamer agents, the result goes up for token-weighted
-// community vote, and passing pilots become 24/7 channels. Proxied through
-// backend/routers/agenttv_proxy.py rather than calling Seemplify directly.
+// service. 2026-07-26: replaced the old Theta/Solana pilot-voting pipeline
+// with a lean always-on ChannelLoop -- real DeepSeek-scripted, Piper-TTS
+// narrated, ffmpeg-composited segments looping forever (3min segment, 30s
+// filler while the next renders). The player below polls /now-playing and
+// seeks to the server-authoritative offset so every viewer is in sync on
+// the same "channel", the same way a real live broadcast would feel,
+// without any actual broadcast/CDN infra behind it.
 //
-// Known, disclosed limitation: Seemplify's real LLM/video-gen/Theta/Solana
-// integrations are currently mocked upstream -- submissions run the full
-// pipeline shape, but scripts/video/streams are placeholders until those
-// are wired with real credentials.
+// Pilot submission + off-chain thumbs-up/down voting below are unchanged --
+// kept as the existing simple community-feedback signal (no on-chain
+// program, per the owner's lean-scope call).
 
 const KEY = () => localStorage.getItem('vantage_api_key') || ''
+
+interface NowPlaying {
+  segmentUrl: string | null
+  phase: 'segment' | 'filler'
+  startedAt: number | null
+  duration: number
+  title: string | null
+  now: number
+}
+
+function ChannelPlayer() {
+  const [np, setNp] = useState<NowPlaying | null>(null)
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+  const lastUrl = useRef<string | null>(null)
+
+  useEffect(() => {
+    let stop = false
+    async function poll() {
+      try {
+        const r = await fetch('/api/cinema/agenttv/now-playing')
+        if (r.ok) {
+          const data = await r.json()
+          if (!stop) setNp(data)
+        }
+      } catch {}
+      if (!stop) setTimeout(poll, 10000)
+    }
+    poll()
+    return () => { stop = true }
+  }, [])
+
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video || !np?.segmentUrl) return
+    const filename = np.segmentUrl.split('/').pop()
+    const src = `/api/cinema/agenttv/media/${filename}`
+    const offsetSec = np.startedAt ? Math.max(0, (np.now - np.startedAt) / 1000) : 0
+
+    if (lastUrl.current !== src) {
+      lastUrl.current = src
+      video.src = src
+      const seekWhenReady = () => {
+        video.currentTime = offsetSec
+        video.play().catch(() => {})
+        video.removeEventListener('loadedmetadata', seekWhenReady)
+      }
+      video.addEventListener('loadedmetadata', seekWhenReady)
+    } else if (Math.abs(video.currentTime - offsetSec) > 3) {
+      // Drift correction -- keep every viewer roughly in sync with the
+      // server's authoritative clock without a jarring reload.
+      video.currentTime = offsetSec
+    }
+  }, [np])
+
+  return (
+    <div className="glass" style={{ padding: 18, marginBottom: 24 }}>
+      <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
+        <Tv size={16} /> AgentTV — live now {np?.phase === 'filler' && <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 400 }}>(back in a moment)</span>}
+      </h3>
+      <video ref={videoRef} controls autoPlay muted style={{ width: '100%', maxHeight: 420, background: '#000', borderRadius: 8 }} />
+      {np?.title && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>{np.title}</div>}
+    </div>
+  )
+}
 
 interface Proposal {
   id: string
@@ -89,6 +155,7 @@ export default function AgentTVSection() {
 
   return (
     <div>
+      <ChannelPlayer />
       <div className="glass" style={{ padding: 18, marginBottom: 24 }}>
         <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
           <Tv size={16} /> Submit a pilot
