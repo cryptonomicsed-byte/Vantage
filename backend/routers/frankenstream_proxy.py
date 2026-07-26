@@ -87,6 +87,13 @@ async def discover(genre_id: int, media_type: str = "movie"):
     return await _forward("GET", f"/api/discover?genre_id={genre_id}&media_type={media_type}")
 
 
+@router.get("/integrations/status")
+async def integrations_status():
+    """Real, read-only booleans for franken-stream's optional API-key-gated
+    sources -- backs Settings > Integrations."""
+    return await _forward("GET", "/api/integrations/status")
+
+
 @router.get("/live/countries")
 async def live_countries():
     return await _forward("GET", "/api/live/countries")

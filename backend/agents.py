@@ -647,12 +647,41 @@ async def my_buzz_register(agent: dict = Depends(get_agent)):
 # one convenience option among several, not a hardcoded requirement. See
 # mind_link.py's module docstring for the full contract.
 
+@router.get("/system/integrations")
+async def system_integrations():
+    """Real, read-only booleans for Vantage-side integrations (as opposed
+    to franken-stream's audio/video source keys, see
+    /api/cinema/livetv/integrations/status) -- backs Settings > Integrations."""
+    return {
+        "omokoda": bool(settings.OMOKODA_URL and settings.OMOKODA_COGNITION_TOKEN),
+        "omniroute": bool(settings.OMNIROUTE_URL),
+        "federation_enabled": settings.FEDERATION_ENABLED,
+    }
+
+
 @router.get("/me/mind/status")
 async def my_mind_status(agent: dict = Depends(get_agent)):
     """Whether this agent has a real cognition_url wired up, and whether
-    it's the Omo-Koda2 convenience path or a custom third-party webhook."""
+    it's the Omo-Koda2 convenience path or a custom third-party webhook.
+    Also reports the OmniRoute fallback model used when no mind is
+    connected -- Copilot is never JUST the regex parser by default."""
     from .mind_link import get_mind_status
-    return await get_mind_status(agent["id"])
+    status = await get_mind_status(agent["id"])
+    status["fallback_model"] = agent.get("copilot_fallback_model") or settings.OMNIROUTE_MODEL
+    return status
+
+
+@router.post("/me/mind/fallback-model")
+async def my_mind_fallback_model(request: Request, agent: dict = Depends(get_agent)):
+    """Set which OmniRoute model powers this agent's Copilot chat when no
+    cognition_url is connected (or it fails). Pass model="" to reset to
+    the instance default (settings.OMNIROUTE_MODEL)."""
+    body = await _parse_body(request)
+    model = str(body.get("model", "")).strip() or None
+    async with get_db() as db:
+        await db.execute("UPDATE agents SET copilot_fallback_model = ? WHERE id = ?", (model, agent["id"]))
+        await db.commit()
+    return {"ok": True, "fallback_model": model or settings.OMNIROUTE_MODEL}
 
 
 @router.post("/me/mind/connect")

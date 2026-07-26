@@ -1,9 +1,32 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { NavLink } from 'react-router-dom'
-import { BookOpen, Code, Copy, Check, Settings as SettingsIcon, Radio, Plus, Trash2, RefreshCw, ExternalLink, Wifi, WifiOff, AlertCircle } from 'lucide-react'
+import { BookOpen, Code, Copy, Check, Settings as SettingsIcon, Radio, Plus, Trash2, RefreshCw, ExternalLink, Wifi, WifiOff, AlertCircle, Brain, CheckCircle2, Circle, Tv, Film } from 'lucide-react'
+import MindTab from './MindTab'
+import BuzzTab from './BuzzTab'
 
-const TABS = ['General', 'Network', 'Developer'] as const
+const TABS = ['General', 'Mind & LLM', 'Buzz', 'Integrations', 'Cinema & Live TV', 'Network', 'Developer'] as const
 type Tab = typeof TABS[number]
+
+interface IntegrationsStatus {
+  tmdb: boolean
+  youtube: boolean
+  jamendo: boolean
+}
+interface SystemIntegrations {
+  omokoda: boolean
+  omniroute: boolean
+  federation_enabled: boolean
+}
+
+function IntegrationRow({ name, ok, hint }: { name: string; ok: boolean; hint?: string }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderBottom: '1px solid var(--border)' }}>
+      {ok ? <CheckCircle2 size={15} color="#4ade80" /> : <Circle size={15} color="var(--muted)" />}
+      <span style={{ fontSize: 13, fontWeight: 500, flex: 1 }}>{name}</span>
+      <span style={{ fontSize: 11, color: ok ? '#4ade80' : 'var(--muted)' }}>{ok ? 'Configured' : (hint || 'Not configured')}</span>
+    </div>
+  )
+}
 
 interface FederationPeer {
   id: number
@@ -28,8 +51,11 @@ function StatusDot({ status }: { status: string }) {
   )
 }
 
+const HASH_TO_TAB: Record<string, Tab> = { mind: 'Mind & LLM', buzz: 'Buzz', integrations: 'Integrations', cinema: 'Cinema & Live TV', network: 'Network', developer: 'Developer' }
+
 export default function Settings() {
-  const [tab, setTab]       = useState<Tab>('General')
+  const initialTab = HASH_TO_TAB[window.location.hash.replace('#', '')] || 'General'
+  const [tab, setTab]       = useState<Tab>(initialTab)
   const [copied, setCopied] = useState(false)
   const apiKey = localStorage.getItem('vantage_api_key') || ''
 
@@ -43,6 +69,23 @@ export default function Settings() {
   const [addSuccess, setAddSuccess] = useState('')
   const [pingingId, setPingingId]   = useState<number | null>(null)
   const [federationEnabled, setFederationEnabled] = useState(false)
+
+  // Integrations state
+  const [streamStatus, setStreamStatus] = useState<IntegrationsStatus | null>(null)
+  const [sysStatus, setSysStatus] = useState<SystemIntegrations | null>(null)
+
+  useEffect(() => {
+    if (tab !== 'Integrations') return
+    fetch('/api/cinema/livetv/integrations/status').then(r => r.ok ? r.json() : null).then(d => d && setStreamStatus(d)).catch(() => {})
+    fetch('/api/agents/system/integrations').then(r => r.ok ? r.json() : null).then(d => d && setSysStatus(d)).catch(() => {})
+  }, [tab])
+
+  // Live TV preference (consumed by LiveTV.tsx via localStorage)
+  const [defaultCountry, setDefaultCountry] = useState(localStorage.getItem('livetv_default_country') || 'US')
+  function saveDefaultCountry(code: string) {
+    setDefaultCountry(code)
+    localStorage.setItem('livetv_default_country', code)
+  }
 
   function copyKey() {
     navigator.clipboard.writeText(apiKey).catch(() => {})
@@ -152,6 +195,8 @@ export default function Settings() {
             onClick={() => setTab(t)}
           >
             {t === 'Network' && <Radio size={12} style={{ marginRight: 5 }} />}
+            {t === 'Mind & LLM' && <Brain size={12} style={{ marginRight: 5 }} />}
+            {t === 'Cinema & Live TV' && <Film size={12} style={{ marginRight: 5 }} />}
             {t}
           </button>
         ))}
@@ -181,6 +226,90 @@ export default function Settings() {
               </p>
             </div>
           )}
+        </div>
+      )}
+
+      {/* ── Mind & LLM ── */}
+      {tab === 'Mind & LLM' && (
+        <div className="settings-section">
+          {apiKey ? (
+            <MindTab apiKey={apiKey} />
+          ) : (
+            <div className="empty-state" style={{ marginTop: 40 }}>
+              <Brain size={32} style={{ marginBottom: 12, opacity: 0.4 }} />
+              <p>Connect your API key in <NavLink to="/dashboard">Dashboard</NavLink> to manage your agent's mind.</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Buzz ── */}
+      {tab === 'Buzz' && (
+        <div className="settings-section">
+          {apiKey ? (
+            <BuzzTab apiKey={apiKey} />
+          ) : (
+            <div className="empty-state" style={{ marginTop: 40 }}>
+              <Radio size={32} style={{ marginBottom: 12, opacity: 0.4 }} />
+              <p>Connect your API key in <NavLink to="/dashboard">Dashboard</NavLink> to manage Buzz.</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Integrations (read-only status) ── */}
+      {tab === 'Integrations' && (
+        <div className="settings-section">
+          <h3 className="settings-section-title" style={{ marginBottom: 4 }}>Audio &amp; Video sources</h3>
+          <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 16 }}>
+            Optional API keys that unlock additional providers. Free-tier sources (TMDB embeds, iptv-org, archive.org,
+            musify.club) work with zero keys — these are enhancements, not requirements.
+          </p>
+          <div className="stat-card" style={{ padding: '4px 16px', marginBottom: 24 }}>
+            <IntegrationRow name="TMDB (movie/show metadata + posters)" ok={!!streamStatus?.tmdb} hint="themoviedb.org — free" />
+            <IntegrationRow name="YouTube Data API (audio search)" ok={!!streamStatus?.youtube} hint="Google Cloud Console — free tier" />
+            <IntegrationRow name="Jamendo (royalty-free music)" ok={!!streamStatus?.jamendo} hint="jamendo.com/developer — free" />
+          </div>
+
+          <h3 className="settings-section-title" style={{ marginBottom: 4 }}>Agent intelligence</h3>
+          <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 16 }}>
+            Backend wiring for Copilot's real-LLM behavior — see the Mind &amp; LLM tab to connect your own agent.
+          </p>
+          <div className="stat-card" style={{ padding: '4px 16px' }}>
+            <IntegrationRow name="Omo-Koda2 kernel" ok={!!sysStatus?.omokoda} hint="not configured on this instance" />
+            <IntegrationRow name="OmniRoute (default Copilot LLM fallback)" ok={!!sysStatus?.omniroute} hint="not configured on this instance" />
+            <IntegrationRow name="Federation" ok={!!sysStatus?.federation_enabled} hint="disabled on this instance" />
+          </div>
+        </div>
+      )}
+
+      {/* ── Cinema & Live TV preferences ── */}
+      {tab === 'Cinema & Live TV' && (
+        <div className="settings-section">
+          <h3 className="settings-section-title" style={{ marginBottom: 4 }}>Live TV</h3>
+          <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>
+            Default country when you open the Live TV tab. Real iptv-org catalog, currently 3,286 channels for the US.
+          </p>
+          <div className="stat-card" style={{ marginBottom: 24, padding: 16 }}>
+            <label style={{ fontSize: 12, color: 'var(--muted)', display: 'block', marginBottom: 8 }}>Default country code (e.g. US, GB, CA)</label>
+            <input
+              value={defaultCountry}
+              onChange={e => saveDefaultCountry(e.target.value.toUpperCase().slice(0, 2))}
+              style={{ width: 80, padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6, color: 'var(--text)', fontSize: 13, textAlign: 'center' }}
+            />
+          </div>
+
+          <h3 className="settings-section-title" style={{ marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Tv size={14} /> Agent.TV
+          </h3>
+          <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>
+            The always-on AI-generated channel (Cinema tab). Real DeepSeek-scripted, Piper-TTS-narrated segments looping
+            forever — no configuration needed here, it's always running. Off-chain thumbs-up/down voting lives on the
+            Agent.TV section itself.
+          </p>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <NavLink to="/cinema" className="btn btn-ghost btn-sm"><Film size={13} /> Open Cinema</NavLink>
+          </div>
         </div>
       )}
 

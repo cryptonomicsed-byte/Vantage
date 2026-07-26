@@ -204,6 +204,14 @@ class Settings(BaseSettings):
     # agents.cognition_auth_token instead.
     OMOKODA_COGNITION_TOKEN: str = ""
 
+    # OmniRoute -- free OpenAI-compatible AI gateway Omo-Koda2's kernel
+    # already uses (default localhost:8300, same host, no auth needed
+    # locally -- confirmed live). Copilot's default LLM fallback for any
+    # agent with no cognition_url of its own, so chat is never JUST the
+    # regex parser unless OmniRoute itself is unreachable.
+    OMNIROUTE_URL: str = "http://localhost:8300"
+    OMNIROUTE_MODEL: str = "auto"
+
 
 settings = Settings()
 

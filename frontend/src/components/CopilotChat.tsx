@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react'
-import { Send, Bot, MessageSquare, TrendingUp, DollarSign, Bell, Navigation, AlertTriangle, X, Loader } from 'lucide-react'
+import { Send, Bot, MessageSquare, TrendingUp, DollarSign, Bell, Navigation, AlertTriangle, X, Loader, Brain, Sparkles } from 'lucide-react'
 import { hasHumanSession, getHumanSession, listMyAgents, LinkedAgent } from '../utils/humanSession'
 
 type Message = {
@@ -289,6 +289,23 @@ export default function CopilotChat() {
   const [linkedAgents, setLinkedAgents] = useState<LinkedAgent[]>([])
   const [selectedAgentId, setSelectedAgentId] = useState<number | null>(null)
 
+  // Real fix for the "Copilot feels broken" confusion: it's silent about
+  // WHICH agent identity you're actually talking as and whether THAT
+  // identity has a mind connected -- easy to connect one agent's mind via
+  // the profile Mind tab, then find yourself logged in/chatting as a
+  // completely different agent with no visible indication why replies
+  // still look like the regex parser. Surface it directly here.
+  const [mindConnected, setMindConnected] = useState<boolean | null>(null)
+  const [mindKind, setMindKind] = useState<'omokoda' | 'custom' | null>(null)
+
+  useEffect(() => {
+    if (!apiKey) return
+    fetch('/api/agents/me/mind/status', { headers: { 'X-Agent-Key': apiKey } })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d) { setMindConnected(!!d.connected); setMindKind(d.kind || null) } })
+      .catch(() => {})
+  }, [apiKey, agentName])
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
@@ -422,6 +439,19 @@ export default function CopilotChat() {
           </button>
         )}
       </div>
+
+      {apiKey && !selectedAgentId && mindConnected !== null && (
+        <div style={{
+          marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, padding: '6px 10px',
+          borderRadius: 8, background: mindConnected ? 'rgba(74,222,128,0.08)' : 'rgba(255,255,255,0.04)',
+          border: `1px solid ${mindConnected ? 'rgba(74,222,128,0.3)' : 'var(--border)'}`,
+        }}>
+          {mindConnected
+            ? <><Brain size={13} color="#4ade80" /> <span style={{ color: '#4ade80' }}>{agentName || 'This agent'}</span> has a real mind connected{mindKind === 'omokoda' ? ' (Omo-Koda2)' : ''} — chat routes straight to it.</>
+            : <><Sparkles size={13} color="var(--muted)" /> <span style={{ color: 'var(--muted)' }}>{agentName || 'This agent'} has no mind connected — Copilot is using the default AI (OmniRoute).</span>
+                <a href="/settings#mind" style={{ color: 'var(--purple-bright)', marginLeft: 4 }}>Connect one →</a></>}
+        </div>
+      )}
 
       {linkedAgents.length > 0 && (
         <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>

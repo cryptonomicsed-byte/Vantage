@@ -225,6 +225,40 @@ async def whoami(agent: dict = Depends(get_agent)):
     }
 
 
+async def _try_omniroute(agent_row: dict, text: str) -> Optional[str]:
+    """Default Copilot LLM fallback: OpenAI-compatible OmniRoute gateway,
+    same host Omo-Koda2's kernel already uses (confirmed live, no auth
+    needed locally). Only reached when the agent has no cognition_url of
+    its own (or it just failed) -- this is what keeps Copilot 'a real LLM'
+    for every agent by default, not just ones with a Mind connected.
+    Returns None (never raises) on any failure so the caller falls through
+    to the regex parser."""
+    if not settings.OMNIROUTE_URL:
+        return None
+    model = agent_row.get("copilot_fallback_model") or settings.OMNIROUTE_MODEL
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(
+                f"{settings.OMNIROUTE_URL.rstrip('/')}/v1/chat/completions",
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": f"You are {agent_row.get('name', 'an agent')}'s Copilot assistant on Vantage. Be concise and helpful."},
+                        {"role": "user", "content": text},
+                    ],
+                    "stream": False,
+                },
+            )
+        if r.status_code == 200:
+            content = r.json().get("choices", [{}])[0].get("message", {}).get("content")
+            if content:
+                return content
+        logger.warning(f"OmniRoute returned {r.status_code} for agent {agent_row.get('name')}")
+    except Exception as e:
+        logger.warning(f"OmniRoute call failed for agent {agent_row.get('name')}: {e}")
+    return None
+
+
 # ── Chat dispatch — shared by an agent's own key and a human acting through
 # a scoped grant on some other agent ──
 async def _dispatch_chat(agent_row: dict, text: str, human_id: Optional[str] = None) -> dict:
@@ -262,9 +296,18 @@ async def _dispatch_chat(agent_row: dict, text: str, human_id: Optional[str] = N
                 if reply:
                     return {"action": "chat_reply", "target": agent_row.get("name", ""),
                             "data": {"reply": reply}, "confidence": 1.0}
-            logger.warning(f"cognition_url returned {r.status_code} for agent {agent_row.get('name')}, falling back to regex parser")
+            logger.warning(f"cognition_url returned {r.status_code} for agent {agent_row.get('name')}, falling back to OmniRoute")
         except Exception as e:
-            logger.warning(f"cognition_url call failed for agent {agent_row.get('name')}: {e} -- falling back to regex parser")
+            logger.warning(f"cognition_url call failed for agent {agent_row.get('name')}: {e} -- falling back to OmniRoute")
+
+    # No agent-specific mind connected (or it just failed) -- default to a
+    # real LLM via OmniRoute rather than going straight to the regex parser.
+    # Same graceful-degrade rule: any failure here falls through to the
+    # regex parser below instead of raising.
+    omniroute_reply = await _try_omniroute(agent_row, text)
+    if omniroute_reply:
+        return {"action": "chat_reply", "target": agent_row.get("name", ""),
+                "data": {"reply": omniroute_reply}, "confidence": 0.95}
 
     parsed = parse_intent(text)
     action = parsed["action"]

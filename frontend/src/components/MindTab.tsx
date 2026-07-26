@@ -5,6 +5,7 @@ interface MindStatus {
   connected: boolean
   cognition_url: string | null
   kind: 'omokoda' | 'custom' | null
+  fallback_model?: string
 }
 
 // Powers Copilot with a real 'mind' instead of the built-in regex intent
@@ -21,11 +22,28 @@ export default function MindTab({ apiKey }: { apiKey: string }) {
   const [customUrl, setCustomUrl] = useState('')
   const [customToken, setCustomToken] = useState('')
 
+  const [fallbackModel, setFallbackModel] = useState('')
+  const [savingModel, setSavingModel] = useState(false)
+
+  async function saveFallbackModel() {
+    setSavingModel(true)
+    try {
+      await fetch('/api/agents/me/mind/fallback-model', {
+        method: 'POST',
+        headers: { 'X-Agent-Key': apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: fallbackModel.trim() }),
+      })
+      load()
+    } finally {
+      setSavingModel(false)
+    }
+  }
+
   function load() {
     setLoading(true)
     fetch('/api/agents/me/mind/status', { headers: { 'X-Agent-Key': apiKey } })
       .then(r => r.json())
-      .then(setStatus)
+      .then(d => { setStatus(d); setFallbackModel(d.fallback_model || '') })
       .catch(() => setError('Could not load mind status.'))
       .finally(() => setLoading(false))
   }
@@ -90,9 +108,9 @@ export default function MindTab({ apiKey }: { apiKey: string }) {
         <Brain size={16} /> Mind
       </h3>
       <p style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 16, maxWidth: 560 }}>
-        By default, Copilot chat runs a basic command parser (price checks, navigation, alerts). Connect a real
-        agent brain here and Copilot routes chat straight to it instead -- any framework that implements the
-        webhook contract works, not just Omo-Koda2.
+        By default, Copilot chat is backed by a real LLM (OmniRoute) for basic conversation, price checks, and
+        navigation. Connect a real agent brain here and Copilot routes chat straight to it instead -- any framework
+        that implements the webhook contract works, not just Omo-Koda2.
       </p>
 
       {error && <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>{error}</p>}
@@ -111,7 +129,7 @@ export default function MindTab({ apiKey }: { apiKey: string }) {
             <span style={{ fontSize: 14, fontWeight: 600 }}>
               {status.connected
                 ? `Connected${status.kind === 'omokoda' ? ' — Omo-Koda2' : ' — custom webhook'}`
-                : 'Not connected — using basic commands'}
+                : 'Not connected — using default LLM fallback'}
             </span>
           </div>
 
@@ -127,6 +145,25 @@ export default function MindTab({ apiKey }: { apiKey: string }) {
           )}
         </div>
       )}
+
+      <div className="glass" style={{ padding: 16, borderRadius: 12, maxWidth: 560, marginBottom: 16 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Default LLM fallback model</div>
+        <p style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 10 }}>
+          Which OmniRoute model answers Copilot chat when {status?.connected ? "your connected mind doesn't respond" : 'no mind is connected'}.
+          Leave blank to use the instance default ("auto").
+        </p>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input
+            placeholder="auto"
+            value={fallbackModel}
+            onChange={e => setFallbackModel(e.target.value)}
+            style={{ flex: 1, padding: '8px 10px', background: 'rgba(8,8,16,0.6)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--muted-hi)', fontSize: 12 }}
+          />
+          <button className="btn btn-ghost btn-sm" disabled={savingModel} onClick={saveFallbackModel}>
+            {savingModel ? <Loader size={12} className="spin" /> : 'Save'}
+          </button>
+        </div>
+      </div>
 
       {!status?.connected && (
         <>

@@ -106,7 +106,7 @@ function ChannelRow({ title, count, channels, activeUrl, onSelect, onSeeAll }: {
 
 export default function LiveTV() {
   const [countries, setCountries] = useState<Country[]>([])
-  const [countryCode, setCountryCode] = useState('US')
+  const [countryCode, setCountryCode] = useState(localStorage.getItem('livetv_default_country') || 'US')
   const [channels, setChannels] = useState<Channel[]>([])
   const [channelsLoading, setChannelsLoading] = useState(false)
   const [activeGroup, setActiveGroup] = useState<string>('All')

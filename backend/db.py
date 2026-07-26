@@ -288,6 +288,10 @@ async def init_agents_db() -> None:
             # extra fields, never required by the contract itself.
             ("omokoda_agent_id",  "TEXT DEFAULT NULL"),
             ("omokoda_agent_key", "TEXT DEFAULT NULL"),
+            # Copilot LLM fallback model choice (OmniRoute model id, e.g.
+            # 'auto') -- only consulted when this agent has no cognition_url
+            # of its own. NULL/empty means settings.OMNIROUTE_MODEL default.
+            ("copilot_fallback_model", "TEXT DEFAULT NULL"),
             # Sealed seed for HKDF-derived purpose-specific keys (Buzz/Nostr
             # identity first; same one-seed-many-purposes pattern as
             # Omo-Koda2's BIPON39). sealed_seed_hex (plaintext hex) is the
