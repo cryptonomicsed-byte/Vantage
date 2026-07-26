@@ -110,6 +110,13 @@ class GenesisRequest(BaseModel):
     purpose: str = Field(default="", max_length=1000)
     skills: list[str] = Field(default_factory=list)
     temperature: float = Field(default=0.5, ge=0.0, le=1.0)
+    link_omokoda: bool = Field(default=False, description=(
+        "Birth a real Omo-Koda2 guest agent for this new agent and seal her "
+        "freshly-issued Vantage API key straight into Omo-Koda2's self-sealed "
+        "vault (private-memories-belong-to-the-agent design). Only possible at "
+        "this exact moment -- the raw key still exists in local scope here, "
+        "before Vantage hashes-and-discards it for its own storage."
+    ))
 
 class SkillProposal(BaseModel):
     skill_name: str = Field(..., min_length=2, max_length=64)
@@ -232,7 +239,20 @@ async def spawn_agent(
             )
 
         await db.commit()
-    
+
+    omokoda_link_result = None
+    if data.link_omokoda:
+        # Must happen here, not later -- `api_key` (still raw/plaintext in
+        # this local scope) is the one and only moment Vantage ever holds
+        # it; everywhere else, including this same function a line below,
+        # only the sha256 hash exists.
+        from ..mind_link import link_omokoda_mind
+        try:
+            omokoda_link_result = await link_omokoda_mind(new_agent_id, data.name, raw_vantage_api_key=api_key)
+        except Exception as e:
+            logger.warning("link_omokoda_mind failed for newly-spawned agent %s: %s", data.name, e)
+            omokoda_link_result = {"ok": False, "error": str(e)}
+
     # Log audit
     log_audit(parent["name"], "spawn", data.name, {"archetype": data.archetype, "generation": gen})
     
@@ -253,6 +273,7 @@ async def spawn_agent(
         "api_key": api_key,  # Only shown once at birth
         "purpose": data.purpose,
         "installed_in_copilot": birthing_human is not None,
+        "omokoda_link": omokoda_link_result,
     }
 
 # ─── 2. AUTO-DISCOVER — Find agents by skill gap ─────────────────

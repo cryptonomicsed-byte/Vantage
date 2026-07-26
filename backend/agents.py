@@ -680,7 +680,15 @@ async def my_mind_link_omokoda(agent: dict = Depends(get_agent)):
     """Convenience path: births a real Omo-Koda2 guest agent via /v1/birth
     and auto-wires this agent's cognition_url to it, with a real live
     verification round trip. One option among several -- see /me/mind/connect
-    for any other agent framework."""
+    for any other agent framework.
+
+    Note on self-seal: this path links an EXISTING Vantage agent (already
+    only holding a hashed api_key) to a NEW Omo-Koda2 mind, so there is no
+    raw Vantage key left to seal into her vault -- Vantage genuinely cannot
+    recover it after the original birth moment. The response's "sealed"
+    field will be false here. To get the Vantage key sealed too, use
+    POST /api/genesis/spawn with link_omokoda=true, which does both at the
+    one moment the raw key exists."""
     from .mind_link import link_omokoda_mind
     try:
         return await link_omokoda_mind(agent["id"], agent["name"])

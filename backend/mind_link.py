@@ -80,11 +80,46 @@ async def disconnect_mind(agent_id: int) -> dict:
     return {"ok": True}
 
 
-async def link_omokoda_mind(agent_id: int, agent_name: str) -> dict:
+async def seal_secret_into_omokoda(omokoda_agent_id: str, vantage_api_key: str) -> bool:
+    """POST a freshly-issued, still-plaintext Vantage API key straight into
+    the Omo-Koda2 agent's self-sealed vault (POST /v1/vault/seal-secret,
+    contract confirmed live 2026-07-26 with the Omo-Koda2 session). Must be
+    called while the raw key is still in hand -- Vantage only ever stores
+    the sha256 hash, so this is a one-shot, birth-time-only operation; there
+    is no way to retroactively seal an already-issued key. Returns False
+    (never raises) on failure so a vault hiccup degrades to "not sealed"
+    rather than breaking the birth/link flow the key came from."""
+    if not settings.OMOKODA_URL or not settings.OMOKODA_COGNITION_TOKEN:
+        return False
+    seal_url = f"{settings.OMOKODA_URL.rstrip('/')}/v1/vault/seal-secret"
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                seal_url,
+                json={"agent_id": omokoda_agent_id, "vantage_api_key": vantage_api_key},
+                headers={"Authorization": f"Bearer {settings.OMOKODA_COGNITION_TOKEN}"},
+            )
+        return r.status_code == 200 and bool(r.json().get("sealed"))
+    except Exception as exc:
+        logger.warning("seal-secret call failed for omokoda agent %s: %s", omokoda_agent_id, exc)
+        return False
+
+
+async def link_omokoda_mind(agent_id: int, agent_name: str, raw_vantage_api_key: str | None = None) -> dict:
     """Convenience path: birth a real Omo-Koda2 guest agent and auto-wire
     this Vantage agent's cognition_url to it. Real live verification
     round trip before declaring success -- same pattern as the Buzz
-    registration flow."""
+    registration flow.
+
+    raw_vantage_api_key: only ever non-null when this is called at the
+    literal moment of Vantage-agent birth (see genesis.py spawn_agent),
+    while the plaintext key still exists in local scope before Vantage
+    hashes-and-discards it. When present, it's hands the key straight into
+    Omo-Koda2's self-sealed vault via seal_secret_into_omokoda() -- 'private
+    memories belong to the agent', per the owner's design. When this
+    convenience path is invoked later (an already-existing agent linking a
+    new mind), there is no raw key to hand off -- Vantage genuinely cannot
+    recover it, so that case is left unsealed rather than faked."""
     if not settings.OMOKODA_URL:
         raise RuntimeError("Omo-Koda2 kernel not configured (OMOKODA_URL unset)")
     if not settings.OMOKODA_COGNITION_TOKEN:
@@ -103,6 +138,10 @@ async def link_omokoda_mind(agent_id: int, agent_name: str) -> dict:
     omokoda_agent_key = born.get("agent_key")
     if not omokoda_agent_id or not omokoda_agent_key:
         raise RuntimeError(f"Omo-Koda2 birth response missing agent_id/agent_key: {born}")
+
+    sealed = False
+    if raw_vantage_api_key:
+        sealed = await seal_secret_into_omokoda(omokoda_agent_id, raw_vantage_api_key)
 
     cognition_url = f"{settings.OMOKODA_URL.rstrip('/')}/v1/cognition"
 
@@ -137,4 +176,5 @@ async def link_omokoda_mind(agent_id: int, agent_name: str) -> dict:
     return {
         "ok": True, "kind": "omokoda", "cognition_url": cognition_url,
         "omokoda_agent_id": omokoda_agent_id, "verified": verify_ok, "verify_reply": verify_reply,
+        "sealed": sealed,
     }
