@@ -115,6 +115,16 @@ async def audio_artist_albums(artist_id: int):
     return await _forward("GET", "/api/audio/artist/albums", params={"artist_id": artist_id})
 
 
+@audio_router.get("/mixtapes")
+async def audio_mixtapes(artist: str):
+    return await _forward("GET", "/api/audio/mixtapes", params={"artist": artist})
+
+
+@audio_router.get("/mixtape/tracks")
+async def audio_mixtape_tracks(identifier: str):
+    return await _forward("GET", "/api/audio/mixtape/tracks", params={"identifier": identifier})
+
+
 @audio_router.get("/podcast/episodes")
 async def audio_podcast_episodes(feed_url: str):
     return await _forward("GET", "/api/audio/podcast/episodes", params={"feed_url": feed_url})

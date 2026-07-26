@@ -36,6 +36,8 @@ interface MusicItem {
   view_url?: string | null; artist_id?: number | null
 }
 interface ArtistItem { title: string; artist_id: number | null; view_url: string | null }
+interface MixtapeItem { identifier: string; title: string; creator: string; downloads: number }
+interface MixtapeTrack { title: string; url: string; duration: number | null }
 interface AlbumTrack {
   title: string; track_number: number | null; preview_url: string | null; duration_ms: number | null
 }
@@ -83,6 +85,11 @@ export default function AudioStreamBrowse() {
   const [viewingArtist, setViewingArtist] = useState<ArtistItem | null>(null)
   const [artistAlbums, setArtistAlbums] = useState<MusicItem[]>([])
   const [artistAlbumsLoading, setArtistAlbumsLoading] = useState(false)
+  const [mixtapes, setMixtapes] = useState<MixtapeItem[]>([])
+  const [mixtapesLoading, setMixtapesLoading] = useState(false)
+  const [openMixtapeId, setOpenMixtapeId] = useState<string | null>(null)
+  const [mixtapeTracks, setMixtapeTracks] = useState<MixtapeTrack[]>([])
+  const [mixtapeTracksLoading, setMixtapeTracksLoading] = useState(false)
   const [trending, setTrending] = useState<ChartItem[]>([])
   const [genres, setGenres] = useState<Genre[]>([])
   const [genreRows, setGenreRows] = useState<Record<number, ChartItem[]>>({})
@@ -192,6 +199,8 @@ export default function AudioStreamBrowse() {
     setViewingArtist(a)
     setArtistAlbumsLoading(true)
     setArtistAlbums([])
+    setMixtapes([])
+    setMixtapesLoading(true)
     try {
       const r = await fetch(`/api/audio/stream/artist/albums?artist_id=${a.artist_id}`)
       const data = await r.json()
@@ -200,6 +209,34 @@ export default function AudioStreamBrowse() {
       setArtistAlbums([])
     } finally {
       setArtistAlbumsLoading(false)
+    }
+    // Real mixtapes via archive.org's hiphopmixtapes collection (DatPiff's
+    // own official successor) -- fetched separately/in parallel, not
+    // gated on the iTunes lookup succeeding.
+    try {
+      const r2 = await fetch(`/api/audio/stream/mixtapes?artist=${encodeURIComponent(a.title)}`)
+      const data2 = await r2.json()
+      setMixtapes(data2.mixtapes || [])
+    } catch {
+      setMixtapes([])
+    } finally {
+      setMixtapesLoading(false)
+    }
+  }
+
+  async function openMixtape(m: MixtapeItem) {
+    if (openMixtapeId === m.identifier) { setOpenMixtapeId(null); return }
+    setOpenMixtapeId(m.identifier)
+    setMixtapeTracksLoading(true)
+    setMixtapeTracks([])
+    try {
+      const r = await fetch(`/api/audio/stream/mixtape/tracks?identifier=${encodeURIComponent(m.identifier)}`)
+      const data = await r.json()
+      setMixtapeTracks(data.tracks || [])
+    } catch {
+      setMixtapeTracks([])
+    } finally {
+      setMixtapeTracksLoading(false)
     }
   }
 
@@ -442,13 +479,59 @@ export default function AudioStreamBrowse() {
               ← Back to results
             </button>
             <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 14 }}>{viewingArtist.title}</h3>
+
+            <h4 style={{ fontSize: 13, fontWeight: 600, marginBottom: 10, color: 'var(--muted-hi)' }}>Albums</h4>
             {artistAlbumsLoading && <p style={{ fontSize: 13, color: 'var(--muted)' }}><Loader size={14} className="spin" /> Loading albums…</p>}
             {!artistAlbumsLoading && artistAlbums.length === 0 && (
               <p style={{ fontSize: 13, color: 'var(--muted)' }}>No albums found for this artist.</p>
             )}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 14 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 14, marginBottom: 28 }}>
               {artistAlbums.map((item, i) => <MusicCard key={i} item={item} isAlbum />)}
             </div>
+
+            {(mixtapesLoading || mixtapes.length > 0) && (
+              <>
+                <h4 style={{ fontSize: 13, fontWeight: 600, marginBottom: 10, color: 'var(--muted-hi)' }}>
+                  Mixtapes <span style={{ fontWeight: 400, color: 'var(--muted)' }}>(via archive.org)</span>
+                </h4>
+                {mixtapesLoading && <p style={{ fontSize: 13, color: 'var(--muted)' }}><Loader size={14} className="spin" /> Loading mixtapes…</p>}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {mixtapes.map((m, i) => (
+                    <div key={i} className="glass" style={{ borderRadius: 8, border: '1px solid var(--border)' }}>
+                      <div
+                        onClick={() => openMixtape(m)}
+                        style={{ padding: 12, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, cursor: 'pointer' }}
+                      >
+                        <span style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <Disc3 size={14} color="var(--muted)" /> {m.title}
+                        </span>
+                        {openMixtapeId === m.identifier && mixtapeTracksLoading
+                          ? <Loader size={12} className="spin" />
+                          : <Play size={12} />}
+                      </div>
+                      {openMixtapeId === m.identifier && !mixtapeTracksLoading && (
+                        <div style={{ padding: '0 12px 12px', display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 260, overflowY: 'auto' }}>
+                          {mixtapeTracks.length === 0 && <div style={{ fontSize: 11, color: 'var(--muted)' }}>No playable tracks found.</div>}
+                          {mixtapeTracks.map((t, ti) => (
+                            <button
+                              key={ti}
+                              onClick={() => { setPlayingUrl(t.url); setPlayingSource('archive.org') }}
+                              className="btn btn-ghost btn-sm"
+                              style={{ display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'space-between', fontSize: 11, textAlign: 'left' }}
+                            >
+                              <span style={{ display: 'flex', alignItems: 'center', gap: 6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {playingUrl === t.url ? <Pause size={10} /> : <Play size={10} />} {t.title}
+                              </span>
+                              <span style={{ color: 'var(--muted)', flexShrink: 0 }}>{t.duration ? `${Math.floor(t.duration / 60)}:${String(Math.floor(t.duration % 60)).padStart(2, '0')}` : ''}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         ) : hasSearched ? (
           <>
