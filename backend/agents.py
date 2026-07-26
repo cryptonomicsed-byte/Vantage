@@ -560,13 +560,17 @@ async def publish(
 async def get_feed(request: Request, limit: int = 50, offset: int = 0, content_type: Optional[str] = None, surface: Optional[str] = None, agent: dict = Depends(get_agent)):
     type_clause = "AND b.content_type = ?" if (content_type and content_type != "all") else ""
     params: list = [content_type] if type_clause else []
-    # Surface filter: the social feed asks for surface='feed' so Netflix-style
-    # cinema titles and Spotify-style audio never leak into the social stream.
+    # Surface filter: SAFE BY DEFAULT -- this is the social feed, so unless a
+    # caller explicitly asks for surface='all' (or a specific surface), only
+    # surface='feed' rows are returned. Netflix-style cinema titles and
+    # Spotify-style audio (and anything Agent.TV generates) must never leak
+    # into the social stream just because a caller forgot to pass the param.
     # Legacy rows may predate the column, so treat NULL surface as 'feed'.
+    effective_surface = surface or "feed"
     surface_clause = ""
-    if surface and surface != "all":
+    if effective_surface != "all":
         surface_clause = "AND COALESCE(b.surface, 'feed') = ?"
-        params.append(surface)
+        params.append(effective_surface)
     params.extend([limit, offset])
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
@@ -1399,6 +1403,7 @@ async def trending_feed(request: Request, limit: int = 50, agent: dict = Depends
                LEFT JOIN view_events ve ON ve.broadcast_id = b.id
                    AND ve.viewed_at >= datetime('now', '-7 days')
                WHERE b.status = 'ready' AND a.jail_mode = 0
+                   AND COALESCE(b.surface, 'feed') = 'feed'
                GROUP BY b.id
                ORDER BY velocity DESC, b.view_count DESC
                LIMIT ?""",
@@ -1425,6 +1430,7 @@ async def personalized_feed(
                JOIN agents a ON a.id = b.agent_id
                JOIN agent_follows f ON f.following_id = a.id
                WHERE f.follower_id=? AND b.status='ready' AND a.jail_mode = 0
+                   AND COALESCE(b.surface, 'feed') = 'feed'
                ORDER BY b.created_at DESC
                LIMIT ? OFFSET ?""",
             (agent["id"], limit, offset),
@@ -2797,7 +2803,8 @@ async def recommended_feed(
             async with db.execute(
                 f"""SELECT b.id FROM broadcasts b
                    JOIN agents a ON a.id = b.agent_id
-                   WHERE b.status='ready' AND b.agent_id != ? AND a.jail_mode = 0 AND ({tag_conditions})""",
+                   WHERE b.status='ready' AND b.agent_id != ? AND a.jail_mode = 0
+                       AND COALESCE(b.surface, 'feed') = 'feed' AND ({tag_conditions})""",
                 [agent["id"]] + tag_params,
             ) as cur:
                 for row in await cur.fetchall():
@@ -2813,6 +2820,7 @@ async def recommended_feed(
                           a.name as agent_name, a.avatar_url
                    FROM broadcasts b JOIN agents a ON a.id = b.agent_id
                    WHERE b.status='ready' AND b.agent_id != ? AND a.jail_mode = 0
+                       AND COALESCE(b.surface, 'feed') = 'feed'
                    ORDER BY b.view_count DESC LIMIT ?""",
                 (agent["id"], limit),
             ) as cur:
@@ -2827,6 +2835,7 @@ async def recommended_feed(
                       a.name as agent_name, a.avatar_url
                FROM broadcasts b JOIN agents a ON a.id = b.agent_id
                WHERE b.id IN ({id_placeholders}) AND b.status='ready' AND a.jail_mode = 0
+                   AND COALESCE(b.surface, 'feed') = 'feed'
                ORDER BY b.view_count DESC, b.created_at DESC
                LIMIT ?""",
             list(candidate_ids) + [limit],

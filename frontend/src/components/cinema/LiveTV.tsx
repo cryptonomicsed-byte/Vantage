@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react'
-import { Play, Loader, Maximize2, Minimize2 } from 'lucide-react'
+import { Play, Loader, Maximize2, Minimize2, ChevronLeft, ChevronRight, Shuffle } from 'lucide-react'
 import Hls from 'hls.js'
 
 // "Live TV" tab -- pure iptv-org channel browser (real HLS, zero
@@ -175,6 +175,26 @@ export default function LiveTV() {
 
   const totalShown = activeGroup === 'All' ? channels.length : (channelsByCategory[activeGroup] || []).length
 
+  // Channel-switcher: steps through whichever list is currently on
+  // screen -- the active category's channels if one is selected
+  // (or the top category's, in the "All" browse view), so next/prev
+  // always advances through something the user can actually see.
+  const switcherList = activeGroup === 'All' ? (channelsByCategory[categories[0]] || []) : (channelsByCategory[activeGroup] || [])
+
+  function stepChannel(dir: 1 | -1) {
+    if (switcherList.length === 0) return
+    const idx = switcherList.findIndex(c => c.url === liveStream?.url)
+    const next = idx === -1 ? 0 : (idx + dir + switcherList.length) % switcherList.length
+    const c = switcherList[next]
+    setLiveStream({ url: c.url, title: c.title })
+  }
+
+  function randomChannel() {
+    if (channels.length === 0) return
+    const c = channels[Math.floor(Math.random() * channels.length)]
+    setLiveStream({ url: c.url, title: c.title })
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 220px)', minHeight: 400 }}>
       {/* Pinned header: country picker + player. Does not scroll with the grid below. */}
@@ -205,8 +225,17 @@ export default function LiveTV() {
                 {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
               </button>
             </div>
-            <div style={{ padding: '8px 14px', background: 'rgba(8,8,16,0.85)', fontSize: 13 }}>
-              Now playing: <strong style={{ color: 'var(--purple-bright)' }}>{liveStream.title}</strong>
+            <div style={{ padding: '10px 14px', background: 'rgba(8,8,16,0.85)', fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#ff4d4d', flexShrink: 0, boxShadow: '0 0 6px #ff4d4d' }} />
+                <span style={{ fontSize: 10, letterSpacing: '0.5px', color: '#ff4d4d', fontWeight: 700, flexShrink: 0 }}>LIVE</span>
+                <strong style={{ color: 'var(--purple-bright)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{liveStream.title}</strong>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                <button className="btn btn-ghost btn-sm" title="Previous channel" onClick={() => stepChannel(-1)}><ChevronLeft size={14} /></button>
+                <button className="btn btn-ghost btn-sm" title="Random channel" onClick={randomChannel}><Shuffle size={13} /></button>
+                <button className="btn btn-ghost btn-sm" title="Next channel" onClick={() => stepChannel(1)}><ChevronRight size={14} /></button>
+              </div>
             </div>
           </div>
         )}
