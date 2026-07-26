@@ -1,10 +1,17 @@
 import React, { useState, useRef, useEffect } from 'react'
-import { Search, Loader, Play, Pause, Radio, Mic, Music2, Youtube, Disc3, AlertTriangle } from 'lucide-react'
+import { Search, Loader, Play, Pause, Radio, Mic, Music2, Youtube, Disc3, AlertTriangle, Users } from 'lucide-react'
 
 // Audio "Stream" tab -- distinct from the Library tab's agent-produced
 // tracks. Legal-first sources first:
-//   Music: iTunes Search API (real metadata, 600x600 cover art, legal
-//     30s preview clips -- NOT full songs, Apple's own design).
+//   Music: iTunes Search API for metadata/search/artwork (real 600x600
+//     covers), grouped into Songs/Albums/Artists sections, plus a
+//     no-search browse view (Trending + genre rows via Apple's classic
+//     RSS charts API). PLAYBACK is "smart": clicking anything first
+//     tries a real full-length match (musify.club, then Jamendo) via
+//     /resolve-full-track, and only falls back to iTunes' 30s preview
+//     if no full match exists -- posters/metadata come from iTunes (the
+//     best source for that), but playing something no longer means
+//     settling for the demo when a real full track is available.
 //   Podcasts: same iTunes Search endpoint (media=podcast) for discovery,
 //     then a real public RSS feed parsed directly for full-length
 //     episode audio -- fully legal, podcasts are open RSS by design.
@@ -17,18 +24,23 @@ import { Search, Loader, Play, Pause, Radio, Mic, Music2, Youtube, Disc3, AlertT
 //   Full Tracks: musify.club, an unlicensed commercial-music mirror --
 //     DISCLOSED, NOT HIDDEN, meaningfully higher legal risk than the
 //     movie-embed providers (labels pursue takedowns far more
-//     aggressively). Kept visually distinct (warning banner) rather than
-//     blended in with the legal sources above.
+//     aggressively). Kept visually distinct (warning banner). The main
+//     Music tab's smart-play already uses this as its first full-track
+//     attempt; this tab remains for direct musify-only search/browse.
 
 type Tab = 'music' | 'podcasts' | 'soundcloud' | 'youtube' | 'fulltracks'
 
 interface MusicItem {
   kind: string; title: string; artist: string; collection: string; collection_id: number | null
   artwork: string | null; preview_url: string | null; track_count: number | null; genre: string | null
+  view_url?: string | null
 }
+interface ArtistItem { title: string; view_url: string | null }
 interface AlbumTrack {
   title: string; track_number: number | null; preview_url: string | null; duration_ms: number | null
 }
+interface ChartItem { title: string; artist: string; collection: string; artwork: string | null }
+interface Genre { id: number; name: string }
 interface PodcastItem {
   kind: string; title: string; artist: string; artwork: string | null; feed_url: string | null
 }
@@ -48,72 +60,12 @@ function fmtMs(ms: number | null): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
 
-function MusicResults({ items, playingUrl, onPlay }: { items: MusicItem[]; playingUrl: string | null; onPlay: (url: string) => void }) {
-  const [openCollectionId, setOpenCollectionId] = useState<number | null>(null)
-  const [tracks, setTracks] = useState<AlbumTrack[]>([])
-  const [tracksLoading, setTracksLoading] = useState(false)
-
-  // iTunes only attaches preview_url at the individual-track level --
-  // entity=album results always return null for it (confirmed live), so
-  // playing an album means fetching its real tracks first, not expecting
-  // the album object itself to carry a preview.
-  async function openAlbum(item: MusicItem) {
-    if (item.preview_url) { onPlay(item.preview_url); return } // a song result -- play directly
-    if (!item.collection_id) return
-    if (openCollectionId === item.collection_id) { setOpenCollectionId(null); return }
-    setOpenCollectionId(item.collection_id)
-    setTracksLoading(true)
-    setTracks([])
-    try {
-      const r = await fetch(`/api/audio/stream/album/tracks?collection_id=${item.collection_id}`)
-      const data = await r.json()
-      setTracks(data.tracks || [])
-    } catch {
-      setTracks([])
-    } finally {
-      setTracksLoading(false)
-    }
-  }
-
+function NowPlayingBadge({ source }: { source: string | null }) {
+  if (!source) return null
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 14 }}>
-      {items.map((item, i) => (
-        <div key={i} className="glass" style={{ padding: 10, borderRadius: 10, border: '1px solid var(--border)', gridColumn: openCollectionId === item.collection_id ? 'span 2' : undefined }}>
-          <div style={{ position: 'relative', width: '100%', aspectRatio: '1/1', borderRadius: 8, overflow: 'hidden', marginBottom: 8, cursor: 'pointer' }} onClick={() => openAlbum(item)}>
-            {item.artwork
-              ? <img src={item.artwork} alt={item.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-              : <div style={{ width: '100%', height: '100%', background: 'rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Music2 size={28} color="var(--muted)" /></div>}
-            <div style={{ position: 'absolute', bottom: 6, right: 6, width: 32, height: 32, borderRadius: '50%', background: 'var(--purple-bright)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              {tracksLoading && openCollectionId === item.collection_id
-                ? <Loader size={14} className="spin" color="#000" />
-                : (playingUrl && playingUrl === item.preview_url ? <Pause size={14} color="#000" /> : <Play size={14} color="#000" fill="#000" />)}
-            </div>
-          </div>
-          <div style={{ fontSize: 12, fontWeight: 600, lineHeight: 1.3 }}>{item.title}</div>
-          <div style={{ fontSize: 11, color: 'var(--muted)' }}>{item.artist}{item.genre ? ` · ${item.genre}` : ''}</div>
-
-          {openCollectionId === item.collection_id && !tracksLoading && (
-            <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 220, overflowY: 'auto' }}>
-              {tracks.length === 0 && <div style={{ fontSize: 11, color: 'var(--muted)' }}>No preview clips available for this album.</div>}
-              {tracks.map((t, ti) => (
-                <button
-                  key={ti}
-                  disabled={!t.preview_url}
-                  onClick={() => t.preview_url && onPlay(t.preview_url)}
-                  className="btn btn-ghost btn-sm"
-                  style={{ display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'space-between', fontSize: 11, opacity: t.preview_url ? 1 : 0.4, textAlign: 'left' }}
-                >
-                  <span style={{ display: 'flex', alignItems: 'center', gap: 6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {playingUrl === t.preview_url ? <Pause size={10} /> : <Play size={10} />} {t.title}
-                  </span>
-                  <span style={{ color: 'var(--muted)', flexShrink: 0 }}>{fmtMs(t.duration_ms)}</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      ))}
-    </div>
+    <span style={{ fontSize: 9, padding: '2px 6px', borderRadius: 4, background: source === '30s preview' ? 'rgba(255,255,255,0.1)' : 'rgba(80,220,140,0.15)', color: source === '30s preview' ? 'var(--muted)' : '#50dc8c', marginLeft: 6 }}>
+      {source}
+    </span>
   )
 }
 
@@ -123,7 +75,19 @@ export default function AudioStreamBrowse() {
   const [searching, setSearching] = useState(false)
   const [error, setError] = useState('')
 
-  const [musicResults, setMusicResults] = useState<MusicItem[]>([])
+  // Music: grouped search + browse rows
+  const [songs, setSongs] = useState<MusicItem[]>([])
+  const [albums, setAlbums] = useState<MusicItem[]>([])
+  const [artists, setArtists] = useState<ArtistItem[]>([])
+  const [hasSearched, setHasSearched] = useState(false)
+  const [trending, setTrending] = useState<ChartItem[]>([])
+  const [genres, setGenres] = useState<Genre[]>([])
+  const [genreRows, setGenreRows] = useState<Record<number, ChartItem[]>>({})
+  const [browseLoading, setBrowseLoading] = useState(true)
+  const [openCollectionId, setOpenCollectionId] = useState<number | null>(null)
+  const [albumTracks, setAlbumTracks] = useState<AlbumTrack[]>([])
+  const [albumTracksLoading, setAlbumTracksLoading] = useState(false)
+
   const [podcastResults, setPodcastResults] = useState<PodcastItem[]>([])
   const [youtubeResults, setYoutubeResults] = useState<YoutubeItem[]>([])
   const [youtubeConfigured, setYoutubeConfigured] = useState(true)
@@ -131,6 +95,8 @@ export default function AudioStreamBrowse() {
   const [resolvingTrack, setResolvingTrack] = useState<string | null>(null)
 
   const [playingUrl, setPlayingUrl] = useState<string | null>(null)
+  const [playingSource, setPlayingSource] = useState<string | null>(null)
+  const [resolvingKey, setResolvingKey] = useState<string | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
 
   const [openPodcast, setOpenPodcast] = useState<PodcastItem | null>(null)
@@ -142,21 +108,81 @@ export default function AudioStreamBrowse() {
   const [scLoading, setScLoading] = useState(false)
   const [scError, setScError] = useState('')
 
-  function playPreview(url: string) {
-    if (playingUrl === url) {
-      audioRef.current?.pause()
-      setPlayingUrl(null)
-      return
-    }
-    setPlayingUrl(url)
-  }
-
   useEffect(() => {
     const audio = audioRef.current
     if (!audio || !playingUrl) return
     audio.src = playingUrl
     audio.play().catch(() => {})
   }, [playingUrl])
+
+  // No-search browse view: Trending + genre rows, loaded once.
+  useEffect(() => {
+    Promise.all([
+      fetch('/api/audio/stream/charts?limit=12').then(r => r.json()).catch(() => ({ results: [] })),
+      fetch('/api/audio/stream/genres').then(r => r.json()).catch(() => ({ genres: [] })),
+    ]).then(([t, g]) => {
+      setTrending(t.results || [])
+      setGenres((g.genres || []).slice(0, 5))
+    }).finally(() => setBrowseLoading(false))
+  }, [])
+
+  useEffect(() => {
+    genres.forEach(g => {
+      if (genreRows[g.id]) return
+      fetch(`/api/audio/stream/charts?genre_id=${g.id}&limit=12`)
+        .then(r => r.json())
+        .then(d => setGenreRows(prev => ({ ...prev, [g.id]: d.results || [] })))
+        .catch(() => {})
+    })
+  }, [genres])
+
+  // Smart play: try a real full-length match first, fall back to a 30s
+  // preview if given one. Shows which source actually played.
+  async function playSmart(key: string, title: string, artist: string, fallbackPreviewUrl: string | null) {
+    if (resolvingKey === key) return
+    setResolvingKey(key)
+    setError('')
+    try {
+      const r = await fetch(`/api/audio/stream/resolve-full-track?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist)}`)
+      if (r.ok) {
+        const data = await r.json()
+        setPlayingUrl(data.stream_url)
+        setPlayingSource(data.source)
+        return
+      }
+    } catch { /* fall through to preview */ }
+    if (fallbackPreviewUrl) {
+      setPlayingUrl(fallbackPreviewUrl)
+      setPlayingSource('30s preview')
+    } else {
+      setError('No full track or preview available for this one -- try another.')
+    }
+    setResolvingKey(null)
+  }
+
+  // Wraps playSmart so the resolving spinner clears even on the
+  // full-track success path (the early return above skips the finally).
+  async function playSmartWrapped(key: string, title: string, artist: string, fallbackPreviewUrl: string | null) {
+    await playSmart(key, title, artist, fallbackPreviewUrl)
+    setResolvingKey(null)
+  }
+
+  async function openAlbum(item: MusicItem) {
+    if (!item.collection_id) return
+    if (openCollectionId === item.collection_id) { setOpenCollectionId(null); return }
+    setOpenCollectionId(item.collection_id)
+    setAlbumTracksLoading(true)
+    setAlbumTracks([])
+    try {
+      const r = await fetch(`/api/audio/stream/album/tracks?collection_id=${item.collection_id}`)
+      const data = await r.json()
+      setAlbumTracks(data.tracks || [])
+    } catch {
+      setAlbumTracks([])
+    } finally {
+      setAlbumTracksLoading(false)
+    }
+  }
 
   async function search() {
     if (!query.trim() || searching) return
@@ -165,10 +191,13 @@ export default function AudioStreamBrowse() {
     setOpenPodcast(null)
     try {
       if (tab === 'music') {
-        const r = await fetch(`/api/audio/stream/search?term=${encodeURIComponent(query.trim())}&media=music&entity=album`)
+        setHasSearched(true)
+        const r = await fetch(`/api/audio/stream/search/grouped?term=${encodeURIComponent(query.trim())}`)
         const data = await r.json()
-        setMusicResults(data.results || [])
-        if ((data.results || []).length === 0) setError('No results -- try another title/artist.')
+        setSongs(data.songs || [])
+        setAlbums(data.albums || [])
+        setArtists((data.artists || []).map((a: MusicItem) => ({ title: a.title, view_url: a.view_url })))
+        if ((data.songs || []).length === 0 && (data.albums || []).length === 0) setError('No results -- try another title/artist.')
       } else if (tab === 'podcasts') {
         const r = await fetch(`/api/audio/stream/search?term=${encodeURIComponent(query.trim())}&media=podcast&entity=podcast`)
         const data = await r.json()
@@ -210,7 +239,7 @@ export default function AudioStreamBrowse() {
   }
 
   async function playFullTrack(item: FullTrackItem) {
-    if (playingUrl && resolvingTrack === item.track_url) return
+    if (resolvingTrack === item.track_url) return
     setResolvingTrack(item.track_url)
     setError('')
     try {
@@ -218,6 +247,7 @@ export default function AudioStreamBrowse() {
       const data = await r.json()
       if (!r.ok || !data.stream_url) { setError('Could not resolve a playable stream for this track -- try another.'); return }
       setPlayingUrl(data.stream_url)
+      setPlayingSource('musify.club')
     } catch {
       setError('Network error resolving track.')
     } finally {
@@ -252,9 +282,88 @@ export default function AudioStreamBrowse() {
     </button>
   )
 
+  function MusicCard({ item, isAlbum }: { item: MusicItem; isAlbum: boolean }) {
+    const key = isAlbum ? `album-${item.collection_id}` : `song-${item.title}-${item.artist}`
+    const isOpen = isAlbum && openCollectionId === item.collection_id
+    return (
+      <div className="glass" style={{ padding: 10, borderRadius: 10, border: '1px solid var(--border)', gridColumn: isOpen ? 'span 2' : undefined }}>
+        <div
+          style={{ position: 'relative', width: '100%', aspectRatio: '1/1', borderRadius: 8, overflow: 'hidden', marginBottom: 8, cursor: 'pointer' }}
+          onClick={() => isAlbum ? openAlbum(item) : playSmartWrapped(key, item.title, item.artist, item.preview_url)}
+        >
+          {item.artwork
+            ? <img src={item.artwork} alt={item.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+            : <div style={{ width: '100%', height: '100%', background: 'rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Music2 size={28} color="var(--muted)" /></div>}
+          <div style={{ position: 'absolute', bottom: 6, right: 6, width: 32, height: 32, borderRadius: '50%', background: 'var(--purple-bright)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            {(resolvingKey === key) || (isOpen && albumTracksLoading)
+              ? <Loader size={14} className="spin" color="#000" />
+              : <Play size={14} color="#000" fill="#000" />}
+          </div>
+        </div>
+        <div style={{ fontSize: 12, fontWeight: 600, lineHeight: 1.3 }}>{item.title}</div>
+        <div style={{ fontSize: 11, color: 'var(--muted)' }}>{item.artist}{item.genre ? ` · ${item.genre}` : ''}</div>
+
+        {isOpen && !albumTracksLoading && (
+          <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 220, overflowY: 'auto' }}>
+            {albumTracks.length === 0 && <div style={{ fontSize: 11, color: 'var(--muted)' }}>No tracks found for this album.</div>}
+            {albumTracks.map((t, ti) => {
+              const tkey = `track-${item.collection_id}-${ti}`
+              return (
+                <button
+                  key={ti}
+                  onClick={() => playSmartWrapped(tkey, t.title, item.artist, t.preview_url)}
+                  className="btn btn-ghost btn-sm"
+                  disabled={resolvingKey === tkey}
+                  style={{ display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'space-between', fontSize: 11, textAlign: 'left' }}
+                >
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {resolvingKey === tkey ? <Loader size={10} className="spin" /> : <Play size={10} />} {t.title}
+                  </span>
+                  <span style={{ color: 'var(--muted)', flexShrink: 0 }}>{fmtMs(t.duration_ms)}</span>
+                </button>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  function ChartRow({ title, items }: { title: string; items: ChartItem[] }) {
+    if (items.length === 0) return null
+    return (
+      <div style={{ marginBottom: 24 }}>
+        <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 10, color: 'var(--muted-hi)' }}>{title}</h3>
+        <div style={{ display: 'flex', gap: 10, overflowX: 'auto', paddingBottom: 8 }}>
+          {items.map((c, i) => {
+            const key = `chart-${title}-${i}`
+            return (
+              <div
+                key={i}
+                onClick={() => playSmartWrapped(key, c.title, c.artist, null)}
+                style={{ flex: '0 0 130px', cursor: 'pointer' }}
+              >
+                <div style={{ position: 'relative', width: '100%', aspectRatio: '1/1', borderRadius: 8, overflow: 'hidden', marginBottom: 6 }}>
+                  {c.artwork
+                    ? <img src={c.artwork} alt={c.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                    : <div style={{ width: '100%', height: '100%', background: 'rgba(255,255,255,0.05)' }} />}
+                  <div style={{ position: 'absolute', bottom: 6, right: 6, width: 26, height: 26, borderRadius: '50%', background: 'var(--purple-bright)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    {resolvingKey === key ? <Loader size={11} className="spin" color="#000" /> : <Play size={11} color="#000" fill="#000" />}
+                  </div>
+                </div>
+                <div style={{ fontSize: 11, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.title}</div>
+                <div style={{ fontSize: 10, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.artist}</div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div>
-      <audio ref={audioRef} onEnded={() => setPlayingUrl(null)} style={{ display: 'none' }} />
+      <audio ref={audioRef} onEnded={() => { setPlayingUrl(null); setPlayingSource(null) }} style={{ display: 'none' }} />
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
         {tabBtn('music', 'Music', Music2)}
@@ -274,10 +383,16 @@ export default function AudioStreamBrowse() {
         </div>
       )}
 
+      {playingUrl && (
+        <div style={{ marginBottom: 16, padding: '8px 14px', borderRadius: 8, background: 'rgba(8,8,16,0.7)', fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+          <Play size={11} color="var(--purple-bright)" /> Now playing <NowPlayingBadge source={playingSource} />
+        </div>
+      )}
+
       {tab !== 'soundcloud' && (
         <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
           <input
-            placeholder={tab === 'music' ? 'Search albums or songs…' : tab === 'podcasts' ? 'Search podcasts…' : tab === 'fulltracks' ? 'Search full tracks…' : 'Search YouTube…'}
+            placeholder={tab === 'music' ? 'Search albums, songs, artists…' : tab === 'podcasts' ? 'Search podcasts…' : tab === 'fulltracks' ? 'Search full tracks…' : 'Search YouTube…'}
             value={query}
             onChange={e => setQuery(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && search()}
@@ -291,7 +406,46 @@ export default function AudioStreamBrowse() {
 
       {error && <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>{error}</p>}
 
-      {tab === 'music' && <MusicResults items={musicResults} playingUrl={playingUrl} onPlay={playPreview} />}
+      {tab === 'music' && (
+        hasSearched ? (
+          <>
+            {songs.length > 0 && (
+              <div style={{ marginBottom: 28 }}>
+                <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 10, color: 'var(--muted-hi)' }}>Songs</h3>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 14 }}>
+                  {songs.map((item, i) => <MusicCard key={i} item={item} isAlbum={false} />)}
+                </div>
+              </div>
+            )}
+            {albums.length > 0 && (
+              <div style={{ marginBottom: 28 }}>
+                <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 10, color: 'var(--muted-hi)' }}>Albums</h3>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 14 }}>
+                  {albums.map((item, i) => <MusicCard key={i} item={item} isAlbum />)}
+                </div>
+              </div>
+            )}
+            {artists.length > 0 && (
+              <div style={{ marginBottom: 28 }}>
+                <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 10, color: 'var(--muted-hi)' }}>Artists</h3>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {artists.map((a, i) => (
+                    <button key={i} className="btn btn-ghost btn-sm" onClick={() => { setQuery(a.title); search() }} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <Users size={12} /> {a.title}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            {browseLoading && <p style={{ fontSize: 13, color: 'var(--muted)' }}><Loader size={14} className="spin" /> Loading…</p>}
+            <ChartRow title="Trending" items={trending} />
+            {genres.map(g => <ChartRow key={g.id} title={g.name} items={genreRows[g.id] || []} />)}
+          </>
+        )
+      )}
 
       {tab === 'podcasts' && (
         <>
@@ -312,7 +466,7 @@ export default function AudioStreamBrowse() {
                       <div style={{ fontSize: 12, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ep.title}</div>
                       <div style={{ fontSize: 10, color: 'var(--muted)' }}>{ep.duration}</div>
                     </div>
-                    <button className="btn btn-ghost btn-sm" onClick={() => setPlayingUrl(ep.audio_url)}>
+                    <button className="btn btn-ghost btn-sm" onClick={() => { setPlayingUrl(ep.audio_url); setPlayingSource(null) }}>
                       {playingUrl === ep.audio_url ? <Pause size={12} /> : <Play size={12} />}
                     </button>
                   </div>

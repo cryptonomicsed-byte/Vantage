@@ -136,3 +136,31 @@ async def audio_musify_search(term: str):
 @audio_router.get("/musify/resolve")
 async def audio_musify_resolve(track_url: str):
     return await _forward("GET", "/api/audio/musify/resolve", params={"track_url": track_url})
+
+
+@audio_router.get("/search/grouped")
+async def audio_search_grouped(term: str):
+    return await _forward("GET", "/api/audio/search/grouped", params={"term": term})
+
+
+@audio_router.get("/charts")
+async def audio_charts(genre_id: int | None = None, limit: int = 25):
+    params: dict = {"limit": limit}
+    if genre_id is not None:
+        params["genre_id"] = genre_id
+    return await _forward("GET", "/api/audio/charts", params=params)
+
+
+@audio_router.get("/genres")
+async def audio_genres():
+    return await _forward("GET", "/api/audio/genres")
+
+
+@audio_router.get("/resolve-full-track")
+async def audio_resolve_full_track(title: str, artist: str = ""):
+    return await _forward("GET", "/api/audio/resolve-full-track", params={"title": title, "artist": artist})
+
+
+@audio_router.get("/jamendo/search")
+async def audio_jamendo_search(term: str):
+    return await _forward("GET", "/api/audio/jamendo/search", params={"term": term})
