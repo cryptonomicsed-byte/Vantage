@@ -216,8 +216,17 @@ export default function AudioStreamBrowse() {
         const data = await r.json()
         setSongs(data.songs || [])
         setAlbums(data.albums || [])
-        setArtists((data.artists || []).map((a: MusicItem) => ({ title: a.title, artist_id: a.artist_id ?? null, view_url: a.view_url })))
+        const artistList = (data.artists || []).map((a: MusicItem) => ({ title: a.title, artist_id: a.artist_id ?? null, view_url: a.view_url }))
+        setArtists(artistList)
         if ((data.songs || []).length === 0 && (data.albums || []).length === 0) setError('No results -- try another title/artist.')
+
+        // Typed exactly an artist's name -- jump straight to their albums
+        // instead of making them click the Artists chip first.
+        const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '')
+        const exactArtist = artistList.find((a: ArtistItem) => normalize(a.title) === normalize(query.trim()))
+        if (exactArtist && exactArtist.artist_id) {
+          openArtist(exactArtist)
+        }
       } else if (tab === 'podcasts') {
         const r = await fetch(`/api/audio/stream/search?term=${encodeURIComponent(query.trim())}&media=podcast&entity=podcast`)
         const data = await r.json()
