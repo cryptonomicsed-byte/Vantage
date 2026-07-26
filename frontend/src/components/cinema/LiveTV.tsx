@@ -7,10 +7,21 @@ import Hls from 'hls.js'
 // TMDB+embed providers). Channels grouped by iptv-org's own `group`
 // metadata (Movies/News/Sports/etc -- some channels carry compound
 // groups like "Documentary;News", split into individual categories
-// below), grid layout with logos, TV-app style.
+// below).
 //
-// Layout: player pinned in a fixed-height header (not scrolling with the
-// grid); the category nav + channel grid live in their own scrollable
+// Layout (2026-07-26 redesign): category rows scroll horizontally
+// (same PosterRow-style Netflix pattern as the Stream tab), not one
+// giant per-category grid dump -- 79 categories x however many channels
+// each was a wall of tiles before. Selecting a category tab still shows
+// its full grid (real intent to browse everything in it), but the
+// default "All" view is a stack of browsable rows, capped per row.
+// Auto-start: the moment channels for the selected country arrive, if
+// nothing is playing yet, immediately start the first channel of the
+// top category -- "always something playing, browse to change", same
+// pattern as the Stream tab's pinned player.
+//
+// Player pinned in a fixed-height header (not scrolling with the
+// grid); the category nav + channel rows live in their own scrollable
 // region below. The category nav is sticky WITHIN that scroll region
 // only (top:0 relative to its own overflow:auto container) -- keeping it
 // out of the same scroll flow as the player avoids the sticky-vs-sticky
@@ -18,6 +29,8 @@ import Hls from 'hls.js'
 
 interface Country { name: string; code: string; flag: string }
 interface Channel { title: string; url: string; group: string; logo: string }
+
+const ROW_CAP = 16 // channels shown per category row in the "All" browse view
 
 const STYLE_ID = 'livetv-css'
 const CSS = `
@@ -43,17 +56,50 @@ function HlsPlayer({ src }: { src: string }) {
   return <video ref={videoRef} controls autoPlay style={{ width: '100%', height: '100%', background: '#000', display: 'block' }} />
 }
 
-function ChannelCard({ c, onClick }: { c: Channel; onClick: () => void }) {
+function ChannelCard({ c, active, onClick }: { c: Channel; active?: boolean; onClick: () => void }) {
   return (
     <div
       className="channel-card glass"
       onClick={onClick}
-      style={{ padding: 14, cursor: 'pointer', borderRadius: 10, border: '1px solid var(--border)', transition: 'all 0.15s ease', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, textAlign: 'center' }}
+      style={{
+        padding: 14, cursor: 'pointer', borderRadius: 10,
+        border: active ? '1px solid var(--purple-bright)' : '1px solid var(--border)',
+        transition: 'all 0.15s ease', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, textAlign: 'center',
+        flex: '0 0 140px',
+      }}
     >
       {c.logo
         ? <img src={c.logo} alt="" style={{ width: 48, height: 48, objectFit: 'contain' }} />
         : <div style={{ width: 48, height: 48, borderRadius: 8, background: 'rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Play size={16} color="var(--muted)" /></div>}
       <div style={{ fontSize: 12, lineHeight: 1.3 }}>{c.title}</div>
+    </div>
+  )
+}
+
+function ChannelRow({ title, count, channels, activeUrl, onSelect, onSeeAll }: {
+  title: string
+  count: number
+  channels: Channel[]
+  activeUrl?: string
+  onSelect: (c: Channel) => void
+  onSeeAll: () => void
+}) {
+  if (channels.length === 0) return null
+  return (
+    <div style={{ marginBottom: 28 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 10 }}>
+        <h3 style={{ fontSize: 14, fontWeight: 600, color: 'var(--muted-hi)' }}>
+          {title} <span style={{ fontWeight: 400, color: 'var(--muted)', fontSize: 12 }}>({count})</span>
+        </h3>
+        {count > channels.length && (
+          <button className="btn btn-ghost btn-sm" onClick={onSeeAll} style={{ fontSize: 11 }}>See all {count} →</button>
+        )}
+      </div>
+      <div style={{ display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 8 }}>
+        {channels.map((c, i) => (
+          <ChannelCard key={title + i} c={c} active={activeUrl === c.url} onClick={() => onSelect(c)} />
+        ))}
+      </div>
     </div>
   )
 }
@@ -88,6 +134,7 @@ export default function LiveTV() {
       .finally(() => setChannelsLoading(false))
   }, [countryCode])
 
+
   // iptv-org groups are sometimes compound ("Documentary;News") -- split
   // each channel into every category it belongs to, not just its first tag.
   const channelsByCategory = useMemo(() => {
@@ -106,6 +153,17 @@ export default function LiveTV() {
     () => Object.keys(channelsByCategory).sort((a, b) => channelsByCategory[b].length - channelsByCategory[a].length),
     [channelsByCategory]
   )
+
+  // Auto-start: the moment channels arrive for this country, if nothing
+  // is playing yet, immediately start the first channel of the top
+  // (most populous) category -- "always something playing, browse to
+  // change", same pattern as the Stream tab's pinned player.
+  useEffect(() => {
+    if (liveStream || categories.length === 0) return
+    const first = channelsByCategory[categories[0]][0]
+    setLiveStream({ url: first.url, title: first.title })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [categories])
 
   function jumpTo(cat: string) {
     setActiveGroup(cat)
@@ -183,25 +241,27 @@ export default function LiveTV() {
         )}
 
         {activeGroup === 'All' ? (
-          // Sectioned view: a labeled row per category, so scrolling shows
-          // real structure instead of one giant unsorted grid.
+          // Netflix-style browse: a horizontally-scrolling, capped row per
+          // category (top categories first, by channel count) -- not a
+          // full grid dump of every channel in every one of the 79
+          // categories. "See all" jumps into that category's full grid.
           categories.map(cat => (
-            <div key={cat} id={`livetv-section-${cat}`} style={{ marginBottom: 28, scrollMarginTop: 56 }}>
-              <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 10, color: 'var(--muted-hi)' }}>
-                {cat} <span style={{ fontWeight: 400, color: 'var(--muted)', fontSize: 12 }}>({channelsByCategory[cat].length})</span>
-              </h3>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12 }}>
-                {channelsByCategory[cat].map((c, i) => (
-                  <ChannelCard key={cat + i} c={c} onClick={() => setLiveStream({ url: c.url, title: c.title })} />
-                ))}
-              </div>
-            </div>
+            <ChannelRow
+              key={cat}
+              title={cat}
+              count={channelsByCategory[cat].length}
+              channels={channelsByCategory[cat].slice(0, ROW_CAP)}
+              activeUrl={liveStream?.url}
+              onSelect={c => setLiveStream({ url: c.url, title: c.title })}
+              onSeeAll={() => jumpTo(cat)}
+            />
           ))
         ) : (
-          // Single-category filtered view
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12 }}>
+          // Single-category filtered view -- full grid, real intent to
+          // browse everything in this one category.
+          <div id={`livetv-section-${activeGroup}`} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12 }}>
             {(channelsByCategory[activeGroup] || []).map((c, i) => (
-              <ChannelCard key={i} c={c} onClick={() => setLiveStream({ url: c.url, title: c.title })} />
+              <ChannelCard key={i} c={c} active={liveStream?.url === c.url} onClick={() => setLiveStream({ url: c.url, title: c.title })} />
             ))}
           </div>
         )}
