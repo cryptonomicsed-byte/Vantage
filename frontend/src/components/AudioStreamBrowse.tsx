@@ -33,9 +33,9 @@ type Tab = 'music' | 'podcasts' | 'soundcloud' | 'youtube' | 'fulltracks'
 interface MusicItem {
   kind: string; title: string; artist: string; collection: string; collection_id: number | null
   artwork: string | null; preview_url: string | null; track_count: number | null; genre: string | null
-  view_url?: string | null
+  view_url?: string | null; artist_id?: number | null
 }
-interface ArtistItem { title: string; view_url: string | null }
+interface ArtistItem { title: string; artist_id: number | null; view_url: string | null }
 interface AlbumTrack {
   title: string; track_number: number | null; preview_url: string | null; duration_ms: number | null
 }
@@ -80,6 +80,9 @@ export default function AudioStreamBrowse() {
   const [albums, setAlbums] = useState<MusicItem[]>([])
   const [artists, setArtists] = useState<ArtistItem[]>([])
   const [hasSearched, setHasSearched] = useState(false)
+  const [viewingArtist, setViewingArtist] = useState<ArtistItem | null>(null)
+  const [artistAlbums, setArtistAlbums] = useState<MusicItem[]>([])
+  const [artistAlbumsLoading, setArtistAlbumsLoading] = useState(false)
   const [trending, setTrending] = useState<ChartItem[]>([])
   const [genres, setGenres] = useState<Genre[]>([])
   const [genreRows, setGenreRows] = useState<Record<number, ChartItem[]>>({})
@@ -184,11 +187,28 @@ export default function AudioStreamBrowse() {
     }
   }
 
+  async function openArtist(a: ArtistItem) {
+    if (!a.artist_id) return
+    setViewingArtist(a)
+    setArtistAlbumsLoading(true)
+    setArtistAlbums([])
+    try {
+      const r = await fetch(`/api/audio/stream/artist/albums?artist_id=${a.artist_id}`)
+      const data = await r.json()
+      setArtistAlbums(data.albums || [])
+    } catch {
+      setArtistAlbums([])
+    } finally {
+      setArtistAlbumsLoading(false)
+    }
+  }
+
   async function search() {
     if (!query.trim() || searching) return
     setSearching(true)
     setError('')
     setOpenPodcast(null)
+    setViewingArtist(null)
     try {
       if (tab === 'music') {
         setHasSearched(true)
@@ -196,7 +216,7 @@ export default function AudioStreamBrowse() {
         const data = await r.json()
         setSongs(data.songs || [])
         setAlbums(data.albums || [])
-        setArtists((data.artists || []).map((a: MusicItem) => ({ title: a.title, view_url: a.view_url })))
+        setArtists((data.artists || []).map((a: MusicItem) => ({ title: a.title, artist_id: a.artist_id ?? null, view_url: a.view_url })))
         if ((data.songs || []).length === 0 && (data.albums || []).length === 0) setError('No results -- try another title/artist.')
       } else if (tab === 'podcasts') {
         const r = await fetch(`/api/audio/stream/search?term=${encodeURIComponent(query.trim())}&media=podcast&entity=podcast`)
@@ -407,7 +427,21 @@ export default function AudioStreamBrowse() {
       {error && <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>{error}</p>}
 
       {tab === 'music' && (
-        hasSearched ? (
+        viewingArtist ? (
+          <div>
+            <button className="btn btn-ghost btn-sm" onClick={() => setViewingArtist(null)} style={{ marginBottom: 14 }}>
+              ← Back to results
+            </button>
+            <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 14 }}>{viewingArtist.title}</h3>
+            {artistAlbumsLoading && <p style={{ fontSize: 13, color: 'var(--muted)' }}><Loader size={14} className="spin" /> Loading albums…</p>}
+            {!artistAlbumsLoading && artistAlbums.length === 0 && (
+              <p style={{ fontSize: 13, color: 'var(--muted)' }}>No albums found for this artist.</p>
+            )}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 14 }}>
+              {artistAlbums.map((item, i) => <MusicCard key={i} item={item} isAlbum />)}
+            </div>
+          </div>
+        ) : hasSearched ? (
           <>
             {songs.length > 0 && (
               <div style={{ marginBottom: 28 }}>
@@ -430,7 +464,13 @@ export default function AudioStreamBrowse() {
                 <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 10, color: 'var(--muted-hi)' }}>Artists</h3>
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                   {artists.map((a, i) => (
-                    <button key={i} className="btn btn-ghost btn-sm" onClick={() => { setQuery(a.title); search() }} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <button
+                      key={i}
+                      className="btn btn-ghost btn-sm"
+                      disabled={!a.artist_id}
+                      onClick={() => openArtist(a)}
+                      style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+                    >
                       <Users size={12} /> {a.title}
                     </button>
                   ))}
