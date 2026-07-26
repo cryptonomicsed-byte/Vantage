@@ -104,6 +104,11 @@ async def audio_search(term: str, media: str = "music", entity: str | None = Non
     return await _forward("GET", "/api/audio/search", params=params)
 
 
+@audio_router.get("/album/tracks")
+async def audio_album_tracks(collection_id: int):
+    return await _forward("GET", "/api/audio/album/tracks", params={"collection_id": collection_id})
+
+
 @audio_router.get("/podcast/episodes")
 async def audio_podcast_episodes(feed_url: str):
     return await _forward("GET", "/api/audio/podcast/episodes", params={"feed_url": feed_url})
