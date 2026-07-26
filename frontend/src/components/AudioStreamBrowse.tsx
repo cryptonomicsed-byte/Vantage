@@ -17,8 +17,11 @@ import { Search, Loader, Play, Pause, Radio, Mic, Music2, Youtube } from 'lucide
 type Tab = 'music' | 'podcasts' | 'soundcloud' | 'youtube'
 
 interface MusicItem {
-  kind: string; title: string; artist: string; collection: string
+  kind: string; title: string; artist: string; collection: string; collection_id: number | null
   artwork: string | null; preview_url: string | null; track_count: number | null; genre: string | null
+}
+interface AlbumTrack {
+  title: string; track_number: number | null; preview_url: string | null; duration_ms: number | null
 }
 interface PodcastItem {
   kind: string; title: string; artist: string; artwork: string | null; feed_url: string | null
@@ -30,27 +33,75 @@ interface YoutubeItem {
   video_id: string; title: string; channel: string; thumbnail: string; embed_url: string
 }
 
-function MusicResults({ items, playingUrl, onPlay }: { items: MusicItem[]; playingUrl: string | null; onPlay: (i: MusicItem) => void }) {
+function fmtMs(ms: number | null): string {
+  if (!ms) return ''
+  const s = Math.floor(ms / 1000)
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
+
+function MusicResults({ items, playingUrl, onPlay }: { items: MusicItem[]; playingUrl: string | null; onPlay: (url: string) => void }) {
+  const [openCollectionId, setOpenCollectionId] = useState<number | null>(null)
+  const [tracks, setTracks] = useState<AlbumTrack[]>([])
+  const [tracksLoading, setTracksLoading] = useState(false)
+
+  // iTunes only attaches preview_url at the individual-track level --
+  // entity=album results always return null for it (confirmed live), so
+  // playing an album means fetching its real tracks first, not expecting
+  // the album object itself to carry a preview.
+  async function openAlbum(item: MusicItem) {
+    if (item.preview_url) { onPlay(item.preview_url); return } // a song result -- play directly
+    if (!item.collection_id) return
+    if (openCollectionId === item.collection_id) { setOpenCollectionId(null); return }
+    setOpenCollectionId(item.collection_id)
+    setTracksLoading(true)
+    setTracks([])
+    try {
+      const r = await fetch(`/api/audio/stream/album/tracks?collection_id=${item.collection_id}`)
+      const data = await r.json()
+      setTracks(data.tracks || [])
+    } catch {
+      setTracks([])
+    } finally {
+      setTracksLoading(false)
+    }
+  }
+
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 14 }}>
       {items.map((item, i) => (
-        <div key={i} className="glass" style={{ padding: 10, borderRadius: 10, border: '1px solid var(--border)' }}>
-          <div style={{ position: 'relative', width: '100%', aspectRatio: '1/1', borderRadius: 8, overflow: 'hidden', marginBottom: 8 }}>
+        <div key={i} className="glass" style={{ padding: 10, borderRadius: 10, border: '1px solid var(--border)', gridColumn: openCollectionId === item.collection_id ? 'span 2' : undefined }}>
+          <div style={{ position: 'relative', width: '100%', aspectRatio: '1/1', borderRadius: 8, overflow: 'hidden', marginBottom: 8, cursor: 'pointer' }} onClick={() => openAlbum(item)}>
             {item.artwork
               ? <img src={item.artwork} alt={item.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
               : <div style={{ width: '100%', height: '100%', background: 'rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Music2 size={28} color="var(--muted)" /></div>}
-            {item.preview_url && (
-              <button
-                onClick={() => onPlay(item)}
-                style={{ position: 'absolute', bottom: 6, right: 6, width: 32, height: 32, borderRadius: '50%', background: 'var(--purple-bright)', border: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
-              >
-                {playingUrl === item.preview_url ? <Pause size={14} color="#000" /> : <Play size={14} color="#000" fill="#000" />}
-              </button>
-            )}
+            <div style={{ position: 'absolute', bottom: 6, right: 6, width: 32, height: 32, borderRadius: '50%', background: 'var(--purple-bright)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              {tracksLoading && openCollectionId === item.collection_id
+                ? <Loader size={14} className="spin" color="#000" />
+                : (playingUrl && playingUrl === item.preview_url ? <Pause size={14} color="#000" /> : <Play size={14} color="#000" fill="#000" />)}
+            </div>
           </div>
           <div style={{ fontSize: 12, fontWeight: 600, lineHeight: 1.3 }}>{item.title}</div>
           <div style={{ fontSize: 11, color: 'var(--muted)' }}>{item.artist}{item.genre ? ` · ${item.genre}` : ''}</div>
-          {item.preview_url && <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 2 }}>30s preview</div>}
+
+          {openCollectionId === item.collection_id && !tracksLoading && (
+            <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 220, overflowY: 'auto' }}>
+              {tracks.length === 0 && <div style={{ fontSize: 11, color: 'var(--muted)' }}>No preview clips available for this album.</div>}
+              {tracks.map((t, ti) => (
+                <button
+                  key={ti}
+                  disabled={!t.preview_url}
+                  onClick={() => t.preview_url && onPlay(t.preview_url)}
+                  className="btn btn-ghost btn-sm"
+                  style={{ display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'space-between', fontSize: 11, opacity: t.preview_url ? 1 : 0.4, textAlign: 'left' }}
+                >
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {playingUrl === t.preview_url ? <Pause size={10} /> : <Play size={10} />} {t.title}
+                  </span>
+                  <span style={{ color: 'var(--muted)', flexShrink: 0 }}>{fmtMs(t.duration_ms)}</span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       ))}
     </div>
@@ -80,14 +131,13 @@ export default function AudioStreamBrowse() {
   const [scLoading, setScLoading] = useState(false)
   const [scError, setScError] = useState('')
 
-  function playPreview(item: MusicItem) {
-    if (!item.preview_url) return
-    if (playingUrl === item.preview_url) {
+  function playPreview(url: string) {
+    if (playingUrl === url) {
       audioRef.current?.pause()
       setPlayingUrl(null)
       return
     }
-    setPlayingUrl(item.preview_url)
+    setPlayingUrl(url)
   }
 
   useEffect(() => {
