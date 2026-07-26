@@ -67,6 +67,22 @@ export default function StreamBrowse() {
   const [error, setError] = useState('')
   const autoTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  // Scroll-triggered floating player (2026-07-27): third-party embed
+  // iframes can't use the real browser Picture-in-Picture API (that only
+  // works on <video> elements, see LiveTV.tsx for the HLS tab where it
+  // does apply) -- so this is a manual fixed-position CSS fallback only,
+  // toggled by an IntersectionObserver on the player's anchor div.
+  const [floating, setFloating] = useState(false)
+  const anchorRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    const anchor = anchorRef.current
+    if (!anchor || !embedUrl) return
+    const observer = new IntersectionObserver(([entry]) => setFloating(!entry.isIntersecting), { threshold: 0 })
+    observer.observe(anchor)
+    return () => observer.disconnect()
+  }, [embedUrl])
+
   useEffect(() => {
     if (!document.getElementById(STYLE_ID)) {
       const el = document.createElement('style'); el.id = STYLE_ID; el.textContent = POSTER_ROW_CSS
@@ -195,98 +211,110 @@ export default function StreamBrowse() {
   const sandboxAttr = activeProvider && !SANDBOXED_EXCEPTIONS.has(activeProvider) ? SAFE_SANDBOX : undefined
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 220px)', minHeight: 400 }}>
-      {/* Pinned header: search + player. Does not scroll with the browse grid below. */}
-      <div style={{ flexShrink: 0 }}>
-        <div style={{ display: 'flex', gap: 8, marginBottom: embedUrl ? 12 : 20 }}>
-          <input
-            placeholder="Search movies and shows…"
-            value={query}
-            onChange={e => { setQuery(e.target.value); if (!e.target.value.trim()) setSearchResults(null) }}
-            onKeyDown={e => e.key === 'Enter' && search()}
-            style={{ flex: 1, padding: '10px 14px', background: 'rgba(8,8,16,0.6)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--muted-hi)', fontSize: 14 }}
-          />
-          <button className="btn btn-primary" disabled={searching || !query.trim()} onClick={search}>
-            {searching ? <Loader size={14} className="spin" /> : <Search size={14} />} Search
-          </button>
-        </div>
+    <div>
+      {/* Normal page flow (2026-07-27) -- player inline at top, browse
+          grid below, no more fixed-height split-scroll regions. When the
+          player scrolls out of view (anchorRef), it switches to a manual
+          fixed-position floating box (real browser PiP doesn't work on
+          cross-origin iframes, only <video> elements -- see LiveTV.tsx
+          for where that applies instead). */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: embedUrl ? 12 : 20 }}>
+        <input
+          placeholder="Search movies and shows…"
+          value={query}
+          onChange={e => { setQuery(e.target.value); if (!e.target.value.trim()) setSearchResults(null) }}
+          onKeyDown={e => e.key === 'Enter' && search()}
+          style={{ flex: 1, padding: '10px 14px', background: 'rgba(8,8,16,0.6)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--muted-hi)', fontSize: 14 }}
+        />
+        <button className="btn btn-primary" disabled={searching || !query.trim()} onClick={search}>
+          {searching ? <Loader size={14} className="spin" /> : <Search size={14} />} Search
+        </button>
+      </div>
 
-        {error && <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>{error}</p>}
+      {error && <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>{error}</p>}
 
-        {embedUrl && (
-          <div style={{ marginBottom: 16, borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)', boxShadow: '0 8px 24px rgba(0,0,0,0.4)' }}>
-            <div style={{ position: 'relative' }}>
+      {embedUrl && (
+        <div ref={anchorRef} style={{ marginBottom: 16 }}>
+          {floating && <div style={{ height: expanded ? '70vh' : 260, borderRadius: 12, border: '1px dashed var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: 12 }}>Floating in the corner — scroll up to bring it back</div>}
+          <div
+            style={floating ? {
+              position: 'fixed', bottom: 16, right: 16, width: 340, height: 191, zIndex: 200,
+              borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)', boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+            } : { borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)', boxShadow: '0 8px 24px rgba(0,0,0,0.4)' }}
+          >
+            <div style={{ position: 'relative', height: floating ? '100%' : undefined }}>
               <iframe
                 key={embedUrl}
                 src={embedUrl}
                 allowFullScreen
                 sandbox={sandboxAttr}
-                style={{ width: '100%', height: expanded ? '70vh' : 260, border: 'none', background: '#000', display: 'block', transition: 'height 0.2s ease' }}
+                style={{ width: '100%', height: floating ? '100%' : (expanded ? '70vh' : 260), border: 'none', background: '#000', display: 'block', transition: floating ? 'none' : 'height 0.2s ease' }}
               />
-              <button
-                onClick={() => setExpanded(e => !e)}
-                title={expanded ? 'Collapse player' : 'Expand player'}
-                style={{ position: 'absolute', top: 8, right: 8, background: 'rgba(0,0,0,0.6)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 6, padding: 6, cursor: 'pointer', color: '#fff', display: 'flex' }}
-              >
-                {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-              </button>
-            </div>
-            <div style={{ padding: '8px 14px', background: 'rgba(8,8,16,0.85)', fontSize: 13 }}>
-              Now playing: <strong style={{ color: 'var(--purple-bright)' }}>{nowPlaying}</strong>
-              {alternates.length > 1 && (
-                <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                  {autoAdvancing ? (
-                    <>
-                      <Loader size={11} className="spin" />
-                      <span style={{ fontSize: 11, color: 'var(--muted)' }}>
-                        Trying {activeProvider}… auto-switching if this doesn't play
-                      </span>
-                      <button className="btn btn-primary btn-sm" onClick={keepThisOne} style={{ fontSize: 11 }}>
-                        <Check size={11} /> This works, keep it
-                      </button>
-                    </>
-                  ) : (
-                    <span style={{ fontSize: 11, color: 'var(--muted)' }}>Not working? Try:</span>
-                  )}
-                  {alternates.map((alt, i) => (
-                    <button
-                      key={alt.provider}
-                      className="btn btn-ghost btn-sm"
-                      disabled={i === providerIndex && !autoAdvancing}
-                      onClick={() => switchProvider(i)}
-                      style={{ fontSize: 11, opacity: i === providerIndex ? (autoAdvancing ? 1 : 0.5) : 1 }}
-                    >
-                      {alt.provider}
-                    </button>
-                  ))}
-                </div>
+              {!floating && (
+                <button
+                  onClick={() => setExpanded(e => !e)}
+                  title={expanded ? 'Collapse player' : 'Expand player'}
+                  style={{ position: 'absolute', top: 8, right: 8, background: 'rgba(0,0,0,0.6)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 6, padding: 6, cursor: 'pointer', color: '#fff', display: 'flex' }}
+                >
+                  {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                </button>
               )}
             </div>
-          </div>
-        )}
-      </div>
-
-      {/* Independently scrolling browse region -- player above stays put. */}
-      <div style={{ flex: 1, overflowY: 'auto', paddingRight: 4 }}>
-        {searchResults !== null ? (
-          <PosterRow title={`Search results for "${query}"`} items={searchResults} resolvingUrl={resolving} onSelect={watch} />
-        ) : (
-          <>
-            {loading && <p style={{ fontSize: 13, color: 'var(--muted)' }}><Loader size={14} className="spin" /> Loading…</p>}
-            {!loading && trending.length === 0 && (
-              <p style={{ fontSize: 13, color: 'var(--muted)' }}>
-                No data -- TMDB may be unreachable right now.
-              </p>
+            {!floating && (
+              <div style={{ padding: '8px 14px', background: 'rgba(8,8,16,0.85)', fontSize: 13 }}>
+                Now playing: <strong style={{ color: 'var(--purple-bright)' }}>{nowPlaying}</strong>
+                {alternates.length > 1 && (
+                  <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    {autoAdvancing ? (
+                      <>
+                        <Loader size={11} className="spin" />
+                        <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+                          Trying {activeProvider}… auto-switching if this doesn't play
+                        </span>
+                        <button className="btn btn-primary btn-sm" onClick={keepThisOne} style={{ fontSize: 11 }}>
+                          <Check size={11} /> This works, keep it
+                        </button>
+                      </>
+                    ) : (
+                      <span style={{ fontSize: 11, color: 'var(--muted)' }}>Not working? Try:</span>
+                    )}
+                    {alternates.map((alt, i) => (
+                      <button
+                        key={alt.provider}
+                        className="btn btn-ghost btn-sm"
+                        disabled={i === providerIndex && !autoAdvancing}
+                        onClick={() => switchProvider(i)}
+                        style={{ fontSize: 11, opacity: i === providerIndex ? (autoAdvancing ? 1 : 0.5) : 1 }}
+                      >
+                        {alt.provider}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             )}
-            <PosterRow title="Trending This Week" items={trending} resolvingUrl={resolving} onSelect={watch} />
-            <PosterRow title="New Releases" items={newReleases} resolvingUrl={resolving} onSelect={watch} />
-            <PosterRow title="Coming Soon" items={upcoming} resolvingUrl={resolving} onSelect={watch} />
-            {genres.map(g => (
-              <PosterRow key={g.id} title={g.name} items={genreRows[g.id] || []} resolvingUrl={resolving} onSelect={watch} />
-            ))}
-          </>
-        )}
-      </div>
+          </div>
+        </div>
+      )}
+
+      {searchResults !== null ? (
+        <PosterRow title={`Search results for "${query}"`} items={searchResults} resolvingUrl={resolving} onSelect={watch} />
+      ) : (
+        <>
+          {loading && <p style={{ fontSize: 13, color: 'var(--muted)' }}><Loader size={14} className="spin" /> Loading…</p>}
+          {!loading && trending.length === 0 && (
+            <p style={{ fontSize: 13, color: 'var(--muted)' }}>
+              No data -- TMDB may be unreachable right now.
+            </p>
+          )}
+          <PosterRow title="Trending This Week" items={trending} resolvingUrl={resolving} onSelect={watch} />
+          <PosterRow title="New Releases" items={newReleases} resolvingUrl={resolving} onSelect={watch} />
+          <PosterRow title="Coming Soon" items={upcoming} resolvingUrl={resolving} onSelect={watch} />
+          {genres.map(g => (
+            <PosterRow key={g.id} title={g.name} items={genreRows[g.id] || []} resolvingUrl={resolving} onSelect={watch} />
+          ))}
+        </>
+      )}
     </div>
   )
 }

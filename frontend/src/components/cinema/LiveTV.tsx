@@ -20,28 +20,34 @@ import Hls from 'hls.js'
 // top category -- "always something playing, browse to change", same
 // pattern as the Stream tab's pinned player.
 //
-// Player pinned in a fixed-height header (not scrolling with the
-// grid); the category nav + channel rows live in their own scrollable
-// region below. The category nav is sticky WITHIN that scroll region
-// only (top:0 relative to its own overflow:auto container) -- keeping it
-// out of the same scroll flow as the player avoids the sticky-vs-sticky
-// overlap/z-fight the previous version had.
+// Layout (2026-07-27 YouTube-style rework): the page now scrolls
+// normally -- player inline at the top, browse rows below, no more
+// fixed-height split-scroll regions. An IntersectionObserver on the
+// player's anchor div detects when it scrolls out of the viewport (the
+// user browsing further down) and switches it into Picture-in-Picture:
+// real browser-native PiP (video.requestPictureInPicture()) since this
+// is an actual <video> element (HLS via hls.js) -- floats even outside
+// the tab on supporting browsers, a genuinely better experience than a
+// faked floating div. Falls back to a manual fixed-position floating
+// div (same DOM node, no remount, playback uninterrupted) if native PiP
+// is unsupported or rejects. Scrolling back into view reverts either way.
 
 interface Country { name: string; code: string; flag: string }
 interface Channel { title: string; url: string; group: string; logo: string }
 
 const ROW_CAP = 16 // channels shown per category row in the "All" browse view
+const SESSION_KEY = 'livetv_session_channel' // persist across navigating away+back this session
 
 const STYLE_ID = 'livetv-css'
 const CSS = `
 .channel-card:hover { transform: translateY(-2px); border-color: var(--purple-bright); }
 `
 
-function HlsPlayer({ src }: { src: string }) {
-  const videoRef = useRef<HTMLVideoElement | null>(null)
+const HlsPlayer = React.forwardRef<HTMLVideoElement, { src: string }>(function HlsPlayer({ src }, ref) {
+  const localRef = useRef<HTMLVideoElement | null>(null)
 
   useEffect(() => {
-    const video = videoRef.current
+    const video = localRef.current
     if (!video) return
     if (Hls.isSupported()) {
       const hls = new Hls()
@@ -53,8 +59,14 @@ function HlsPlayer({ src }: { src: string }) {
     }
   }, [src])
 
-  return <video ref={videoRef} controls autoPlay style={{ width: '100%', height: '100%', background: '#000', display: 'block' }} />
-}
+  return (
+    <video
+      ref={node => { localRef.current = node; if (typeof ref === 'function') ref(node); else if (ref) (ref as React.MutableRefObject<HTMLVideoElement | null>).current = node }}
+      controls autoPlay
+      style={{ width: '100%', height: '100%', background: '#000', display: 'block' }}
+    />
+  )
+})
 
 function ChannelCard({ c, active, onClick }: { c: Channel; active?: boolean; onClick: () => void }) {
   return (
@@ -110,8 +122,73 @@ export default function LiveTV() {
   const [channels, setChannels] = useState<Channel[]>([])
   const [channelsLoading, setChannelsLoading] = useState(false)
   const [activeGroup, setActiveGroup] = useState<string>('All')
-  const [liveStream, setLiveStream] = useState<{ url: string; title: string } | null>(null)
+  const [liveStream, setLiveStream] = useState<{ url: string; title: string } | null>(() => {
+    // Persist across navigating away+back within the same session --
+    // sessionStorage survives an unmount/remount of this component,
+    // unlike component state.
+    try {
+      const saved = sessionStorage.getItem(SESSION_KEY)
+      return saved ? JSON.parse(saved) : null
+    } catch { return null }
+  })
   const [expanded, setExpanded] = useState(false)
+  // Two distinct floating states: nativePip is real OS-level
+  // Picture-in-Picture (the browser handles rendering entirely --
+  // floats even outside the tab, no CSS positioning needed on our end).
+  // manualPip is the CSS fixed-position fallback for when native PiP is
+  // unsupported or rejects -- only THIS one needs the fixed-position
+  // wrapper below.
+  const [nativePip, setNativePip] = useState(false)
+  const [manualPip, setManualPip] = useState(false)
+  const anchorRef = useRef<HTMLDivElement | null>(null)
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+
+  useEffect(() => {
+    if (liveStream) sessionStorage.setItem(SESSION_KEY, JSON.stringify(liveStream))
+  }, [liveStream])
+
+  // Scroll-triggered PiP: real native browser PiP for this <video>
+  // element when available, manual floating-div fallback otherwise.
+  useEffect(() => {
+    const anchor = anchorRef.current
+    if (!anchor || !liveStream) return
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        const video = videoRef.current
+        if (!entry.isIntersecting) {
+          if (video && document.pictureInPictureEnabled && !video.disablePictureInPicture) {
+            video.requestPictureInPicture().catch(() => setManualPip(true))
+          } else {
+            setManualPip(true)
+          }
+        } else {
+          if (document.pictureInPictureElement) {
+            document.exitPictureInPicture().catch(() => {})
+          }
+          setManualPip(false)
+        }
+      },
+      { threshold: 0 }
+    )
+    observer.observe(anchor)
+    return () => observer.disconnect()
+  }, [liveStream])
+
+  // Native PiP can be closed by the user (browser's own PiP window close
+  // button) without scrolling back into view -- keep nativePip honest
+  // either way, independent of the manual-fallback flag.
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video) return
+    const onEnter = () => setNativePip(true)
+    const onLeave = () => setNativePip(false)
+    video.addEventListener('enterpictureinpicture', onEnter)
+    video.addEventListener('leavepictureinpicture', onLeave)
+    return () => {
+      video.removeEventListener('enterpictureinpicture', onEnter)
+      video.removeEventListener('leavepictureinpicture', onLeave)
+    }
+  }, [liveStream])
 
   useEffect(() => {
     if (!document.getElementById(STYLE_ID)) {
@@ -195,35 +272,76 @@ export default function LiveTV() {
     setLiveStream({ url: c.url, title: c.title })
   }
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 220px)', minHeight: 400 }}>
-      {/* Pinned header: country picker + player. Does not scroll with the grid below. */}
-      <div style={{ flexShrink: 0 }}>
-        <div style={{ display: 'flex', gap: 8, marginBottom: liveStream ? 12 : 16, alignItems: 'center', flexWrap: 'wrap' }}>
-          <select
-            value={countryCode}
-            onChange={e => setCountryCode(e.target.value)}
-            style={{ padding: '8px 12px', background: 'rgba(8,8,16,0.6)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--muted-hi)', fontSize: 13 }}
-          >
-            {(countries.length ? countries : [{ name: 'United States', code: 'US', flag: '🇺🇸' }]).map(c => (
-              <option key={c.code} value={c.code}>{c.flag} {c.name}</option>
-            ))}
-          </select>
-          {channelsLoading && <Loader size={14} className="spin" />}
-          <span style={{ fontSize: 12, color: 'var(--muted)' }}>{totalShown} channels</span>
-        </div>
+  // Keyboard shortcuts: space = play/pause, arrows = prev/next channel.
+  // Ignored while typing in an input/select/textarea so this doesn't
+  // hijack normal form interaction (e.g. the country picker).
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      const tag = (e.target as HTMLElement)?.tagName
+      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return
+      if (e.code === 'Space') {
+        e.preventDefault()
+        const video = videoRef.current
+        if (!video) return
+        if (video.paused) video.play().catch(() => {}); else video.pause()
+      } else if (e.code === 'ArrowRight') {
+        stepChannel(1)
+      } else if (e.code === 'ArrowLeft') {
+        stepChannel(-1)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [switcherList, liveStream])
 
-        {liveStream && (
-          <div style={{ marginBottom: 16, borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)', boxShadow: '0 8px 24px rgba(0,0,0,0.4)' }}>
-            <div style={{ position: 'relative', height: expanded ? '70vh' : 260, transition: 'height 0.2s ease' }}>
-              <HlsPlayer src={liveStream.url} />
-              <button
-                onClick={() => setExpanded(e => !e)}
-                title={expanded ? 'Collapse player' : 'Expand player'}
-                style={{ position: 'absolute', top: 8, right: 8, background: 'rgba(0,0,0,0.6)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 6, padding: 6, cursor: 'pointer', color: '#fff', display: 'flex' }}
-              >
-                {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-              </button>
+  return (
+    <div>
+      {/* Normal page flow -- player inline at top, browse rows below.
+          When the player (anchorRef) scrolls out of view, it switches to
+          real native Picture-in-Picture (or the manual floating fallback,
+          see pipMode below) so playback continues while browsing. */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: liveStream ? 12 : 16, alignItems: 'center', flexWrap: 'wrap' }}>
+        <select
+          value={countryCode}
+          onChange={e => setCountryCode(e.target.value)}
+          style={{ padding: '8px 12px', background: 'rgba(8,8,16,0.6)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--muted-hi)', fontSize: 13 }}
+        >
+          {(countries.length ? countries : [{ name: 'United States', code: 'US', flag: '🇺🇸' }]).map(c => (
+            <option key={c.code} value={c.code}>{c.flag} {c.name}</option>
+          ))}
+        </select>
+        {channelsLoading && <Loader size={14} className="spin" />}
+        <span style={{ fontSize: 12, color: 'var(--muted)' }}>{totalShown} channels</span>
+        <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 'auto' }}>Space play/pause · ← → change channel</span>
+      </div>
+
+      {liveStream && (
+        <div ref={anchorRef} style={{ marginBottom: 16 }}>
+          {/* This inline placeholder box stays in normal flow always --
+              when in the manual-fallback floating mode, the actual player
+              below is fixed-positioned instead, so this keeps the layout
+              from collapsing/jumping while it floats. Native PiP needs no
+              placeholder -- the browser leaves the in-page <video> box
+              inert/empty on its own and handles the floating window itself. */}
+          {manualPip && <div style={{ height: expanded ? '70vh' : 260, borderRadius: 12, border: '1px dashed var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: 12 }}>Floating in the corner — scroll up to bring it back</div>}
+          <div
+            style={manualPip ? {
+              position: 'fixed', bottom: 16, right: 16, width: 340, height: 191, zIndex: 200,
+              borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)', boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+            } : { borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)', boxShadow: '0 8px 24px rgba(0,0,0,0.4)' }}
+          >
+            <div style={{ position: 'relative', height: manualPip ? '100%' : (expanded ? '70vh' : 260), transition: manualPip ? 'none' : 'height 0.2s ease' }}>
+              <HlsPlayer src={liveStream.url} ref={videoRef} />
+              {!manualPip && !nativePip && (
+                <button
+                  onClick={() => setExpanded(e => !e)}
+                  title={expanded ? 'Collapse player' : 'Expand player'}
+                  style={{ position: 'absolute', top: 8, right: 8, background: 'rgba(0,0,0,0.6)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 6, padding: 6, cursor: 'pointer', color: '#fff', display: 'flex' }}
+                >
+                  {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                </button>
+              )}
             </div>
             <div style={{ padding: '10px 14px', background: 'rgba(8,8,16,0.85)', fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
@@ -238,8 +356,8 @@ export default function LiveTV() {
               </div>
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Independently scrolling category nav + channel grid. */}
       <div style={{ flex: 1, overflowY: 'auto', paddingRight: 4 }}>
