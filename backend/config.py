@@ -195,6 +195,15 @@ class Settings(BaseSettings):
     # settings.OMOKODA_URL — must exist here so that access never AttributeErrors.
     OMOKODA_URL: str = ""
 
+    # Shared, kernel-wide bearer token for Omo-Koda2's /v1/cognition webhook
+    # (Authorization: Bearer <token>) -- confirmed live with the Omo-Koda2
+    # session: NOT per-agent, one value proves the caller may hit the
+    # endpoint at all; agent_id/agent_key in the request body select WHICH
+    # agent. Only used by the Omo-Koda2 auto-link convenience path -- a
+    # generic third-party cognition_url stores its own token per-agent in
+    # agents.cognition_auth_token instead.
+    OMOKODA_COGNITION_TOKEN: str = ""
+
 
 settings = Settings()
 

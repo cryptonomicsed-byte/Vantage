@@ -280,6 +280,14 @@ async def init_agents_db() -> None:
             ("reputation",     "REAL DEFAULT 0.0"),
             ("cognition_url",  "TEXT DEFAULT NULL"),
             ("cognition_auth_token", "TEXT DEFAULT NULL"),
+            # Optional, Omo-Koda2-specific: the guest agent_id/agent_key pair
+            # from /v1/birth, needed only because Omo-Koda2's kernel routes
+            # /v1/cognition requests by agent_id/agent_key internally. A
+            # generic third-party cognition_url (any other agent framework)
+            # leaves these null -- _dispatch_chat sends them as optional
+            # extra fields, never required by the contract itself.
+            ("omokoda_agent_id",  "TEXT DEFAULT NULL"),
+            ("omokoda_agent_key", "TEXT DEFAULT NULL"),
             # Sealed seed for HKDF-derived purpose-specific keys (Buzz/Nostr
             # identity first; same one-seed-many-purposes pattern as
             # Omo-Koda2's BIPON39). sealed_seed_hex (plaintext hex) is the

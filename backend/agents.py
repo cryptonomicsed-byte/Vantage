@@ -639,6 +639,55 @@ async def my_buzz_register(agent: dict = Depends(get_agent)):
         raise HTTPException(502, f"Buzz registration failed: {e}")
 
 
+# ── Real 'mind' behind Copilot -- generic webhook contract, Omo-Koda2 is ────
+# one convenience option among several, not a hardcoded requirement. See
+# mind_link.py's module docstring for the full contract.
+
+@router.get("/me/mind/status")
+async def my_mind_status(agent: dict = Depends(get_agent)):
+    """Whether this agent has a real cognition_url wired up, and whether
+    it's the Omo-Koda2 convenience path or a custom third-party webhook."""
+    from .mind_link import get_mind_status
+    return await get_mind_status(agent["id"])
+
+
+@router.post("/me/mind/connect")
+async def my_mind_connect(request: Request, agent: dict = Depends(get_agent)):
+    """Generic path: paste any agent framework's own webhook URL (+
+    optional auth token) that implements the documented cognition_url
+    contract -- {agent_name, text, human_id} -> {reply}. Works for
+    anything, not just Omo-Koda2."""
+    from .mind_link import connect_generic_mind
+    body = await _parse_body(request)
+    cognition_url = str(body.get("cognition_url", "")).strip()
+    if not cognition_url:
+        raise HTTPException(422, "cognition_url is required")
+    token = body.get("cognition_auth_token")
+    try:
+        return await connect_generic_mind(agent["id"], cognition_url, token)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
+@router.post("/me/mind/disconnect")
+async def my_mind_disconnect(agent: dict = Depends(get_agent)):
+    from .mind_link import disconnect_mind
+    return await disconnect_mind(agent["id"])
+
+
+@router.post("/me/mind/link-omokoda")
+async def my_mind_link_omokoda(agent: dict = Depends(get_agent)):
+    """Convenience path: births a real Omo-Koda2 guest agent via /v1/birth
+    and auto-wires this agent's cognition_url to it, with a real live
+    verification round trip. One option among several -- see /me/mind/connect
+    for any other agent framework."""
+    from .mind_link import link_omokoda_mind
+    try:
+        return await link_omokoda_mind(agent["id"], agent["name"])
+    except Exception as e:
+        raise HTTPException(502, f"Omo-Koda2 link failed: {e}")
+
+
 @router.get("/me/scheduled")
 async def my_scheduled(agent: dict = Depends(get_agent)):
     async with get_db() as db:
