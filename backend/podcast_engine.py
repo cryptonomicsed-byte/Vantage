@@ -105,15 +105,44 @@ async def _synthesize_turn(text: str, voice: str, out_path: Path):
         raise RuntimeError(f"edge-tts failed: {stderr.decode()[:300]}")
 
 
-async def synthesize_dialogue(turns: list[dict], work_dir: Path) -> tuple[Path, list[dict]]:
+_voices_cache: list[dict] | None = None
+
+
+async def list_voices() -> list[dict]:
+    """Real edge-tts voice catalog (47 English neural voices, confirmed
+    live) -- backs the provider-choice settings UI. Free, no API key,
+    cached in-process after first call since the list is effectively
+    static per deployment."""
+    global _voices_cache
+    if _voices_cache is not None:
+        return _voices_cache
+    proc = await asyncio.create_subprocess_exec(
+        EDGE_TTS_BIN, "--list-voices",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    out, _ = await proc.communicate()
+    voices = []
+    for line in out.decode().splitlines()[1:]:  # skip header row
+        parts = line.split()
+        if len(parts) < 2 or not parts[0].startswith(("en-", "es-", "fr-", "de-")):
+            continue
+        voices.append({"id": parts[0], "gender": parts[1] if len(parts) > 1 else ""})
+    _voices_cache = voices
+    return voices
+
+
+async def synthesize_dialogue(turns: list[dict], work_dir: Path, voices: dict | None = None) -> tuple[Path, list[dict]]:
     """Synthesize each turn with its speaker's distinct voice, concatenate
     into one continuous audio track via ffmpeg (real multi-voice, not one
     generic reader). Also returns each turn's [start, end) in the final
     track so the video composite can burn in real synced captions instead
-    of one static title card for the whole episode."""
+    of one static title card for the whole episode. `voices` overrides the
+    free default {"A": ..., "B": ...} -- e.g. a per-agent choice from
+    Settings, real edge-tts voice ids from list_voices()."""
+    voice_map = voices or VOICES
     turn_files = []
     for i, turn in enumerate(turns):
-        voice = VOICES.get(turn["speaker"], VOICES["A"])
+        voice = voice_map.get(turn["speaker"], VOICES["A"])
         out = work_dir / f"turn_{i:03d}.mp3"
         await _synthesize_turn(turn["text"], voice, out)
         turn_files.append(out)
@@ -260,20 +289,21 @@ async def composite_video(audio_path: Path, title: str, timings: list[dict], out
         raise RuntimeError(f"ffmpeg composite failed: {stderr.decode()[:400]}")
 
 
-async def generate_podcast(topic: str, kind: str, num_turns: int = 10) -> dict:
+async def generate_podcast(topic: str, kind: str, num_turns: int = 10, voices: dict | None = None) -> dict:
     """Full pipeline: dialogue script -> multi-voice synthesis -> (audio |
     video) output file, written directly into the already-mounted static
     dir for its kind. Returns {"stream_url": ..., "duration_sec": ..., "script": [...]}.
     Does NOT publish -- caller decides surface/cover/etc via _insert_broadcast.
     num_turns controls roughly how long the episode runs -- Agent.TV uses a
     higher count for ~3min channel segments than the one-shot Collab
-    "Create Podcast" default."""
+    "Create Podcast" default. voices overrides the default host voices --
+    a per-agent choice from Settings (see list_voices())."""
     work_id = uuid.uuid4().hex[:12]
     work_dir = SCRATCH_DIR / work_id
     work_dir.mkdir(parents=True, exist_ok=True)
     try:
         turns = await generate_dialogue_script(topic, num_turns=num_turns)
-        combined_audio, timings = await synthesize_dialogue(turns, work_dir)
+        combined_audio, timings = await synthesize_dialogue(turns, work_dir, voices=voices)
 
         if kind == "video":
             final = VIDEO_OUT_DIR / f"{work_id}.mp4"

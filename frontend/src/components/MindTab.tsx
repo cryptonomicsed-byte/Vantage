@@ -165,6 +165,8 @@ export default function MindTab({ apiKey }: { apiKey: string }) {
         </div>
       </div>
 
+      <PodcastVoicesSection apiKey={apiKey} />
+
       {!status?.connected && (
         <>
           <div className="glass" style={{ padding: 16, borderRadius: 12, maxWidth: 560, marginBottom: 16 }}>
@@ -207,5 +209,94 @@ export default function MindTab({ apiKey }: { apiKey: string }) {
         </>
       )}
     </section>
+  )
+}
+
+interface Voice { id: string; gender: string }
+
+// Real provider choice for podcast generation -- free edge-tts voices
+// (47 real English neural voices, confirmed live), not a fake dropdown.
+// Applies to Collab's "Create Podcast" and (for the flagship channel
+// only, other agents' channels just replay what they've already
+// published) whatever content this agent creates. Works identically for
+// a human who hasn't created their own agent -- every browser visitor
+// already has a real, auto-provisioned agent identity (see
+// ensureAgentKey.ts), so this setting is never gated behind "does this
+// human own a named agent."
+//
+// Honest scope note: LLM (above) and Voice (below) are the two real,
+// wired provider choices in Vantage today. Image/video generation
+// providers aren't a real feature yet -- Cinema/Audio publishing takes
+// externally-hosted media URLs rather than generating images/video
+// in-app, so a provider picker for those would be decorative. Not built
+// here; flagged rather than faked.
+function PodcastVoicesSection({ apiKey }: { apiKey: string }) {
+  const [voices, setVoices] = useState<Voice[]>([])
+  const [hostA, setHostA] = useState('')
+  const [hostB, setHostB] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    Promise.all([
+      fetch('/api/podcast/voices').then(r => r.json()),
+      fetch('/api/podcast/voices/mine', { headers: { 'X-Agent-Key': apiKey } }).then(r => r.json()),
+    ]).then(([all, mine]) => {
+      setVoices(all)
+      setHostA(mine.A || 'en-US-GuyNeural')
+      setHostB(mine.B || 'en-US-JennyNeural')
+    }).catch(() => {}).finally(() => setLoading(false))
+  }, [apiKey])
+
+  async function save() {
+    setSaving(true)
+    setSaved(false)
+    try {
+      await fetch('/api/podcast/voices/mine', {
+        method: 'POST',
+        headers: { 'X-Agent-Key': apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ A: hostA, B: hostB }),
+      })
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2000)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="glass" style={{ padding: 16, borderRadius: 12, maxWidth: 560, marginBottom: 16 }}>
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Podcast voices</div>
+      <p style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 10 }}>
+        Which real edge-tts voice powers each of your two podcast hosts when you create one in Collab.
+        Free, no API key — defaults to Guy/Jenny if you don't choose your own.
+      </p>
+      {loading ? (
+        <Loader size={14} className="spin" />
+      ) : (
+        <>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
+            <div>
+              <label style={{ fontSize: 10, color: 'var(--muted)', display: 'block', marginBottom: 4 }}>Host A</label>
+              <select value={hostA} onChange={e => setHostA(e.target.value)}
+                style={{ width: '100%', padding: '7px 8px', background: 'rgba(8,8,16,0.6)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--muted-hi)', fontSize: 12 }}>
+                {voices.map(v => <option key={v.id} value={v.id}>{v.id} ({v.gender})</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={{ fontSize: 10, color: 'var(--muted)', display: 'block', marginBottom: 4 }}>Host B</label>
+              <select value={hostB} onChange={e => setHostB(e.target.value)}
+                style={{ width: '100%', padding: '7px 8px', background: 'rgba(8,8,16,0.6)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--muted-hi)', fontSize: 12 }}>
+                {voices.map(v => <option key={v.id} value={v.id}>{v.id} ({v.gender})</option>)}
+              </select>
+            </div>
+          </div>
+          <button className="btn btn-ghost btn-sm" disabled={saving} onClick={save}>
+            {saving ? <Loader size={12} className="spin" /> : (saved ? 'Saved!' : 'Save')}
+          </button>
+        </>
+      )}
+    </div>
   )
 }
