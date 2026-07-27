@@ -7,8 +7,19 @@ import time, json, sqlite3, os, sys, urllib.request, signal
 DB = "/opt/ares/Vantage/data/vantage.db"
 HELIUS_KEY = os.environ.get("HELIUS_API_KEY", "")
 BIRDEYE_KEY = os.environ.get("BIRDEYE_KEY", "")
-VANTAGE_KEY = open(os.path.expanduser("~/.vantage_key")).read().strip()
+try:
+    VANTAGE_KEY = open(os.path.expanduser("~/.vantage_key")).read().strip()
+except FileNotFoundError:
+    print("  ⚠️ ~/.vantage_key not found -- signal ingest/snipe calls will fail until it exists")
+    VANTAGE_KEY = ""
 VANTAGE_URL = "http://localhost:8001/api/trading/signals/ingest"
+# Real-money auto-execution kill switch: was unconditionally firing a real
+# 0.01 SOL market buy on every moonshot>60 detection with zero human
+# confirmation, no circuit breaker, no daily loss cap. Off by default --
+# set DEGEN_AUTOSNIPE_ENABLED=true to opt back into live auto-sniping.
+# Detection/watchlisting/scoring all still run either way; only the actual
+# order-placement call is gated.
+AUTOSNIPE_ENABLED = os.environ.get("DEGEN_AUTOSNIPE_ENABLED", "").lower() in ("1", "true", "yes")
 
 def fetch(url, headers=None):
     h = headers or {}; h['User-Agent'] = 'curl/8.0'
@@ -143,7 +154,11 @@ def run():
                     direction = "BUY" if pc_1h > -5 else "SELL"
                     detail = f"Fusion: vol=${vol_1h:.0f} buys_1h={buys_1h} pc_1h={pc_1h:.1f}% | moonshot={moonshot}"
                     if moonshot > 50: add_to_pumpfun_watchlist(addr, sym)
-                    if moonshot > 60: snipe_token(sym, moonshot)  # 🎯 auto-snipe at 60+
+                    if moonshot > 60:
+                        if AUTOSNIPE_ENABLED:
+                            snipe_token(sym, moonshot)  # 🎯 auto-snipe at 60+ (explicitly opted in)
+                        else:
+                            print(f"  🎯 moonshot={moonshot} for {sym} -- autosnipe disabled (set DEGEN_AUTOSNIPE_ENABLED=true to trade live)")
                     print(f"  🔥 {sym}: {direction} c={conviction:.2f} v=${vol_1h:.0f} ms={moonshot}")
                     ingest(sym, direction, conviction, detail)
                 checked.add(addr)

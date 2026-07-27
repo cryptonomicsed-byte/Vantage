@@ -5,7 +5,7 @@ dev wallet sell %, holder concentration.
 
 Usage: Import from vantage_predictor.py or run standalone.
 """
-import urllib.request, json, time
+import os, urllib.request, json, time
 
 HELIUS_KEY = os.environ.get("HELIUS_API_KEY", "")
 BIRDEYE_KEY = os.environ.get("BIRDEYE_KEY", "")

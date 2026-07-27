@@ -48,6 +48,7 @@ class RunRequest(BaseModel):
     clone_url: str
     owner: str
     name: str
+    gitea_token: Optional[str] = None
 
 
 @app.get("/health")
@@ -79,9 +80,24 @@ async def _execute(run_id: str, req: RunRequest) -> None:
     run_dir = WORK_DIR / "strix_runs"
     try:
         WORK_DIR.mkdir(parents=True, exist_ok=True)
+        # req.clone_url is now a bare (unauthenticated) URL -- credentials, if
+        # any, are supplied via GIT_ASKPASS instead of embedding a token in
+        # the URL string, which would otherwise be visible via `ps aux` for
+        # this subprocess and get written into the cloned repo's own
+        # .git/config on disk.
+        clone_env = {**os.environ}
+        if req.gitea_token:
+            askpass = WORK_DIR / "_git_askpass.sh"
+            if not askpass.exists():
+                askpass.write_text('#!/bin/sh\ncase "$1" in\n  *sername*) echo "$GIT_ASKPASS_TOKEN" ;;\n  *) echo "" ;;\nesac\n')
+                askpass.chmod(0o700)
+            clone_env["GIT_ASKPASS"] = str(askpass)
+            clone_env["GIT_ASKPASS_TOKEN"] = req.gitea_token
+            clone_env["GIT_TERMINAL_PROMPT"] = "0"
         clone = await asyncio.create_subprocess_exec(
             "git", "clone", "--depth", "1", req.clone_url, str(target),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=clone_env,
         )
         _, clone_err = await asyncio.wait_for(clone.communicate(), timeout=60)
         if clone.returncode != 0:

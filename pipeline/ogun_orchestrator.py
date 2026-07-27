@@ -11,8 +11,28 @@ Flow:
 
 Wallet: BIPON39 Soul (85SFCuohae...) — 0.18 SOL + 0.08 USDC
 """
+import re
 import subprocess, json, sqlite3, time, os, sys, urllib.request
 from datetime import datetime, timezone
+
+_SAFE_TOKEN_RE = re.compile(r"^[a-z0-9_-]{1,20}$")
+
+
+def safe_token(token: str) -> str:
+    """Token/symbol names ultimately originate from external feeds
+    (Pump.fun/Kraken signal data), then got interpolated into a shell
+    command string via an f-string and reconstructed with .split() --
+    a value containing whitespace could inject extra CLI arguments (e.g.
+    overriding --wallet) into the sol-cli invocation. Real argument
+    injection, not classic shell injection (no shell=True is used here),
+    but still a live risk: validate to a safe charset before it ever
+    reaches subprocess.run, and refuse to trade anything that doesn't
+    look like a real token symbol."""
+    token = (token or "").strip().lower()
+    if not _SAFE_TOKEN_RE.match(token):
+        raise ValueError(f"unsafe/invalid token symbol for sol-cli: {token!r}")
+    return token
+
 
 VANTAGE_URL = "http://localhost:8001"
 VANTAGE_KEY = os.environ.get("VANTAGE_KEY","")
@@ -81,9 +101,15 @@ def check_exits():
         if pnl <= sl:
             print(f"\n  🛑 STOP LOSS: {symbol} @ {pnl*100:.1f}%")
             # Sell via sol-cli
-            token = symbol.lower()
-            cmd = f"sol token swap all {token} sol --wallet {WALLET}"
-            result = subprocess.run(cmd.split(), capture_output=True, text=True, timeout=60)
+            try:
+                token = safe_token(symbol)
+            except ValueError as e:
+                print(f"  ⚠️ skipping exit, {e}")
+                continue
+            result = subprocess.run(
+                ["sol", "token", "swap", "all", token, "sol", "--wallet", WALLET],
+                capture_output=True, text=True, timeout=60,
+            )
             sig = None
             for line in (result.stdout + result.stderr).split("\n"):
                 if "Signature:" in line:
@@ -99,9 +125,15 @@ def check_exits():
             
         elif pnl >= tp:
             print(f"\n  🎯 TAKE PROFIT: {symbol} @ +{pnl*100:.1f}%")
-            token = symbol.lower()
-            cmd = f"sol token swap all {token} sol --wallet {WALLET}"
-            result = subprocess.run(cmd.split(), capture_output=True, text=True, timeout=60)
+            try:
+                token = safe_token(symbol)
+            except ValueError as e:
+                print(f"  ⚠️ skipping exit, {e}")
+                continue
+            result = subprocess.run(
+                ["sol", "token", "swap", "all", token, "sol", "--wallet", WALLET],
+                capture_output=True, text=True, timeout=60,
+            )
             sig = None
             for line in (result.stdout + result.stderr).split("\n"):
                 if "Signature:" in line:
@@ -174,11 +206,14 @@ def execute_kraken_swap(symbol, conviction):
         return None
     
     try:
-        cmd = f"sol token swap {amount} sol {token} --wallet {WALLET}"
-        print(f"  $ {cmd}")
-        result = subprocess.run(cmd.split(), capture_output=True, text=True, timeout=60)
+        token = safe_token(token)
+        print(f"  $ sol token swap {amount} sol {token} --wallet {WALLET}")
+        result = subprocess.run(
+            ["sol", "token", "swap", str(amount), "sol", token, "--wallet", WALLET],
+            capture_output=True, text=True, timeout=60,
+        )
         output = result.stdout + result.stderr
-        
+
         # Extract TX sig
         sig = None
         for line in output.split("\n"):
@@ -212,11 +247,13 @@ def execute_pumpfun_snipe(symbol, conviction):
     
     try:
         # Normalize symbol for sol-cli
-        token = symbol.lower().replace(" ", "-").replace("/", "-")[:20]
-        
-        cmd = f"sol token swap {amount} sol {token} --wallet {WALLET}"
-        print(f"  $ {cmd}")
-        result = subprocess.run(cmd.split(), capture_output=True, text=True, timeout=60)
+        token = safe_token(symbol.lower().replace(" ", "-").replace("/", "-")[:20])
+
+        print(f"  $ sol token swap {amount} sol {token} --wallet {WALLET}")
+        result = subprocess.run(
+            ["sol", "token", "swap", str(amount), "sol", token, "--wallet", WALLET],
+            capture_output=True, text=True, timeout=60,
+        )
         output = result.stdout + result.stderr
         
         sig = None

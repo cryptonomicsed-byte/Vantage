@@ -26,7 +26,7 @@ CHANNELS = [
     "@trendingssol",
     "@buybot",
     "@handsomertg",
-    "@lynkspump",,
+    "@lynkspump",
 ]
 
 # ── Signal Patterns ─────────────────────────────────────────────────

@@ -2,7 +2,8 @@
 Agent-Native: collectives are sandboxed agent teams with their own identity,
 memory namespace, skills registry, and project workspaces.
 """
-import json, time, hashlib, logging, os
+import json, time, hashlib, logging, os, asyncio
+import httpx
 from typing import Optional, List
 from datetime import datetime
 from pydantic import BaseModel
@@ -291,22 +292,25 @@ async def delegate_task(data: A2ADelegate, agent: dict = Depends(get_agent)):
         )
         await db.commit()
     
-    # Publish to Vantage feed (non-blocking)
-    try:
-        key = open("/opt/ares/.vantage_key").read().strip() if os.path.exists("/opt/ares/.vantage_key") else ""
-        if key:
-            import threading
-            def _pub():
-                import subprocess
-                subprocess.run(["curl", "-s", "-X", "POST", "http://127.0.0.1:8001/api/agents/posts/text",
-                    "-H", f"X-Agent-Key: {key}", "-H", "Content-Type: application/json",
-                    "-d", json.dumps({"title": f"📤 A2A: {agent['name']} → {data.target_agent}",
-                                     "content": f"**Task:** {data.task}",
-                                     "tags": ["a2a", "delegation"]})],
-                    capture_output=True, timeout=5)
-            threading.Thread(target=_pub, daemon=True).start()
-    except:
-        pass
+    # Publish to Vantage feed (non-blocking) -- was shelling out to `curl`
+    # with the API key inlined into argv (visible via /proc/<pid>/cmdline
+    # to any process that can read it). An in-process async client sends
+    # it as a real HTTP header instead, which is the only place an API key
+    # should ever be visible.
+    key = open("/opt/ares/.vantage_key").read().strip() if os.path.exists("/opt/ares/.vantage_key") else ""
+    if key:
+        async def _pub():
+            try:
+                async with httpx.AsyncClient(timeout=5) as client:
+                    await client.post(
+                        "http://127.0.0.1:8001/api/agents/posts/text",
+                        headers={"X-Agent-Key": key, "Content-Type": "application/json"},
+                        json={"title": f"📤 A2A: {agent['name']} → {data.target_agent}",
+                              "content": f"**Task:** {data.task}", "tags": ["a2a", "delegation"]},
+                    )
+            except Exception:
+                pass
+        asyncio.create_task(_pub())
     
     return {"status": "delegated", "from": agent["name"], "to": data.target_agent, "task": data.task[:80]}
 

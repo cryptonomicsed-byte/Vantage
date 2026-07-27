@@ -18,8 +18,15 @@ from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, Header, HTTPException, Query, Body
 from pydantic import BaseModel
 
+from ..config import settings
+from ..crypto_utils import encrypt_key_for_agent, decrypt_key_for_agent
+
 router = APIRouter(prefix="/api/agents", tags=["wallets"])
-DB_PATH = os.environ.get("DB_PATH", "backend/data/vantage.db")
+# Was defaulting to a relative "backend/data/vantage.db" -- under this
+# process's actual WorkingDirectory that resolved to a stale, orphaned
+# SQLite file completely disconnected from the real database every other
+# router uses (settings.DATA_DIR). Fixed to match.
+DB_PATH = os.environ.get("DB_PATH") or str(settings.DATA_DIR / "vantage.db")
 ALCHEMY_KEY = os.environ.get("ALCHEMY_API_KEY", "")
 ALCHEMY_WALLET_ADDRESS = os.environ.get("ALCHEMY_WALLET_ADDRESS", "")
 
@@ -103,25 +110,22 @@ def init_wallet_tables():
         print(f"Wallet table init failed: {e}")
 
 
-def encrypt_private_key(private_key: str, salt: str) -> str:
-    """Placeholder: In production, use proper encryption (e.g., Fernet)."""
-    # For now, base64 encode + salt. UPGRADE THIS.
-    import base64
-    combined = f"{private_key}:{salt}".encode()
-    return base64.b64encode(combined).decode()
+def encrypt_private_key(private_key: str, agent_id: int, api_key: str) -> str:
+    """Real AES-256-GCM encryption (backend/crypto_utils.py), keyed off the
+    agent's own API key -- was previously base64(key + salt), fully
+    recoverable by anyone with database read access. No salt param needed
+    anymore: crypto_utils derives + embeds its own per-call salt."""
+    return encrypt_key_for_agent(private_key, {"id": agent_id, "api_key": api_key})
 
 
-def decrypt_private_key(encrypted: str, salt: str) -> Optional[str]:
-    """Placeholder: Decrypt with same method as above."""
-    import base64
+def decrypt_private_key(encrypted: str, agent_id: int, api_key: str) -> Optional[str]:
+    """Real AES-256-GCM decryption, requires the agent's own API key --
+    matches crypto_utils's design principle: the API key is the only
+    secret needed, no master key exists to compromise."""
     try:
-        decrypted = base64.b64decode(encrypted).decode()
-        key, stored_salt = decrypted.split(":")
-        if stored_salt == salt:
-            return key
-    except:
-        pass
-    return None
+        return decrypt_key_for_agent(encrypted, {"id": agent_id, "api_key": api_key})
+    except Exception:
+        return None
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────
@@ -144,20 +148,28 @@ async def create_wallet(
         db = sqlite3.connect(DB_PATH)
 
         if request.type == "custom":
-            # Generate a new wallet (in production, use proper key generation)
-            import secrets
-            private_key = f"0x{secrets.token_hex(32)}"  # Placeholder
-            salt = secrets.token_hex(16)
-            encrypted_key = encrypt_private_key(private_key, salt)
+            # NOTE (real functional gap, separate from the encryption fix
+            # below): private_key and address here are still two
+            # INDEPENDENTLY random values, not a real derived keypair --
+            # this "custom" wallet type doesn't produce a usable on-chain
+            # wallet for any chain. Nothing else in the codebase reads
+            # private_key_encrypted/private_key_salt back out to sign a
+            # real transaction (verified: this table is disconnected from
+            # the actual trading path, which loads a real key from
+            # hermes_soul_seed.json instead) -- so this is inert/placeholder
+            # today, but genuine keypair generation would be needed before
+            # this endpoint could be trusted for anything real.
+            private_key = f"0x{secrets.token_hex(32)}"  # Placeholder, not a real keypair
+            encrypted_key = encrypt_private_key(private_key, agent_id, x_agent_key)
 
             # Derive address from private key (placeholder)
             address = f"0x{secrets.token_hex(20)}"
 
             db.execute("""
                 INSERT INTO agent_wallets
-                (id, agent_id, type, address, private_key_encrypted, private_key_salt, name, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (wallet_id, agent_id, "custom", address, encrypted_key, salt, request.name, datetime.utcnow().isoformat()))
+                (id, agent_id, type, address, private_key_encrypted, name, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (wallet_id, agent_id, "custom", address, encrypted_key, request.name, datetime.utcnow().isoformat()))
 
             response = {
                 "wallet_id": wallet_id,

@@ -1,5 +1,6 @@
 """Agent Identity and Profile endpoints."""
 import hashlib as _hlib
+import hmac as _hmac
 import secrets
 import shutil
 import aiosqlite
@@ -28,6 +29,10 @@ from ..utils import _compute_reputation_badges, _validate_file_magic, _security_
 
 router = APIRouter(prefix="/api/agents", tags=["identity"])
 
+
+def _hmac_compare(a: str, b: str) -> bool:
+    return _hmac.compare_digest(a.encode(), b.encode())
+
 @router.post("/register")
 @_limiter.limit("5/minute")
 async def register(request: Request):
@@ -35,6 +40,18 @@ async def register(request: Request):
     name = str(body.get("name", "")).strip()[:100]
     if not name:
         raise HTTPException(422, "name is required")
+
+    # Registration is unauthenticated by design (agent-first BYOK: anyone
+    # can mint their own identity) -- but that's also a real spam/abuse
+    # vector with only a 5/min per-IP limit as protection (confirmed live:
+    # the directory already has test/spam entries). This adds an OPT-IN
+    # invite-token gate: with VANTAGE_REGISTER_INVITE_TOKEN unset (default),
+    # behavior is byte-for-byte unchanged from before. Set it to require
+    # callers to pass a matching `invite_token` in the body.
+    if settings.REGISTER_INVITE_TOKEN:
+        provided = str(body.get("invite_token", ""))
+        if not provided or not _hmac_compare(provided, settings.REGISTER_INVITE_TOKEN):
+            raise HTTPException(403, "invite_token is required to register")
 
     if not _rexp.match(r"^[a-zA-Z0-9_\-\. ]+$", name):
         raise HTTPException(422, "Invalid characters in agent name. Use alphanumeric, spaces, dots, underscores or hyphens.")

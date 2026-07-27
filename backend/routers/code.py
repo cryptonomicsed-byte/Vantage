@@ -46,6 +46,37 @@ SCAN_DIR = "/tmp/vantage_code_scan"
 VANTAGE_URL = "http://127.0.0.1:8001"
 
 _headers = {"Accept": "application/json", "Authorization": f"token {GITEA_TOKEN}"}
+
+# clone_url used to embed GITEA_TOKEN directly (http://TOKEN@host/...), which
+# is visible to any process that can list argv (`ps aux`) for the git clone
+# subprocess AND gets persisted in plaintext into the cloned repo's own
+# .git/config on disk for as long as that scratch checkout exists. A
+# GIT_ASKPASS helper supplies the same credential (token-as-username, blank
+# password -- mirrors the previous URL scheme's actual auth shape) without
+# ever putting it in argv or writing it into a config file.
+_ASKPASS_SCRIPT = os.path.join(SCAN_DIR, "_git_askpass.sh")
+
+
+def _ensure_askpass_script():
+    os.makedirs(SCAN_DIR, exist_ok=True)
+    if not os.path.exists(_ASKPASS_SCRIPT):
+        with open(_ASKPASS_SCRIPT, "w") as f:
+            f.write('#!/bin/sh\ncase "$1" in\n  *sername*) echo "$GIT_ASKPASS_TOKEN" ;;\n  *) echo "" ;;\nesac\n')
+        os.chmod(_ASKPASS_SCRIPT, 0o700)
+
+
+def _git_clone_env() -> dict:
+    _ensure_askpass_script()
+    env = os.environ.copy()
+    env["GIT_ASKPASS"] = _ASKPASS_SCRIPT
+    env["GIT_ASKPASS_TOKEN"] = GITEA_TOKEN
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+def _bare_clone_url(full_name: str) -> str:
+    """No token embedded -- pair with _git_clone_env() for the subprocess call."""
+    return f"{GITEA_URL}/{full_name}.git"
 _cache = {"data": None, "ts": 0}
 _activity_feed: list[dict] = []
 _activity_max = 100
@@ -381,8 +412,8 @@ async def push_file(owner: str, name: str, req: PushFileRequest, agent: dict = D
 
     try:
         # Clone
-        clone_url = f"{GITEA_URL}/{full_name}.git".replace("http://", f"http://{GITEA_TOKEN}@")
-        subprocess.run(["git", "clone", "--depth", "1", clone_url, target], capture_output=True, timeout=30)
+        clone_url = _bare_clone_url(full_name)
+        subprocess.run(["git", "clone", "--depth", "1", clone_url, target], capture_output=True, timeout=30, env=_git_clone_env())
 
         # Write file
         filepath = os.path.join(target, req.path)
@@ -395,7 +426,7 @@ async def push_file(owner: str, name: str, req: PushFileRequest, agent: dict = D
         subprocess.run(["git", "-C", target, "config", "user.email", "agent@vantage.local"], capture_output=True)
         subprocess.run(["git", "-C", target, "config", "user.name", "Vantage Agent"], capture_output=True)
         subprocess.run(["git", "-C", target, "commit", "-m", req.message], capture_output=True)
-        result = subprocess.run(["git", "-C", target, "push", "origin", req.branch], capture_output=True, timeout=30)
+        result = subprocess.run(["git", "-C", target, "push", "origin", req.branch], capture_output=True, timeout=30, env=_git_clone_env())
 
         _log_activity("push", full_name, f"{req.path}: {req.message[:50]}", agent=agent["name"])
 
@@ -416,7 +447,7 @@ async def push_file(owner: str, name: str, req: PushFileRequest, agent: dict = D
 async def _regex_scan(owner: str, name: str, agent_id: int, agent_name: str) -> dict:
     """Fast, synchronous secret/vuln pattern scan — the existing default engine."""
     full_name = f"{owner}/{name}"
-    clone_url = f"{GITEA_URL}/{full_name}.git".replace("http://", f"http://{GITEA_TOKEN}@")
+    clone_url = _bare_clone_url(full_name)
     target = os.path.join(SCAN_DIR, f"scan_{name}")
     os.makedirs(SCAN_DIR, exist_ok=True)
 
@@ -424,7 +455,7 @@ async def _regex_scan(owner: str, name: str, agent_id: int, agent_name: str) -> 
     try:
         if os.path.exists(target):
             shutil.rmtree(target)
-        subprocess.run(["git", "clone", "--depth", "1", clone_url, target], capture_output=True, timeout=30)
+        subprocess.run(["git", "clone", "--depth", "1", clone_url, target], capture_output=True, timeout=30, env=_git_clone_env())
 
         # Scan all files
         files_scanned = 0
@@ -549,14 +580,14 @@ async def _trivy_scan(owner: str, name: str, agent_id: int, agent_name: str) -> 
     filling the gap the regex engine leaves -- that one only matches 6 hardcoded
     patterns, this covers actual known-vulnerable dependency versions."""
     full_name = f"{owner}/{name}"
-    clone_url = f"{GITEA_URL}/{full_name}.git".replace("http://", f"http://{GITEA_TOKEN}@")
+    clone_url = _bare_clone_url(full_name)
     target = os.path.join(SCAN_DIR, f"trivy_{name}")
     os.makedirs(SCAN_DIR, exist_ok=True)
 
     try:
         if os.path.exists(target):
             shutil.rmtree(target)
-        subprocess.run(["git", "clone", "--depth", "1", clone_url, target], capture_output=True, timeout=30)
+        subprocess.run(["git", "clone", "--depth", "1", clone_url, target], capture_output=True, timeout=30, env=_git_clone_env())
 
         proc = subprocess.run(
             ["trivy", "fs", "--scanners", "vuln,secret,misconfig",
@@ -632,14 +663,14 @@ async def _semgrep_scan(owner: str, name: str, agent_id: int, agent_name: str) -
     bug patterns across languages), complementing Trivy (deps/secrets/misconfig)
     and regex (fast hardcoded patterns)."""
     full_name = f"{owner}/{name}"
-    clone_url = f"{GITEA_URL}/{full_name}.git".replace("http://", f"http://{GITEA_TOKEN}@")
+    clone_url = _bare_clone_url(full_name)
     target = os.path.join(SCAN_DIR, f"semgrep_{name}")
     os.makedirs(SCAN_DIR, exist_ok=True)
 
     try:
         if os.path.exists(target):
             shutil.rmtree(target)
-        subprocess.run(["git", "clone", "--depth", "1", clone_url, target], capture_output=True, timeout=30)
+        subprocess.run(["git", "clone", "--depth", "1", clone_url, target], capture_output=True, timeout=30, env=_git_clone_env())
 
         proc = subprocess.run(
             ["/opt/ares/venv/bin/semgrep", "--config", "auto", "--json",
@@ -698,14 +729,14 @@ async def _sbom_scan(owner: str, name: str, agent_id: int, agent_name: str) -> d
     a repo actually depends on, the missing piece for knowing what you'''re
     exposed to when a new CVE drops somewhere in the ecosystem."""
     full_name = f"{owner}/{name}"
-    clone_url = f"{GITEA_URL}/{full_name}.git".replace("http://", f"http://{GITEA_TOKEN}@")
+    clone_url = _bare_clone_url(full_name)
     target = os.path.join(SCAN_DIR, f"sbom_{name}")
     os.makedirs(SCAN_DIR, exist_ok=True)
 
     try:
         if os.path.exists(target):
             shutil.rmtree(target)
-        subprocess.run(["git", "clone", "--depth", "1", clone_url, target], capture_output=True, timeout=30)
+        subprocess.run(["git", "clone", "--depth", "1", clone_url, target], capture_output=True, timeout=30, env=_git_clone_env())
 
         proc = subprocess.run(
             ["syft", target, "-o", "cyclonedx-json", "--quiet"],
@@ -800,11 +831,11 @@ async def trigger_scan(
         raise HTTPException(503, "Strix runner not configured — set VANTAGE_STRIX_RUNNER_URL")
 
     full_name = f"{owner}/{name}"
-    clone_url = f"{GITEA_URL}/{full_name}.git".replace("http://", f"http://{GITEA_TOKEN}@")
+    clone_url = _bare_clone_url(full_name)
     scan_id = await _create_scan_row(agent["id"], owner, name, "strix")
     try:
         async with httpx.AsyncClient(timeout=10) as cl:
-            r = await cl.post(f"{settings.STRIX_RUNNER_URL}/run", json={"clone_url": clone_url, "owner": owner, "name": name})
+            r = await cl.post(f"{settings.STRIX_RUNNER_URL}/run", json={"clone_url": clone_url, "owner": owner, "name": name, "gitea_token": GITEA_TOKEN})
             r.raise_for_status()
             runner_run_id = r.json().get("run_id", "")
     except Exception as e:
@@ -987,9 +1018,9 @@ async def search_code(req: SearchRequest, agent: dict = Depends(get_agent)):
 
     for full_name in repos_to_search[:5]:  # Limit to 5 repos
         target = os.path.join(search_dir, full_name.replace("/", "_"))
-        clone_url = f"{GITEA_URL}/{full_name}.git".replace("http://", f"http://{GITEA_TOKEN}@")
+        clone_url = _bare_clone_url(full_name)
         try:
-            subprocess.run(["git", "clone", "--depth", "1", clone_url, target], capture_output=True, timeout=15)
+            subprocess.run(["git", "clone", "--depth", "1", clone_url, target], capture_output=True, timeout=15, env=_git_clone_env())
             grep = subprocess.run(["grep", "-rn", "-i", req.query, target], capture_output=True, text=True)
             for line in grep.stdout.strip().split("\n")[:20]:
                 if ":" in line:

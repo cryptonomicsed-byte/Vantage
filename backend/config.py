@@ -117,6 +117,12 @@ class Settings(BaseSettings):
 
     ADMIN_KEY: str = ""  # set via VANTAGE_ADMIN_KEY env var — no hardcoded default
 
+    # Optional gate on /api/agents/register (unset by default = fully open,
+    # unchanged behavior). Set VANTAGE_REGISTER_INVITE_TOKEN to require
+    # callers to pass a matching invite_token in the registration body --
+    # a real spam/abuse vector today (only a 5/min per-IP limit protects it).
+    REGISTER_INVITE_TOKEN: str = ""
+
     @field_validator("ADMIN_KEY")
     @classmethod
     def validate_admin_key(cls, v: str) -> str:

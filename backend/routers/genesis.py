@@ -12,7 +12,8 @@ Design:
 
 Enterprise: E2E tested, audit-logged, plug-and-play via MCP.
 """
-import json, hashlib, os, sqlite3, subprocess, time, logging, asyncio
+import json, hashlib, os, sqlite3, time, logging, asyncio
+import httpx
 from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, Field
@@ -136,16 +137,23 @@ def hash_key(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()
 
 def post_to_feed(title: str, content: str, tags: list[str] | None = None):
-    """Publish to Vantage feed (fire-and-forget)."""
+    """Publish to Vantage feed (fire-and-forget).
+
+    Was shelling out to `curl` with the API key inlined into the argv list
+    -- visible to any process that can read /proc/<pid>/cmdline for this
+    process. Sending it as a real HTTP header via an in-process client
+    instead means the key is only ever on the wire (as any API key sending
+    is expected to be), never in this process's own command-line args."""
     try:
         key = open("/opt/ares/.vantage_key").read().strip()
-        subprocess.run(
-            ["curl", "-s", "-X", "POST", "http://127.0.0.1:8001/api/agents/posts/text",
-             "-H", f"X-Agent-Key: {key}", "-H", "Content-Type: application/json",
-             "-d", json.dumps({"title": title, "content": content, "tags": tags or ["genesis"]})],
-            capture_output=True, timeout=5
-        )
-    except: pass
+        with httpx.Client(timeout=5) as client:
+            client.post(
+                "http://127.0.0.1:8001/api/agents/posts/text",
+                headers={"X-Agent-Key": key, "Content-Type": "application/json"},
+                json={"title": title, "content": content, "tags": tags or ["genesis"]},
+            )
+    except Exception:
+        pass
 
 def log_audit(agent_name: str, action: str, target: str = "", details: dict | None = None):
     """Write to immutable audit trail (best-effort, non-blocking)."""

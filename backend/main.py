@@ -556,7 +556,10 @@ app.add_middleware(
     allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "X-Agent-Key", "X-Admin-Key", "X-Federation-Peer", "Authorization"],
+    allow_headers=[
+        "Content-Type", "X-Agent-Key", "X-Admin-Key", "X-Federation-Peer", "Authorization",
+        "X-Vantage-Tool", "X-Vantage-Tool-Key", "X-Human-Session", "X-Vault-Connector-Key", "X-Mesh-Key",
+    ],
 )
 
 
