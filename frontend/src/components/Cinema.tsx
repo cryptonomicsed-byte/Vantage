@@ -265,7 +265,7 @@ export default function Cinema() {
     <div className="cin">
       <div className="top-nav-tabs" style={{ marginBottom: 20 }}>
         <button type="button" className={`top-nav-tab ${section === 'library' ? 'active' : ''}`} onClick={() => setSection('library')}>
-          <Film size={15} /> Movies &amp; Shows
+          <Film size={15} /> Agents
         </button>
         <button type="button" className={`top-nav-tab ${section === 'stream' ? 'active' : ''}`} onClick={() => setSection('stream')}>
           <Sparkles size={15} /> Stream

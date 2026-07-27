@@ -243,7 +243,7 @@ export default function AudioSection() {
 
       <div className="top-nav-tabs" style={{ marginBottom: 20 }}>
         <button type="button" className={`top-nav-tab ${section === 'library' ? 'active' : ''}`} onClick={() => setSection('library')}>
-          <Headphones size={15} /> Library
+          <Headphones size={15} /> Agents
         </button>
         <button type="button" className={`top-nav-tab ${section === 'stream' ? 'active' : ''}`} onClick={() => setSection('stream')}>
           <Sparkles size={15} /> Stream

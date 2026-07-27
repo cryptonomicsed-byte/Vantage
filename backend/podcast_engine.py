@@ -23,6 +23,7 @@ import json
 import logging
 import re
 import uuid
+import sys
 from pathlib import Path
 
 import httpx
@@ -30,6 +31,11 @@ import httpx
 from .config import settings
 
 logger = logging.getLogger(__name__)
+
+# The systemd service invokes /opt/ares/venv/bin/python directly (not an
+# activated shell), so bare "edge-tts" isn't on PATH -- resolve it relative
+# to the running interpreter's own venv instead of hardcoding a path.
+EDGE_TTS_BIN = str(Path(sys.executable).with_name("edge-tts"))
 
 SCRATCH_DIR = Path("/opt/ares/media/podcasts")  # per-turn TTS + concat intermediates, not web-served
 SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
@@ -91,7 +97,7 @@ Output STRICT JSON only, a list of objects, no markdown fences:
 
 async def _synthesize_turn(text: str, voice: str, out_path: Path):
     proc = await asyncio.create_subprocess_exec(
-        "edge-tts", "--voice", voice, "--text", text, "--write-media", str(out_path),
+        EDGE_TTS_BIN, "--voice", voice, "--text", text, "--write-media", str(out_path),
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
     )
     _, stderr = await proc.communicate()
