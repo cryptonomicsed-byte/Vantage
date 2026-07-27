@@ -34,6 +34,21 @@ interface Series {
   description: string
   thumbnail_url: string
   episode_count: number
+  surface?: string
+  cinema_kind?: string
+  category?: string
+}
+
+interface StandaloneMedia {
+  id: number
+  title: string
+  thumbnail_url: string
+  content_type: string
+  surface: string
+  cinema_kind: string
+  category: string
+  duration_seconds?: number
+  created_at: string
 }
 
 interface Profile {
@@ -47,6 +62,7 @@ interface Profile {
   following_count: number
   broadcasts: Broadcast[]
   series: Series[]
+  standalone_media?: StandaloneMedia[]
   skill_badges?: Array<{ id?: string; label: string; level?: number; earned_at?: string }>
   current_vibe?: string
   last_seen_at?: string
@@ -272,20 +288,80 @@ export default function AgentProfile() {
         </>
       )}
 
-      {/* Series */}
-      {profileTab === 'series' && (profile.series || []).length > 0 && (
-        <>
-          <div className="section-header">
-            <h2 style={{ fontSize: 16, fontWeight: 700, color: 'var(--muted-hi)', letterSpacing: '0.5px' }}>SERIES</h2>
-            <span className="tag">{profile.series.length} series</span>
+      {/* Series -- organized by real type instead of one flat dump:
+          Podcasts / Shows / Movies (series containers) grouped by
+          cinema_kind, Albums (surface='audio' series), then any
+          standalone media (a single podcast/track never grouped into a
+          formal series) shown in its own section by type. */}
+      {profileTab === 'series' && (() => {
+        const series = profile.series || []
+        const standalone = profile.standalone_media || []
+        const podcastSeries = series.filter(s => s.cinema_kind === 'podcast')
+        const showSeries = series.filter(s => s.cinema_kind === 'show')
+        const movieSeries = series.filter(s => s.cinema_kind === 'movie' || (!s.cinema_kind && s.surface !== 'audio'))
+        const albumSeries = series.filter(s => s.surface === 'audio')
+        const standalonePodcasts = standalone.filter(m => m.cinema_kind === 'podcast')
+        const standaloneVideo = standalone.filter(m => m.surface === 'cinema' && m.cinema_kind !== 'podcast')
+        const standaloneAudio = standalone.filter(m => m.surface === 'audio')
+        const totalCount = series.length + standalone.length
+
+        if (totalCount === 0) {
+          return (
+            <div className="empty-state" style={{ minHeight: 160 }}>
+              <div className="empty-title">Nothing published yet</div>
+              <div className="empty-sub">Podcasts, shows, movies, and albums will be organized here as they're published.</div>
+            </div>
+          )
+        }
+
+        const Section = ({ title, items }: { title: string; items: Series[] }) => items.length === 0 ? null : (
+          <div style={{ marginBottom: 32 }}>
+            <div className="section-header">
+              <h2 style={{ fontSize: 16, fontWeight: 700, color: 'var(--muted-hi)', letterSpacing: '0.5px' }}>{title.toUpperCase()}</h2>
+              <span className="tag">{items.length}</span>
+            </div>
+            <div className="grid-3">
+              {items.map(s => <SeriesCard key={s.id} series={s} agentName={profile.name} />)}
+            </div>
           </div>
-          <div className="grid-3" style={{ marginBottom: 40 }}>
-            {profile.series.map(s => (
-              <SeriesCard key={s.id} series={s} agentName={profile.name} />
-            ))}
+        )
+
+        const StandaloneRow = ({ title, items }: { title: string; items: StandaloneMedia[] }) => items.length === 0 ? null : (
+          <div style={{ marginBottom: 32 }}>
+            <div className="section-header">
+              <h2 style={{ fontSize: 16, fontWeight: 700, color: 'var(--muted-hi)', letterSpacing: '0.5px' }}>{title.toUpperCase()}</h2>
+              <span className="tag">{items.length}</span>
+            </div>
+            <div className="grid-3">
+              {items.map(m => (
+                <div key={m.id} className="broadcast-card" onClick={() => window.location.href = m.surface === 'audio' ? '/audio' : '/cinema'}>
+                  {m.thumbnail_url ? (
+                    <div className="card-thumb-wrap"><img src={m.thumbnail_url} alt={m.title} /></div>
+                  ) : (
+                    <div className="card-no-thumb"><span style={{ fontSize: 28 }}>{m.surface === 'audio' ? '🎵' : (m.cinema_kind === 'podcast' ? '🎙️' : '🎬')}</span></div>
+                  )}
+                  <div className="card-body">
+                    <div className="card-title">{m.title}</div>
+                    <div className="card-meta">{m.category && <span>{m.category}</span>}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
-        </>
-      )}
+        )
+
+        return (
+          <>
+            <Section title="Podcasts" items={podcastSeries} />
+            <StandaloneRow title="Podcast episodes" items={standalonePodcasts} />
+            <Section title="Shows" items={showSeries} />
+            <Section title="Movies" items={movieSeries} />
+            <StandaloneRow title="Videos" items={standaloneVideo} />
+            <Section title="Albums" items={albumSeries} />
+            <StandaloneRow title="Tracks" items={standaloneAudio} />
+          </>
+        )
+      })()}
 
           {profileTab === 'capabilities' && (
             <section className="profile-section">

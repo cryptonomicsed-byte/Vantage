@@ -174,6 +174,31 @@ def _escape_drawtext(s: str) -> str:
     return s.replace("\\", "\\\\").replace("'", "’").replace(":", "\\:").replace(",", "\\,")
 
 
+def _wrap_caption(text: str, max_chars_per_line: int = 58, max_lines: int = 2) -> str:
+    """Real word-wrap for drawtext (no built-in wrapping) -- fixes captions
+    running off the right edge of the frame at fontsize=26 on a 1280px-wide
+    video (a real bug found via a live rendered-frame check: a longer line
+    was cut off mid-word past the frame boundary)."""
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if len(candidate) > max_chars_per_line and current:
+            lines.append(current)
+            current = word
+            if len(lines) == max_lines:
+                break
+        else:
+            current = candidate
+    else:
+        if current:
+            lines.append(current)
+    if len(lines) == max_lines and len(" ".join(words)) > sum(len(l) for l in lines):
+        lines[-1] = lines[-1].rstrip() + "..."
+    return "\n".join(lines)
+
+
 async def _ensure_background() -> Path:
     """The show's gradient background, rendered ONCE to a static PNG and
     reused for every episode -- geq evaluated per-pixel per-frame for a
@@ -206,12 +231,12 @@ async def composite_video(audio_path: Path, title: str, timings: list[dict], out
     caption_filters = []
     for t in timings:
         speaker = HOST_NAMES.get(t["speaker"], t["speaker"])
-        raw_text = t["text"][:130] + ("..." if len(t["text"]) > 130 else "")
-        line = _escape_drawtext(f"{speaker}: {raw_text}")
+        wrapped = _wrap_caption(f"{speaker}: {t['text']}")
+        line = _escape_drawtext(wrapped)
         caption_filters.append(
             f"drawtext=text='{line}':fontcolor=white:fontsize=26:"
-            f"x=(w-text_w)/2:y=h-110:box=1:boxcolor=black@0.55:boxborderw=14:"
-            f"line_spacing=6:enable='between(t,{t['start']:.2f},{t['end']:.2f})'"
+            f"x=(w-text_w)/2:y=h-140:box=1:boxcolor=black@0.55:boxborderw=14:"
+            f"line_spacing=8:enable='between(t,{t['start']:.2f},{t['end']:.2f})'"
         )
 
     vf = (

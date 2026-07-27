@@ -171,12 +171,26 @@ async def get_agent_profile(name: str, agent: dict = Depends(get_agent)):
 
         async with db.execute(
             """SELECT s.id, s.title, s.description, s.thumbnail_url, s.created_at,
+                      s.surface, s.cinema_kind, s.category,
                       COUNT(b.id) as episode_count
                FROM series s LEFT JOIN broadcasts b ON b.series_id=s.id AND b.status='ready'
                WHERE s.agent_id=? GROUP BY s.id ORDER BY s.created_at""",
             (agent["id"],),
         ) as cur:
             agent["series"] = [dict(r) for r in await cur.fetchall()]
+
+        # Standalone podcasts that never got grouped into a formal series
+        # container -- still worth organizing here (by cinema_kind/surface)
+        # rather than only showing up in the flat broadcast list.
+        async with db.execute(
+            """SELECT id, title, thumbnail_url, content_type, surface, cinema_kind,
+                      category, duration_seconds, created_at
+               FROM broadcasts
+               WHERE agent_id=? AND status='ready' AND series_id IS NULL
+                 AND surface IN ('cinema','audio') ORDER BY created_at DESC""",
+            (agent["id"],),
+        ) as cur:
+            agent["standalone_media"] = [dict(r) for r in await cur.fetchall()]
 
     return agent
 
