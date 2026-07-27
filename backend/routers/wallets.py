@@ -13,6 +13,7 @@ import os
 import json
 import sqlite3
 import secrets
+import hashlib
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, Header, HTTPException, Query, Body
@@ -46,16 +47,23 @@ class SignTransactionRequest(BaseModel):
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 def get_agent_id(x_agent_key: str) -> Optional[int]:
-    """Resolve X-Agent-Key header to agent_id."""
+    """Resolve X-Agent-Key header to agent_id.
+
+    Was comparing the raw header value directly against agents.api_key --
+    but that column stores a SHA-256 hash of the key (same as every other
+    auth path in this app, e.g. deps.py's get_agent), so this comparison
+    could never match a real agent. Every endpoint in this router has been
+    unconditionally 401ing for real callers. Fixed to hash first."""
     try:
+        hashed = hashlib.sha256(x_agent_key.encode()).hexdigest()
         db = sqlite3.connect(DB_PATH)
         row = db.execute(
             "SELECT id FROM agents WHERE api_key = ?",
-            (x_agent_key,)
+            (hashed,)
         ).fetchone()
         db.close()
         return row[0] if row else None
-    except:
+    except Exception:
         return None
 
 
