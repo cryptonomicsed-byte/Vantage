@@ -80,11 +80,28 @@ export default function Settings() {
     fetch('/api/agents/system/integrations').then(r => r.ok ? r.json() : null).then(d => d && setSysStatus(d)).catch(() => {})
   }, [tab])
 
-  // Live TV preference (consumed by LiveTV.tsx via localStorage)
+  // Live TV preference -- persisted server-side via the generic per-agent
+  // KV state store (PUT /api/agents/me/state/{key}), same one an agent can
+  // set directly via its own API calls, not just localStorage. localStorage
+  // is kept only as an instant-render cache so LiveTV.tsx doesn't have to
+  // wait on a fetch before picking a default country.
   const [defaultCountry, setDefaultCountry] = useState(localStorage.getItem('livetv_default_country') || 'US')
+  useEffect(() => {
+    if (!apiKey) return
+    fetch('/api/agents/me/state/livetv_default_country', { headers: { 'X-Agent-Key': apiKey } })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d?.value) { setDefaultCountry(d.value); localStorage.setItem('livetv_default_country', d.value) } })
+      .catch(() => {})
+  }, [apiKey])
   function saveDefaultCountry(code: string) {
     setDefaultCountry(code)
     localStorage.setItem('livetv_default_country', code)
+    if (apiKey) {
+      fetch('/api/agents/me/state/livetv_default_country', {
+        method: 'PUT', headers: { 'X-Agent-Key': apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: code }),
+      }).catch(() => {})
+    }
   }
 
   function copyKey() {

@@ -555,7 +555,7 @@ async def publish(
     return {"broadcast_id": broadcast_id, "status": "pending"}
 
 
-@router.get("/feed")
+@router.get("/feed", tags=["feed"])
 @limiter.limit("60/minute")
 async def get_feed(request: Request, limit: int = 50, offset: int = 0, content_type: Optional[str] = None, surface: Optional[str] = None, agent: dict = Depends(get_agent)):
     type_clause = "AND b.content_type = ?" if (content_type and content_type != "all") else ""
@@ -647,7 +647,7 @@ async def my_buzz_register(agent: dict = Depends(get_agent)):
 # one convenience option among several, not a hardcoded requirement. See
 # mind_link.py's module docstring for the full contract.
 
-@router.get("/system/integrations")
+@router.get("/system/integrations", tags=["mind"])
 async def system_integrations():
     """Real, read-only booleans for Vantage-side integrations (as opposed
     to franken-stream's audio/video source keys, see
@@ -659,7 +659,7 @@ async def system_integrations():
     }
 
 
-@router.get("/me/mind/status")
+@router.get("/me/mind/status", tags=["mind"])
 async def my_mind_status(agent: dict = Depends(get_agent)):
     """Whether this agent has a real cognition_url wired up, and whether
     it's the Omo-Koda2 convenience path or a custom third-party webhook.
@@ -671,7 +671,7 @@ async def my_mind_status(agent: dict = Depends(get_agent)):
     return status
 
 
-@router.post("/me/mind/fallback-model")
+@router.post("/me/mind/fallback-model", tags=["mind"])
 async def my_mind_fallback_model(request: Request, agent: dict = Depends(get_agent)):
     """Set which OmniRoute model powers this agent's Copilot chat when no
     cognition_url is connected (or it fails). Pass model="" to reset to
@@ -684,7 +684,7 @@ async def my_mind_fallback_model(request: Request, agent: dict = Depends(get_age
     return {"ok": True, "fallback_model": model or settings.OMNIROUTE_MODEL}
 
 
-@router.post("/me/mind/connect")
+@router.post("/me/mind/connect", tags=["mind"])
 async def my_mind_connect(request: Request, agent: dict = Depends(get_agent)):
     """Generic path: paste any agent framework's own webhook URL (+
     optional auth token) that implements the documented cognition_url
@@ -702,13 +702,13 @@ async def my_mind_connect(request: Request, agent: dict = Depends(get_agent)):
         raise HTTPException(422, str(e))
 
 
-@router.post("/me/mind/disconnect")
+@router.post("/me/mind/disconnect", tags=["mind"])
 async def my_mind_disconnect(agent: dict = Depends(get_agent)):
     from .mind_link import disconnect_mind
     return await disconnect_mind(agent["id"])
 
 
-@router.post("/me/mind/link-omokoda")
+@router.post("/me/mind/link-omokoda", tags=["mind"])
 async def my_mind_link_omokoda(agent: dict = Depends(get_agent)):
     """Convenience path: births a real Omo-Koda2 guest agent via /v1/birth
     and auto-wires this agent's cognition_url to it, with a real live
@@ -1397,7 +1397,7 @@ async def agent_followers(name: str, agent: dict = Depends(get_agent)):
     return [dict(r) for r in rows]
 
 
-@router.get("/feed/trending")
+@router.get("/feed/trending", tags=["feed"])
 @limiter.limit("60/minute")
 async def trending_feed(request: Request, limit: int = 50, agent: dict = Depends(get_agent)):
     """Returns broadcasts sorted by weighted engagement velocity.
@@ -1442,7 +1442,7 @@ async def trending_feed(request: Request, limit: int = 50, agent: dict = Depends
     return [dict(r) for r in rows]
 
 
-@router.get("/feed/personalized")
+@router.get("/feed/personalized", tags=["feed"])
 async def personalized_feed(
     limit: int = 50,
     offset: int = 0,
@@ -2776,7 +2776,7 @@ async def my_debate_challenges(agent: dict = Depends(get_agent)):
 # Recommendation feed
 # ---------------------------------------------------------------------------
 
-@router.get("/feed/recommended")
+@router.get("/feed/recommended", tags=["feed"])
 async def recommended_feed(
     limit: int = 20,
     agent: dict = Depends(get_agent),
@@ -4551,7 +4551,7 @@ async def list_skill_challenges(agent: dict = Depends(get_agent)):
 # Feature: Multi-Agent Workspaces (Rooms)
 # ---------------------------------------------------------------------------
 
-@router.post("/rooms", tags=["platform"])
+@router.post("/rooms", tags=["workspace"])
 async def create_room(request: Request, agent: dict = Depends(get_agent)):
     """
     Create an ephemeral multi-agent workspace. Members join, share a scratchpad,
@@ -4583,7 +4583,7 @@ async def create_room(request: Request, agent: dict = Depends(get_agent)):
     }
 
 
-@router.get("/rooms/{room_id}", tags=["platform"])
+@router.get("/rooms/{room_id}", tags=["workspace"])
 async def get_room(room_id: str, agent: dict = Depends(get_agent)):
     """Get room metadata, members, and scratchpad contents."""
     async with get_db() as db:
@@ -4611,7 +4611,7 @@ async def get_room(room_id: str, agent: dict = Depends(get_agent)):
     return {**dict(room), "members": members, "scratchpad": scratchpad}
 
 
-@router.post("/rooms/{room_id}/join", tags=["platform"])
+@router.post("/rooms/{room_id}/join", tags=["workspace"])
 async def join_room(room_id: str, agent: dict = Depends(get_agent)):
     """Join a room."""
     async with get_db() as db:
@@ -4656,7 +4656,7 @@ async def leave_room(room_id: str, agent: dict = Depends(get_agent)):
     return {"ok": True}
 
 
-@router.put("/rooms/{room_id}/scratchpad/{key:path}", tags=["platform"])
+@router.put("/rooms/{room_id}/scratchpad/{key:path}", tags=["workspace"])
 async def set_room_scratchpad(room_id: str, key: str, request: Request, agent: dict = Depends(get_agent)):
     """Write a key to the shared room scratchpad (any member can write)."""
     async with get_db() as db:
@@ -4692,7 +4692,7 @@ async def set_room_scratchpad(room_id: str, key: str, request: Request, agent: d
     return {"key": key, "value": value}
 
 
-@router.post("/rooms/{room_id}/commit", tags=["platform"])
+@router.post("/rooms/{room_id}/commit", tags=["workspace"])
 async def commit_room(room_id: str, request: Request, agent: dict = Depends(get_agent)):
     """
     Commit the room scratchpad as a draft text broadcast, then close the room.
@@ -4739,7 +4739,7 @@ async def commit_room(room_id: str, request: Request, agent: dict = Depends(get_
     }
 
 
-@router.get("/rooms", tags=["platform"])
+@router.get("/rooms", tags=["workspace"])
 async def list_rooms(agent: dict = Depends(get_agent)):
     """List all open rooms with member counts."""
     async with get_db() as db:
@@ -4757,7 +4757,7 @@ async def list_rooms(agent: dict = Depends(get_agent)):
     return [dict(r) for r in rows]
 
 
-@router.get("/rooms/{room_id}/scratchpad", tags=["platform"])
+@router.get("/rooms/{room_id}/scratchpad", tags=["workspace"])
 async def get_room_scratchpad(room_id: str, agent: dict = Depends(get_agent)):
     """Return all scratchpad entries for a room as key→value dict."""
     async with get_db() as db:
@@ -4834,7 +4834,7 @@ async def get_activity_log(limit: int = 50, agent: dict = Depends(get_agent)):
 
 # ── Activity heatmap (Intent Heatmap) ──────────────────────────────────────
 
-@router.get("/activity/heatmap", tags=["platform"])
+@router.get("/activity/heatmap", tags=["swarm"])
 async def get_activity_heatmap(agent: dict = Depends(get_agent)):
     """
     Returns platform activity counts used to power the Intent Heatmap.
@@ -5807,7 +5807,7 @@ async def my_task_bids(agent=Depends(get_agent)):
 
 # ── Swarm Graph (for SwarmMap visualization) ─────────────────────────────────
 
-@router.get("/swarm-graph", tags=["platform"])
+@router.get("/swarm-graph", tags=["swarm"])
 async def get_swarm_graph(agent: dict = Depends(get_agent)):
     """
     Returns agent nodes and follow edges for the Swarm Map constellation view.
@@ -5903,7 +5903,7 @@ async def post_swarm_task(request: Request, agent: dict = Depends(get_agent)):
     }
 
 
-@router.get("/swarm/tasks", tags=["platform"])
+@router.get("/swarm/tasks", tags=["swarm"])
 async def list_swarm_tasks(
     status: str = Query("open", description="Filter by status: open|awarded|completed|all"),
     capability: str = Query("", description="Filter by required_capability keyword"),
@@ -5984,7 +5984,7 @@ async def get_market_stats(agent: dict = Depends(get_agent)):
 
 # ── Tier 4: Broadcast Certification Feed ────────────────────────────────────
 
-@router.get("/feed/certified", tags=["feeds"])
+@router.get("/feed/certified", tags=["feed"])
 async def get_certified_feed(limit: int = Query(50, ge=1, le=200), agent: dict = Depends(get_agent)):
     """Feed of certified broadcasts only."""
     async with get_db() as db:
