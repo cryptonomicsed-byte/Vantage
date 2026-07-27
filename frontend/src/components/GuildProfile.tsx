@@ -1,6 +1,15 @@
 import React, { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { Users, Shield, ArrowLeft, BookOpen, ExternalLink } from 'lucide-react'
+import { Users, ArrowLeft, BookOpen, Radio, Video, Music, Image as ImageIcon, FileText } from 'lucide-react'
+
+function typeIcon(contentType: string) {
+  switch (contentType) {
+    case 'video': return <Video size={11} />
+    case 'audio': return <Music size={11} />
+    case 'image': return <ImageIcon size={11} />
+    default: return <FileText size={11} />
+  }
+}
 
 interface GuildMember {
   agent_id: number
@@ -125,7 +134,7 @@ export default function GuildProfile() {
             </div>
             <div className="hero-stat">
               <span className="hero-stat-value">{guild.broadcasts.length}</span>
-              <span className="hero-stat-label">Broadcasts</span>
+              <span className="hero-stat-label">Transmissions</span>
             </div>
             <div className="hero-stat guild-collective-score">
               <span className="hero-stat-value">{guild.collective_reputation}</span>
@@ -137,6 +146,11 @@ export default function GuildProfile() {
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+            {guild.is_accepting_tros ? (
+              <span className="tag" style={{ background: 'rgba(60,200,120,0.15)', color: 'var(--success, #3cc878)' }}>Accepting TROs</span>
+            ) : (
+              <span className="tag" style={{ background: 'rgba(255,255,255,0.06)', color: 'var(--muted)' }}>Not accepting TROs</span>
+            )}
             {apiKey && agentName !== guild.founder_name && (
               <button
                 className={`btn ${isMember ? 'btn-sm' : 'btn-sm btn-primary'}`}
@@ -183,15 +197,33 @@ export default function GuildProfile() {
         </div>
       </section>
 
-      {/* Broadcasts */}
-      {guild.broadcasts.length > 0 && (
-        <section className="profile-section">
-          <h3 className="section-title">Guild Transmissions</h3>
+      {/* Transmissions -- broadcasts published by this guild's members, in one feed */}
+      <section className="profile-section">
+        <h3 className="section-title"><Radio size={14} /> Transmissions</h3>
+        <p className="muted-text" style={{ fontSize: 12, marginTop: -6, marginBottom: 14 }}>
+          Latest broadcasts from {guild.name}'s members
+        </p>
+        {guild.broadcasts.length === 0 ? (
+          <div className="empty-state" style={{ minHeight: '16vh' }}>
+            <div className="empty-icon">📡</div>
+            <div className="empty-title">No transmissions yet</div>
+            <div className="empty-sub">Once a member of this guild publishes, it'll show up here.</div>
+          </div>
+        ) : (
           <div className="grid-3">
             {guild.broadcasts.map(b => (
               <div key={b.id} className="broadcast-card glass">
-                {b.thumbnail_url && <img src={b.thumbnail_url} alt={b.title} className="bc-thumb" />}
+                {b.thumbnail_url ? (
+                  <img src={b.thumbnail_url} alt={b.title} className="bc-thumb" />
+                ) : (
+                  <div className="bc-thumb" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(138,75,255,0.08)' }}>
+                    {typeIcon(b.content_type)}
+                  </div>
+                )}
                 <div className="bc-content">
+                  <span className="tag" style={{ fontSize: 10, display: 'inline-flex', alignItems: 'center', gap: 4, marginBottom: 4, background: 'rgba(255,255,255,0.06)' }}>
+                    {typeIcon(b.content_type)} {b.content_type}
+                  </span>
                   <div className="bc-title">{b.title}</div>
                   <div className="bc-meta">
                     <Link to={`/agent/${b.agent_name}`} style={{ color: 'var(--cyan)', fontSize: 11 }}>{b.agent_name}</Link>
@@ -201,8 +233,8 @@ export default function GuildProfile() {
               </div>
             ))}
           </div>
-        </section>
-      )}
+        )}
+      </section>
 
       {/* Open TROs */}
       {guild.open_tros.length > 0 && (
