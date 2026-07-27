@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { Play, Loader, Maximize2, Minimize2, ChevronLeft, ChevronRight, Shuffle } from 'lucide-react'
 import Hls from 'hls.js'
+import AddToPlaylistButton from '../AddToPlaylistButton'
 
 // "Live TV" tab -- pure iptv-org channel browser (real HLS, zero
 // scraping), separate from the "Stream" tab (on-demand movies/TV via
@@ -74,12 +75,15 @@ function ChannelCard({ c, active, onClick }: { c: Channel; active?: boolean; onC
       className="channel-card glass"
       onClick={onClick}
       style={{
-        padding: 14, cursor: 'pointer', borderRadius: 10,
+        position: 'relative', padding: 14, cursor: 'pointer', borderRadius: 10,
         border: active ? '1px solid var(--purple-bright)' : '1px solid var(--border)',
         transition: 'all 0.15s ease', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, textAlign: 'center',
         flex: '0 0 140px',
       }}
     >
+      <div style={{ position: 'absolute', top: 4, right: 4, zIndex: 2 }}>
+        <AddToPlaylistButton item={{ external_title: c.title, external_url: c.url, external_thumbnail: c.logo, external_kind: 'channel' }} size={11} />
+      </div>
       {c.logo
         ? <img src={c.logo} alt="" style={{ width: 48, height: 48, objectFit: 'contain' }} />
         : <div style={{ width: 48, height: 48, borderRadius: 8, background: 'rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Play size={16} color="var(--muted)" /></div>}

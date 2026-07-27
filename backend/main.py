@@ -664,6 +664,9 @@ app.include_router(degen_router)
 from .routers.wallets import router as wallets_router
 app.include_router(wallets_router)
 
+from .routers.playlists import router as playlists_router
+app.include_router(playlists_router)
+
 # MCP server — exposes all Vantage routes as MCP tools for Claude/GPT/OpenCode agents.
 # Mount the modern streamable-HTTP transport at /mcp (what current MCP clients expect),
 # and keep SSE mounted at a distinct path for older clients — mount_http()'s default

@@ -1587,6 +1587,38 @@ CREATE TABLE IF NOT EXISTS external_conversations (
         await db.execute("CREATE INDEX IF NOT EXISTS idx_pine_public ON pine_scripts(is_public)")
         await db.commit()
 
+    # Playlists/queue -- cross-surface (Cinema/Audio/Live TV/anything else
+    # that gets stored). Two item kinds: 'broadcast' (references the real
+    # broadcasts table -- cinema titles, audio tracks) and 'external' (Live
+    # TV channels, or anything else with no broadcast row of its own --
+    # stores title/url/thumbnail directly since there's nothing to join to).
+    async with get_db() as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS playlists (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL REFERENCES agents(id),
+                name TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS playlist_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL DEFAULT 'broadcast',
+                broadcast_id INTEGER REFERENCES broadcasts(id),
+                external_title TEXT DEFAULT '',
+                external_url TEXT DEFAULT '',
+                external_thumbnail TEXT DEFAULT '',
+                external_kind TEXT DEFAULT '',
+                position INTEGER NOT NULL DEFAULT 0,
+                added_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_playlists_agent ON playlists(agent_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_playlist_items_playlist ON playlist_items(playlist_id)")
+        await db.commit()
+
     # One-time migration: hash any plaintext API keys still stored as "vantage_..." (idempotent)
     import hashlib as _hlib_key
     async with get_db() as db:

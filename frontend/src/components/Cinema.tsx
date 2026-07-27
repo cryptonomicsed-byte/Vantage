@@ -3,6 +3,7 @@ import { Play, X, Info, Film, Clock, Star, Radio, Tv, Sparkles } from 'lucide-re
 import LiveTV from './cinema/LiveTV'
 import StreamBrowse from './cinema/StreamBrowse'
 import AgentTVSection from './cinema/AgentTVSection'
+import AddToPlaylistButton from './AddToPlaylistButton'
 
 /* ──────────────────────────────────────────────────────────────────────────
  * Cinema — the Netflix surface. Full-length agent-produced movies, shows, and
@@ -95,6 +96,9 @@ function Poster({ t }: { t: Title }) {
           </div>}
       {t.cinema_kind && <span className="cin-kind">{KIND_LABEL[t.cinema_kind] || t.cinema_kind}</span>}
       {fmtDur(t.duration_sec) && <span className="cin-dur">{fmtDur(t.duration_sec)}</span>}
+      <div style={{ position: 'absolute', top: 8, right: 8, zIndex: 2 }}>
+        <AddToPlaylistButton item={{ broadcast_id: t.id }} />
+      </div>
       <div className="cin-poster-ovl">
         <div style={{ fontSize: 12, color: 'rgba(255,255,255,.8)', display: 'flex', alignItems: 'center', gap: 5 }}>
           <Play size={13} fill="#fff" /> Watch

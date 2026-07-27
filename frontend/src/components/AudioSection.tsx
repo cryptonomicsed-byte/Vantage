@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Play, Pause, Music, Headphones, X, Sparkles } from 'lucide-react'
+import { Play, Pause, Music, Headphones, X, Sparkles, SkipBack, SkipForward, RotateCcw, RotateCw, Volume2, VolumeX, ListMusic } from 'lucide-react'
 import AudioStreamBrowse from './AudioStreamBrowse'
+import AddToPlaylistButton from './AddToPlaylistButton'
 
 /* ──────────────────────────────────────────────────────────────────────────
  * Audio — the Spotify surface. Agent-produced tracks/albums only
@@ -56,11 +57,25 @@ const CSS = `
 .aud-card h3{font-size:14px;font-weight:600;margin:0 0 3px;color:rgba(255,255,255,.92);display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
 .aud-card .by{font-size:12px;color:rgba(255,255,255,.45);display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
 .aud-empty{padding:90px 20px;text-align:center;color:rgba(255,255,255,.4)}
-.aud-bar{position:fixed;left:0;right:0;bottom:0;z-index:900;background:rgba(12,13,22,.97);backdrop-filter:blur(14px);border-top:1px solid rgba(255,255,255,.08);display:flex;align-items:center;gap:16px;padding:10px 20px}
+.aud-bar{position:fixed;left:0;right:0;bottom:0;z-index:900;background:rgba(12,13,22,.97);backdrop-filter:blur(14px);border-top:1px solid rgba(255,255,255,.08);display:flex;flex-direction:column;padding:10px 20px 12px}
+.aud-bar-main{display:flex;align-items:center;gap:16px}
 .aud-bar-cover{width:52px;height:52px;border-radius:6px;overflow:hidden;flex-shrink:0;box-shadow:0 4px 12px rgba(0,0,0,.5)}
 .aud-bar-cover img{width:100%;height:100%;object-fit:cover}
-.aud-bar audio{flex:1;min-width:0;height:36px}
 .aud-bar-close{background:none;border:none;color:rgba(255,255,255,.5);cursor:pointer;flex-shrink:0}
+.aud-transport{display:flex;align-items:center;gap:6px;flex-shrink:0}
+.aud-transport button{background:none;border:none;color:rgba(255,255,255,.75);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:6px;border-radius:50%;transition:all .15s}
+.aud-transport button:hover{color:#fff;background:rgba(255,255,255,.08)}
+.aud-transport button:disabled{opacity:.3;cursor:default}
+.aud-transport .play-main{width:38px;height:38px;background:#1db954;color:#000}
+.aud-transport .play-main:hover{background:#1ed760;color:#000}
+.aud-seek-row{display:flex;align-items:center;gap:8px;margin-top:6px;flex:1}
+.aud-seek-time{font-size:11px;color:rgba(255,255,255,.45);min-width:36px;font-variant-numeric:tabular-nums}
+.aud-seek-time.right{text-align:right}
+.aud-seekbar{flex:1;height:4px;-webkit-appearance:none;appearance:none;background:rgba(255,255,255,.15);border-radius:2px;cursor:pointer;outline:none}
+.aud-seekbar::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;border-radius:50%;background:#1db954;cursor:pointer}
+.aud-seekbar::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:#1db954;border:none;cursor:pointer}
+.aud-volume{-webkit-appearance:none;appearance:none;width:80px;height:4px;background:rgba(255,255,255,.15);border-radius:2px;cursor:pointer;outline:none}
+.aud-volume::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;border-radius:50%;background:#fff;cursor:pointer}
 `
 
 function Cover({ t, playing }: { t: Track; playing: boolean }) {
@@ -70,13 +85,16 @@ function Cover({ t, playing }: { t: Track; playing: boolean }) {
       {t.thumbnail_url
         ? <img src={t.thumbnail_url} alt={t.title} loading="lazy" />
         : <div className="aud-cover-fb" style={{ background: `linear-gradient(135deg,hsl(${h} 55% 30%),hsl(${(h + 50) % 360} 55% 14%))` }}><Headphones size={30} opacity={0.9} /></div>}
+      <div style={{ position: 'absolute', top: 6, right: 6, zIndex: 2 }}>
+        <AddToPlaylistButton item={{ broadcast_id: t.id }} size={12} />
+      </div>
       <div className="aud-playbtn">{playing ? <Pause size={20} color="#000" fill="#000" /> : <Play size={20} color="#000" fill="#000" style={{ marginLeft: 2 }} />}</div>
     </div>
   )
 }
 
 /* Album modal — the ordered tracklist. Clicking a track plays it. */
-function AlbumModal({ id, onClose, onPlay, currentId }: { id: number; onClose: () => void; onPlay: (t: Track) => void; currentId?: number }) {
+function AlbumModal({ id, onClose, onPlay, currentId }: { id: number; onClose: () => void; onPlay: (t: Track, ctx: Track[], label: string) => void; currentId?: number }) {
   const [detail, setDetail] = useState<AlbumDetail | null>(null)
   const [stats, setStats] = useState<any>(null)
   useEffect(() => {
@@ -107,7 +125,7 @@ function AlbumModal({ id, onClose, onPlay, currentId }: { id: number; onClose: (
           {(detail?.tracks || []).map((t, i) => {
             const playing = currentId === t.id
             return (
-              <div key={t.id} onClick={() => onPlay(t)} style={{ display: 'flex', gap: 14, alignItems: 'center', padding: '10px 12px', borderRadius: 8, cursor: 'pointer', background: playing ? 'rgba(29,185,84,.12)' : 'transparent' }}>
+              <div key={t.id} onClick={() => onPlay(t, detail?.tracks || [], detail?.title || 'Album')} style={{ display: 'flex', gap: 14, alignItems: 'center', padding: '10px 12px', borderRadius: 8, cursor: 'pointer', background: playing ? 'rgba(29,185,84,.12)' : 'transparent' }}>
                 <div style={{ width: 22, textAlign: 'center', color: playing ? '#1db954' : 'rgba(255,255,255,.4)', fontWeight: 600 }}>{playing ? <Play size={14} fill="#1db954" /> : (t as any).track_number || i + 1}</div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 15, fontWeight: 600, color: playing ? '#1db954' : '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</div>
@@ -131,6 +149,71 @@ export default function AudioSection() {
   const [current, setCurrent] = useState<Track | null>(null)
   const [openAlbum, setOpenAlbum] = useState<number | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
+
+  // Playback queue: whatever list the user played FROM (an album's
+  // tracklist, or a browse row) becomes the auto-advance context -- when
+  // a track ends, it plays the next one in that same list rather than
+  // just stopping. queueLabel is shown in the player bar so it's clear
+  // what "next" means.
+  const [queue, setQueue] = useState<Track[]>([])
+  const [queueLabel, setQueueLabel] = useState('')
+  const [playing, setPlaying] = useState(false)
+  const [currentTime, setCurrentTime] = useState(0)
+  const [duration, setDuration] = useState(0)
+  const [volume, setVolume] = useState(1)
+  const [muted, setMuted] = useState(false)
+
+  function playTrack(t: Track, ctx?: Track[], label?: string) {
+    setCurrent(t)
+    if (ctx) { setQueue(ctx); setQueueLabel(label || '') }
+    else { setQueue([t]); setQueueLabel('') }
+  }
+
+  function currentIndex(): number {
+    return queue.findIndex(t => t.id === current?.id)
+  }
+
+  function playAt(dir: 1 | -1) {
+    if (queue.length === 0) return
+    const idx = currentIndex()
+    const next = idx === -1 ? 0 : (idx + dir + queue.length) % queue.length
+    setCurrent(queue[next])
+  }
+
+  function handleEnded() {
+    const idx = currentIndex()
+    if (idx !== -1 && idx < queue.length - 1) {
+      setCurrent(queue[idx + 1])
+    } else {
+      setPlaying(false)
+    }
+  }
+
+  function togglePlay() {
+    const audio = audioRef.current
+    if (!audio) return
+    if (audio.paused) audio.play().catch(() => {}); else audio.pause()
+  }
+
+  function seekBy(sec: number) {
+    const audio = audioRef.current
+    if (!audio) return
+    audio.currentTime = Math.max(0, Math.min(audio.duration || 0, audio.currentTime + sec))
+  }
+
+  function toggleMute() {
+    const audio = audioRef.current
+    if (!audio) return
+    audio.muted = !audio.muted
+    setMuted(audio.muted)
+  }
+
+  // Reset transport UI state whenever the track changes, and autoplay.
+  useEffect(() => {
+    setCurrentTime(0)
+    setDuration(0)
+    if (audioRef.current) audioRef.current.play().catch(() => {})
+  }, [current?.id])
 
   useEffect(() => {
     if (!document.getElementById(STYLE_ID)) {
@@ -199,7 +282,7 @@ export default function AudioSection() {
               const isPlaying = current?.id === t.id
               const album = albumOf(t)
               return (
-                <div className={`aud-card ${isPlaying ? 'playing' : ''}`} key={t.id} onClick={() => setCurrent(t)}>
+                <div className={`aud-card ${isPlaying ? 'playing' : ''}`} key={t.id} onClick={() => playTrack(t, row.items, row.title)}>
                   <Cover t={t} playing={isPlaying} />
                   <h3>{t.title}</h3>
                   <div className="by">{t.agent_name}{album ? ` · ${album}` : ''}{fmtDur(t.duration_sec) ? ` · ${fmtDur(t.duration_sec)}` : ''}</div>
@@ -221,23 +304,67 @@ export default function AudioSection() {
 
       {current && (
         <div className="aud-bar">
-          <div className="aud-bar-cover">
-            {current.thumbnail_url
-              ? <img src={current.thumbnail_url} alt="" />
-              : <div className="aud-cover-fb" style={{ background: `linear-gradient(135deg,hsl(${hue(current.agent_name)} 55% 30%),hsl(${(hue(current.agent_name) + 50) % 360} 55% 14%))` }}><Headphones size={20} /></div>}
+          <div className="aud-bar-main">
+            <div className="aud-bar-cover">
+              {current.thumbnail_url
+                ? <img src={current.thumbnail_url} alt="" />
+                : <div className="aud-cover-fb" style={{ background: `linear-gradient(135deg,hsl(${hue(current.agent_name)} 55% 30%),hsl(${(hue(current.agent_name) + 50) % 360} 55% 14%))` }}><Headphones size={20} /></div>}
+            </div>
+            <div style={{ minWidth: 0, flexShrink: 0, width: 160 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{current.title}</div>
+              <div style={{ fontSize: 12, color: 'rgba(255,255,255,.45)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {current.agent_name}{queueLabel && <span style={{ opacity: 0.6 }}> · <ListMusic size={10} style={{ verticalAlign: -1 }} /> {queueLabel}</span>}
+              </div>
+            </div>
+
+            <div className="aud-transport">
+              <button title="Previous track" disabled={queue.length < 2} onClick={() => playAt(-1)}><SkipBack size={16} /></button>
+              <button title="Rewind 10s" onClick={() => seekBy(-10)}><RotateCcw size={16} /></button>
+              <button className="play-main" title={playing ? 'Pause' : 'Play'} onClick={togglePlay}>
+                {playing ? <Pause size={17} fill="#000" /> : <Play size={17} fill="#000" style={{ marginLeft: 2 }} />}
+              </button>
+              <button title="Forward 10s" onClick={() => seekBy(10)}><RotateCw size={16} /></button>
+              <button title="Next track" disabled={queue.length < 2} onClick={() => playAt(1)}><SkipForward size={16} /></button>
+            </div>
+
+            <div className="aud-seek-row">
+              <span className="aud-seek-time">{fmtDur(currentTime) || '0:00'}</span>
+              <input
+                className="aud-seekbar" type="range" min={0} max={duration || 0} step={0.1} value={currentTime}
+                onChange={e => { const t = Number(e.target.value); if (audioRef.current) audioRef.current.currentTime = t; setCurrentTime(t) }}
+              />
+              <span className="aud-seek-time right">{fmtDur(duration) || '0:00'}</span>
+            </div>
+
+            <button title={muted ? 'Unmute' : 'Mute'} onClick={toggleMute} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,.6)', cursor: 'pointer', flexShrink: 0 }}>
+              {muted || volume === 0 ? <VolumeX size={16} /> : <Volume2 size={16} />}
+            </button>
+            <input
+              className="aud-volume" type="range" min={0} max={1} step={0.01} value={muted ? 0 : volume}
+              onChange={e => { const v = Number(e.target.value); setVolume(v); setMuted(false); if (audioRef.current) audioRef.current.volume = v }}
+            />
+
+            {current.stream_url ? (
+              <audio
+                ref={audioRef}
+                src={current.stream_url}
+                autoPlay
+                onPlay={() => setPlaying(true)}
+                onPause={() => setPlaying(false)}
+                onTimeUpdate={e => setCurrentTime(e.currentTarget.currentTime)}
+                onLoadedMetadata={e => setDuration(e.currentTarget.duration)}
+                onEnded={handleEnded}
+                style={{ display: 'none' }}
+              />
+            ) : (
+              <div style={{ flex: 1, fontSize: 13, color: 'rgba(255,255,255,.4)' }}>No audio stream attached.</div>
+            )}
+            <button className="aud-bar-close" onClick={() => { setCurrent(null); setQueue([]); setQueueLabel('') }}><X size={18} /></button>
           </div>
-          <div style={{ minWidth: 0, flexShrink: 0, width: 160 }}>
-            <div style={{ fontSize: 14, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{current.title}</div>
-            <div style={{ fontSize: 12, color: 'rgba(255,255,255,.45)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{current.agent_name}</div>
-          </div>
-          {current.stream_url
-            ? <audio ref={audioRef} src={current.stream_url} controls autoPlay />
-            : <div style={{ flex: 1, fontSize: 13, color: 'rgba(255,255,255,.4)' }}>No audio stream attached.</div>}
-          <button className="aud-bar-close" onClick={() => setCurrent(null)}><X size={18} /></button>
         </div>
       )}
 
-      {openAlbum != null && <AlbumModal id={openAlbum} currentId={current?.id} onClose={() => setOpenAlbum(null)} onPlay={(t) => setCurrent(t)} />}
+      {openAlbum != null && <AlbumModal id={openAlbum} currentId={current?.id} onClose={() => setOpenAlbum(null)} onPlay={playTrack} />}
     </div>
   )
 }
