@@ -33,6 +33,17 @@ class Settings(BaseSettings):
     PORT: int = 8000
     PUBLIC_URL: str = "http://localhost:8000"
 
+    # Postgres dual-backend (backend/db_adapter.py) -- empty POSTGRES_URL
+    # means SQLite-only (current production default); setting it switches
+    # get_db_connection() to a pooled Postgres connection instead. These
+    # fields were referenced by db_adapter.py without ever being declared
+    # here (a real pre-existing bug -- any code path touching the adapter
+    # crashed with AttributeError, found via the e2e test audit).
+    POSTGRES_URL: str = ""
+    POSTGRES_POOL_MIN: int = 2
+    POSTGRES_POOL_MAX: int = 10
+    POSTGRES_POOL_TIMEOUT: int = 30
+
     # Real Tor hidden service mirror (see /etc/tor/torrc HiddenServiceDir
     # on the host) -- same general-resiliency purpose federation/mesh
     # already serves for discoverable, independent instances. Optional;

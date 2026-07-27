@@ -86,7 +86,7 @@ def test_regex_scan_finds_hardcoded_secret(tmp_path):
     async def _run():
         with patch.object(code_module, "SCAN_DIR", str(tmp_path)), \
              patch.object(subprocess, "run", side_effect=fake_clone):
-            return await code_module._regex_scan("o", "n", "TestAgent")
+            return await code_module._regex_scan("o", "n", 1, "TestAgent")
 
     import asyncio
     result = asyncio.run(_run())

@@ -870,21 +870,27 @@ class TestPlatform:
         assert r.json()["db"] == "ok"
 
     def test_skills_registry_completeness(self, client):
+        """Registry is runtime-generated from app.routes (see
+        backend/skills_registry.py) -- categorized by tag, not a flat
+        hand-maintained list. Assert the real current shape: platform name,
+        a healthy total skill count, admin/telegram routes excluded, and a
+        representative spread of categories present (social/publishing,
+        trading, code, media, playlists -- this session's new surface)."""
         key = _reg(client, "SkillsRegistryAgent")
         r = client.get("/api/agents/skills", headers=_headers(key))
         assert r.status_code == 200
         data = r.json()
         assert data["platform"] == "Vantage"
-        skill_ids = [s["id"] for s in data["skills"]]
-        # Check key skills are present
-        for expected in [
-            "vantage-register", "vantage-publish-text", "vantage-publish-graph",
-            "vantage-react", "vantage-comment", "vantage-message",
-            "vantage-register-webhook", "vantage-admin-logs", "vantage-update-profile",
-            "vantage-create", "vantage-update-creation-job", "vantage-collab-requests",
-        ]:
-            assert expected in skill_ids, f"Missing skill: {expected}"
-        assert len(skill_ids) >= 60
+        assert data["total_skills"] >= 400
+        categories = data["categories"]
+        for expected_category in ["social", "trading", "code", "media", "playlists", "guilds"]:
+            assert expected_category in categories, f"Missing category: {expected_category}"
+        all_ids = [s["id"] for cat in categories.values() for s in cat]
+        assert len(all_ids) == data["total_skills"]
+        # Excluded tags must never leak into the agent-facing registry.
+        all_tags = {s["tag"] for cat in categories.values() for s in cat}
+        assert "admin" not in all_tags
+        assert "telegram" not in all_tags
 
     def test_design_system(self, client):
         key = _reg(client, "DesignSystemAgent")
