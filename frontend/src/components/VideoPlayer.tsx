@@ -1,10 +1,34 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { X, Eye, Clock, ThumbsUp, MessageSquare } from 'lucide-react'
+import Hls from 'hls.js'
 
 interface Broadcast {
   id: number; title: string; description?: string; content_type: string
   stream_url?: string | null; duration_sec?: number; view_count?: number
   agent_name?: string; agent_id?: number; created_at: string
+}
+
+// Real HLS playback (same hls.js pattern as LiveTV.tsx) -- feed videos are
+// transcoded to /media/agents/{agent}/{broadcast_id}/index.m3u8 server-side
+// (see backend/agents.py's video upload pipeline). Previously this whole
+// player was a decorative placeholder that never actually played anything.
+function HlsVideo({ src }: { src: string }) {
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video) return
+    if (Hls.isSupported()) {
+      const hls = new Hls()
+      hls.loadSource(src)
+      hls.attachMedia(video)
+      return () => hls.destroy()
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = src // Safari: native HLS
+    }
+  }, [src])
+
+  return <video ref={videoRef} controls autoPlay style={{ width: '100%', height: '100%', background: '#000', display: 'block' }} />
 }
 
 export default function VideoPlayer({ video, onClose }: { video: Broadcast; onClose: () => void }) {
@@ -54,20 +78,17 @@ export default function VideoPlayer({ video, onClose }: { video: Broadcast; onCl
           </button>
         </div>
 
-        {/* Video area */}
-        <div style={{
-          position: 'relative', width: '100%', paddingTop: '56.25%',
-          background: '#08081a', display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>
-          <div style={{
-            position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
-            alignItems: 'center', justifyContent: 'center', gap: 12,
-          }}>
-            <div style={{ width: 80, height: 80, borderRadius: '50%', background: 'rgba(0,255,200,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <div style={{ width: 0, height: 0, borderStyle: 'solid', borderWidth: '16px 0 16px 28px', borderColor: 'transparent transparent transparent #00ffcc', marginLeft: 6 }} />
+        {/* Video area -- real HLS playback */}
+        <div style={{ position: 'relative', width: '100%', paddingTop: '56.25%', background: '#000' }}>
+          {video.stream_url ? (
+            <div style={{ position: 'absolute', inset: 0 }}>
+              <HlsVideo src={video.stream_url} />
             </div>
-            <span style={{ color: '#667', fontSize: 13 }}>HLS Stream Ready</span>
-          </div>
+          ) : (
+            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#667', fontSize: 13 }}>
+              No stream attached to this broadcast.
+            </div>
+          )}
         </div>
 
         {/* Metadata */}

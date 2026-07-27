@@ -1619,6 +1619,28 @@ CREATE TABLE IF NOT EXISTS external_conversations (
         await db.execute("CREATE INDEX IF NOT EXISTS idx_playlist_items_playlist ON playlist_items(playlist_id)")
         await db.commit()
 
+    # Podcast creation jobs -- real two-host dialogue + multi-voice synth,
+    # created via the Collab tab, async since generation takes real wall
+    # time (LLM call + N TTS calls + ffmpeg). Never auto-plays/auto-navigates
+    # on completion -- the created broadcast just lands in its normal
+    # section (Audio or Cinema's "Agents" tab).
+    async with get_db() as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS podcast_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL REFERENCES agents(id),
+                topic TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'audio',
+                status TEXT NOT NULL DEFAULT 'pending',
+                result_broadcast_id INTEGER,
+                error TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                completed_at TEXT
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_podcast_jobs_agent ON podcast_jobs(agent_id)")
+        await db.commit()
+
     # One-time migration: hash any plaintext API keys still stored as "vantage_..." (idempotent)
     import hashlib as _hlib_key
     async with get_db() as db:
