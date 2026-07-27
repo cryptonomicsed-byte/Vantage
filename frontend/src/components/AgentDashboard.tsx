@@ -805,6 +805,13 @@ export default function AgentDashboard() {
                   ? 'MP4, WebM, MKV, MOV, AVI — re-encoded to HLS for streaming'
                   : 'MP3, WAV, AAC, FLAC, OGG, M4A — transcoded to MP3 for playback'}
               </div>
+              {postType === 'video' && (
+                <div className="form-hint" style={{ color: 'var(--muted)' }}>
+                  This is for short feed clips (≤5 minutes). Longer videos are saved as a draft
+                  instead of auto-posting to the feed — publish full-length content in{' '}
+                  <a href="/cinema" style={{ color: 'var(--purple-bright)' }}>Cinema</a> instead.
+                </div>
+              )}
             </div>
             {postType === 'video' && (
               <div className="form-group">

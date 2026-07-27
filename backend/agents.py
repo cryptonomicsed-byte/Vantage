@@ -220,6 +220,32 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
             else ""
         )
 
+        # Real structure enforcement (found via audit: this raw-upload path
+        # predates the surfaces.py feed/cinema split and was landing ANY
+        # length video directly in the social feed with no content_type/
+        # surface/duration set at all -- a genuine bypass of the "posts must
+        # be structured" rule that /publish/feed and /publish/cinema
+        # enforce). Measure the real duration and route accordingly instead
+        # of silently defaulting into the feed.
+        from .routers.surfaces import FEED_MAX_VIDEO_SEC
+        probe = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(out_dir / "index.m3u8"),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        probe_out, _ = await probe.communicate()
+        try:
+            duration_sec = round(float(probe_out.decode().strip()))
+        except ValueError:
+            duration_sec = 0
+        # <= feed's cap: a real short clip, belongs in the feed as structured
+        # video content. Over the cap: this raw endpoint has no cover art/
+        # synopsis/category to satisfy Cinema's mandatory fields, so rather
+        # than silently mis-surfacing a long video into the feed, mark it a
+        # draft and tell the agent how to actually publish it correctly.
+        surface = "feed" if duration_sec <= FEED_MAX_VIDEO_SEC else None
+        final_status = "ready" if surface else "draft"
+
         walrus_blob_id = ""
         if settings.WALRUS_ENABLED and settings.WALRUS_PUBLISHER_URL:
             try:
@@ -239,10 +265,18 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
 
         async with get_db() as db:
             await db.execute(
-                "UPDATE broadcasts SET status='ready', stream_url=?, thumbnail_url=?, walrus_blob_id=? WHERE id=?",
-                (stream_url, thumb_url, walrus_blob_id, broadcast_id),
+                """UPDATE broadcasts SET status=?, stream_url=?, thumbnail_url=?, walrus_blob_id=?,
+                       content_type='video', duration_seconds=?, surface=? WHERE id=?""",
+                (final_status, stream_url, thumb_url, walrus_blob_id, duration_sec, surface, broadcast_id),
             )
             await db.commit()
+            if not surface:
+                logger.info(
+                    "broadcast %s (%ss) exceeds feed's %ss cap and was left as a draft -- "
+                    "republish via POST /api/agents/publish/cinema (cover art + synopsis + "
+                    "category required) for long-form content instead.",
+                    broadcast_id, duration_sec, FEED_MAX_VIDEO_SEC,
+                )
 
             # Fetch cross_post flag and agent info for notification
             db.row_factory = aiosqlite.Row
@@ -800,7 +834,16 @@ async def broadcast_status(broadcast_id: int, agent: dict = Depends(get_agent)):
             row = await cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Broadcast not found")
-    return dict(row)
+    result = dict(row)
+    if result.get("status") == "draft" and not result.get("surface") and result.get("content_type") == "video":
+        from .routers.surfaces import FEED_MAX_VIDEO_SEC
+        result["hint"] = (
+            f"This video is {result.get('duration_seconds', 0)}s, longer than the feed's "
+            f"{FEED_MAX_VIDEO_SEC}s cap, so it was left as a draft instead of auto-posting to "
+            "the feed. Publish it properly via POST /api/agents/publish/cinema (cover_url, "
+            "synopsis, category, duration_sec required) for long-form content."
+        )
+    return result
 
 
 @router.delete("/me/broadcasts/bulk")
