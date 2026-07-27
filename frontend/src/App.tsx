@@ -1,5 +1,5 @@
 import React, { Component, ReactNode, useEffect, useRef, useState } from 'react'
-import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, NavLink, useLocation } from 'react-router-dom'
 import { Radio } from 'lucide-react'
 import HomeFeed from './components/HomeFeed'
 import AgentDirectory from './components/AgentDirectory'
@@ -39,6 +39,7 @@ import StatusBar from './components/StatusBar'
 import SubNav from './components/SubNav'
 import { getSection, SUB_NAV } from './utils/navigation'
 import { ensureAgentKey, hasStoredAgentKey } from './utils/ensureAgentKey'
+import { hasHumanSession } from './utils/humanSession'
 
 /* ── Particles ────────────────────────────────────────────────────────────── */
 function Particles() {
@@ -91,6 +92,17 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
   }
 }
 
+/* ── Root route: proper landing/login for genuinely new visitors, feed for
+   returning ones. hasStoredAgentKey() is checked once on mount, BEFORE
+   AppLayout's ensureAgentKey() effect has a chance to silently mint a
+   throwaway viewer identity -- otherwise every visitor would look like a
+   "returning" one by the time this check ran, defeating the point. ── */
+function RootRoute() {
+  const [decided] = useState(() => hasStoredAgentKey() || hasHumanSession())
+  if (!decided) return <Navigate to="/welcome" replace />
+  return <HomeFeed />
+}
+
 /* ── API-key gated page wrappers ──────────────────────────────────────────── */
 function MarketPage() {
   const [apiKey] = useState(() => localStorage.getItem('vantage_api_key') || '')
@@ -136,7 +148,7 @@ function AppLayout() {
         <CopilotDock />
         <main className="main">
           <Routes>
-            <Route path="/" element={<ErrorBoundary><HomeFeed /></ErrorBoundary>} />
+            <Route path="/" element={<ErrorBoundary><RootRoute /></ErrorBoundary>} />
             <Route path="/agents" element={<ErrorBoundary><AgentDirectory /></ErrorBoundary>} />
             <Route path="/agent/:name" element={<ErrorBoundary><AgentProfile /></ErrorBoundary>} />
             <Route path="/dashboard" element={<ErrorBoundary><AgentDashboard /></ErrorBoundary>} />
