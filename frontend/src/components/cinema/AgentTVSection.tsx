@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Tv, Play, ThumbsUp, ThumbsDown, Mic, ChevronLeft, Radio } from 'lucide-react'
+import { usePip } from '../../contexts/PipPlayerContext'
 
 // AgentTV -- Live-TV-style multi-channel guide (2026-07-27 redesign):
 // every agent with published podcast content is its own channel, not one
@@ -66,8 +67,9 @@ function ChannelGuide({ channels, onSelect }: { channels: ChannelInfo[]; onSelec
 
 function ChannelPlayer({ agentId, onChangeChannel }: { agentId: number; onChangeChannel: () => void }) {
   const [np, setNp] = useState<NowPlaying | null>(null)
-  const [playing, setPlaying] = useState(false)
   const [reacted, setReacted] = useState<'up' | 'down' | null>(null)
+  const pip = usePip()
+  const inlineRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     let stop = false
@@ -82,10 +84,32 @@ function ChannelPlayer({ agentId, onChangeChannel }: { agentId: number; onChange
     return () => { stop = true }
   }, [agentId])
 
-  useEffect(() => { setReacted(null); setPlaying(false) }, [agentId])
+  useEffect(() => { setReacted(null) }, [agentId])
 
+  // Claim the inline slot back from the floating PiP whenever this channel's
+  // current segment is the one actually playing -- e.g. the user tapped
+  // play here, wandered off elsewhere in the app (it kept floating), and
+  // came back to this exact channel/segment.
+  useEffect(() => {
+    if (np?.segmentUrl && pip.state.src === np.segmentUrl) {
+      pip.claimInline(inlineRef.current)
+    }
+    // Releasing on unmount lets it fall back to floating instead of
+    // vanishing when the user navigates away from Agent.TV entirely.
+    return () => { pip.claimInline(null) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [np?.segmentUrl, pip.state.src])
+
+  const isThisPlaying = !!np?.segmentUrl && pip.state.src === np.segmentUrl
   const offsetSec = np?.startedAt ? Math.max(0, (np.now - np.startedAt) / 1000) : 0
   const remainingSec = np ? Math.max(0, np.duration - offsetSec) : 0
+
+  function tune() {
+    if (!np?.segmentUrl) return
+    // Real 24hr-broadcast join: start playback AT the live offset, not 0:00
+    // -- the whole point of a live channel is that it's already in progress.
+    pip.play({ src: np.segmentUrl, title: np.title || 'Agent.TV', startTime: offsetSec, returnPath: '/agenttv' })
+  }
 
   return (
     <div>
@@ -94,10 +118,10 @@ function ChannelPlayer({ agentId, onChangeChannel }: { agentId: number; onChange
       </button>
       <div style={{ borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)', boxShadow: '0 8px 24px rgba(0,0,0,0.4)' }}>
         <div style={{ position: 'relative', height: 320, background: '#000' }}>
-          {!playing ? (
+          {!isThisPlaying && (
             <div
-              onClick={() => np?.segmentUrl && setPlaying(true)}
-              style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, cursor: np?.segmentUrl ? 'pointer' : 'default' }}
+              onClick={tune}
+              style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, cursor: np?.segmentUrl ? 'pointer' : 'default', zIndex: 1 }}
             >
               <div style={{ width: 64, height: 64, borderRadius: '50%', background: 'var(--purple-bright)', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: np?.segmentUrl ? 1 : 0.4 }}>
                 <Play size={26} color="#000" fill="#000" style={{ marginLeft: 3 }} />
@@ -109,9 +133,11 @@ function ChannelPlayer({ agentId, onChangeChannel }: { agentId: number; onChange
                 <div style={{ fontSize: 11, color: 'var(--muted)' }}>~{Math.round(remainingSec / 60)} min left in this episode</div>
               )}
             </div>
-          ) : np?.segmentUrl ? (
-            <video key={np.segmentUrl} controls autoPlay style={{ width: '100%', height: '100%', background: '#000', display: 'block' }} src={`${np.segmentUrl}?t=${np.startedAt}`} />
-          ) : null}
+          )}
+          {/* This div is the inline portal target -- the PiP provider moves
+              the real <video> element in here while this channel is open
+              and playing, or floats it bottom-right once you navigate away. */}
+          <div ref={inlineRef} style={{ position: 'absolute', inset: 0 }} />
         </div>
         <div style={{ padding: '10px 14px', background: 'rgba(8,8,16,0.85)', fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>

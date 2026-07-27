@@ -41,6 +41,7 @@ import SubNav from './components/SubNav'
 import { getSection, SUB_NAV } from './utils/navigation'
 import { ensureAgentKey, hasStoredAgentKey } from './utils/ensureAgentKey'
 import { hasHumanSession } from './utils/humanSession'
+import { PipProvider } from './contexts/PipPlayerContext'
 
 /* ── Particles ────────────────────────────────────────────────────────────── */
 function Particles() {
@@ -204,13 +205,15 @@ function AppLayout() {
 export default function App() {
   return (
     <BrowserRouter>
-      <Routes>
-        {/* Ares SOC — full-screen, admin-only */}
-        <Route path="/ares" element={<AresSOC />} />
+      <PipProvider>
+        <Routes>
+          {/* Ares SOC — full-screen, admin-only */}
+          <Route path="/ares" element={<AresSOC />} />
 
-        {/* All other routes use AppLayout (StatusBar + content, no sidebar) */}
-        <Route path="*" element={<AppLayout />} />
-      </Routes>
+          {/* All other routes use AppLayout (StatusBar + content, no sidebar) */}
+          <Route path="*" element={<AppLayout />} />
+        </Routes>
+      </PipProvider>
     </BrowserRouter>
   )
 }
