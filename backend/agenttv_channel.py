@@ -20,6 +20,7 @@ StaticFiles, unlike the old httpx-proxy approach that broke seeking).
 """
 import asyncio
 import hashlib
+import inspect
 import logging
 import random
 import secrets
@@ -29,6 +30,7 @@ import aiosqlite
 
 from .db import get_db
 from .podcast_engine import generate_podcast, ensure_jingle, JINGLE_STREAM_URL, JINGLE_DURATION_SEC
+from .podcast_scanners import ai_news_topic, crypto_tier_topic, crypto_degen_topic
 from .routers.surfaces import _insert_broadcast
 
 logger = logging.getLogger(__name__)
@@ -36,26 +38,31 @@ logger = logging.getLogger(__name__)
 AGENTTV_AGENT_NAME = "Agent.TV"
 
 
-async def _ensure_agenttv_agent() -> dict:
-    """A real system agent identity for auto-generated episodes -- so they're
-    real broadcasts with real reactions (thumbs-up/down reuses the existing
-    reaction system, no separate voting mechanism needed), browsable in
-    Cinema like anyone else's content, not just ephemeral channel state."""
+async def _ensure_agent(name: str, bio: str) -> dict:
+    """A real system agent identity for a channel's auto-generated episodes
+    -- so they're real broadcasts with real reactions (thumbs-up/down
+    reuses the existing reaction system, no separate voting mechanism
+    needed), browsable in Cinema like anyone else's content, not just
+    ephemeral channel state. Shared by every persona channel, not just the
+    flagship Agent.TV."""
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
-        row = await (await db.execute("SELECT * FROM agents WHERE name=?", (AGENTTV_AGENT_NAME,))).fetchone()
+        row = await (await db.execute("SELECT * FROM agents WHERE name=?", (name,))).fetchone()
         if row:
             return dict(row)
         raw_key = "vantage_" + secrets.token_hex(24)
         key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
         cur = await db.execute(
             "INSERT INTO agents (name, api_key, bio) VALUES (?, ?, ?)",
-            (AGENTTV_AGENT_NAME, key_hash, "Vantage's always-on AI podcast channel — real two-host dialogue, new episode every few minutes, 24/7."),
+            (name, key_hash, bio),
         )
         await db.commit()
         row = await (await db.execute("SELECT * FROM agents WHERE id=?", (cur.lastrowid,))).fetchone()
         return dict(row)
+
+
 NUM_TURNS_PER_EPISODE = 22  # roughly a 3-4min episode at this engine's pace
+NUM_TURNS_PER_SEGMENT = 12  # ~3min segment for the scanner-driven persona channels
 
 TOPICS = [
     "the strangest things found in deep ocean trenches",
@@ -76,8 +83,27 @@ TOPICS = [
 ]
 
 
-class AgentTVChannel:
-    def __init__(self):
+class PersonaChannel:
+    """A generic always-on channel: fixed identity + fixed voice pair +
+    a pluggable topic source. The flagship Agent.TV instance below uses a
+    random static topic list (free-ranging AI-hosted talk show); the
+    scanner-driven persona channels (AI Daily Wire, Crypto Tier One, Degen
+    Frequency) each pass a topic_fn that pulls from real, already-running
+    Ares scan data instead -- same engine, same jingle, different real
+    material and different voice/personality per show."""
+
+    def __init__(
+        self, agent_name: str, bio: str, topic_fn, *,
+        voices: dict | None = None, num_turns: int = NUM_TURNS_PER_EPISODE,
+        category: str | None = None, accepts_user_submissions: bool = False,
+    ):
+        self.agent_name = agent_name
+        self.bio = bio
+        self.topic_fn = topic_fn
+        self.voices = voices
+        self.num_turns = num_turns
+        self.category = category or agent_name
+        self.accepts_user_submissions = accepts_user_submissions
         self.state = {
             "segmentUrl": None,
             "phase": "segment",  # 'segment' | 'filler'
@@ -101,7 +127,10 @@ class AgentTVChannel:
     async def _next_user_submission(self) -> dict | None:
         """Oldest not-yet-aired user-submitted podcast (published via Collab's
         Create Podcast, kind=video), if any -- these air ahead of freshly
-        auto-generated episodes."""
+        auto-generated episodes. Only the flagship Agent.TV channel accepts
+        these; persona channels are single-topic shows."""
+        if not self.accepts_user_submissions:
+            return None
         async with get_db() as db:
             db.row_factory = aiosqlite.Row
             row = await (await db.execute(
@@ -121,22 +150,22 @@ class AgentTVChannel:
     async def _next_episode(self) -> dict:
         submitted = await self._next_user_submission()
         if submitted:
-            logger.info("Agent.TV: airing user-submitted podcast %s", submitted["title"])
+            logger.info("%s: airing user-submitted podcast %s", self.agent_name, submitted["title"])
             return submitted
 
-        topic = random.choice(TOPICS)
-        result = await generate_podcast(topic, "video", num_turns=NUM_TURNS_PER_EPISODE)
+        topic = await self.topic_fn() if inspect.iscoroutinefunction(self.topic_fn) else self.topic_fn()
+        result = await generate_podcast(topic, "video", num_turns=self.num_turns, voices=self.voices)
 
         # Real broadcast, not just ephemeral channel state -- browsable in
         # Cinema's Agents tab like any other agent's content, with real
         # reactions (thumbs-up/down reuses the existing reaction system).
-        agent = await _ensure_agenttv_agent()
+        agent = await _ensure_agent(self.agent_name, self.bio)
         script_text = "\n".join(f"**{t['speaker']}:** {t['text']}" for t in result["script"])
         bid = await _insert_broadcast(
-            agent, title=topic[:300], description="Auto-generated Agent.TV episode",
+            agent, title=topic[:300], description=f"Auto-generated {self.agent_name} episode",
             content_type="video", stream_url=result["stream_url"], thumbnail_url="",
             duration_sec=result["duration_sec"], post_content=script_text,
-            tags=["podcast", "agenttv"], surface="cinema", cinema_kind="podcast", category="Agent.TV",
+            tags=["podcast", "agenttv"], surface="cinema", cinema_kind="podcast", category=self.category,
         )
         # Mark aired immediately -- it's airing right now, this is not a
         # pending user submission for _next_user_submission() to pick up
@@ -154,7 +183,7 @@ class AgentTVChannel:
                 "startedAt": int(time.time() * 1000), "duration": current["duration"],
                 "title": current["title"], "cycle": self.state["cycle"] + 1,
             }
-            logger.info("Agent.TV: playing '%s' (%ss)", current["title"], current["duration"])
+            logger.info("%s: playing '%s' (%ss)", self.agent_name, current["title"], current["duration"])
 
             next_task = asyncio.create_task(self._next_episode())
             await asyncio.sleep(max(1, current["duration"]))
@@ -173,26 +202,37 @@ class AgentTVChannel:
             try:
                 current = next_task.result()
             except Exception as e:
-                logger.warning("Agent.TV: episode generation failed, retrying: %s", e)
+                logger.warning("%s: episode generation failed, retrying: %s", self.agent_name, e)
                 await asyncio.sleep(5)
                 try:
                     current = await self._next_episode()
                 except Exception as e2:
-                    logger.error("Agent.TV: retry also failed: %s", e2)
+                    logger.error("%s: retry also failed: %s", self.agent_name, e2)
                     await asyncio.sleep(30)
                     current = {"url": JINGLE_STREAM_URL, "duration": JINGLE_DURATION_SEC, "title": "Technical difficulties"}
+
+
+async def _live_agent_ids() -> dict[int, PersonaChannel]:
+    """agent_id -> PersonaChannel for every always-on persona channel
+    (flagship Agent.TV plus the scanner-driven shows) -- these all get the
+    LIVE badge and a real generation loop instead of a virtual schedule."""
+    result = {}
+    for ch in ALL_CHANNELS:
+        agent = await _ensure_agent(ch.agent_name, ch.bio)
+        result[agent["id"]] = ch
+    return result
 
 
 async def list_channels() -> list[dict]:
     """Every agent with real published podcast content becomes its own
     channel -- Live-TV-style channel guide instead of one fixed rotation.
-    The flagship "Agent.TV" system agent is_live=True (continuously
-    generating fresh episodes, real-time rotation); every other agent's
-    channel just loops their own already-published episodes on a
-    deterministic virtual schedule (see now_playing_for_channel) so every
-    viewer sees the same thing at the same time without a live generation
-    loop per channel."""
-    agent = await _ensure_agenttv_agent()
+    Persona channels (flagship Agent.TV + the scanner-driven shows) are
+    is_live=True (continuously generating fresh episodes, real-time
+    rotation); every other agent's channel just loops their own
+    already-published episodes on a deterministic virtual schedule (see
+    now_playing_for_channel) so every viewer sees the same thing at the
+    same time without a live generation loop per channel."""
+    live_ids = await _live_agent_ids()
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
@@ -200,25 +240,26 @@ async def list_channels() -> list[dict]:
                       COUNT(*) as episode_count
                FROM broadcasts b JOIN agents a ON a.id = b.agent_id
                WHERE b.surface='cinema' AND b.cinema_kind='podcast' AND b.status='ready'
-               GROUP BY a.id ORDER BY (a.id = ?) DESC, episode_count DESC""",
-            (agent["id"],),
+               GROUP BY a.id ORDER BY (a.id IN (%s)) DESC, episode_count DESC""" % (
+                ",".join(str(i) for i in live_ids) or "-1"
+            )
         )).fetchall()
     return [
-        {**dict(r), "is_live": r["agent_id"] == agent["id"]}
+        {**dict(r), "is_live": r["agent_id"] in live_ids}
         for r in rows
     ]
 
 
 async def now_playing_for_channel(agent_id: int) -> dict:
-    """For the flagship live channel, the real always-on rotation state.
+    """For any always-on persona channel, the real live rotation state.
     For any other agent's channel: a deterministic virtual schedule over
     their own published episodes -- current wall-clock time modulo the
     total playlist length picks the "currently airing" episode and offset,
     so every viewer watching agent X's channel is in sync with each other
     without needing a separate generation loop per agent."""
-    agenttv_agent = await _ensure_agenttv_agent()
-    if agent_id == agenttv_agent["id"]:
-        return channel.now_playing()
+    live_ids = await _live_agent_ids()
+    if agent_id in live_ids:
+        return live_ids[agent_id].now_playing()
 
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
@@ -252,4 +293,43 @@ async def now_playing_for_channel(agent_id: int) -> dict:
     }
 
 
-channel = AgentTVChannel()
+channel = PersonaChannel(
+    AGENTTV_AGENT_NAME,
+    "Vantage's always-on AI podcast channel — real two-host dialogue, new episode every few minutes, 24/7.",
+    lambda: random.choice(TOPICS),
+    accepts_user_submissions=True,
+)
+
+ai_news_channel = PersonaChannel(
+    "AI Daily Wire",
+    "Vantage's 24/7 AI news show — two hosts react to real, current AI headlines every episode, not a fixed script.",
+    ai_news_topic,
+    voices={"A": "en-US-DavisNeural", "B": "en-US-AriaNeural"},
+    num_turns=NUM_TURNS_PER_SEGMENT,
+    category="AI News",
+)
+
+crypto_tier_channel = PersonaChannel(
+    "Crypto Tier One",
+    "Vantage's 24/7 institutional-grade crypto market briefing — real chain health, price consensus, and arbitrage data every episode.",
+    crypto_tier_topic,
+    voices={"A": "en-US-ChristopherNeural", "B": "en-US-MichelleNeural"},
+    num_turns=NUM_TURNS_PER_SEGMENT,
+    category="Crypto Tier One",
+)
+
+degen_channel = PersonaChannel(
+    "Degen Frequency",
+    "Vantage's 24/7 degen crypto show — real trending on-chain tokens, hyped up every episode.",
+    crypto_degen_topic,
+    voices={"A": "en-US-JasonNeural", "B": "en-US-SaraNeural"},
+    num_turns=NUM_TURNS_PER_SEGMENT,
+    category="Degen Frequency",
+)
+
+ALL_CHANNELS = [channel, ai_news_channel, crypto_tier_channel, degen_channel]
+
+
+async def start_all_channels():
+    for ch in ALL_CHANNELS:
+        await ch.start()
