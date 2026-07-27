@@ -156,6 +156,8 @@ function physicsTickOnce(
 
 // ─── Drawing ──────────────────────────────────────────────────────────────────
 
+interface ViewTransform { scale: number; offsetX: number; offsetY: number }
+
 function drawFrame(
   ctx: CanvasRenderingContext2D,
   simNodes: SimNode[],
@@ -165,12 +167,18 @@ function drawFrame(
   w: number,
   h: number,
   hoveredId: number | null,
-  particles: TaskParticle[]
+  particles: TaskParticle[],
+  view: ViewTransform
 ) {
   // Transparent — the container div behind the canvas carries the glass
   // (rgba + backdrop-filter) look, so the graph reads as floating over it
-  // rather than painted onto a solid backdrop.
+  // rather than painted onto a solid backdrop. Clear in screen space
+  // (before the zoom/pan transform below) so the whole visible canvas is
+  // wiped regardless of current zoom level.
   ctx.clearRect(0, 0, w, h)
+  ctx.save()
+  ctx.translate(view.offsetX, view.offsetY)
+  ctx.scale(view.scale, view.scale)
 
   // Edges
   edges.forEach(({ from, to }) => {
@@ -295,6 +303,8 @@ function drawFrame(
       ctx.restore()
     }
   })
+
+  ctx.restore()
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -310,6 +320,18 @@ export default function SwarmMap() {
   const rafRef = useRef<number>(0)
   const hoveredIdRef = useRef<number | null>(null)
   const canvasSizeRef = useRef({ w: 0, h: 0 })
+
+  // Zoom/pan: mutable ref (not React state) so panning/zooming doesn't
+  // trigger a re-render every frame -- the rAF loop reads it directly.
+  const viewRef = useRef<ViewTransform>({ scale: 1, offsetX: 0, offsetY: 0 })
+  const dragRef = useRef<{ dragging: boolean; startX: number; startY: number; moved: boolean }>({
+    dragging: false, startX: 0, startY: 0, moved: false,
+  })
+
+  function screenToWorld(mx: number, my: number): { x: number; y: number } {
+    const v = viewRef.current
+    return { x: (mx - v.offsetX) / v.scale, y: (my - v.offsetY) / v.scale }
+  }
 
   const [loading, setLoading] = useState(true)
   const [agentCount, setAgentCount] = useState(0)
@@ -500,7 +522,8 @@ export default function SwarmMap() {
           w,
           h,
           hoveredIdRef.current,
-          particlesRef.current
+          particlesRef.current,
+          viewRef.current
         )
       } else if (loading) {
         // Loading state
@@ -533,12 +556,27 @@ export default function SwarmMap() {
     const canvas = canvasRef.current
     if (!canvas) return
     const rect = canvas.getBoundingClientRect()
-    const mx = e.clientX - rect.left
-    const my = e.clientY - rect.top
+    const screenX = e.clientX - rect.left
+    const screenY = e.clientY - rect.top
+
+    // Panning takes priority over hover -- drag the view instead of
+    // hovering nodes while a drag is in progress.
+    if (dragRef.current.dragging) {
+      const dx = screenX - dragRef.current.startX
+      const dy = screenY - dragRef.current.startY
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dragRef.current.moved = true
+      viewRef.current = { ...viewRef.current, offsetX: viewRef.current.offsetX + dx, offsetY: viewRef.current.offsetY + dy }
+      dragRef.current.startX = screenX
+      dragRef.current.startY = screenY
+      return
+    }
+
+    const { x: mx, y: my } = screenToWorld(screenX, screenY)
+    const hoverRadiusWorld = HOVER_RADIUS / viewRef.current.scale
 
     const simNodes = simNodesRef.current
     let closest: SimNode | null = null
-    let closestDist = HOVER_RADIUS
+    let closestDist = hoverRadiusWorld
 
     simNodes.forEach((nd) => {
       const dx = nd.x - mx
@@ -564,21 +602,64 @@ export default function SwarmMap() {
     }
   }, [])
 
+  const handleMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const rect = canvas.getBoundingClientRect()
+    dragRef.current = { dragging: true, startX: e.clientX - rect.left, startY: e.clientY - rect.top, moved: false }
+  }, [])
+
+  const handleMouseUp = useCallback(() => {
+    dragRef.current.dragging = false
+  }, [])
+
+  const handleWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
+    e.preventDefault()
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const rect = canvas.getBoundingClientRect()
+    const screenX = e.clientX - rect.left
+    const screenY = e.clientY - rect.top
+
+    const v = viewRef.current
+    const zoomFactor = e.deltaY < 0 ? 1.12 : 1 / 1.12
+    const newScale = Math.min(4, Math.max(0.35, v.scale * zoomFactor))
+
+    // Keep the point under the cursor fixed while zooming (standard
+    // "zoom toward cursor" behavior, not zoom-toward-canvas-corner).
+    const worldX = (screenX - v.offsetX) / v.scale
+    const worldY = (screenY - v.offsetY) / v.scale
+    viewRef.current = {
+      scale: newScale,
+      offsetX: screenX - worldX * newScale,
+      offsetY: screenY - worldY * newScale,
+    }
+  }, [])
+
+  const resetView = useCallback(() => {
+    viewRef.current = { scale: 1, offsetX: 0, offsetY: 0 }
+  }, [])
+
   const handleMouseLeave = useCallback(() => {
     hoveredIdRef.current = null
     setTooltip((prev) => ({ ...prev, visible: false }))
   }, [])
 
   const handleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    // A drag that actually moved the view shouldn't also fire a node
+    // navigation on release -- only treat it as a click if the mouse
+    // never moved past the drag threshold.
+    if (dragRef.current.moved) return
+
     const canvas = canvasRef.current
     if (!canvas) return
     const rect = canvas.getBoundingClientRect()
-    const mx = e.clientX - rect.left
-    const my = e.clientY - rect.top
+    const { x: mx, y: my } = screenToWorld(e.clientX - rect.left, e.clientY - rect.top)
+    const hoverRadiusWorld = HOVER_RADIUS / viewRef.current.scale
 
     const simNodes = simNodesRef.current
     let closest: SimNode | null = null
-    let closestDist = HOVER_RADIUS
+    let closestDist = hoverRadiusWorld
 
     simNodes.forEach((nd) => {
       const dx = nd.x - mx
@@ -610,11 +691,34 @@ export default function SwarmMap() {
     >
       <canvas
         ref={canvasRef}
-        style={{ width: '100%', height: '100%', display: 'block', cursor: 'crosshair' }}
+        style={{ width: '100%', height: '100%', display: 'block', cursor: 'grab' }}
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
+        onMouseDown={handleMouseDown}
+        onMouseUp={handleMouseUp}
+        onWheel={handleWheel}
         onClick={handleClick}
       />
+
+      {/* Zoom controls -- scroll/pinch to zoom toward cursor, drag to pan,
+          reset button to snap back to the default view. */}
+      <div style={{ position: 'absolute', bottom: 16, right: 16, display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <button
+          onClick={() => { const v = viewRef.current; viewRef.current = { ...v, scale: Math.min(4, v.scale * 1.25) } }}
+          style={{ width: 32, height: 32, borderRadius: 8, background: 'rgba(10,10,20,0.75)', border: '1px solid rgba(138,75,255,0.3)', color: '#e0e0ff', cursor: 'pointer', fontSize: 16, fontWeight: 700 }}
+          title="Zoom in"
+        >+</button>
+        <button
+          onClick={() => { const v = viewRef.current; viewRef.current = { ...v, scale: Math.max(0.35, v.scale / 1.25) } }}
+          style={{ width: 32, height: 32, borderRadius: 8, background: 'rgba(10,10,20,0.75)', border: '1px solid rgba(138,75,255,0.3)', color: '#e0e0ff', cursor: 'pointer', fontSize: 16, fontWeight: 700 }}
+          title="Zoom out"
+        >−</button>
+        <button
+          onClick={resetView}
+          style={{ width: 32, height: 32, borderRadius: 8, background: 'rgba(10,10,20,0.75)', border: '1px solid rgba(138,75,255,0.3)', color: '#e0e0ff', cursor: 'pointer', fontSize: 11 }}
+          title="Reset view"
+        >⟲</button>
+      </div>
 
       {/* Controls overlay */}
       <div

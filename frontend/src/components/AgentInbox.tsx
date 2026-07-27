@@ -128,27 +128,40 @@ export default function AgentInbox() {
   )
 
   return (
-    <div style={{ maxWidth: 720 }}>
+    <div style={{ maxWidth: 900 }}>
       <div className="section-header">
         <h1 className="page-title" style={{ marginBottom: 0 }}>Messages</h1>
         {unread > 0 && <span className="tag" style={{ background: 'rgba(138,75,255,0.15)', color: 'var(--purple-bright)' }}>{unread} unread</span>}
       </div>
 
-      <div className="feed-tabs" style={{ marginBottom: 24 }}>
-        <button className={`feed-tab${tab === 'inbox' ? ' active' : ''}`} onClick={() => { setTab('inbox'); loadTab('inbox') }}>
-          📬 Inbox {unread > 0 && `(${unread})`}
-        </button>
-        <button className={`feed-tab${tab === 'sent' ? ' active' : ''}`} onClick={() => { setTab('sent'); loadTab('sent') }}>
-          📤 Sent
-        </button>
-        <button className={`feed-tab${tab === 'compose' ? ' active' : ''}`} onClick={() => setTab('compose')}>
-          ✏️ Compose
-        </button>
-        <button className={`feed-tab${tab === 'collabs' ? ' active' : ''}`} onClick={() => { setTab('collabs'); loadCollabs() }}>
-          🤝 Collabs {collabs.length > 0 && `(${collabs.length})`}
-        </button>
-        <button className="feed-tab" onClick={() => tab !== 'compose' && tab !== 'collabs' ? loadTab(tab) : loadCollabs()}>
-          <RefreshCw size={11} />
+      {/* Real bug found: this tab bar used "feed-tab"/"feed-tabs" classes
+          that were never styled anywhere in the app (orphaned/dead CSS) --
+          rendered as unstyled raw buttons. Switched to top-nav-tab(s), the
+          same real, styled tab pattern used everywhere else (Cinema,
+          Audio, etc). Refresh moved to its own icon button, out of the
+          tab row, so it doesn't look like an unlabeled 5th tab. */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24, borderBottom: '1px solid var(--border)' }}>
+        <div className="top-nav-tabs">
+          <button type="button" className={`top-nav-tab${tab === 'inbox' ? ' active' : ''}`} onClick={() => { setTab('inbox'); loadTab('inbox') }}>
+            📬 Inbox {unread > 0 && `(${unread})`}
+          </button>
+          <button type="button" className={`top-nav-tab${tab === 'sent' ? ' active' : ''}`} onClick={() => { setTab('sent'); loadTab('sent') }}>
+            📤 Sent
+          </button>
+          <button type="button" className={`top-nav-tab${tab === 'compose' ? ' active' : ''}`} onClick={() => setTab('compose')}>
+            ✏️ Compose
+          </button>
+          <button type="button" className={`top-nav-tab${tab === 'collabs' ? ' active' : ''}`} onClick={() => { setTab('collabs'); loadCollabs() }}>
+            🤝 Collabs {collabs.length > 0 && `(${collabs.length})`}
+          </button>
+        </div>
+        <button
+          className="btn btn-ghost btn-sm"
+          title="Refresh"
+          onClick={() => tab !== 'compose' && tab !== 'collabs' ? loadTab(tab) : loadCollabs()}
+          style={{ flexShrink: 0, marginBottom: 6 }}
+        >
+          <RefreshCw size={13} />
         </button>
       </div>
 
