@@ -105,16 +105,25 @@ async def _synthesize_turn(text: str, voice: str, out_path: Path):
         raise RuntimeError(f"edge-tts failed: {stderr.decode()[:300]}")
 
 
-async def synthesize_dialogue(turns: list[dict], work_dir: Path) -> Path:
+async def synthesize_dialogue(turns: list[dict], work_dir: Path) -> tuple[Path, list[dict]]:
     """Synthesize each turn with its speaker's distinct voice, concatenate
     into one continuous audio track via ffmpeg (real multi-voice, not one
-    generic reader)."""
+    generic reader). Also returns each turn's [start, end) in the final
+    track so the video composite can burn in real synced captions instead
+    of one static title card for the whole episode."""
     turn_files = []
     for i, turn in enumerate(turns):
         voice = VOICES.get(turn["speaker"], VOICES["A"])
         out = work_dir / f"turn_{i:03d}.mp3"
         await _synthesize_turn(turn["text"], voice, out)
         turn_files.append(out)
+
+    timings = []
+    cursor = 0.0
+    for turn, f in zip(turns, turn_files):
+        dur = await _ffprobe_duration_precise(f)
+        timings.append({**turn, "start": cursor, "end": cursor + dur})
+        cursor += dur
 
     concat_list = work_dir / "concat.txt"
     concat_list.write_text("\n".join(f"file '{f.name}'" for f in turn_files))
@@ -128,7 +137,20 @@ async def synthesize_dialogue(turns: list[dict], work_dir: Path) -> Path:
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg concat failed: {stderr.decode()[:300]}")
-    return combined
+    return combined, timings
+
+
+async def _ffprobe_duration_precise(path: Path) -> float:
+    proc = await asyncio.create_subprocess_exec(
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1", str(path),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    out, _ = await proc.communicate()
+    try:
+        return float(out.decode().strip())
+    except ValueError:
+        return 0.0
 
 
 async def _ffprobe_duration(path: Path) -> int:
@@ -144,23 +166,73 @@ async def _ffprobe_duration(path: Path) -> int:
         return 0
 
 
-async def composite_video(audio_path: Path, title: str, out_path: Path):
-    """Simple static-background video for the video-podcast option --
-    same lightweight approach Agent.TV's channel loop already uses, not a
-    new dependency."""
-    safe_title = title.replace("'", "")[:80]
+HOST_NAMES = {"A": "Alex", "B": "Jordan"}
+BG_PATH = VIDEO_OUT_DIR / "agenttv_bg.png"
+
+
+def _escape_drawtext(s: str) -> str:
+    return s.replace("\\", "\\\\").replace("'", "’").replace(":", "\\:").replace(",", "\\,")
+
+
+async def _ensure_background() -> Path:
+    """The show's gradient background, rendered ONCE to a static PNG and
+    reused for every episode -- geq evaluated per-pixel per-frame for a
+    live 3-5min render measured at ~2.9x realtime (a 10s test took 29s),
+    which would blow the jingle's wait budget. A static image composited
+    under drawtext costs almost nothing by comparison."""
+    if BG_PATH.exists():
+        return BG_PATH
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-y",
         "-f", "lavfi", "-i", "color=c=0x141422:s=1280x720",
+        "-vf", "geq=r='40+20*sin(2*PI*Y/H)':g='20+15*cos(2*PI*Y/H)':b='60+25*sin(2*PI*(X+Y)/(W+H))'",
+        "-frames:v", "1", "-update", "1", str(BG_PATH),
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"background render failed: {stderr.decode()[:300]}")
+    return BG_PATH
+
+
+async def composite_video(audio_path: Path, title: str, timings: list[dict], out_path: Path):
+    """A real, consistent show template instead of a static title card:
+    gradient background, persistent episode title bar, and per-turn
+    captions ("Alex: ...") synced to the actual dialogue timing -- so a
+    video podcast looks like a produced show, not a generic placeholder."""
+    bg = await _ensure_background()
+    safe_title = _escape_drawtext(title[:90])
+
+    caption_filters = []
+    for t in timings:
+        speaker = HOST_NAMES.get(t["speaker"], t["speaker"])
+        raw_text = t["text"][:130] + ("..." if len(t["text"]) > 130 else "")
+        line = _escape_drawtext(f"{speaker}: {raw_text}")
+        caption_filters.append(
+            f"drawtext=text='{line}':fontcolor=white:fontsize=26:"
+            f"x=(w-text_w)/2:y=h-110:box=1:boxcolor=black@0.55:boxborderw=14:"
+            f"line_spacing=6:enable='between(t,{t['start']:.2f},{t['end']:.2f})'"
+        )
+
+    vf = (
+        f"drawtext=text='{safe_title}':fontcolor=white:fontsize=34:x=(w-text_w)/2:y=48:"
+        "box=1:boxcolor=black@0.4:boxborderw=10,"
+        f"drawtext=text='VANTAGE RADIO':fontcolor=0x9d8cff:fontsize=16:x=(w-text_w)/2:y=100,"
+        + ",".join(caption_filters)
+    )
+
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y",
+        "-loop", "1", "-i", str(bg),
         "-i", str(audio_path),
-        "-vf", f"drawtext=text='{safe_title}':fontcolor=white:fontsize=32:x=(w-text_w)/2:y=(h-text_h)/2",
+        "-vf", vf,
         "-shortest", "-c:v", "libx264", "-tune", "stillimage", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k", str(out_path),
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
     )
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg composite failed: {stderr.decode()[:300]}")
+        raise RuntimeError(f"ffmpeg composite failed: {stderr.decode()[:400]}")
 
 
 async def generate_podcast(topic: str, kind: str, num_turns: int = 10) -> dict:
@@ -176,11 +248,11 @@ async def generate_podcast(topic: str, kind: str, num_turns: int = 10) -> dict:
     work_dir.mkdir(parents=True, exist_ok=True)
     try:
         turns = await generate_dialogue_script(topic, num_turns=num_turns)
-        combined_audio = await synthesize_dialogue(turns, work_dir)
+        combined_audio, timings = await synthesize_dialogue(turns, work_dir)
 
         if kind == "video":
             final = VIDEO_OUT_DIR / f"{work_id}.mp4"
-            await composite_video(combined_audio, topic, final)
+            await composite_video(combined_audio, topic, timings, final)
             stream_url = f"/media/videos/{work_id}.mp4"
         else:
             final = AUDIO_OUT_DIR / f"{work_id}.mp3"

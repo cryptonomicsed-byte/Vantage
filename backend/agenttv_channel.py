@@ -183,4 +183,73 @@ class AgentTVChannel:
                     current = {"url": JINGLE_STREAM_URL, "duration": JINGLE_DURATION_SEC, "title": "Technical difficulties"}
 
 
+async def list_channels() -> list[dict]:
+    """Every agent with real published podcast content becomes its own
+    channel -- Live-TV-style channel guide instead of one fixed rotation.
+    The flagship "Agent.TV" system agent is_live=True (continuously
+    generating fresh episodes, real-time rotation); every other agent's
+    channel just loops their own already-published episodes on a
+    deterministic virtual schedule (see now_playing_for_channel) so every
+    viewer sees the same thing at the same time without a live generation
+    loop per channel."""
+    agent = await _ensure_agenttv_agent()
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            """SELECT a.id as agent_id, a.name as agent_name, a.avatar_url,
+                      COUNT(*) as episode_count
+               FROM broadcasts b JOIN agents a ON a.id = b.agent_id
+               WHERE b.surface='cinema' AND b.cinema_kind='podcast' AND b.status='ready'
+               GROUP BY a.id ORDER BY (a.id = ?) DESC, episode_count DESC""",
+            (agent["id"],),
+        )).fetchall()
+    return [
+        {**dict(r), "is_live": r["agent_id"] == agent["id"]}
+        for r in rows
+    ]
+
+
+async def now_playing_for_channel(agent_id: int) -> dict:
+    """For the flagship live channel, the real always-on rotation state.
+    For any other agent's channel: a deterministic virtual schedule over
+    their own published episodes -- current wall-clock time modulo the
+    total playlist length picks the "currently airing" episode and offset,
+    so every viewer watching agent X's channel is in sync with each other
+    without needing a separate generation loop per agent."""
+    agenttv_agent = await _ensure_agenttv_agent()
+    if agent_id == agenttv_agent["id"]:
+        return channel.now_playing()
+
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            """SELECT id, title, stream_url, duration_seconds FROM broadcasts
+               WHERE agent_id=? AND surface='cinema' AND cinema_kind='podcast' AND status='ready'
+               ORDER BY id ASC""",
+            (agent_id,),
+        )).fetchall()
+    if not rows:
+        return {"segmentUrl": None, "phase": "segment", "startedAt": None, "duration": 0, "title": None, "cycle": 0, "now": int(time.time() * 1000)}
+
+    total = sum(max(1, r["duration_seconds"] or 1) for r in rows)
+    now_s = int(time.time())
+    offset = now_s % total
+    acc = 0
+    for i, r in enumerate(rows):
+        dur = max(1, r["duration_seconds"] or 1)
+        if offset < acc + dur:
+            started_at = (now_s - (offset - acc)) * 1000
+            return {
+                "segmentUrl": r["stream_url"], "phase": "segment", "startedAt": started_at,
+                "duration": dur, "title": r["title"], "cycle": i, "now": int(time.time() * 1000),
+            }
+        acc += dur
+    # Shouldn't happen (offset < total by construction), but stay safe.
+    r = rows[0]
+    return {
+        "segmentUrl": r["stream_url"], "phase": "segment", "startedAt": now_s * 1000,
+        "duration": r["duration_seconds"] or 0, "title": r["title"], "cycle": 0, "now": int(time.time() * 1000),
+    }
+
+
 channel = AgentTVChannel()
