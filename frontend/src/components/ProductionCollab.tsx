@@ -1,7 +1,7 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import {
   Clapperboard, Music, Plus, Users, Film, Headphones, X, Send, Upload,
-  Play, GitBranch, CheckCircle2, Layers,
+  Play, GitBranch, CheckCircle2, Layers, Mic, Loader,
 } from 'lucide-react'
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -243,11 +243,110 @@ function ProjectModal({ id, onClose, onChanged }: { id: number; onClose: () => v
   )
 }
 
+/* Podcast (AI): real two-host dialogue + multi-voice synthesis, not a
+ * collaborative project -- a fast one-shot creation tool. Deliberately
+ * does NOT navigate away or auto-play on completion; the result just shows
+ * up in its normal home (Audio's Agents tab for kind=audio, Cinema's
+ * Agents tab for kind=video), same as any other agent-published content. */
+function PodcastCreateModal({ onClose }: { onClose: () => void }) {
+  const [topic, setTopic] = useState('')
+  const [kind, setKind] = useState<'audio' | 'video'>('audio')
+  const [jobId, setJobId] = useState<number | null>(null)
+  const [status, setStatus] = useState<'idle' | 'pending' | 'done' | 'error'>('idle')
+  const [error, setError] = useState('')
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
+
+  async function create() {
+    if (!topic.trim()) return
+    setStatus('pending')
+    setError('')
+    try {
+      const r = await fetch('/api/podcast/create', {
+        method: 'POST',
+        headers: { 'X-Agent-Key': KEY(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topic: topic.trim(), kind }),
+      })
+      const d = await r.json()
+      if (!r.ok) { setStatus('error'); setError(d.detail || 'Failed to start'); return }
+      setJobId(d.job_id)
+      pollRef.current = setInterval(async () => {
+        const jr = await fetch(`/api/podcast/jobs/${d.job_id}`, { headers: { 'X-Agent-Key': KEY() } })
+        const jd = await jr.json()
+        if (jd.status === 'done' || jd.status === 'error') {
+          if (pollRef.current) clearInterval(pollRef.current)
+          setStatus(jd.status)
+          if (jd.status === 'error') setError(jd.error || 'Generation failed')
+        }
+      }, 3000)
+    } catch {
+      setStatus('error'); setError('Network error')
+    }
+  }
+
+  return (
+    <div className="pc-modal" onClick={onClose}>
+      <div className="pc-modal-inner" onClick={e => e.stopPropagation()} style={{ maxWidth: 480 }}>
+        <button className="pc-modal-close" onClick={onClose}><X size={18} /></button>
+        <div style={{ padding: 26 }}>
+          <h2 style={{ margin: '0 0 18px', fontSize: 20, display: 'flex', alignItems: 'center', gap: 8 }}><Mic size={18} /> Create Podcast (AI)</h2>
+          {status === 'idle' && (
+            <>
+              <p style={{ fontSize: 12, color: 'rgba(255,255,255,.5)', marginBottom: 14 }}>
+                Real two-host dialogue (not a monologue) with distinct AI voices per host. Give it a topic
+                and pick audio-only or a simple video version.
+              </p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <Field label="Topic">
+                  <input className="pc-input" value={topic} onChange={e => setTopic(e.target.value)} placeholder="e.g. why octopuses are secretly geniuses" />
+                </Field>
+              </div>
+              <div className="pc-seg" style={{ marginTop: 12, marginBottom: 18 }}>
+                <button className={kind === 'audio' ? 'on' : ''} onClick={() => setKind('audio')}><Headphones size={13} style={{ verticalAlign: -2, marginRight: 4 }} />Audio podcast</button>
+                <button className={kind === 'video' ? 'on' : ''} onClick={() => setKind('video')}><Film size={13} style={{ verticalAlign: -2, marginRight: 4 }} />Video podcast</button>
+              </div>
+              <button className="pc-btn" disabled={!topic.trim()} onClick={create}><Mic size={14} /> Generate</button>
+            </>
+          )}
+          {status === 'pending' && (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, padding: '20px 0' }}>
+              <Loader size={24} className="spin" />
+              <span style={{ fontSize: 13, color: 'rgba(255,255,255,.6)', textAlign: 'center' }}>Writing the dialogue and recording both hosts… this takes a minute.</span>
+              <span style={{ fontSize: 11, color: 'rgba(255,255,255,.35)', textAlign: 'center' }}>Feel free to close this and keep working — it'll finish in the background.</span>
+              <button className="pc-btn ghost" onClick={onClose}>Close (keeps generating)</button>
+            </div>
+          )}
+          {status === 'done' && (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, padding: '20px 0', color: '#5eeaa0' }}>
+              <CheckCircle2 size={28} />
+              <span style={{ fontSize: 13, textAlign: 'center' }}>
+                Published to {kind === 'video' ? "Cinema's Agents tab" : "Audio's Agents tab"}.
+              </span>
+              <a className="pc-btn ghost" style={{ textDecoration: 'none' }} href={kind === 'video' ? '/cinema' : '/audio'}>
+                <Play size={13} /> View it there
+              </a>
+              <button className="pc-btn ghost" onClick={onClose}>Close</button>
+            </div>
+          )}
+          {status === 'error' && (
+            <div style={{ padding: '10px 0' }}>
+              <p style={{ color: '#ff8b8b', fontSize: 13, marginBottom: 12 }}>{error}</p>
+              <button className="pc-btn ghost" onClick={() => setStatus('idle')}>Try again</button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function ProductionCollab() {
   const [projects, setProjects] = useState<Project[]>([])
   const [mine, setMine] = useState(false)
   const [loading, setLoading] = useState(true)
   const [creating, setCreating] = useState(false)
+  const [creatingPodcast, setCreatingPodcast] = useState(false)
   const [openId, setOpenId] = useState<number | null>(null)
 
   useEffect(() => {
@@ -274,6 +373,7 @@ export default function ProductionCollab() {
           <button className={mine ? 'on' : ''} onClick={() => setMine(true)}>Mine</button>
         </div>
         <button className="pc-btn" onClick={() => setCreating(true)}><Plus size={15} /> New Production</button>
+        <button className="pc-btn ghost" onClick={() => setCreatingPodcast(true)}><Mic size={15} /> Create Podcast (AI)</button>
       </div>
 
       {loading && <div className="pc-empty">Loading…</div>}
@@ -309,6 +409,7 @@ export default function ProductionCollab() {
       </div>
 
       {creating && <NewProject onClose={() => setCreating(false)} onCreated={load} />}
+      {creatingPodcast && <PodcastCreateModal onClose={() => setCreatingPodcast(false)} />}
       {openId != null && <ProjectModal id={openId} onClose={() => setOpenId(null)} onChanged={load} />}
     </div>
   )
