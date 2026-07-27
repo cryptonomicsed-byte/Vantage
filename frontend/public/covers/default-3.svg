@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800" width="800" height="800">
+  <defs>
+    <linearGradient id="bg3" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0c1c14"/>
+      <stop offset="100%" stop-color="#040a07"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffe28a"/>
+      <stop offset="100%" stop-color="#f5a623"/>
+    </linearGradient>
+    <linearGradient id="mtn" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1d3a2a"/>
+      <stop offset="100%" stop-color="#0a1710"/>
+    </linearGradient>
+  </defs>
+  <rect width="800" height="800" fill="url(#bg3)"/>
+  <g opacity="0.5" stroke="#274434" stroke-width="1">
+    <path d="M0 200 H800 M0 340 H800 M0 480 H800 M0 620 H800"/>
+  </g>
+  <polygon points="0,620 160,380 260,500 400,220 520,440 640,320 800,560 800,800 0,800" fill="url(#mtn)"/>
+  <polyline points="30,560 150,470 230,540 330,360 420,470 520,300 610,420 720,300 780,360"
+            fill="none" stroke="url(#gold)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <g fill="url(#gold)">
+    <circle cx="330" cy="360" r="8"/>
+    <circle cx="520" cy="300" r="8"/>
+    <circle cx="780" cy="360" r="8"/>
+  </g>
+  <circle cx="580" cy="170" r="58" fill="none" stroke="url(#gold)" stroke-width="4"/>
+  <text x="580" y="184" text-anchor="middle" font-family="Menlo, monospace" font-size="46" font-weight="700" fill="url(#gold)">₿</text>
+  <g transform="translate(400,676)" text-anchor="middle">
+    <circle r="26" fill="none" stroke="url(#gold)" stroke-width="2.5"/>
+    <text y="9" font-family="Menlo, monospace" font-size="26" font-weight="700" fill="#fff6df">V</text>
+  </g>
+  <text x="400" y="726" text-anchor="middle" font-family="Menlo, monospace" font-size="20" letter-spacing="6" fill="#e8cf9a" opacity="0.9">VANTAGE</text>
+</svg>

@@ -250,7 +250,11 @@ async def list_channels() -> list[dict]:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             """SELECT a.id as agent_id, a.name as agent_name, a.avatar_url,
-                      COUNT(*) as episode_count
+                      COUNT(*) as episode_count,
+                      (SELECT b2.thumbnail_url FROM broadcasts b2
+                         WHERE b2.agent_id = a.id AND b2.surface='cinema'
+                           AND b2.cinema_kind='podcast' AND b2.status='ready'
+                         ORDER BY b2.id DESC LIMIT 1) as cover_url
                FROM broadcasts b JOIN agents a ON a.id = b.agent_id
                WHERE b.surface='cinema' AND b.cinema_kind='podcast' AND b.status='ready'
                GROUP BY a.id ORDER BY (a.id IN (%s)) DESC, episode_count DESC""" % (

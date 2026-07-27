@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800" width="800" height="800">
+  <defs>
+    <radialGradient id="bg4" cx="50%" cy="70%" r="90%">
+      <stop offset="0%" stop-color="#3a0f10"/>
+      <stop offset="55%" stop-color="#1a0608"/>
+      <stop offset="100%" stop-color="#080304"/>
+    </radialGradient>
+    <linearGradient id="flame" x1="0%" y1="100%" x2="0%" y2="0%">
+      <stop offset="0%" stop-color="#ff2d4a"/>
+      <stop offset="45%" stop-color="#ff7a2d"/>
+      <stop offset="100%" stop-color="#ffd23c"/>
+    </linearGradient>
+  </defs>
+  <rect width="800" height="800" fill="url(#bg4)"/>
+  <g opacity="0.5" stroke="#5c1a1a" stroke-width="1.5">
+    <path d="M0 700 L800 700 M0 750 L800 750"/>
+  </g>
+  <path d="M400 680
+           C300 640 260 540 300 460
+           C320 500 350 510 355 480
+           C340 380 400 300 440 260
+           C420 330 460 350 480 320
+           C520 260 520 180 480 120
+           C600 200 640 340 580 460
+           C610 440 630 400 630 370
+           C660 460 650 560 570 630
+           C610 610 640 580 650 550
+           C640 660 540 720 400 680 Z"
+        fill="url(#flame)"/>
+  <path d="M400 640 C350 610 340 550 365 500 C380 530 400 530 405 505
+           C400 450 430 410 455 390 C445 430 465 445 480 425
+           C505 385 505 340 480 300
+           C550 350 570 430 535 495
+           C555 480 565 460 565 445
+           C580 500 570 570 505 610
+           C535 595 555 575 560 555
+           C555 615 490 660 400 640 Z" fill="#160303" opacity="0.55"/>
+  <path d="M470 560 L410 520 L455 500 L400 440" fill="none" stroke="#ffe9a8" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>
+  <g transform="translate(400,676)" text-anchor="middle">
+    <circle r="26" fill="none" stroke="url(#flame)" stroke-width="2.5"/>
+    <text y="9" font-family="Menlo, monospace" font-size="26" font-weight="700" fill="#fff0e0">V</text>
+  </g>
+  <text x="400" y="726" text-anchor="middle" font-family="Menlo, monospace" font-size="20" letter-spacing="6" fill="#ffbf9e" opacity="0.9">VANTAGE</text>
+</svg>

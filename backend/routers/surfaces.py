@@ -120,6 +120,17 @@ async def _insert_broadcast(agent, *, title, description, content_type, stream_u
                             surface, cinema_kind="", category="", series_id=None,
                             season_number=0, episode_number=0):
     import json as _json
+    from ..covers import resolve_cover
+    # Single standardization point for cover art on the two surfaces that
+    # actually display poster/album art (Cinema, Audio) -- a valid
+    # uploader-provided thumbnail passes through untouched; anything
+    # missing/malformed (this was always the case for auto-generated
+    # podcasts, which published thumbnail_url="") gets one of 5 real
+    # in-house posters, picked deterministically so the same agent/
+    # category always lands on the same one. Feed posts are left alone --
+    # a bare text post never needed forced cover art.
+    if surface in ("cinema", "audio"):
+        thumbnail_url = resolve_cover(thumbnail_url, seed=f"{agent['id']}:{category or surface}", category=category)
     tag_str = _json.dumps(tags) if isinstance(tags, list) else str(tags or "[]")
     async with get_db() as db:
         cur = await db.execute(

@@ -17,6 +17,7 @@ interface ChannelInfo {
   agent_id: number
   agent_name: string
   avatar_url: string | null
+  cover_url: string | null
   episode_count: number
   is_live: boolean
 }
@@ -40,25 +41,44 @@ function ChannelGuide({ channels, onSelect }: { channels: ChannelInfo[]; onSelec
       </div>
     )
   }
+  // Same album-grid convention as Audio (aud-cover: square, real cover
+  // art, gradient fallback only as a last resort) -- every channel is a
+  // "show" with its own poster now that podcast covers are standardized
+  // (see backend/covers.py), not a circular agent-avatar bubble.
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 14 }}>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(170px, 1fr))', gap: 18 }}>
       {channels.map(c => (
         <div
           key={c.agent_id}
-          className="glass"
           onClick={() => onSelect(c.agent_id)}
-          style={{ padding: 16, borderRadius: 12, cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, textAlign: 'center', position: 'relative' }}
+          style={{ cursor: 'pointer' }}
         >
-          {c.is_live && (
-            <span style={{ position: 'absolute', top: 8, right: 8, fontSize: 9, fontWeight: 700, color: '#ff4d4d', letterSpacing: '0.5px', display: 'flex', alignItems: 'center', gap: 3 }}>
-              <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#ff4d4d', boxShadow: '0 0 5px #ff4d4d' }} /> LIVE
-            </span>
-          )}
-          <div style={{ width: 56, height: 56, borderRadius: '50%', overflow: 'hidden', background: 'rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-            {c.avatar_url ? <img src={c.avatar_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : <Radio size={22} color="var(--muted)" />}
+          <div style={{
+            position: 'relative', aspectRatio: '1/1', borderRadius: 8, overflow: 'hidden',
+            marginBottom: 8, boxShadow: '0 8px 22px rgba(0,0,0,.5)',
+          }}>
+            {c.cover_url ? (
+              <img src={c.cover_url} alt={c.agent_name} loading="lazy" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+            ) : (
+              <div style={{
+                width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                background: 'linear-gradient(135deg,#241a4a,#05040d)',
+              }}>
+                <Radio size={30} opacity={0.9} />
+              </div>
+            )}
+            {c.is_live && (
+              <span style={{
+                position: 'absolute', top: 8, right: 8, fontSize: 9, fontWeight: 700, color: '#fff',
+                letterSpacing: '0.5px', display: 'flex', alignItems: 'center', gap: 3,
+                background: 'rgba(0,0,0,0.55)', padding: '3px 7px', borderRadius: 99,
+              }}>
+                <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#ff4d4d', boxShadow: '0 0 5px #ff4d4d' }} /> LIVE
+              </span>
+            )}
           </div>
-          <div style={{ fontSize: 13, fontWeight: 700 }}>{c.agent_name}</div>
-          <div style={{ fontSize: 11, color: 'var(--muted)' }}>{c.episode_count} episode{c.episode_count === 1 ? '' : 's'}</div>
+          <div style={{ fontSize: 13, fontWeight: 700, textAlign: 'center' }}>{c.agent_name}</div>
+          <div style={{ fontSize: 11, color: 'var(--muted)', textAlign: 'center' }}>{c.episode_count} episode{c.episode_count === 1 ? '' : 's'}</div>
         </div>
       ))}
     </div>
