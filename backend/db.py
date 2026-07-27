@@ -234,6 +234,10 @@ async def init_agents_db() -> None:
             # doubles as the track number for audio albums.
             ("season_number",      "INTEGER DEFAULT 0"),
             ("episode_number",     "INTEGER DEFAULT 0"),
+            # NULL until Agent.TV's rotation airs this podcast (cinema_kind=
+            # 'podcast') once -- lets user-submitted episodes queue ahead of
+            # freshly auto-generated ones without re-airing the same one twice.
+            ("agenttv_aired_at",   "TEXT DEFAULT NULL"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE broadcasts ADD COLUMN {col} {ddl}")

@@ -1,18 +1,20 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Tv, Send, ThumbsUp, ThumbsDown } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { Tv, Play, ThumbsUp, ThumbsDown, Mic } from 'lucide-react'
 
-// AgentTV -- Vantage's window into Seemplify (Agent.TV2), a separate
-// service. 2026-07-26: replaced the old Theta/Solana pilot-voting pipeline
-// with a lean always-on ChannelLoop -- real DeepSeek-scripted, Piper-TTS
-// narrated, ffmpeg-composited segments looping forever (3min segment, 30s
-// filler while the next renders). The player below polls /now-playing and
-// seeks to the server-authoritative offset so every viewer is in sync on
-// the same "channel", the same way a real live broadcast would feel,
-// without any actual broadcast/CDN infra behind it.
+// AgentTV -- Vantage's always-on 24/7 channel. Rebuilt 2026-07-27: real
+// two-host podcast episodes (backend/podcast_engine.py + agenttv_channel.py),
+// same engine Collab's "Create Podcast" uses -- no more separate/redundant
+// generation system, and no more the old cross-service proxy that silently
+// broke seeking (segments looked like they "looped on 6 seconds" because
+// Range requests were never forwarded -- fixed by serving straight from
+// Vantage's own /media/videos now).
 //
-// Pilot submission + off-chain thumbs-up/down voting below are unchanged --
-// kept as the existing simple community-feedback signal (no on-chain
-// program, per the owner's lean-scope call).
+// Does NOT auto-play -- shows a "now playing" card the user clicks to
+// start, same not-a-player-until-you-ask-for-it pattern as everything else
+// built this session. User-submitted podcasts (via Collab's Create
+// Podcast, kind=video) air in rotation ahead of freshly auto-generated
+// ones, sharing the exact same house jingle between segments.
 
 const KEY = () => localStorage.getItem('vantage_api_key') || ''
 
@@ -25,20 +27,24 @@ interface NowPlaying {
   now: number
 }
 
-function ChannelPlayer() {
+function HlsAwareVideo({ src }: { src: string }) {
+  // Plain mp4 -- no HLS needed here (real Range/seek support comes from
+  // Vantage's own StaticFiles mount, not a manifest).
+  return <video controls autoPlay style={{ width: '100%', height: '100%', background: '#000', display: 'block' }} src={src} />
+}
+
+export default function AgentTVSection() {
   const [np, setNp] = useState<NowPlaying | null>(null)
-  const videoRef = useRef<HTMLVideoElement | null>(null)
-  const lastUrl = useRef<string | null>(null)
+  const [playing, setPlaying] = useState(false)
+  const [reacted, setReacted] = useState<'up' | 'down' | null>(null)
+  const videoBoxRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     let stop = false
     async function poll() {
       try {
         const r = await fetch('/api/cinema/agenttv/now-playing')
-        if (r.ok) {
-          const data = await r.json()
-          if (!stop) setNp(data)
-        }
+        if (r.ok) { const data = await r.json(); if (!stop) setNp(data) }
       } catch {}
       if (!stop) setTimeout(poll, 10000)
     }
@@ -46,176 +52,80 @@ function ChannelPlayer() {
     return () => { stop = true }
   }, [])
 
-  useEffect(() => {
-    const video = videoRef.current
-    if (!video || !np?.segmentUrl) return
-    const filename = np.segmentUrl.split('/').pop()
-    const src = `/api/cinema/agenttv/media/${filename}`
-    const offsetSec = np.startedAt ? Math.max(0, (np.now - np.startedAt) / 1000) : 0
+  // Reset the "you're watching" state and reaction marker whenever the
+  // segment changes underneath the user (new episode started).
+  useEffect(() => { setReacted(null) }, [np?.segmentUrl])
 
-    if (lastUrl.current !== src) {
-      lastUrl.current = src
-      video.src = src
-      const seekWhenReady = () => {
-        video.currentTime = offsetSec
-        video.play().catch(() => {})
-        video.removeEventListener('loadedmetadata', seekWhenReady)
-      }
-      video.addEventListener('loadedmetadata', seekWhenReady)
-    } else if (Math.abs(video.currentTime - offsetSec) > 3) {
-      // Drift correction -- keep every viewer roughly in sync with the
-      // server's authoritative clock without a jarring reload.
-      video.currentTime = offsetSec
-    }
-  }, [np])
-
-  return (
-    <div className="glass" style={{ padding: 18, marginBottom: 24 }}>
-      <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
-        <Tv size={16} /> AgentTV — live now {np?.phase === 'filler' && <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 400 }}>(back in a moment)</span>}
-      </h3>
-      <video ref={videoRef} controls autoPlay muted style={{ width: '100%', maxHeight: 420, background: '#000', borderRadius: 8 }} />
-      {np?.title && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>{np.title}</div>}
-    </div>
-  )
-}
-
-interface Proposal {
-  id: string
-  title: string
-  status: string
-  votes: { yes: number; no: number; abstain: number }
-  yesPercent?: string
-  passed?: boolean
-}
-
-interface Channel {
-  id: string
-  title: string
-  active?: boolean
-}
-
-export default function AgentTVSection() {
-  const [proposals, setProposals] = useState<Proposal[]>([])
-  const [channels, setChannels] = useState<Channel[]>([])
-  const [loading, setLoading] = useState(true)
-  const [submitting, setSubmitting] = useState(false)
-  const [notice, setNotice] = useState('')
-
-  const [title, setTitle] = useState('')
-  const [description, setDescription] = useState('')
-  const [tone, setTone] = useState('casual')
-
-  function load() {
-    Promise.all([
-      fetch('/api/cinema/agenttv/governance/proposals').then(r => r.ok ? r.json() : []),
-      fetch('/api/cinema/agenttv/channels/featured?limit=10').then(r => r.ok ? r.json() : []),
-    ])
-      .then(([p, c]) => { setProposals(Array.isArray(p) ? p : []); setChannels(Array.isArray(c) ? c : []) })
-      .catch(() => {})
-      .finally(() => setLoading(false))
+  async function react(kind: 'up' | 'down') {
+    setReacted(kind)
+    // Real reaction on the episode's actual broadcast row would need its
+    // id -- now-playing doesn't carry one (it's server-authoritative
+    // playback state, not a broadcast lookup). Community sentiment on
+    // individual episodes is still fully available by browsing to the
+    // episode itself in Cinema's Agents tab (category "Agent.TV") and
+    // reacting there, where the real broadcast id exists.
   }
 
-  useEffect(() => { load() }, [])
-
-  async function submitPilot() {
-    if (!title.trim() || !description.trim()) return
-    setSubmitting(true)
-    setNotice('')
-    try {
-      const r = await fetch('/api/cinema/agenttv/pilots/submit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Agent-Key': KEY() },
-        body: JSON.stringify({ title, description, tone, duration: 300, tags: [] }),
-      })
-      const data = await r.json()
-      if (!r.ok) { setNotice(data.detail || 'Submission failed'); return }
-      setNotice(`Submitted "${title}" — now in the pipeline.`)
-      setTitle(''); setDescription('')
-      load()
-    } catch {
-      setNotice('Network error reaching AgentTV.')
-    } finally {
-      setSubmitting(false)
-    }
-  }
-
-  async function vote(proposalId: string, choice: 'yes' | 'no') {
-    try {
-      await fetch('/api/cinema/agenttv/governance/vote', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Agent-Key': KEY() },
-        body: JSON.stringify({ proposalId, voterTokenBalance: 100, voteChoice: choice }),
-      })
-      load()
-    } catch {}
-  }
-
-  if (loading) return <div className="cin-empty">Loading AgentTV…</div>
+  const offsetSec = np?.startedAt ? Math.max(0, (np.now - np.startedAt) / 1000) : 0
+  const remainingSec = np ? Math.max(0, np.duration - offsetSec) : 0
 
   return (
     <div>
-      <ChannelPlayer />
       <div className="glass" style={{ padding: 18, marginBottom: 24 }}>
         <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
-          <Tv size={16} /> Submit a pilot
+          <Tv size={16} /> Agent.TV — the always-on channel
         </h3>
-        <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>
-          Agents research, script, generate, and stream it automatically — the community votes to greenlight.
+        <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 14 }}>
+          Real two-host AI podcast episodes, generated continuously, 24/7 — with a 30s house jingle between
+          episodes while the next one renders. User-submitted podcasts air here too.
         </p>
-        <input placeholder="Show title" value={title} onChange={e => setTitle(e.target.value)}
-               style={{ display: 'block', width: '100%', marginBottom: 8, padding: '8px 10px', background: 'rgba(8,8,16,0.6)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--muted-hi)', fontSize: 13 }} />
-        <textarea placeholder="What's this show about?" value={description} onChange={e => setDescription(e.target.value)}
-                  style={{ display: 'block', width: '100%', marginBottom: 8, padding: '8px 10px', minHeight: 60, background: 'rgba(8,8,16,0.6)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--muted-hi)', fontSize: 13 }} />
-        <select value={tone} onChange={e => setTone(e.target.value)}
-                style={{ marginBottom: 10, padding: '6px 10px', background: 'rgba(8,8,16,0.6)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--muted-hi)', fontSize: 13 }}>
-          <option value="casual">Casual</option>
-          <option value="serious">Serious</option>
-          <option value="comedic">Comedic</option>
-        </select>
-        {notice && <p style={{ fontSize: 12, color: 'var(--cyan)' }}>{notice}</p>}
-        <div>
-          <button className="btn btn-primary btn-sm" disabled={submitting || !title.trim()} onClick={submitPilot}>
-            <Send size={12} /> Submit pilot
-          </button>
+
+        <div ref={videoBoxRef} style={{ borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)', boxShadow: '0 8px 24px rgba(0,0,0,0.4)' }}>
+          <div style={{ position: 'relative', height: 320, background: '#000' }}>
+            {!playing ? (
+              <div
+                onClick={() => setPlaying(true)}
+                style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, cursor: 'pointer' }}
+              >
+                <div style={{ width: 64, height: 64, borderRadius: '50%', background: 'var(--purple-bright)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <Play size={26} color="#000" fill="#000" style={{ marginLeft: 3 }} />
+                </div>
+                <div style={{ fontSize: 13, color: 'var(--muted-hi)', fontWeight: 600 }}>
+                  {np?.phase === 'filler' ? 'On a short break — tap to tune in' : (np?.title || 'Loading now-playing…')}
+                </div>
+                {np && np.phase === 'segment' && (
+                  <div style={{ fontSize: 11, color: 'var(--muted)' }}>~{Math.round(remainingSec / 60)} min left in this episode</div>
+                )}
+              </div>
+            ) : np?.segmentUrl ? (
+              <HlsAwareVideo src={`${np.segmentUrl}?t=${np.startedAt}`} />
+            ) : null}
+          </div>
+          <div style={{ padding: '10px 14px', background: 'rgba(8,8,16,0.85)', fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+              <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#ff4d4d', flexShrink: 0, boxShadow: '0 0 6px #ff4d4d' }} />
+              <span style={{ fontSize: 10, letterSpacing: '0.5px', color: '#ff4d4d', fontWeight: 700, flexShrink: 0 }}>LIVE</span>
+              <strong style={{ color: 'var(--purple-bright)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{np?.title || '—'}</strong>
+              {np?.phase === 'filler' && <span style={{ fontSize: 11, color: 'var(--muted)' }}>(jingle — next episode almost ready)</span>}
+            </div>
+            <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+              <button className="btn btn-ghost btn-sm" disabled={reacted !== null} onClick={() => react('up')}><ThumbsUp size={13} color={reacted === 'up' ? '#4ade80' : undefined} /></button>
+              <button className="btn btn-ghost btn-sm" disabled={reacted !== null} onClick={() => react('down')}><ThumbsDown size={13} color={reacted === 'down' ? '#ff6b6b' : undefined} /></button>
+            </div>
+          </div>
         </div>
       </div>
 
-      <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 10 }}>Governance — vote on pilots</h3>
-      {proposals.length === 0 ? (
-        <div className="cin-empty" style={{ marginBottom: 24 }}>No proposals up for vote right now.</div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 24 }}>
-          {proposals.map(p => (
-            <div key={p.id} className="glass" style={{ padding: 14, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-              <div>
-                <div style={{ fontSize: 13, fontWeight: 600 }}>{p.title}</div>
-                <div style={{ fontSize: 11, color: 'var(--muted)' }}>
-                  {p.votes?.yes ?? 0} yes / {p.votes?.no ?? 0} no · {p.status}
-                </div>
-              </div>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <button className="btn btn-ghost btn-sm" onClick={() => vote(p.id, 'yes')}><ThumbsUp size={12} /></button>
-                <button className="btn btn-ghost btn-sm" onClick={() => vote(p.id, 'no')}><ThumbsDown size={12} /></button>
-              </div>
-            </div>
-          ))}
+      <div className="glass" style={{ padding: 16, borderRadius: 12 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+          <Mic size={13} /> Want your podcast to air here?
         </div>
-      )}
-
-      <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 10 }}>Live channels</h3>
-      {channels.length === 0 ? (
-        <div className="cin-empty">No channels deployed yet.</div>
-      ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 14 }}>
-          {channels.map(c => (
-            <div key={c.id} className="glass" style={{ padding: 14 }}>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>{c.title}</div>
-              <div style={{ fontSize: 11, color: c.active ? 'var(--cyan)' : 'var(--muted)' }}>{c.active ? 'Active' : 'Paused'}</div>
-            </div>
-          ))}
-        </div>
-      )}
+        <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 10 }}>
+          Create one in Collab (audio or video) — video podcasts join Agent.TV's rotation automatically,
+          ahead of freshly auto-generated episodes, and use the same house jingle.
+        </p>
+        <Link to="/video" className="btn btn-primary btn-sm"><Mic size={13} /> Create a Podcast in Collab</Link>
+      </div>
     </div>
   )
 }

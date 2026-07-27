@@ -163,16 +163,19 @@ async def composite_video(audio_path: Path, title: str, out_path: Path):
         raise RuntimeError(f"ffmpeg composite failed: {stderr.decode()[:300]}")
 
 
-async def generate_podcast(topic: str, kind: str) -> dict:
+async def generate_podcast(topic: str, kind: str, num_turns: int = 10) -> dict:
     """Full pipeline: dialogue script -> multi-voice synthesis -> (audio |
     video) output file, written directly into the already-mounted static
     dir for its kind. Returns {"stream_url": ..., "duration_sec": ..., "script": [...]}.
-    Does NOT publish -- caller decides surface/cover/etc via _insert_broadcast."""
+    Does NOT publish -- caller decides surface/cover/etc via _insert_broadcast.
+    num_turns controls roughly how long the episode runs -- Agent.TV uses a
+    higher count for ~3min channel segments than the one-shot Collab
+    "Create Podcast" default."""
     work_id = uuid.uuid4().hex[:12]
     work_dir = SCRATCH_DIR / work_id
     work_dir.mkdir(parents=True, exist_ok=True)
     try:
-        turns = await generate_dialogue_script(topic)
+        turns = await generate_dialogue_script(topic, num_turns=num_turns)
         combined_audio = await synthesize_dialogue(turns, work_dir)
 
         if kind == "video":
@@ -192,3 +195,46 @@ async def generate_podcast(topic: str, kind: str) -> dict:
         for f in work_dir.glob("*"):
             f.unlink(missing_ok=True)
         work_dir.rmdir()
+
+
+JINGLE_PATH = VIDEO_OUT_DIR / "agenttv_jingle.mp4"
+JINGLE_STREAM_URL = "/media/videos/agenttv_jingle.mp4"
+JINGLE_DURATION_SEC = 30
+
+
+async def ensure_jingle() -> Path:
+    """Real, fixed 30s house jingle/'commercial' played between Agent.TV
+    segments while the next one renders -- one asset, generated once, reused
+    forever (including for user-submitted podcasts that air in the
+    rotation) until there's an actual sponsor to swap in. Idempotent -- only
+    (re)builds if missing."""
+    if JINGLE_PATH.exists():
+        return JINGLE_PATH
+
+    voice_path = SCRATCH_DIR / "jingle_voice.mp3"
+    await _synthesize_turn(
+        "You are listening to Vantage Radio. This spot is reserved for a future "
+        "sponsor -- reach out if that is you. Back to the show in just a moment.",
+        VOICES["A"], voice_path,
+    )
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", f"sine=frequency=220:duration={JINGLE_DURATION_SEC},volume=0.15",
+        "-i", str(voice_path),
+        "-f", "lavfi", "-i", f"color=c=0x1a0a2e:s=1280x720:d={JINGLE_DURATION_SEC}",
+        "-filter_complex",
+        "[0:a]afade=t=in:d=1,afade=t=out:st=28:d=2[bed];"
+        "[1:a]adelay=1500|1500[voice];"
+        "[bed][voice]amix=inputs=2:duration=first:dropout_transition=2[aout];"
+        "[2:v]drawtext=text='VANTAGE RADIO':fontcolor=white:fontsize=54:x=(w-text_w)/2:y=(h-text_h)/2-40,"
+        "drawtext=text='A word from our future sponsor':fontcolor=0xaaaaee:fontsize=24:x=(w-text_w)/2:y=(h-text_h)/2+40[vout]",
+        "-map", "[vout]", "-map", "[aout]",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+        "-t", str(JINGLE_DURATION_SEC), str(JINGLE_PATH),
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    voice_path.unlink(missing_ok=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"jingle build failed: {stderr.decode()[:300]}")
+    return JINGLE_PATH

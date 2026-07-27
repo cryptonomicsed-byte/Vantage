@@ -480,6 +480,10 @@ async def lifespan(app: FastAPI):
     gossip_task = asyncio.create_task(_federation_gossip_loop())
     watch_task = asyncio.create_task(_platform_subscription_loop())
     weather_task = asyncio.create_task(_weather_alert_loop())
+
+    from .agenttv_channel import channel as _agenttv_channel
+    await _agenttv_channel.start()
+
     yield
     for t in (task, gossip_task, watch_task, weather_task):
         t.cancel()

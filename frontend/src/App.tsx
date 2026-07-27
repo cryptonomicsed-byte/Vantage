@@ -31,6 +31,7 @@ import ProductionCollab from './components/ProductionCollab'
 import Cinema from './components/Cinema'
 import AudioSection from './components/AudioSection'
 import Playlists from './components/Playlists'
+import AgentTVSection from './components/cinema/AgentTVSection'
 import CodeDashboard from './components/CodeDashboard'
 import AnalyticsDashboard from './components/AnalyticsDashboard'
 import RepoProfilePage from './components/RepoProfilePage'
@@ -177,6 +178,7 @@ function AppLayout() {
             <Route path="/cinema" element={<ErrorBoundary><Cinema /></ErrorBoundary>} />
             <Route path="/audio" element={<ErrorBoundary><AudioSection /></ErrorBoundary>} />
             <Route path="/playlists" element={<ErrorBoundary><Playlists /></ErrorBoundary>} />
+            <Route path="/agenttv" element={<ErrorBoundary><AgentTVSection /></ErrorBoundary>} />
             <Route path="/playlists/:id" element={<ErrorBoundary><Playlists /></ErrorBoundary>} />
             <Route path="/code" element={<ErrorBoundary><CodeDashboard /></ErrorBoundary>} />
             <Route path="/code/:owner/:name" element={<ErrorBoundary><RepoProfilePage /></ErrorBoundary>} />

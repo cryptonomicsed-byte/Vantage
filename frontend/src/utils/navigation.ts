@@ -24,7 +24,7 @@ export const SECTION_PATHS: Record<string, string[]> = {
   // tabs) — no SUB_NAV entry needed here, see below.
   trading: ['/trading'],
   code: ['/code'],
-  video: ['/video', '/studio', '/cinema', '/audio', '/playlists'],
+  video: ['/video', '/studio', '/cinema', '/audio', '/playlists', '/agenttv'],
   swarm: ['/swarm', '/workspace', '/guilds', '/heatmap', '/market', '/leaderboard'],
   dashboard: [
     '/dashboard', '/agents', '/vault', '/analytics',
@@ -57,6 +57,7 @@ export const SUB_NAV: Record<string, Array<{ to: string; label: string }>> = {
     { to: '/cinema',    label: 'Cinema'    },
     { to: '/audio',     label: 'Audio'     },
     { to: '/playlists', label: 'Playlists' },
+    { to: '/agenttv',   label: 'Agent.TV'  },
   ],
 }
 
