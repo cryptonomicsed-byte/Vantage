@@ -176,7 +176,20 @@ class PersonaChannel:
         return {"url": result["stream_url"], "duration": result["duration_sec"], "title": topic}
 
     async def _run(self):
-        current = await self._next_episode()
+        # Retry loop for the very first episode too -- a bad voice ID or a
+        # transient scan/generation failure here used to kill this whole
+        # asyncio task silently forever (never surfaced as a Task exception
+        # until GC, which could take a very long time), leaving the channel
+        # permanently absent from the guide with zero error visible.
+        current = None
+        while current is None and self.running:
+            try:
+                current = await self._next_episode()
+            except Exception as e:
+                logger.error("%s: initial episode generation failed, retrying in 15s: %s", self.agent_name, e)
+                await asyncio.sleep(15)
+        if current is None:
+            return
         while self.running:
             self.state = {
                 "segmentUrl": current["url"], "phase": "segment",
@@ -304,7 +317,7 @@ ai_news_channel = PersonaChannel(
     "AI Daily Wire",
     "Vantage's 24/7 AI news show — two hosts react to real, current AI headlines every episode, not a fixed script.",
     ai_news_topic,
-    voices={"A": "en-US-DavisNeural", "B": "en-US-AriaNeural"},
+    voices={"A": "en-US-EricNeural", "B": "en-US-AriaNeural"},
     num_turns=NUM_TURNS_PER_SEGMENT,
     category="AI News",
 )
@@ -322,7 +335,7 @@ degen_channel = PersonaChannel(
     "Degen Frequency",
     "Vantage's 24/7 degen crypto show — real trending on-chain tokens, hyped up every episode.",
     crypto_degen_topic,
-    voices={"A": "en-US-JasonNeural", "B": "en-US-SaraNeural"},
+    voices={"A": "en-US-RogerNeural", "B": "en-US-EmmaNeural"},
     num_turns=NUM_TURNS_PER_SEGMENT,
     category="Degen Frequency",
 )

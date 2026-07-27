@@ -86,17 +86,17 @@ function ChannelPlayer({ agentId, onChangeChannel }: { agentId: number; onChange
 
   useEffect(() => { setReacted(null) }, [agentId])
 
-  // Claim the inline slot back from the floating PiP whenever this channel's
-  // current segment is the one actually playing -- e.g. the user tapped
-  // play here, wandered off elsewhere in the app (it kept floating), and
-  // came back to this exact channel/segment.
+  // Register this placeholder's rect as where the (always root-mounted)
+  // video should visually sit while this channel's segment is the one
+  // actually playing. Unregistering on unmount (or the placeholder simply
+  // detaching from the document when this page goes away) makes the video
+  // fall back to floating bottom-right automatically -- it never lived
+  // inside this subtree, so leaving Agent.TV can't take it down with it.
   useEffect(() => {
     if (np?.segmentUrl && pip.state.src === np.segmentUrl) {
-      pip.claimInline(inlineRef.current)
+      pip.registerSlot(inlineRef.current)
     }
-    // Releasing on unmount lets it fall back to floating instead of
-    // vanishing when the user navigates away from Agent.TV entirely.
-    return () => { pip.claimInline(null) }
+    return () => { pip.registerSlot(null) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [np?.segmentUrl, pip.state.src])
 
@@ -134,9 +134,10 @@ function ChannelPlayer({ agentId, onChangeChannel }: { agentId: number; onChange
               )}
             </div>
           )}
-          {/* This div is the inline portal target -- the PiP provider moves
-              the real <video> element in here while this channel is open
-              and playing, or floats it bottom-right once you navigate away. */}
+          {/* Layout-only placeholder -- the real <video> lives at the app
+              root and is visually overlaid onto this element's rect while
+              this channel is open and playing, then floats bottom-right
+              the moment you navigate away (see PipPlayerContext). */}
           <div ref={inlineRef} style={{ position: 'absolute', inset: 0 }} />
         </div>
         <div style={{ padding: '10px 14px', background: 'rgba(8,8,16,0.85)', fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
