@@ -736,6 +736,14 @@ app.include_router(playlists_router)
 from .routers.podcast import router as podcast_router
 app.include_router(podcast_router)
 
+# Was written (start/stop/restart/list ares-* daemons, tags=["admin"] so it's
+# already excluded from the MCP surface same as every other admin route) but
+# never actually included -- found while extending it for A5 crash-loop
+# visibility. The whole daemon-control API has been dead/unreachable code
+# until now, not just today's health-signal addition.
+from .routers.daemons import router as daemons_router
+app.include_router(daemons_router)
+
 # MCP server — exposes all Vantage routes as MCP tools for Claude/GPT/OpenCode agents.
 # Mount the modern streamable-HTTP transport at /mcp (what current MCP clients expect),
 # and keep SSE mounted at a distinct path for older clients — mount_http()'s default
