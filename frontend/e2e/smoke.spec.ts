@@ -58,3 +58,27 @@ test('cinema, audio, agent.tv, and swarm all render their real UI, not just a bl
     expect(bodyText.trim().length, `${path} should render real content, not an empty shell`).toBeGreaterThan(50)
   }
 })
+
+// Every static (non-parameterized) route in App.tsx -- this exact class of
+// bug (a route works fine via in-app client-side navigation but 404s at
+// the HTTP layer on direct load, because main.py's SPA route allowlist is
+// hand-maintained and has no structural guarantee of staying in sync with
+// App.tsx) is what caught /playlists, /agenttv, and /creator-analytics
+// missing entirely. This sweep exists so the NEXT time a route is added to
+// App.tsx without updating that allowlist, it fails a test instead of only
+// failing silently for whoever hits it by typing/bookmarking the URL.
+const ALL_STATIC_ROUTES = [
+  '/dashboard', '/analytics', '/inbox', '/search', '/api-docs', '/market',
+  '/trading', '/knowledge', '/settings', '/workspace', '/heatmap', '/copilot',
+  '/collectives', '/vault', '/video', '/studio', '/playlists',
+  '/creator-analytics', '/code',
+]
+
+for (const path of ALL_STATIC_ROUTES) {
+  test(`${path} is directly navigable (not just reachable via client-side nav)`, async ({ page }) => {
+    const response = await page.goto(path)
+    expect(response?.status(), `${path} HTTP status`).toBeLessThan(400)
+    await expect(page.getByText('Signal Lost')).toHaveCount(0)
+    await expect(page.getByText('"detail":"Not Found"')).toHaveCount(0)
+  })
+}
