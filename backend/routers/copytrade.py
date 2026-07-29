@@ -6,7 +6,7 @@ the human acting through a scoped grant) takes, same sovereignty principle
 as the rest of Vantage -- no agent's funds move without that agent's own
 order being explicitly created."""
 import aiosqlite
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..db import get_db
 from ..deps import get_agent, _parse_body
@@ -77,7 +77,7 @@ async def my_leaders(agent: dict = Depends(get_agent)):
 
 
 @router.get("/feed")
-async def feed(agent: dict = Depends(get_agent), limit: int = 50):
+async def feed(agent: dict = Depends(get_agent), limit: int = Query(50, ge=1, le=200)):
     """Recent orders ("Operations") from agents this agent follows, most
     recent first -- excludes anything this agent has already copied."""
     async with get_db() as db:

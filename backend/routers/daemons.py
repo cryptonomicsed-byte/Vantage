@@ -24,7 +24,7 @@ import logging
 import re
 
 import aiosqlite
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from backend.db import get_db
@@ -212,7 +212,7 @@ async def restart_daemon(unit: str, admin_key: str = Depends(get_admin)):
 
 
 @router.get("/actions")
-async def list_daemon_actions(limit: int = 50, _: str = Depends(get_admin)):
+async def list_daemon_actions(limit: int = Query(50, ge=1, le=500), _: str = Depends(get_admin)):
     """Recent start/stop/restart audit trail — who (key-hash) toggled what,
     when. Real accountability for a control surface that can take live
     trading daemons offline."""

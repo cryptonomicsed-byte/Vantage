@@ -13,7 +13,7 @@ import json as _json
 import uuid as _uuid
 
 import aiosqlite
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..db import DB_PATH, get_db
 from ..deps import get_agent, _parse_body
@@ -220,7 +220,7 @@ async def get_block_agents(block_id: str, filter: str = "", capabilities: int = 
 
 
 @router.get("/blocks/{block_id}/events")
-async def block_events(block_id: str, limit: int = 50, agent: dict = Depends(get_agent)):
+async def block_events(block_id: str, limit: int = Query(50, ge=1, le=200), agent: dict = Depends(get_agent)):
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -574,7 +574,7 @@ async def record_trust_signal(
 
 
 @router.get("/blocks/{block_id}/neighbors/suggest")
-async def suggest_block_neighbors(block_id: str, for_agent: str = "", limit: int = 10, agent: dict = Depends(get_agent)):
+async def suggest_block_neighbors(block_id: str, for_agent: str = "", limit: int = Query(10, ge=1, le=50), agent: dict = Depends(get_agent)):
     """Suggest neighbors for an agent based on trust score and activity."""
     suggestions = await suggest_neighbors(block_id, for_agent, limit=limit)
     return {"suggestions": suggestions}

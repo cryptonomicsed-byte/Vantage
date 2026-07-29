@@ -591,7 +591,7 @@ async def publish(
 
 @router.get("/feed", tags=["feed"])
 @limiter.limit("60/minute")
-async def get_feed(request: Request, limit: int = 50, offset: int = 0, content_type: Optional[str] = None, surface: Optional[str] = None, agent: dict = Depends(get_agent)):
+async def get_feed(request: Request, limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), content_type: Optional[str] = None, surface: Optional[str] = None, agent: dict = Depends(get_agent)):
     type_clause = "AND b.content_type = ?" if (content_type and content_type != "all") else ""
     params: list = [content_type] if type_clause else []
     # Surface filter: SAFE BY DEFAULT -- this is the social feed, so unless a
@@ -1442,7 +1442,7 @@ async def agent_followers(name: str, agent: dict = Depends(get_agent)):
 
 @router.get("/feed/trending", tags=["feed"])
 @limiter.limit("60/minute")
-async def trending_feed(request: Request, limit: int = 50, agent: dict = Depends(get_agent)):
+async def trending_feed(request: Request, limit: int = Query(50, ge=1, le=200), agent: dict = Depends(get_agent)):
     """Returns broadcasts sorted by weighted engagement velocity.
 
     Weighting (P0 fix — resists bot farming):
@@ -1487,8 +1487,8 @@ async def trending_feed(request: Request, limit: int = 50, agent: dict = Depends
 
 @router.get("/feed/personalized", tags=["feed"])
 async def personalized_feed(
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     agent: dict = Depends(get_agent),
 ):
     async with get_db() as db:
@@ -2821,7 +2821,7 @@ async def my_debate_challenges(agent: dict = Depends(get_agent)):
 
 @router.get("/feed/recommended", tags=["feed"])
 async def recommended_feed(
-    limit: int = 20,
+    limit: int = Query(20, ge=1, le=100),
     agent: dict = Depends(get_agent),
 ):
     async with get_db() as db:
@@ -3031,8 +3031,8 @@ async def search(
     content_type: Optional[str] = None,
     model_provider: Optional[str] = None,
     tags: Optional[str] = None,
-    limit: int = 50,
-    offset: int = 0, agent: dict = Depends(get_agent)):
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0), agent: dict = Depends(get_agent)):
     conditions = ["b.status = 'ready'"]
     params: list = []
 
@@ -3477,7 +3477,7 @@ async def ping_federation_peer(peer_id: int, agent: dict = Depends(get_agent)):
 
 
 @router.get("/federation/feed")
-async def get_federation_feed(limit: int = 50):
+async def get_federation_feed(limit: int = Query(50, ge=1, le=200)):
     """Aggregate feeds from all known federation peers plus local content."""
     local_items: list = []
     async with get_db() as db:
@@ -4855,7 +4855,7 @@ async def push_trace(request: Request, agent: dict = Depends(get_agent)):
 
 
 @router.get("/agents/activity-log", tags=["platform"])
-async def get_activity_log(limit: int = 50, agent: dict = Depends(get_agent)):
+async def get_activity_log(limit: int = Query(50, ge=1, le=200), agent: dict = Depends(get_agent)):
     """Recent thought traces from all agents — powers Observer Mode feed."""
     limit = min(limit, 200)
     async with get_db() as db:
@@ -5187,7 +5187,7 @@ async def query_knowledge(
     subject: Optional[str] = None,
     predicate: Optional[str] = None,
     agent: Optional[str] = None,
-    limit: int = 50, _caller: dict = Depends(get_agent)):
+    limit: int = Query(50, ge=1, le=200), _caller: dict = Depends(get_agent)):
     """Query the global knowledge graph."""
     conditions = []
     params: list = []
@@ -7906,7 +7906,7 @@ async def admin_stats(_: str = Depends(get_admin)):
     }
 
 @admin_router.get("/receipts")
-async def admin_receipts(limit: int = 100, agent_id: Optional[str] = None, _: str = Depends(get_admin)):
+async def admin_receipts(limit: int = Query(100, ge=1, le=1000), agent_id: Optional[str] = None, _: str = Depends(get_admin)):
     """Return recent audit receipts from the tamper-evident chain."""
     async with get_db() as db:
         db.row_factory = aiosqlite.Row

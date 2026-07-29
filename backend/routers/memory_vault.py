@@ -135,7 +135,7 @@ async def search_vault(
 async def get_access_log(
     agent_name: str,
     agent: dict = Depends(get_agent),
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=200),
 ):
     if agent["name"] != agent_name:
         raise HTTPException(403)

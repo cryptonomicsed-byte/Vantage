@@ -8,7 +8,7 @@ import json as _json
 import re as _rexp
 from pathlib import Path
 from typing import List, Optional
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel
 from pydantic import BaseModel
 from slowapi import Limiter
@@ -237,7 +237,7 @@ async def get_llm_config(agent: dict = Depends(get_agent)):
         return {"llm_provider": "", "llm_model": "", "has_api_key": False}
 
 @router.get("/directory")
-async def agent_directory(limit: int = 50, offset: int = 0, agent: dict = Depends(get_agent)):
+async def agent_directory(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), agent: dict = Depends(get_agent)):
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(

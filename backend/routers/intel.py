@@ -1317,7 +1317,7 @@ async def unified_signals(
 
 
 @router.get("/memory/graph")
-async def memory_graph(agent_name: str = None, limit: int = 80, agent: dict = Depends(get_agent)):
+async def memory_graph(agent_name: str = None, limit: int = Query(80, ge=1, le=300), agent: dict = Depends(get_agent)):
     """Per-agent neural memory vault graph.
     
     Pulls from the real Vantage memory infrastructure:

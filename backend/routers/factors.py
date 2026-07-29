@@ -16,7 +16,7 @@ from typing import Any, Optional
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..deps import get_agent
 
@@ -102,7 +102,7 @@ class LiveComputeRequest(BaseModel):
     alpha_id: str
     symbols: list[str]
     interval: str = "1d"
-    limit: int = 200
+    limit: int = Field(200, ge=1, le=2000)
 
 
 @router.post("/compute-live")
@@ -152,7 +152,7 @@ class VantageNativeComputeRequest(BaseModel):
     alpha_id: str
     symbols: list[str] = []
     interval: str = "1d"
-    limit: int = 200
+    limit: int = Field(200, ge=1, le=2000)
     lookback_seconds: int = 3600
     bucket_seconds: int = 900
 

@@ -7,7 +7,7 @@ Disclosed, not hidden: results come from unlicensed streaming-mirror
 sites whose availability rots quickly -- some results will be dead links,
 that's inherent to this class of source, not a bug in this proxy."""
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from ..deps import _parse_body
@@ -175,7 +175,7 @@ async def audio_search_grouped(term: str):
 
 
 @audio_router.get("/charts")
-async def audio_charts(genre_id: int | None = None, limit: int = 25):
+async def audio_charts(genre_id: int | None = None, limit: int = Query(25, ge=1, le=100)):
     params: dict = {"limit": limit}
     if genre_id is not None:
         params["genre_id"] = genre_id
