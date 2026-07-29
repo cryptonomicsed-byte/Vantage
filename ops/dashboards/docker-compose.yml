@@ -12,12 +12,13 @@ services:
       MB_DB_FILE: /metabase-data/metabase.db
     volumes:
       - metabase_data:/metabase-data
-      # Read-only mount of the REAL live Vantage database. SQLite's WAL
-      # mode (already how Vantage runs, see backend/db.py) supports
-      # concurrent readers alongside the writer by design, so this is safe
-      # -- and :ro at the mount level means Metabase's own JDBC driver
-      # can't write to it even if something tried.
-      - /opt/ares/Vantage/data/vantage.db:/data/vantage.db:ro
+      # NOT the live vantage.db (deliberately 600-permissioned to protect
+      # wallet-encryption keys/hashes -- confirmed live that Metabase's
+      # container user, uid 2000, can't read it, and loosening those
+      # permissions isn't the right fix). refresh_mirror.sh maintains a
+      # periodic read-only copy instead, owned by a host group matching
+      # this container's uid -- see that script + its systemd timer.
+      - ./vantage_mirror.db:/data/vantage.db:ro
 
 volumes:
   metabase_data:
