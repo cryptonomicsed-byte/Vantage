@@ -1,0 +1,6 @@
+[Unit]
+Description=Nightly Vantage SQLite backup
+
+[Service]
+Type=oneshot
+ExecStart=/opt/ares/backups/backup_vantage.sh

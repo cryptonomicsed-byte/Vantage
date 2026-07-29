@@ -30,7 +30,8 @@ groupadd -g 2000 metabase-mirror   # must match the metabase container's uid, ve
                                     # docker exec vantage_metabase id metabase
 chmod +x ops/dashboards/refresh_mirror.sh
 ./ops/dashboards/refresh_mirror.sh   # first mirror, before Metabase starts
-cp ops/dashboards/ares-metabase-mirror.{service,timer} /etc/systemd/system/
+cp ops/dashboards/ares-metabase-mirror.service.example /etc/systemd/system/ares-metabase-mirror.service
+cp ops/dashboards/ares-metabase-mirror.timer /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now ares-metabase-mirror.timer
 

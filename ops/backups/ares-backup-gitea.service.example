@@ -1,0 +1,6 @@
+[Unit]
+Description=Nightly Gitea Postgres backup
+
+[Service]
+Type=oneshot
+ExecStart=/opt/ares/backups/backup_gitea.sh

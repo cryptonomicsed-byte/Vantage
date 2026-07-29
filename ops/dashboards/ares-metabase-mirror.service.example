@@ -1,0 +1,6 @@
+[Unit]
+Description=Refresh the read-only Vantage DB mirror for Metabase
+
+[Service]
+Type=oneshot
+ExecStart=/opt/ares/Vantage/ops/dashboards/refresh_mirror.sh
