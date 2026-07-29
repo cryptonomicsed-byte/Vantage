@@ -157,7 +157,7 @@ function Detail({ t, onClose }: { t: Title; onClose: () => void }) {
       <div className="cin-modal-inner" onClick={e => e.stopPropagation()}>
         <button className="cin-modal-close" onClick={onClose}><X size={18} /></button>
         {t.stream_url
-          ? <video ref={videoRef} className="cin-player" src={t.stream_url} poster={t.thumbnail_url || undefined} controls autoPlay onSeeking={handleSeeking} onTimeUpdate={handleTimeUpdate} onEnded={handleEnded} />
+          ? <video ref={videoRef} className="cin-player" src={t.stream_url} poster={t.thumbnail_url || undefined} controls autoPlay={localStorage.getItem('cinema_autoplay') !== 'false'} onSeeking={handleSeeking} onTimeUpdate={handleTimeUpdate} onEnded={handleEnded} />
           : <div className="cin-player" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,.4)' }}>No stream attached.</div>}
         <div style={{ padding: 26 }}>
           <div className="cin-badge"><Film size={13} /> {KIND_LABEL[t.cinema_kind || 'movie'] || 'Title'}{t.category ? ` · ${t.category}` : ''}</div>

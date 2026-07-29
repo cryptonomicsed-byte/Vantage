@@ -690,6 +690,12 @@ async def system_integrations():
         "omokoda": bool(settings.OMOKODA_URL and settings.OMOKODA_COGNITION_TOKEN),
         "omniroute": bool(settings.OMNIROUTE_URL),
         "federation_enabled": settings.FEDERATION_ENABLED,
+        # Non-secret config detail for Settings > Integrations -- real
+        # values, not just the booleans above. Tokens/keys are never
+        # included here, only endpoint URLs and the default model name.
+        "omniroute_url": settings.OMNIROUTE_URL,
+        "omniroute_default_model": settings.OMNIROUTE_MODEL,
+        "omokoda_url": settings.OMOKODA_URL if settings.OMOKODA_URL and settings.OMOKODA_COGNITION_TOKEN else None,
     }
 
 
@@ -703,6 +709,38 @@ async def my_mind_status(agent: dict = Depends(get_agent)):
     status = await get_mind_status(agent["id"])
     status["fallback_model"] = agent.get("copilot_fallback_model") or settings.OMNIROUTE_MODEL
     return status
+
+
+_omniroute_models_cache: dict = {"at": 0.0, "models": []}
+
+
+@router.get("/me/mind/models", tags=["mind"])
+async def list_omniroute_models(_agent: dict = Depends(get_agent)):
+    """Real available models from OmniRoute's own /v1/models (OpenAI-
+    compatible), not a hardcoded guess -- powers the fallback-model
+    dropdown in Settings instead of a free-text field nobody could fill in
+    correctly without already knowing OmniRoute's model catalog by heart.
+    Cached 5 minutes; the catalog doesn't change request-to-request."""
+    import time as _time_mod
+    now = _time_mod.time()
+    if now - _omniroute_models_cache["at"] < 300 and _omniroute_models_cache["models"]:
+        return {"models": _omniroute_models_cache["models"], "cached": True}
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.get(f"{settings.OMNIROUTE_URL.rstrip('/')}/v1/models")
+            r.raise_for_status()
+            data = r.json()
+        models = sorted(m["id"] for m in data.get("data", []) if m.get("id"))
+        _omniroute_models_cache["at"] = now
+        _omniroute_models_cache["models"] = models
+        return {"models": models, "cached": False}
+    except Exception as e:
+        logger.warning("OmniRoute /v1/models fetch failed: %s", e)
+        # Serve the last-known-good list through an outage rather than an
+        # empty dropdown, same pattern used for GeckoTerminal elsewhere.
+        if _omniroute_models_cache["models"]:
+            return {"models": _omniroute_models_cache["models"], "cached": True, "stale": True}
+        return {"models": [], "error": "OmniRoute unreachable"}
 
 
 @router.post("/me/mind/fallback-model", tags=["mind"])

@@ -24,14 +24,16 @@ export default function MindTab({ apiKey }: { apiKey: string }) {
 
   const [fallbackModel, setFallbackModel] = useState('')
   const [savingModel, setSavingModel] = useState(false)
+  const [availableModels, setAvailableModels] = useState<string[]>([])
+  const [modelsError, setModelsError] = useState('')
 
-  async function saveFallbackModel() {
+  async function saveFallbackModel(model: string) {
     setSavingModel(true)
     try {
       await fetch('/api/agents/me/mind/fallback-model', {
         method: 'POST',
         headers: { 'X-Agent-Key': apiKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: fallbackModel.trim() }),
+        body: JSON.stringify({ model }),
       })
       load()
     } finally {
@@ -46,7 +48,27 @@ export default function MindTab({ apiKey }: { apiKey: string }) {
       .then(d => { setStatus(d); setFallbackModel(d.fallback_model || '') })
       .catch(() => setError('Could not load mind status.'))
       .finally(() => setLoading(false))
+    // Real available models from OmniRoute's own catalog (GET /v1/models),
+    // not a free-text field the user had to fill in blind -- see
+    // backend/agents.py's list_omniroute_models for where this comes from.
+    fetch('/api/agents/me/mind/models', { headers: { 'X-Agent-Key': apiKey } })
+      .then(r => r.json())
+      .then(d => {
+        if (Array.isArray(d.models) && d.models.length) setAvailableModels(d.models)
+        else setModelsError(d.error || 'No models returned')
+      })
+      .catch(() => setModelsError('Could not reach OmniRoute for the model list.'))
   }
+
+  // Group by provider prefix (auto/, aug/, oc/, tllm/, ddgw/, etc.) -- a
+  // flat 90+ item dropdown is unusable, but the prefixes are real,
+  // meaningful groupings OmniRoute itself uses (aggregator vs specific
+  // upstream), not an arbitrary categorization invented here.
+  const modelGroups = availableModels.reduce<Record<string, string[]>>((acc, id) => {
+    const group = id.includes('/') ? id.split('/')[0] : 'other'
+    ;(acc[group] ||= []).push(id)
+    return acc
+  }, {})
 
   useEffect(() => { load() }, [])
 
@@ -150,19 +172,32 @@ export default function MindTab({ apiKey }: { apiKey: string }) {
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Default LLM fallback model</div>
         <p style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 10 }}>
           Which OmniRoute model answers Copilot chat when {status?.connected ? "your connected mind doesn't respond" : 'no mind is connected'}.
-          Leave blank to use the instance default ("auto").
+          Leave on "auto" to use the instance default.
         </p>
+        {modelsError && (
+          <div style={{ fontSize: 11, color: 'var(--danger, #ff6666)', marginBottom: 8 }}>{modelsError}</div>
+        )}
         <div style={{ display: 'flex', gap: 8 }}>
-          <input
-            placeholder="auto"
+          <select
             value={fallbackModel}
-            onChange={e => setFallbackModel(e.target.value)}
+            onChange={e => { setFallbackModel(e.target.value); saveFallbackModel(e.target.value) }}
+            disabled={savingModel}
             style={{ flex: 1, padding: '8px 10px', background: 'rgba(8,8,16,0.6)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--muted-hi)', fontSize: 12 }}
-          />
-          <button className="btn btn-ghost btn-sm" disabled={savingModel} onClick={saveFallbackModel}>
-            {savingModel ? <Loader size={12} className="spin" /> : 'Save'}
-          </button>
+          >
+            <option value="">auto (instance default)</option>
+            {Object.entries(modelGroups).sort(([a], [b]) => a.localeCompare(b)).map(([group, ids]) => (
+              <optgroup key={group} label={group}>
+                {ids.map(id => <option key={id} value={id}>{id}</option>)}
+              </optgroup>
+            ))}
+          </select>
+          {savingModel && <Loader size={14} className="spin" style={{ marginTop: 8 }} />}
         </div>
+        <p style={{ fontSize: 10, color: 'var(--muted)', marginTop: 6 }}>
+          {availableModels.length > 0
+            ? `${availableModels.length} real models fetched live from OmniRoute -- saves automatically on selection.`
+            : 'Loading model catalog from OmniRoute…'}
+        </p>
       </div>
 
       <PodcastVoicesSection apiKey={apiKey} />

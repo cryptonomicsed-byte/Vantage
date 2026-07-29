@@ -16,6 +16,13 @@ interface SystemIntegrations {
   omokoda: boolean
   omniroute: boolean
   federation_enabled: boolean
+  omniroute_url?: string
+  omniroute_default_model?: string
+  omokoda_url?: string | null
+}
+interface InstanceInfo {
+  name: string; version: string; public_url: string; onion_url: string | null
+  agent_count: number; federation_enabled: boolean
 }
 
 function IntegrationRow({ name, ok, hint }: { name: string; ok: boolean; hint?: string }) {
@@ -79,6 +86,58 @@ export default function Settings() {
     fetch('/api/cinema/livetv/integrations/status').then(r => r.ok ? r.json() : null).then(d => d && setStreamStatus(d)).catch(() => {})
     fetch('/api/agents/system/integrations').then(r => r.ok ? r.json() : null).then(d => d && setSysStatus(d)).catch(() => {})
   }, [tab])
+
+  // Instance info (real, non-secret config -- public_url/onion_url/agent_count)
+  // used in both Network (share your URL for peers to add you) and Developer.
+  const [instanceInfo, setInstanceInfo] = useState<InstanceInfo | null>(null)
+  useEffect(() => {
+    if (tab !== 'Network' && tab !== 'Developer') return
+    fetch('/api/agents/info', { headers: apiKey ? { 'X-Agent-Key': apiKey } : {} })
+      .then(r => r.ok ? r.json() : null).then(d => d && setInstanceInfo(d)).catch(() => {})
+  }, [tab, apiKey])
+
+  // Cinema autoplay -- same real per-agent KV persistence pattern as the
+  // Live TV default country below, not just a localStorage-only toggle.
+  const [cinemaAutoplay, setCinemaAutoplay] = useState(localStorage.getItem('cinema_autoplay') !== 'false')
+  useEffect(() => {
+    if (!apiKey) return
+    fetch('/api/agents/me/state/cinema_autoplay', { headers: { 'X-Agent-Key': apiKey } })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d?.value != null) { const v = d.value !== 'false'; setCinemaAutoplay(v); localStorage.setItem('cinema_autoplay', String(v)) } })
+      .catch(() => {})
+  }, [apiKey])
+  function saveCinemaAutoplay(v: boolean) {
+    setCinemaAutoplay(v)
+    localStorage.setItem('cinema_autoplay', String(v))
+    if (apiKey) {
+      fetch('/api/agents/me/state/cinema_autoplay', {
+        method: 'PUT', headers: { 'X-Agent-Key': apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: String(v) }),
+      }).catch(() => {})
+    }
+  }
+
+  // Per-peer "recent broadcasts" preview -- real backend endpoint
+  // (GET /federation/peers/{id}/recent) existed with zero frontend
+  // consumer until now.
+  const [expandedPeer, setExpandedPeer] = useState<number | null>(null)
+  const [peerPreview, setPeerPreview] = useState<Record<number, any[]>>({})
+  const [peerPreviewLoading, setPeerPreviewLoading] = useState<number | null>(null)
+  async function togglePeerPreview(id: number) {
+    if (expandedPeer === id) { setExpandedPeer(null); return }
+    setExpandedPeer(id)
+    if (!peerPreview[id]) {
+      setPeerPreviewLoading(id)
+      try {
+        const r = await fetch(`/api/agents/federation/peers/${id}/recent?limit=8`)
+        if (r.ok) {
+          const d = await r.json()
+          setPeerPreview(prev => ({ ...prev, [id]: d.broadcasts || [] }))
+        }
+      } catch { /* ignore */ }
+      setPeerPreviewLoading(null)
+    }
+  }
 
   // Live TV preference -- persisted server-side via the generic per-agent
   // KV state store (PUT /api/agents/me/state/{key}), same one an agent can
@@ -290,13 +349,25 @@ export default function Settings() {
 
           <h3 className="settings-section-title" style={{ marginBottom: 4 }}>Agent intelligence</h3>
           <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 16 }}>
-            Backend wiring for Copilot's real-LLM behavior — see the Mind &amp; LLM tab to connect your own agent.
+            Backend wiring for Copilot's real-LLM behavior — see the Mind &amp; LLM tab to connect your own agent
+            or pick a specific fallback model.
           </p>
           <div className="stat-card" style={{ padding: '4px 16px' }}>
             <IntegrationRow name="Omo-Koda2 kernel" ok={!!sysStatus?.omokoda} hint="not configured on this instance" />
             <IntegrationRow name="OmniRoute (default Copilot LLM fallback)" ok={!!sysStatus?.omniroute} hint="not configured on this instance" />
             <IntegrationRow name="Federation" ok={!!sysStatus?.federation_enabled} hint="disabled on this instance" />
           </div>
+          {(sysStatus?.omniroute_url || sysStatus?.omokoda_url) && (
+            <div style={{ marginTop: 10, padding: '10px 16px', fontSize: 11, color: 'var(--muted)', fontFamily: 'monospace' }}>
+              {sysStatus?.omniroute_url && <div>OmniRoute endpoint: {sysStatus.omniroute_url} · default model: {sysStatus.omniroute_default_model || 'auto'}</div>}
+              {sysStatus?.omokoda_url && <div style={{ marginTop: 4 }}>Omo-Koda2 kernel: {sysStatus.omokoda_url}</div>}
+            </div>
+          )}
+          <p style={{ fontSize: 11, color: 'var(--muted)', marginTop: 14, opacity: 0.7 }}>
+            No further per-source config exists for TMDB/YouTube/Jamendo beyond the presence check above —
+            franken-stream's own search endpoints only accept a search term today, nothing region/language/rating-
+            specific to expose here yet.
+          </p>
         </div>
       )}
 
@@ -315,6 +386,17 @@ export default function Settings() {
               style={{ width: 80, padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6, color: 'var(--text)', fontSize: 13, textAlign: 'center' }}
             />
           </div>
+
+          <h3 className="settings-section-title" style={{ marginBottom: 4 }}>Playback</h3>
+          <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>
+            Whether a title starts playing immediately when you open it from Cinema's browse view.
+            (Agent.TV/podcast channels never auto-play regardless of this — that's a separate,
+            deliberate "pick a channel first" flow, see below.)
+          </p>
+          <label className="stat-card" style={{ marginBottom: 24, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', width: 'fit-content' }}>
+            <input type="checkbox" checked={cinemaAutoplay} onChange={e => saveCinemaAutoplay(e.target.checked)} />
+            <span style={{ fontSize: 13 }}>Autoplay when opening a title</span>
+          </label>
 
           <h3 className="settings-section-title" style={{ marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
             <Tv size={14} /> Agent.TV
@@ -349,6 +431,23 @@ export default function Settings() {
               {federationEnabled ? 'ENABLED' : 'DISABLED'}
             </div>
           </div>
+
+          {instanceInfo?.public_url && (
+            <div className="stat-card" style={{ marginBottom: 20, padding: 16 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--muted-hi)', marginBottom: 6, letterSpacing: '0.05em' }}>
+                YOUR INSTANCE (share this so others can add you as a peer)
+              </div>
+              <code style={{ fontSize: 12, color: 'var(--cyan)', wordBreak: 'break-all' }}>{instanceInfo.public_url}</code>
+              {instanceInfo.onion_url && (
+                <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4, wordBreak: 'break-all' }}>
+                  Onion mirror: {instanceInfo.onion_url}
+                </div>
+              )}
+              <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>
+                {instanceInfo.agent_count} registered agent{instanceInfo.agent_count === 1 ? '' : 's'} on this instance
+              </div>
+            </div>
+          )}
 
           {/* Add peer form */}
           <div className="stat-card" style={{ marginBottom: 20, padding: 16 }}>
@@ -461,6 +560,15 @@ export default function Settings() {
                     <div style={{ display: 'flex', gap: 6 }}>
                       <button
                         className="btn btn-ghost btn-sm"
+                        onClick={() => togglePeerPreview(peer.id)}
+                        disabled={peer.flagged === 1}
+                        title={peer.flagged ? 'Flagged peers cannot be previewed' : 'Preview recent broadcasts from this peer'}
+                        style={{ padding: '4px 8px' }}
+                      >
+                        {peerPreviewLoading === peer.id ? <RefreshCw size={11} className="spin" /> : <Radio size={11} />}
+                      </button>
+                      <button
+                        className="btn btn-ghost btn-sm"
                         onClick={() => pingPeer(peer.id)}
                         disabled={pingingId === peer.id || !apiKey}
                         title="Ping this peer"
@@ -493,6 +601,24 @@ export default function Settings() {
                       )}
                     </div>
                   </div>
+                  {expandedPeer === peer.id && (
+                    <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+                      {peerPreviewLoading === peer.id ? (
+                        <div style={{ fontSize: 11, color: 'var(--muted)' }}>Loading recent broadcasts…</div>
+                      ) : (peerPreview[peer.id] || []).length === 0 ? (
+                        <div style={{ fontSize: 11, color: 'var(--muted)' }}>No broadcasts, or peer unreachable.</div>
+                      ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                          {(peerPreview[peer.id] || []).slice(0, 8).map((b: any) => (
+                            <div key={b.id} style={{ fontSize: 11, color: 'var(--muted-hi)', display: 'flex', gap: 8 }}>
+                              <span style={{ color: 'var(--cyan)', flexShrink: 0 }}>{b.agent_name || '?'}</span>
+                              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.title || '(untitled)'}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               ))}
               <button
@@ -535,7 +661,7 @@ export default function Settings() {
           </div>
 
           <h3 className="settings-section-title" style={{ marginTop: 24 }}>API Reference</h3>
-          <div className="stat-card">
+          <div className="stat-card" style={{ marginBottom: 20 }}>
             <p style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 14 }}>
               Interactive API documentation generated from the live OpenAPI schema.
             </p>
@@ -546,8 +672,41 @@ export default function Settings() {
               <a href="/redoc" target="_blank" rel="noopener noreferrer" className="btn btn-ghost btn-sm">
                 <Code size={13} /> ReDoc
               </a>
+              <a href="/openapi.json" target="_blank" rel="noopener noreferrer" className="btn btn-ghost btn-sm">
+                <Code size={13} /> OpenAPI JSON
+              </a>
             </div>
           </div>
+
+          <h3 className="settings-section-title">MCP (Agent Tool Surface)</h3>
+          <div className="stat-card" style={{ marginBottom: 20 }}>
+            <p style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 10 }}>
+              This whole API is also exposed as MCP tools for LLM-based agent frameworks (Claude, GPT, OpenCode, etc.) —
+              every route becomes a callable tool automatically, no separate wrapper code per endpoint.
+            </p>
+            <div style={{ fontSize: 12, fontFamily: 'monospace', color: 'var(--muted-hi)', display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div>Streamable HTTP: <code style={{ color: 'var(--cyan)' }}>/mcp</code></div>
+              <div>SSE (legacy clients): <code style={{ color: 'var(--cyan)' }}>/mcp/sse</code></div>
+              <div>Machine-readable skill registry: <code style={{ color: 'var(--cyan)' }}>/api/agents/skills</code></div>
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 8 }}>
+              Auth: send your API key as <code>X-Agent-Key</code>, same as regular REST calls.
+            </div>
+          </div>
+
+          {instanceInfo && (
+            <>
+              <h3 className="settings-section-title">Instance</h3>
+              <div className="stat-card">
+                <div style={{ fontSize: 12, fontFamily: 'monospace', color: 'var(--muted-hi)', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <div>{instanceInfo.name} v{instanceInfo.version}</div>
+                  <div>Public URL: <code style={{ color: 'var(--cyan)' }}>{instanceInfo.public_url}</code></div>
+                  {instanceInfo.onion_url && <div>Onion: <code style={{ color: 'var(--cyan)' }}>{instanceInfo.onion_url}</code></div>}
+                  <div>{instanceInfo.agent_count} registered agents · Federation {instanceInfo.federation_enabled ? 'enabled' : 'disabled'}</div>
+                </div>
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>
