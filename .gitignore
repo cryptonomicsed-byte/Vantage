@@ -22,3 +22,7 @@ backend/.seed_keys.json
 *.key
 *_seed.json
 hermes_soul_seed.json
+
+# Playwright E2E test artifacts (generated, not source)
+frontend/playwright-report/
+frontend/test-results/

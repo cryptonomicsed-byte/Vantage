@@ -23,6 +23,7 @@
     "video.js": "^8.6.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/d3-force": "^3.0.10",

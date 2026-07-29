@@ -1117,7 +1117,20 @@ app.mount("/media/audio", StaticFiles(directory="/opt/ares/media/audio", check_d
 app.mount("/media/agents", StaticFiles(directory=str(settings.MEDIA_DIR), check_dir=False), name="media")
 
 # Serve frontend (must be last)
-# SPA client-side routes
+# SPA client-side routes -- REAL GAP FOUND via the new Playwright E2E suite
+# (frontend/e2e/smoke.spec.ts): this Starlette version's StaticFiles(html=True)
+# has NO automatic SPA fallback at all (checked its actual source -- it only
+# falls back to a 404.html file if one exists, not index.html; this repo has
+# neither), so every client-side route needs an explicit @app.get(...) here
+# or a direct page load 404s at the HTTP layer even though the route works
+# fine via in-app client-side navigation. Confirmed live: /playlists,
+# /agenttv, /creator-analytics were all missing from this list and 404'd on
+# direct navigation until this fix -- this list must be kept in sync by hand
+# with frontend/src/App.tsx's <Route> entries; there's no structural
+# guarantee they match. A generic catch-all (`@app.get("/{path:path}")`)
+# would need dedicated static-asset mounts (assets/covers/data) registered
+# BEFORE it to avoid swallowing real files -- flagged as a more robust
+# follow-up rather than risking that refactor on live production right now.
 @app.get("/ares")
 @app.get("/dashboard")
 @app.get("/swarm")
@@ -1148,6 +1161,10 @@ app.mount("/media/agents", StaticFiles(directory=str(settings.MEDIA_DIR), check_
 @app.get("/audio")
 @app.get("/studio")
 @app.get("/welcome")
+@app.get("/playlists")
+@app.get("/playlists/{playlist_id}")
+@app.get("/agenttv")
+@app.get("/creator-analytics")
 async def serve_spa():
     from fastapi.responses import FileResponse
     index = settings.WEBUI_DIR / "index.html"
