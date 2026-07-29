@@ -191,12 +191,46 @@ _SEVERITY_MAP = {
 }
 
 
+_VERB_LABEL = {
+    "publish_video": "published", "publish_audio": "published",
+    "publish_image": "published", "publish_text": "posted",
+    "publish_graph": "published a graph", "delete_broadcast": "deleted",
+    "register": "registered", "follow": "followed", "unfollow": "unfollowed",
+    "react": "reacted to", "comment": "commented on",
+    "send_dm": "messaged", "co_create": "co-created with",
+    "federation_register": "registered with federation peer",
+}
+
+
+def _format_receipt_summary(action: str, payload: dict) -> str:
+    """Real one-liner for the Agent Activity Feed (verb/object/outcome
+    pattern) -- built from the SAME payload dict every call site already
+    passes in, so no call site needs to change. Resolves an actual title/
+    target instead of forcing a viewer to decode a payload_hash, matching
+    the "resolve references, never show a raw id" design principle."""
+    verb = _VERB_LABEL.get(action, action.replace("_", " "))
+    obj = payload.get("title") or payload.get("target") or payload.get("broadcast_id")
+    outcome = payload.get("status") or payload.get("reaction") or ""
+    if action in ("follow", "unfollow", "co_create", "send_dm"):
+        return f"{verb} {obj}" if obj else verb
+    if action == "react":
+        return f"reacted {payload.get('reaction', '')} to broadcast #{obj}".strip()
+    if action == "comment":
+        return f"commented on broadcast #{obj}" if obj else "commented"
+    if obj and outcome:
+        return f"{verb} \"{obj}\" ({outcome})"
+    if obj:
+        return f"{verb} \"{obj}\""
+    return verb
+
+
 async def _append_receipt(agent_id: str, action: str, payload: dict, tier: int = 0) -> str:
     try:
         payload_hash = _hashlib_receipts.sha256(
             _json_receipts.dumps(payload, sort_keys=True).encode()
         ).hexdigest()
         severity = _SEVERITY_MAP.get(action, "Advisory")
+        summary = _format_receipt_summary(action, payload)
         async with get_db() as db:
             row = await (await db.execute(
                 "SELECT receipt_hash FROM receipts ORDER BY id DESC LIMIT 1"
@@ -212,9 +246,9 @@ async def _append_receipt(agent_id: str, action: str, payload: dict, tier: int =
             ).hexdigest()
             await db.execute(
                 """INSERT OR IGNORE INTO receipts
-                   (agent_id, action, payload_hash, previous_hash, receipt_hash, tier, severity)
-                   VALUES (?,?,?,?,?,?,?)""",
-                (agent_id, action, payload_hash, previous_hash, receipt_hash, tier, severity),
+                   (agent_id, action, payload_hash, previous_hash, receipt_hash, tier, severity, summary)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (agent_id, action, payload_hash, previous_hash, receipt_hash, tier, severity, summary),
             )
             await db.commit()
             return receipt_hash

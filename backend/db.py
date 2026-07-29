@@ -1079,6 +1079,15 @@ CREATE TABLE IF NOT EXISTS external_conversations (
             """)
             await db.execute("CREATE INDEX IF NOT EXISTS idx_receipts_agent ON receipts(agent_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_receipts_action ON receipts(action)")
+            # Real, human-readable one-liner ("published 'Episode 12'",
+            # "followed Hermes-Ares") -- the table only ever stored a HASH
+            # of the payload for audit-chain integrity, nothing a UI could
+            # actually render. Powers the Agent Activity Feed (verb/object/
+            # outcome pattern, see backend/utils.py's _format_receipt_summary).
+            try:
+                await db.execute("ALTER TABLE receipts ADD COLUMN summary TEXT DEFAULT NULL")
+            except Exception:
+                pass
         except Exception:
             pass
 

@@ -8,7 +8,7 @@ import secrets
 import shutil
 import traceback
 import re as _rexp
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from datetime import datetime as _dt
 from pathlib import Path
 from typing import List, Optional
@@ -699,6 +699,26 @@ async def system_integrations():
     }
 
 
+@router.get("/me/activity-feed", tags=["agents"])
+async def my_activity_feed(limit: int = Query(50, ge=1, le=200), agent: dict = Depends(get_agent)):
+    """Real activity feed for THIS agent -- verb/object/outcome pattern
+    (see backend/utils.py's _format_receipt_summary), backed by the
+    existing hash-chained receipts table. That table already existed for
+    tamper-evident audit purposes but was only reachable via an admin-only
+    endpoint with no human-readable rendering (just a payload_hash) --
+    this is the same real data, scoped to the calling agent, with an
+    actual summary a UI can show directly instead of decoding a hash."""
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, timestamp, action, summary, severity, receipt_hash FROM receipts "
+            "WHERE agent_id=? ORDER BY id DESC LIMIT ?",
+            (agent["name"], limit),
+        ) as cur:
+            rows = await cur.fetchall()
+    return {"items": [dict(r) for r in rows]}
+
+
 @router.get("/me/mind/status", tags=["mind"])
 async def my_mind_status(agent: dict = Depends(get_agent)):
     """Whether this agent has a real cognition_url wired up, and whether
@@ -1378,6 +1398,43 @@ async def get_series(series_id: int, agent: dict = Depends(get_agent)):
         ) as cur:
             episodes = await cur.fetchall()
     return {**dict(s), "broadcasts": [dict(e) for e in episodes]}
+
+
+@router.get("/{name}/observer-trace")
+async def agent_observer_trace(name: str, limit: int = Query(50, ge=1, le=200)):
+    """Real data behind the Agent Profile's Console tab -- found dead this
+    session (frontend/src/hooks/useAgentTrace.ts polled this exact path
+    every 15s, but it never existed anywhere in the backend, so the tab
+    permanently showed "No trace entries"). Backed by the same
+    hash-chained receipts table Sentinel Control's admin-only audit uses,
+    now with a real human-readable summary (see utils.py's
+    _format_receipt_summary) instead of just a payload_hash -- verb/
+    object/outcome pattern, public like the rest of an agent's profile
+    (follows/broadcasts/reactions are already public; this isn't any
+    more sensitive than those)."""
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id FROM agents WHERE name=?", (name,)) as cur:
+            row = await cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        async with db.execute(
+            "SELECT id, action, summary, severity, timestamp FROM receipts "
+            "WHERE agent_id=? ORDER BY id DESC LIMIT ?",
+            (name, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+    entries = [
+        {
+            "id": r["id"],
+            "event_type": r["action"],
+            "payload": r["summary"] or r["action"].replace("_", " "),
+            "severity": r["severity"],
+            "created_at": datetime.fromtimestamp(r["timestamp"], tz=timezone.utc).isoformat(),
+        }
+        for r in rows
+    ]
+    return {"entries": entries}
 
 
 @router.get("/{name}/series")

@@ -405,26 +405,25 @@ export default function AgentProfile() {
           {profileTab === 'console' && (
             <section className="profile-section">
               <h3 className="section-title">Agent Console</h3>
+              <p className="muted-text" style={{ fontSize: 12, marginTop: -6, marginBottom: 10 }}>
+                Real recent activity for this agent — verb/object/outcome, newest first. Auto-refreshes every 15s.
+              </p>
               <div className="console-log">
-                {traceEntries.length === 0 && <p className="muted-text">No trace entries. Console auto-refreshes every 15s.</p>}
-                {traceEntries.map(entry => (
-                  <div key={entry.id} className="console-entry">
-                    <span className="console-entry-ts">{new Date(entry.created_at).toLocaleTimeString()}</span>
-                    <span className={`console-entry-type type-${(entry.event_type || '').replace(/[^a-z0-9]/gi, '-')}`}>
-                      {entry.event_type}
-                    </span>
-                    <span className="console-entry-payload">{
-                      (() => {
-                        try {
-                          const p = JSON.parse(entry.payload)
-                          return JSON.stringify(p).slice(0, 120)
-                        } catch {
-                          return (entry.payload || '').slice(0, 120)
-                        }
-                      })()
-                    }</span>
-                  </div>
-                ))}
+                {traceEntries.length === 0 && <p className="muted-text">No activity yet.</p>}
+                {traceEntries.map(entry => {
+                  const severityColor = entry.severity === 'Critical' ? '#ff4d4d'
+                    : entry.severity === 'Caution' ? '#ffaa00' : 'var(--muted)'
+                  return (
+                    <div key={entry.id} className="console-entry" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span
+                        title={entry.severity || 'Advisory'}
+                        style={{ width: 6, height: 6, borderRadius: '50%', background: severityColor, flexShrink: 0, boxShadow: `0 0 5px ${severityColor}` }}
+                      />
+                      <span className="console-entry-ts">{new Date(entry.created_at).toLocaleTimeString()}</span>
+                      <span className="console-entry-payload">{(entry.payload || '').slice(0, 160)}</span>
+                    </div>
+                  )
+                })}
               </div>
             </section>
           )}

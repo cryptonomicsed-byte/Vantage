@@ -5,6 +5,7 @@ export interface TraceEntry {
   event_type: string
   payload: string
   created_at: string
+  severity?: string
 }
 
 export function useAgentTrace(agentName: string | undefined) {
