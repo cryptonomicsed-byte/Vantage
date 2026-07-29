@@ -90,6 +90,42 @@ async def _log_action(unit: str, action: str, admin_key: str) -> None:
         logging.getLogger(__name__).warning(f"daemon_actions audit log failed for {unit}/{action}: {e}")
 
 
+HIGH_RESTART_THRESHOLD = 10
+
+
+async def _daemon_restart_stats() -> dict[str, dict]:
+    """NRestarts/ActiveEnterTimestamp per unit, straight from systemd.
+
+    `running` alone (the only signal this endpoint exposed before) can't
+    tell a healthy daemon from one crash-looping every few seconds --
+    systemd reports "active/running" for both, because between crashes it
+    IS briefly running again. This is not hypothetical: Zàngbétò crash-
+    looped 17,132+ times before being caught, invisible to this exact
+    check the whole time. NRestarts makes that visible without touching
+    any of the 35 daemons' own code -- systemd already tracks it, this
+    endpoint just wasn't reading it."""
+    code, out, err = await _systemctl(
+        "show", "ares-*.service",
+        "--property=Id,NRestarts,ActiveEnterTimestamp",
+    )
+    if code != 0:
+        return {}
+    stats: dict[str, dict] = {}
+    current: dict = {}
+    for line in out.splitlines():
+        if not line.strip():
+            if current.get("Id"):
+                stats[current["Id"]] = current
+            current = {}
+            continue
+        if "=" in line:
+            k, _, v = line.partition("=")
+            current[k] = v
+    if current.get("Id"):
+        stats[current["Id"]] = current
+    return stats
+
+
 @router.get("")
 async def list_daemons(_: str = Depends(get_admin)):
     """Every ares-*.service unit and its live state, straight from systemd
@@ -102,6 +138,7 @@ async def list_daemons(_: str = Depends(get_admin)):
     )
     if code != 0:
         raise HTTPException(500, f"systemctl list-units failed: {err.strip()}")
+    restart_stats = await _daemon_restart_stats()
     daemons = []
     for line in out.splitlines():
         parts = line.split(None, 4)
@@ -111,6 +148,8 @@ async def list_daemons(_: str = Depends(get_admin)):
         description = parts[4] if len(parts) > 4 else ""
         if not _UNIT_RE.match(unit):
             continue
+        stat = restart_stats.get(unit, {})
+        n_restarts = int(stat.get("NRestarts") or 0)
         daemons.append({
             "unit": unit,
             "name": unit.removeprefix("ares-").removesuffix(".service"),
@@ -119,9 +158,20 @@ async def list_daemons(_: str = Depends(get_admin)):
             "sub": sub,
             "running": active == "active" and sub == "running",
             "description": description,
+            "n_restarts": n_restarts,
+            "active_since": stat.get("ActiveEnterTimestamp") or None,
+            # Real, generic signal a stopped/started daemon still passes:
+            # a high NRestarts count means systemd has been repeatedly
+            # relaunching it (Restart=always masking a crash loop), not
+            # that it's been reliably up.
+            "crash_looping": n_restarts >= HIGH_RESTART_THRESHOLD,
         })
     daemons.sort(key=lambda d: d["name"])
-    return {"daemons": daemons, "count": len(daemons)}
+    return {
+        "daemons": daemons,
+        "count": len(daemons),
+        "crash_looping_count": sum(1 for d in daemons if d["crash_looping"]),
+    }
 
 
 class DaemonActionResult(BaseModel):
