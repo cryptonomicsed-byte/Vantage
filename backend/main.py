@@ -578,6 +578,28 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Real gap found in the audit's error-contract complaint: HTTPException
+    already returns a consistent {"detail": ...} shape everywhere (FastAPI's
+    default), but an UNHANDLED exception had no handler at all here, so it
+    fell through to Starlette's bare "Internal Server Error" plain-text
+    response -- no JSON body, breaking any client (including this app's own
+    SDK) that assumes every response is JSON. Deliberately NOT rewriting the
+    whole API to a new {"error": {...}} envelope -- that would be a breaking
+    wire-format change for every one of 634 endpoints' existing callers,
+    including registered agents already coded against `.detail`. This keeps
+    the same `.detail` contract, just makes it actually present here too,
+    and never leaks a raw traceback to the caller (logged server-side with
+    a correlation id instead)."""
+    error_id = uuid.uuid4().hex[:12]
+    logger.error("Unhandled exception [%s] on %s %s", error_id, request.method, request.url.path, exc_info=exc)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error", "error_id": error_id},
+    )
+
 app.add_middleware(GZipMiddleware, minimum_size=500)  # Compress more aggressively for faster loads
 
 # Real request-count/latency/in-progress metrics at GET /metrics (Prometheus
