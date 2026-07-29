@@ -523,6 +523,14 @@ async def init_agents_db() -> None:
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_agent_state_agent ON agent_state(agent_id)")
         await db.execute("""
+            CREATE TABLE IF NOT EXISTS rate_limit_counters (
+                key_hash TEXT NOT NULL,
+                window_start INTEGER NOT NULL,
+                count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (key_hash, window_start)
+            )
+        """)
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS honeypot_hits (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 path TEXT NOT NULL,

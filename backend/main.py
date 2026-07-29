@@ -37,31 +37,56 @@ logger = logging.getLogger(__name__)
 limiter = Limiter(key_func=get_remote_address)
 FFMPEG_AVAILABLE = False
 
-# Per-API-key rate limiting: {api_key: [timestamp1, timestamp2, ...]}
-_api_key_requests: dict[str, list] = {}
 RATE_LIMIT_REQUESTS_PER_MINUTE = 100
 
-def _check_api_key_rate_limit(api_key: str) -> bool:
-    """Check if API key has exceeded rate limit (100 req/min). Returns True if OK."""
+async def _check_api_key_rate_limit(api_key: str) -> bool:
+    """Check if API key has exceeded rate limit (100 req/min). Returns True if OK.
+
+    Was a plain in-memory dict of timestamp lists -- reset on every restart
+    (a real burst window every deploy), and grew forever per distinct key
+    ever seen with no eviction. Replaced with a DB-backed fixed-window
+    counter (rate_limit_counters, PK on key_hash+window_start) instead of
+    Redis: Vantage already runs SQLite in WAL mode with busy_timeout for
+    everything else, and per-minute UPSERT buckets (not one row per
+    request) keep this cheap rather than turning every API call into its
+    own write, which would undermine the concurrency work just done
+    elsewhere this session."""
     if not api_key:
         return True  # No key means no per-key rate limiting
 
-    now = time.time()
-    minute_ago = now - 60
+    key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+    window_start = int(time.time() // 60) * 60
 
-    if api_key not in _api_key_requests:
-        _api_key_requests[api_key] = []
+    async with get_db() as db:
+        cur = await db.execute(
+            """INSERT INTO rate_limit_counters (key_hash, window_start, count)
+               VALUES (?, ?, 1)
+               ON CONFLICT(key_hash, window_start) DO UPDATE SET count = count + 1
+               RETURNING count""",
+            (key_hash, window_start),
+        )
+        row = await cur.fetchone()
+        await db.commit()
 
-    # Remove old requests outside the window
-    _api_key_requests[api_key] = [t for t in _api_key_requests[api_key] if t > minute_ago]
+    return (row[0] if row else 1) <= RATE_LIMIT_REQUESTS_PER_MINUTE
 
-    # Check if over limit
-    if len(_api_key_requests[api_key]) >= RATE_LIMIT_REQUESTS_PER_MINUTE:
-        return False
 
-    # Add current request
-    _api_key_requests[api_key].append(now)
-    return True
+async def _prune_rate_limit_counters():
+    """Drop counter rows for windows more than a few minutes old -- keeps
+    the table small; nothing needs history beyond the current window."""
+    cutoff = int(time.time() // 60) * 60 - 300
+    async with get_db() as db:
+        await db.execute("DELETE FROM rate_limit_counters WHERE window_start < ?", (cutoff,))
+        await db.commit()
+
+
+async def _rate_limit_prune_loop():
+    while True:
+        try:
+            await _prune_rate_limit_counters()
+        except Exception as e:
+            logger.warning("rate limit counter prune failed: %s", e)
+        await asyncio.sleep(300)
 
 # Per-peer circuit breaker state (in-memory; DB columns shadow for observability)
 # Structure: {peer_id: {"failures": int, "open_until": float}}
@@ -484,12 +509,13 @@ async def lifespan(app: FastAPI):
     gossip_task = asyncio.create_task(_federation_gossip_loop())
     watch_task = asyncio.create_task(_platform_subscription_loop())
     weather_task = asyncio.create_task(_weather_alert_loop())
+    rate_limit_prune_task = asyncio.create_task(_rate_limit_prune_loop())
 
     from .agenttv_channel import start_all_channels as _start_all_agenttv_channels
     await _start_all_agenttv_channels()
 
     yield
-    for t in (task, gossip_task, watch_task, weather_task):
+    for t in (task, gossip_task, watch_task, weather_task, rate_limit_prune_task):
         t.cancel()
         try:
             await t
@@ -597,7 +623,7 @@ async def api_key_rate_limit_middleware(request: Request, call_next):
     """Rate limit /api/* endpoints by API key (100 requests/minute)."""
     if request.url.path.startswith("/api/"):
         api_key = request.headers.get("X-Agent-Key", "")
-        if not _check_api_key_rate_limit(api_key):
+        if not await _check_api_key_rate_limit(api_key):
             return JSONResponse(
                 status_code=429,
                 content={"detail": f"Rate limit exceeded (100 requests/minute per API key)"},
