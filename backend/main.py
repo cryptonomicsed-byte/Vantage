@@ -785,6 +785,54 @@ async def feed_ws(ws: WebSocket):
         _feed_clients.discard(ws)
 
 
+async def _ws_agent_id(ws: WebSocket) -> int | None:
+    """WebSocket has no custom-header support in browsers, so auth here
+    comes via a `key` query param instead of X-Agent-Key -- same
+    sha256-hash-then-lookup as the real REST get_agent dependency."""
+    key = ws.query_params.get("key", "")
+    if not key:
+        return None
+    hashed = hashlib.sha256(key.encode()).hexdigest()
+    async with get_db() as db:
+        cur = await db.execute("SELECT id FROM agents WHERE api_key=?", (hashed,))
+        row = await cur.fetchone()
+    return row[0] if row else None
+
+
+async def _ws_channel_authorized(channel: str, agent_id: int | None) -> bool:
+    """Real authorization gap found while wiring this up: room:{id} and
+    block.{id} gossip channels broadcast membership/scratchpad-activity
+    events for rooms/blocks that the REST API (/rooms/{id}/scratchpad,
+    mesh join/leave) already gates by membership -- but any unauthenticated
+    WebSocket client could subscribe to ANY room/block channel by guessing
+    or observing its id, with zero membership check, and see who's active
+    and what keys changed (not the scratchpad content itself, which stays
+    REST-gated -- but real activity/membership leakage regardless). Public
+    channels (swarm/guild.events/tro/debates/agenttv/etc) are intentionally
+    open to anyone, including anonymous dashboard viewers (ActivityTicker,
+    SwarmMap) -- only room:*/block.* get a real membership check here,
+    matching what their REST endpoints already enforce."""
+    if channel.startswith("room:"):
+        if agent_id is None:
+            return False
+        room_id = channel[len("room:"):]
+        async with get_db() as db:
+            cur = await db.execute(
+                "SELECT 1 FROM room_members WHERE room_id=? AND agent_id=?", (room_id, agent_id)
+            )
+            return (await cur.fetchone()) is not None
+    if channel.startswith("block."):
+        if agent_id is None:
+            return False
+        block_id = channel[len("block."):]
+        async with get_db() as db:
+            cur = await db.execute(
+                "SELECT 1 FROM mesh_agents WHERE block_id=? AND agent_id=?", (block_id, agent_id)
+            )
+            return (await cur.fetchone()) is not None
+    return True  # public channel, unchanged behavior
+
+
 @app.websocket("/ws/gossip")
 async def gossip_ws(ws: WebSocket, channel: str = "swarm.system.alerts"):
     """Agent-to-Agent Event Bus WebSocket. Subscribe to a named channel for live events.
@@ -793,6 +841,10 @@ async def gossip_ws(ws: WebSocket, channel: str = "swarm.system.alerts"):
     real-time mesh events (proposals, resource reservations, agent join/leave, signals).
     """
     await ws.accept()
+    agent_id = await _ws_agent_id(ws)
+    if not await _ws_channel_authorized(channel, agent_id):
+        await ws.close(code=4403, reason="not a member of this room/block")
+        return
     if channel not in _gossip_channels:
         _gossip_channels[channel] = set()
     _gossip_channels[channel].add(ws)

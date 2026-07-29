@@ -172,7 +172,11 @@ function RoomCanvas({ roomId }: { roomId: string }) {
 
   useEffect(() => {
     loadRoom()
-    const ws = new WebSocket(`wss://${location.host}/ws/gossip?channel=room:${roomId}`)
+    // room:* channels now require real membership (backend checks
+    // room_members) since WS has no custom-header support -- pass the key
+    // as a query param, same as the REST calls this component already
+    // makes with X-Agent-Key.
+    const ws = new WebSocket(`wss://${location.host}/ws/gossip?channel=room:${roomId}&key=${encodeURIComponent(apiKey)}`)
     ws.onmessage = e => {
       try {
         const msg = JSON.parse(e.data)
