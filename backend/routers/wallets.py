@@ -11,13 +11,13 @@ Private keys and Alchemy tokens never exposed to agents.
 """
 import os
 import json
-import sqlite3
 import secrets
 import hashlib
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, Header, HTTPException, Query, Body
 from pydantic import BaseModel
+import aiosqlite
 
 from ..config import settings
 from ..crypto_utils import encrypt_key_for_agent, decrypt_key_for_agent
@@ -46,7 +46,18 @@ class SignTransactionRequest(BaseModel):
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
-def get_agent_id(x_agent_key: str) -> Optional[int]:
+async def _db():
+    """Real async connection with busy_timeout -- every endpoint in this
+    router used to open a blocking sqlite3.connect() (no busy_timeout at
+    all) inside an `async def` handler, stalling the whole event loop for
+    every other in-flight request while it ran, and failing outright with
+    "database is locked" under any real write concurrency."""
+    conn = await aiosqlite.connect(DB_PATH)
+    await conn.execute("PRAGMA busy_timeout=20000")
+    return conn
+
+
+async def get_agent_id(x_agent_key: str) -> Optional[int]:
     """Resolve X-Agent-Key header to agent_id.
 
     Was comparing the raw header value directly against agents.api_key --
@@ -56,64 +67,66 @@ def get_agent_id(x_agent_key: str) -> Optional[int]:
     unconditionally 401ing for real callers. Fixed to hash first."""
     try:
         hashed = hashlib.sha256(x_agent_key.encode()).hexdigest()
-        db = sqlite3.connect(DB_PATH)
-        row = db.execute(
-            "SELECT id FROM agents WHERE api_key = ?",
-            (hashed,)
-        ).fetchone()
-        db.close()
-        return row[0] if row else None
+        db = await _db()
+        try:
+            cur = await db.execute("SELECT id FROM agents WHERE api_key = ?", (hashed,))
+            row = await cur.fetchone()
+            return row[0] if row else None
+        finally:
+            await db.close()
     except Exception:
         return None
 
 
-def init_wallet_tables():
+async def init_wallet_tables():
     """Create wallet tables if they don't exist."""
     try:
-        db = sqlite3.connect(DB_PATH)
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS agent_wallets (
-                id TEXT PRIMARY KEY,
-                agent_id INTEGER NOT NULL,
-                type TEXT NOT NULL,
-                address TEXT NOT NULL,
+        db = await _db()
+        try:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS agent_wallets (
+                    id TEXT PRIMARY KEY,
+                    agent_id INTEGER NOT NULL,
+                    type TEXT NOT NULL,
+                    address TEXT NOT NULL,
 
-                private_key_encrypted TEXT,
-                private_key_salt TEXT,
+                    private_key_encrypted TEXT,
+                    private_key_salt TEXT,
 
-                alchemy_session_token TEXT,
-                alchemy_capabilities TEXT,
-                alchemy_approval_expires_at TEXT,
+                    alchemy_session_token TEXT,
+                    alchemy_capabilities TEXT,
+                    alchemy_approval_expires_at TEXT,
 
-                name TEXT,
-                network TEXT DEFAULT 'solana',
-                created_at TEXT,
-                last_used_at TEXT,
+                    name TEXT,
+                    network TEXT DEFAULT 'solana',
+                    created_at TEXT,
+                    last_used_at TEXT,
 
-                FOREIGN KEY (agent_id) REFERENCES agents(id)
-            )
-        """)
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS agent_wallet_signatures (
-                id TEXT PRIMARY KEY,
-                wallet_id TEXT NOT NULL,
-                agent_id INTEGER NOT NULL,
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS agent_wallet_signatures (
+                    id TEXT PRIMARY KEY,
+                    wallet_id TEXT NOT NULL,
+                    agent_id INTEGER NOT NULL,
 
-                intent TEXT,
-                transaction_preview TEXT,
-                signed_tx TEXT,
+                    intent TEXT,
+                    transaction_preview TEXT,
+                    signed_tx TEXT,
 
-                vantage_signed BOOLEAN,
-                agent_approved BOOLEAN,
+                    vantage_signed BOOLEAN,
+                    agent_approved BOOLEAN,
 
-                created_at TEXT,
+                    created_at TEXT,
 
-                FOREIGN KEY (wallet_id) REFERENCES agent_wallets(id),
-                FOREIGN KEY (agent_id) REFERENCES agents(id)
-            )
-        """)
-        db.commit()
-        db.close()
+                    FOREIGN KEY (wallet_id) REFERENCES agent_wallets(id),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.commit()
+        finally:
+            await db.close()
     except Exception as e:
         print(f"Wallet table init failed: {e}")
 
@@ -145,16 +158,15 @@ async def create_wallet(
 ):
     """Create a wallet for an agent (custom or Alchemy)."""
     # Verify agent owns this key
-    real_agent_id = get_agent_id(x_agent_key)
+    real_agent_id = await get_agent_id(x_agent_key)
     if not real_agent_id or real_agent_id != agent_id:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    init_wallet_tables()
+    await init_wallet_tables()
     wallet_id = f"wal_{request.type}_{secrets.token_hex(8)}"
+    db = await _db()
 
     try:
-        db = sqlite3.connect(DB_PATH)
-
         if request.type == "custom":
             # NOTE (real functional gap, separate from the encryption fix
             # below): private_key and address here are still two
@@ -173,7 +185,7 @@ async def create_wallet(
             # Derive address from private key (placeholder)
             address = f"0x{secrets.token_hex(20)}"
 
-            db.execute("""
+            await db.execute("""
                 INSERT INTO agent_wallets
                 (id, agent_id, type, address, private_key_encrypted, name, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -194,7 +206,7 @@ async def create_wallet(
             if not ALCHEMY_WALLET_ADDRESS:
                 raise HTTPException(status_code=500, detail="Alchemy not configured")
 
-            db.execute("""
+            await db.execute("""
                 INSERT INTO agent_wallets
                 (id, agent_id, type, address, alchemy_session_token, name, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -214,12 +226,18 @@ async def create_wallet(
         else:
             raise HTTPException(status_code=400, detail="Invalid wallet type")
 
-        db.commit()
-        db.close()
+        await db.commit()
         return response
 
+    except HTTPException:
+        # Was falling through to the broad `except Exception` below, which
+        # wrapped even intentional 400s (invalid type)/500s (Alchemy not
+        # configured) into a generic 500 -- re-raise as-is instead.
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        await db.close()
 
 
 @router.get("/{agent_id}/wallets")
@@ -228,16 +246,16 @@ async def list_wallets(
     x_agent_key: str = Header(...)
 ):
     """List all wallets for an agent."""
-    real_agent_id = get_agent_id(x_agent_key)
+    real_agent_id = await get_agent_id(x_agent_key)
     if not real_agent_id or real_agent_id != agent_id:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    init_wallet_tables()
+    await init_wallet_tables()
+    db = await _db()
+    db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
 
     try:
-        db = sqlite3.connect(DB_PATH)
-        db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
-        rows = db.execute(
+        cur = await db.execute(
             """
             SELECT id, type, address, name, network, created_at, last_used_at
             FROM agent_wallets
@@ -245,8 +263,8 @@ async def list_wallets(
             ORDER BY created_at DESC
             """,
             (agent_id,)
-        ).fetchall()
-        db.close()
+        )
+        rows = await cur.fetchall()
 
         return {
             "agent_id": agent_id,
@@ -254,6 +272,8 @@ async def list_wallets(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        await db.close()
 
 
 @router.get("/{agent_id}/wallets/{wallet_id}")
@@ -263,24 +283,24 @@ async def get_wallet(
     x_agent_key: str = Header(...)
 ):
     """Get wallet details (NO private key exposed)."""
-    real_agent_id = get_agent_id(x_agent_key)
+    real_agent_id = await get_agent_id(x_agent_key)
     if not real_agent_id or real_agent_id != agent_id:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    init_wallet_tables()
+    await init_wallet_tables()
+    db = await _db()
+    db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
 
     try:
-        db = sqlite3.connect(DB_PATH)
-        db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
-        wallet = db.execute(
+        cur = await db.execute(
             """
             SELECT id, type, address, name, network, created_at, last_used_at
             FROM agent_wallets
             WHERE id = ? AND agent_id = ?
             """,
             (wallet_id, agent_id)
-        ).fetchone()
-        db.close()
+        )
+        wallet = await cur.fetchone()
 
         if not wallet:
             raise HTTPException(status_code=404, detail="Wallet not found")
@@ -293,6 +313,8 @@ async def get_wallet(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        await db.close()
 
 
 @router.post("/{agent_id}/wallets/{wallet_id}/sign")
@@ -303,23 +325,22 @@ async def sign_transaction(
     x_agent_key: str = Header(...)
 ):
     """Agent signs a transaction (Vantage signs on their behalf, private key never exposed)."""
-    real_agent_id = get_agent_id(x_agent_key)
+    real_agent_id = await get_agent_id(x_agent_key)
     if not real_agent_id or real_agent_id != agent_id:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    init_wallet_tables()
+    await init_wallet_tables()
+    db = await _db()
 
     try:
-        db = sqlite3.connect(DB_PATH)
-
         # Verify wallet exists and belongs to agent
-        wallet = db.execute(
+        cur = await db.execute(
             "SELECT id, type, address FROM agent_wallets WHERE id = ? AND agent_id = ?",
             (wallet_id, agent_id)
-        ).fetchone()
+        )
+        wallet = await cur.fetchone()
 
         if not wallet:
-            db.close()
             raise HTTPException(status_code=404, detail="Wallet not found")
 
         # Create signature record
@@ -330,14 +351,13 @@ async def sign_transaction(
         # For now, return a mock signed tx
         signed_tx = f"0x_signed_{secrets.token_hex(32)}"
 
-        db.execute("""
+        await db.execute("""
             INSERT INTO agent_wallet_signatures
             (id, wallet_id, agent_id, intent, transaction_preview, signed_tx, vantage_signed, agent_approved, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (sig_id, wallet_id, agent_id, request.intent, tx_preview, signed_tx, True, False, datetime.utcnow().isoformat()))
 
-        db.commit()
-        db.close()
+        await db.commit()
 
         return {
             "signed_tx": signed_tx,
@@ -353,6 +373,8 @@ async def sign_transaction(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        await db.close()
 
 
 @router.post("/{agent_id}/wallets/{wallet_id}/alchemy/approve")
@@ -364,34 +386,32 @@ async def approve_alchemy_session(
     x_agent_key: str = Header(...)
 ):
     """Agent requests Alchemy session approval."""
-    real_agent_id = get_agent_id(x_agent_key)
+    real_agent_id = await get_agent_id(x_agent_key)
     if not real_agent_id or real_agent_id != agent_id:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    init_wallet_tables()
+    await init_wallet_tables()
+    db = await _db()
 
     try:
-        db = sqlite3.connect(DB_PATH)
-
-        wallet = db.execute(
+        cur = await db.execute(
             "SELECT id, type FROM agent_wallets WHERE id = ? AND agent_id = ?",
             (wallet_id, agent_id)
-        ).fetchone()
+        )
+        wallet = await cur.fetchone()
 
         if not wallet or wallet[1] != "alchemy":
-            db.close()
             raise HTTPException(status_code=404, detail="Alchemy wallet not found")
 
         expires_at = (datetime.utcnow() + timedelta(days=expires_in_days)).isoformat()
 
-        db.execute("""
+        await db.execute("""
             UPDATE agent_wallets
             SET alchemy_capabilities = ?, alchemy_approval_expires_at = ?
             WHERE id = ?
         """, (json.dumps(capabilities), expires_at, wallet_id))
 
-        db.commit()
-        db.close()
+        await db.commit()
 
         return {
             "wallet_id": wallet_id,
@@ -406,7 +426,11 @@ async def approve_alchemy_session(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        await db.close()
 
 
-# Initialize tables on import
-init_wallet_tables()
+# Table init now happens from main.py's async startup lifespan (see
+# init_wallet_tables() call there) -- this function is async now (real
+# aiosqlite instead of blocking sqlite3.connect()), so it can no longer
+# run bare at module-import time with no event loop present.

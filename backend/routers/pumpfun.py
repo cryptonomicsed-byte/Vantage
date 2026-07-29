@@ -1,20 +1,41 @@
 """Pump.fun Degen Trenches — Solana meme coin alpha.
 Data: GeckoTerminal (real-time Solana pools), Birdeye (prices), Jupiter (quotes)
 """
-import json, os, urllib.request, hashlib, sqlite3
+import json, os, urllib.request, hashlib
 from pathlib import Path
 from fastapi import APIRouter, Query, HTTPException, Header
+import aiosqlite
 
 router = APIRouter(prefix="/api/intel/pumpfun", tags=["pumpfun"])
 DB = Path("/opt/ares/Vantage/data/vantage.db")
 BIRDEYE = os.environ.get("BIRDEYE_KEY", "")
 HELIUS = os.environ.get("HELIUS_API_KEY", "")
 
-def get_agent(key):
+
+async def _db():
+    """Real async connection with busy_timeout -- this router used to open
+    a blocking sqlite3.connect() (no busy_timeout at all) on every single
+    request, inside an `async def` handler, stalling the whole event loop
+    for every other in-flight request while it ran, and failing outright
+    with "database is locked" under any real write concurrency."""
+    conn = await aiosqlite.connect(str(DB))
+    await conn.execute("PRAGMA busy_timeout=20000")
+    # dict rows (not aiosqlite.Row) -- matches the original hand-rolled
+    # row_factory exactly, since downstream code calls .get() on rows,
+    # which sqlite3.Row/aiosqlite.Row doesn't support.
+    conn.row_factory = lambda cur, row: dict(zip([c[0] for c in cur.description], row))
+    return conn
+
+
+async def get_agent(key):
     h = hashlib.sha256(key.encode()).hexdigest()
-    db = sqlite3.connect(str(DB)); db.row_factory = lambda c,r: dict(zip([col[0] for col in c.description], r))
-    r = db.execute("SELECT id, name FROM agents WHERE api_key=?", (h,)).fetchone(); db.close()
-    return dict(r) if r else None
+    db = await _db()
+    try:
+        cur = await db.execute("SELECT id, name FROM agents WHERE api_key=?", (h,))
+        r = await cur.fetchone()
+        return dict(r) if r else None
+    finally:
+        await db.close()
 
 def _fetch(url, headers=None, timeout=10):
     h = headers or {}
@@ -38,7 +59,7 @@ def _mint_from_pool(p: dict) -> str:
 
 @router.get("/new-launches")
 async def new_launches(limit: int=20, x_agent_key: str=Header(...)):
-    get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
+    if not await get_agent(x_agent_key): raise HTTPException(401)
     try:
         d = _fetch(f"https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=1", {"accept":"application/json"})
         pools = d.get("data",[])
@@ -59,7 +80,7 @@ async def new_launches(limit: int=20, x_agent_key: str=Header(...)):
 # ════════════════════════════════════════════════════════════════
 @router.get("/trending")
 async def trending(limit: int=20, x_agent_key: str=Header(...)):
-    get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
+    if not await get_agent(x_agent_key): raise HTTPException(401)
     try:
         d = _fetch("https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1", {"accept":"application/json"})
         pools = d.get("data",[])
@@ -83,7 +104,7 @@ async def trending(limit: int=20, x_agent_key: str=Header(...)):
 # ════════════════════════════════════════════════════════════════
 @router.get("/bonding-curve")
 async def bonding_curve(mint: str=Query(...), x_agent_key: str=Header(...)):
-    get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
+    if not await get_agent(x_agent_key): raise HTTPException(401)
     try:
         d = _fetch(f"https://public-api.birdeye.so/defi/price?address={mint}", {"X-API-KEY": BIRDEYE, "accept":"application/json"})
         price = float(d.get("data",{}).get("value",0))
@@ -106,7 +127,7 @@ async def bonding_curve(mint: str=Query(...), x_agent_key: str=Header(...)):
 # ════════════════════════════════════════════════════════════════
 @router.get("/graduations")
 async def graduations(limit: int=20, x_agent_key: str=Header(...)):
-    get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
+    if not await get_agent(x_agent_key): raise HTTPException(401)
     try:
         d = _fetch("https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1", {"accept":"application/json"})
         pools = d.get("data",[])
@@ -130,7 +151,7 @@ async def graduations(limit: int=20, x_agent_key: str=Header(...)):
 
 @router.get("/trades/{mint}")
 async def trades(mint: str, limit: int=20, x_agent_key: str=Header(...)):
-    get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
+    if not await get_agent(x_agent_key): raise HTTPException(401)
     try:
         d = _fetch(f"https://quote-api.jup.ag/v6/quote?inputMint={mint}&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=1000000&slippageBps=50")
         return {"mint":mint,"in_amount":d.get("inAmount",0),"out_amount":d.get("outAmount",0),"price_impact_pct":float(d.get("priceImpactPct",0)),"routes":len(d.get("routePlan",[])),"source":"Jupiter"}
@@ -139,7 +160,7 @@ async def trades(mint: str, limit: int=20, x_agent_key: str=Header(...)):
 
 @router.get("/risk/{mint}")
 async def risk(mint: str, x_agent_key: str=Header(...)):
-    get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
+    if not await get_agent(x_agent_key): raise HTTPException(401)
     try:
         d = _fetch(f"https://public-api.birdeye.so/defi/price?address={mint}", {"X-API-KEY": BIRDEYE})
         price = float(d.get("data",{}).get("value",0))
@@ -153,31 +174,50 @@ async def risk(mint: str, x_agent_key: str=Header(...)):
 
 @router.get("/watchlist")
 async def watchlist(x_agent_key: str=Header(...)):
-    get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
-    db = sqlite3.connect(str(DB)); db.row_factory = lambda c,r: dict(zip([col[0] for col in c.description], r))
-    rows = db.execute("SELECT * FROM tracked_wallets WHERE chain='pumpfun' ORDER BY created_at DESC LIMIT 50").fetchall(); db.close()
+    if not await get_agent(x_agent_key): raise HTTPException(401)
+    db = await _db()
+    try:
+        cur = await db.execute("SELECT * FROM tracked_wallets WHERE chain='pumpfun' ORDER BY created_at DESC LIMIT 50")
+        rows = await cur.fetchall()
+    finally:
+        await db.close()
     return {"watchlist":[dict(r) for r in rows],"count":len(rows)}
 
 @router.post("/watchlist")
 async def add_watchlist(mint: str=Query(...), label: str=Query(""), x_agent_key: str=Header(...)):
-    agent = get_agent(x_agent_key)
+    # NOTE: this was `agent = get_agent(x_agent_key)` with get_agent still
+    # synchronous at the time -- once get_agent became async (this pass),
+    # that would've silently assigned a coroutine object instead of awaiting
+    # it, made `if not agent` always False (coroutines are truthy), skipped
+    # the 401 entirely, and then crashed on agent["id"]. Fixed by awaiting.
+    agent = await get_agent(x_agent_key)
     if not agent: raise HTTPException(401)
-    db = sqlite3.connect(str(DB))
-    db.execute("INSERT OR IGNORE INTO tracked_wallets (chain,address,label,added_by_agent_id) VALUES (?,?,?,?)", ("pumpfun", mint, label or f"Pumpfun-{mint[:8]}", agent["id"]))
-    db.commit(); db.close()
+    db = await _db()
+    try:
+        await db.execute(
+            "INSERT OR IGNORE INTO tracked_wallets (chain,address,label,added_by_agent_id) VALUES (?,?,?,?)",
+            ("pumpfun", mint, label or f"Pumpfun-{mint[:8]}", agent["id"]),
+        )
+        await db.commit()
+    finally:
+        await db.close()
     return {"status":"added","mint":mint}
 
 @router.get("/signals")
 async def signals(limit: int=20, x_agent_key: str=Header(...)):
-    get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
-    db = sqlite3.connect(str(DB)); db.row_factory = lambda c,r: dict(zip([col[0] for col in c.description], r))
-    rows = db.execute("SELECT * FROM trading_signals WHERE type='pumpfun' ORDER BY timestamp DESC LIMIT ?", (limit,)).fetchall(); db.close()
+    if not await get_agent(x_agent_key): raise HTTPException(401)
+    db = await _db()
+    try:
+        cur = await db.execute("SELECT * FROM trading_signals WHERE type='pumpfun' ORDER BY timestamp DESC LIMIT ?", (limit,))
+        rows = await cur.fetchall()
+    finally:
+        await db.close()
     return {"signals":[dict(r) for r in rows],"count":len(rows),"source":"pumpfun"}
 
 @router.get("/detect")
 async def detect(address: str = Query(...), x_agent_key: str = Header(...)):
     """Auto-detect: wallet vs token mint (CA) on Solana via Helius RPC."""
-    get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
+    if not await get_agent(x_agent_key): raise HTTPException(401)
     try:
         payload = json.dumps({"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":[address,{"encoding":"jsonParsed"}]}).encode()
         req = urllib.request.Request(f"https://mainnet.helius-rpc.com/?api-key={HELIUS}",data=payload,headers={"Content-Type":"application/json"})
@@ -205,7 +245,7 @@ async def detect(address: str = Query(...), x_agent_key: str = Header(...)):
 @router.get("/token/holders")
 async def token_holders(mint: str = Query(...), limit: int = Query(20), x_agent_key: str = Header(...)):
     """Top token holders via Birdeye."""
-    get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
+    if not await get_agent(x_agent_key): raise HTTPException(401)
     try:
         d = _fetch(f"https://public-api.birdeye.so/defi/v3/token/holder?address={mint}&limit={limit}", {"X-API-KEY":BIRDEYE,"accept":"application/json"})
         items = d.get("data",{}).get("items",d.get("data",[]))
@@ -223,7 +263,7 @@ async def token_holders(mint: str = Query(...), limit: int = Query(20), x_agent_
 @router.get("/token/creator")
 async def token_creator(mint: str = Query(...), x_agent_key: str = Header(...)):
     """Token creator from Pump.fun frontend API."""
-    get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
+    if not await get_agent(x_agent_key): raise HTTPException(401)
     try:
         d = _fetch(f"https://frontend-api.pump.fun/coins/{mint}",{"accept":"application/json"})
         return {"mint":mint,"creator":d.get("creator",d.get("creatorAddress","")),"name":d.get("name",""),"symbol":d.get("symbol",""),"description":d.get("description","")[:200],"twitter":d.get("twitter",""),"website":d.get("website",""),"created_at":d.get("created_timestamp","")}
@@ -233,7 +273,7 @@ async def token_creator(mint: str = Query(...), x_agent_key: str = Header(...)):
 @router.get("/token/traders")
 async def token_traders(mint: str = Query(...), x_agent_key: str = Header(...)):
     """Top traders for a token via Helius RPC."""
-    get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
+    if not await get_agent(x_agent_key): raise HTTPException(401)
     try:
         import urllib.request as ur
         payload = json.dumps({"jsonrpc":"2.0","id":1,"method":"getSignaturesForAddress","params":[mint,{"limit":30}]}).encode()
@@ -272,7 +312,7 @@ async def token_traders(mint: str = Query(...), x_agent_key: str = Header(...)):
 # ════════════════════════════════════════════════════════════════
 @router.post("/trace-token/{mint}")
 async def trace_token(mint: str, symbol: str = Query(""), x_agent_key: str = Header(...)):
-    get_agent(x_agent_key) or (_ for _ in ()).throw(HTTPException(401))
+    if not await get_agent(x_agent_key): raise HTTPException(401)
     import asyncio, sys
     sys.path.insert(0, "/opt/ares")
     import pumpfun_wallet_intel as pwi
