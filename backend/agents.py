@@ -677,6 +677,86 @@ async def my_buzz_register(agent: dict = Depends(get_agent)):
         raise HTTPException(502, f"Buzz registration failed: {e}")
 
 
+# ── Buzz Workflows/Automations -- real Nostr protocol, not a REST proxy. ────
+# See buzz_workflows.py's module docstring for the exact kinds used and why
+# run-history/approval flows are deliberately excluded from this MVP.
+
+@router.get("/me/buzz/workflows")
+async def list_buzz_workflows(channel_id: Optional[str] = None, agent: dict = Depends(get_agent)):
+    from .buzz_workflows import list_workflows, DEFAULT_CHANNEL_ID
+    try:
+        return await list_workflows(agent["id"], channel_id or DEFAULT_CHANNEL_ID)
+    except Exception as e:
+        raise HTTPException(502, f"Buzz workflow list failed: {e}")
+
+
+@router.get("/me/buzz/workflows/{workflow_id}")
+async def get_buzz_workflow(workflow_id: str, agent: dict = Depends(get_agent)):
+    from .buzz_workflows import get_workflow
+    try:
+        wf = await get_workflow(agent["id"], workflow_id)
+    except Exception as e:
+        raise HTTPException(502, f"Buzz workflow lookup failed: {e}")
+    if wf is None:
+        raise HTTPException(404, "workflow not found")
+    return wf
+
+
+@router.post("/me/buzz/workflows")
+async def create_buzz_workflow(body: dict, agent: dict = Depends(get_agent)):
+    from .buzz_workflows import create_workflow, DEFAULT_CHANNEL_ID
+    definition = body.get("definition")
+    if not isinstance(definition, dict):
+        raise HTTPException(400, "body.definition (object) is required")
+    try:
+        return await create_workflow(
+            agent["id"], definition,
+            channel_id=body.get("channel_id") or DEFAULT_CHANNEL_ID,
+            workflow_id=body.get("workflow_id"),
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"Buzz workflow create failed: {e}")
+
+
+@router.put("/me/buzz/workflows/{workflow_id}")
+async def update_buzz_workflow(workflow_id: str, body: dict, agent: dict = Depends(get_agent)):
+    from .buzz_workflows import update_workflow, DEFAULT_CHANNEL_ID
+    definition = body.get("definition")
+    if not isinstance(definition, dict):
+        raise HTTPException(400, "body.definition (object) is required")
+    try:
+        return await update_workflow(
+            agent["id"], workflow_id, definition,
+            channel_id=body.get("channel_id") or DEFAULT_CHANNEL_ID,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"Buzz workflow update failed: {e}")
+
+
+@router.delete("/me/buzz/workflows/{workflow_id}")
+async def delete_buzz_workflow(workflow_id: str, agent: dict = Depends(get_agent)):
+    from .buzz_workflows import delete_workflow
+    try:
+        return await delete_workflow(agent["id"], workflow_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"Buzz workflow delete failed: {e}")
+
+
+@router.post("/me/buzz/workflows/{workflow_id}/trigger")
+async def trigger_buzz_workflow(workflow_id: str, body: Optional[dict] = None, agent: dict = Depends(get_agent)):
+    from .buzz_workflows import trigger_workflow
+    try:
+        return await trigger_workflow(agent["id"], workflow_id, (body or {}).get("inputs"))
+    except Exception as e:
+        raise HTTPException(502, f"Buzz workflow trigger failed: {e}")
+
+
 # ── Real 'mind' behind Copilot -- generic webhook contract, Omo-Koda2 is ────
 # one convenience option among several, not a hardcoded requirement. See
 # mind_link.py's module docstring for the full contract.
