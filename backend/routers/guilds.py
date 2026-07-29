@@ -14,7 +14,9 @@ from slowapi.util import get_remote_address
 from ..db import DB_PATH, get_db
 from ..deps import get_agent, _parse_body
 from ..memory_vault import MemoryVault
-from ..utils import _broadcast_gossip, notify_feed_clients
+from ..utils import _broadcast_gossip, notify_feed_clients, _create_notification
+
+_VALID_REPORT_REASONS = {"spam", "profanity", "illegal", "impersonation", "other"}
 
 _limiter = Limiter(key_func=get_remote_address)
 
@@ -445,4 +447,144 @@ async def guild_vault_note(slug: str, request: Request, agent: dict = Depends(ge
     vault._write_note(note_path, frontmatter, note_body_text)
     relative = str(note_path.relative_to(vault.vault_path))
     await vault._update_fts(relative, title, note_body_text, tags)
+    return {"path": relative, "id": note_id, "guild_slug": slug}
+
+
+# ── Guild moderation (Task B P0 #2) ──────────────────────────────────────────
+# Real, well-designed pattern adapted from Buzz's VISION_MODERATION.md: a
+# report is a signal for a human to review, never an auto-trigger; the
+# reporter's identity is visible to the acting founder/admin (accountability
+# runs both ways) but NEVER to the reported agent; every resolution produces
+# a real, non-silent outcome (both the reporter and, where relevant, the
+# reported agent are notified of what actually happened) instead of a silent
+# delete. Scoped to the guild a report was filed in -- Vantage had no
+# per-community moderation layer before this, only instance-wide/admin-only
+# Sentinel Control.
+
+@router.post("/{slug}/reports")
+@_limiter.limit("10/minute")
+async def file_guild_report(slug: str, request: Request, agent: dict = Depends(get_agent)):
+    guild = await _get_guild(slug)
+    role = await _get_member_role(guild["id"], agent["id"])
+    if role is None:
+        raise HTTPException(403, "Must be a guild member to report content")
+    body = await _parse_body(request)
+    target_type = str(body.get("target_type", "")).strip()
+    target_id = str(body.get("target_id", "")).strip()
+    reason = str(body.get("reason", "")).strip()
+    note = str(body.get("note", ""))[:1000]
+    if target_type not in ("broadcast", "agent"):
+        raise HTTPException(422, "target_type must be 'broadcast' or 'agent'")
+    if not target_id:
+        raise HTTPException(422, "target_id is required")
+    if reason not in _VALID_REPORT_REASONS:
+        raise HTTPException(422, f"reason must be one of {sorted(_VALID_REPORT_REASONS)}")
+    async with get_db() as db:
+        await db.execute(
+            """INSERT INTO guild_reports
+               (guild_id, target_type, target_id, reporter_agent_id, reporter_name, reason, note)
+               VALUES (?,?,?,?,?,?,?)""",
+            (guild["id"], target_type, target_id, agent["id"], agent["name"], reason, note),
+        )
+        await db.commit()
+    # Real per the design: the report is private -- never broadcast, never
+    # visible to the room, only reaches whoever can act on it (the queue
+    # endpoint below, founder-only).
+    return {"ok": True, "status": "received"}
+
+
+@router.get("/{slug}/reports")
+async def list_guild_reports(slug: str, status: str = Query("open"), agent: dict = Depends(get_agent)):
+    guild = await _get_guild(slug)
+    role = await _get_member_role(guild["id"], agent["id"])
+    if role != "founder":
+        raise HTTPException(403, "Only the guild founder can view the moderation queue")
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        if status == "all":
+            cur = await db.execute(
+                "SELECT * FROM guild_reports WHERE guild_id=? ORDER BY id DESC", (guild["id"],)
+            )
+        else:
+            cur = await db.execute(
+                "SELECT * FROM guild_reports WHERE guild_id=? AND status=? ORDER BY id DESC",
+                (guild["id"], status),
+            )
+        rows = await cur.fetchall()
+    return {"reports": [dict(r) for r in rows]}
+
+
+@router.post("/{slug}/reports/{report_id}/resolve")
+async def resolve_guild_report(slug: str, report_id: int, request: Request, agent: dict = Depends(get_agent)):
+    guild = await _get_guild(slug)
+    role = await _get_member_role(guild["id"], agent["id"])
+    if role != "founder":
+        raise HTTPException(403, "Only the guild founder can act on reports")
+    body = await _parse_body(request)
+    action = str(body.get("action", "")).strip()
+    resolution_note = str(body.get("note", ""))[:500]
+    if action not in ("dismiss", "remove_broadcast", "warn", "kick"):
+        raise HTTPException(422, "action must be one of dismiss, remove_broadcast, warn, kick")
+
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM guild_reports WHERE id=? AND guild_id=?", (report_id, guild["id"])
+        ) as cur:
+            report = await cur.fetchone()
+        if not report:
+            raise HTTPException(404, "Report not found")
+        report = dict(report)
+        if report["status"] != "open":
+            raise HTTPException(409, "Report already resolved")
+
+        target_agent_id = None
+        target_agent_name = None
+        if action == "remove_broadcast" and report["target_type"] == "broadcast":
+            async with db.execute(
+                "SELECT agent_id FROM broadcasts WHERE id=?", (report["target_id"],)
+            ) as cur:
+                brow = await cur.fetchone()
+            if brow:
+                target_agent_id = brow["agent_id"]
+            # Same real convention Sentinel Control's own archive action
+            # uses -- hides it from feeds, doesn't destroy the row.
+            await db.execute("UPDATE broadcasts SET status='archived' WHERE id=?", (report["target_id"],))
+        elif action in ("warn", "kick") and report["target_type"] == "agent":
+            async with db.execute(
+                "SELECT id FROM agents WHERE name=?", (report["target_id"],)
+            ) as cur:
+                arow = await cur.fetchone()
+            if arow:
+                target_agent_id = arow["id"]
+                target_agent_name = report["target_id"]
+            if action == "kick" and target_agent_id:
+                await db.execute(
+                    "DELETE FROM guild_members WHERE guild_id=? AND agent_id=?",
+                    (guild["id"], target_agent_id),
+                )
+
+        new_status = "dismissed" if action == "dismiss" else "actioned"
+        await db.execute(
+            """UPDATE guild_reports SET status=?, resolution_action=?, resolution_note=?,
+               resolved_by=?, resolved_at=datetime('now') WHERE id=?""",
+            (new_status, action, resolution_note, agent["name"], report_id),
+        )
+        await db.commit()
+
+        # Real, non-silent outcome on both sides -- reporter always hears
+        # the loop closed; the reported agent hears it straight if a real
+        # restriction was applied, never a silent drop.
+        await _create_notification(
+            db, report["reporter_agent_id"], "guild_report_resolved", agent["name"],
+            subject=f"Your report in {guild['name']} was {new_status} ({action})",
+        )
+        if target_agent_id and action in ("remove_broadcast", "warn", "kick"):
+            await _create_notification(
+                db, target_agent_id, "guild_moderation_action", agent["name"],
+                subject=f"A moderator in {guild['name']} took action ({action}): {resolution_note or 'no reason given'}",
+            )
+        await db.commit()
+
+    return {"ok": True, "status": new_status, "action": action}
     return {"path": relative, "id": note_id, "guild_slug": slug}

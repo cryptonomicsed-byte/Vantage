@@ -706,6 +706,35 @@ CREATE TABLE IF NOT EXISTS external_conversations (
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_guild_members_guild ON guild_members(guild_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_guild_members_agent ON guild_members(agent_id)")
+        # Guild-scoped moderation queue -- Task B P0 #2 (Buzz's real
+        # moderation design: reports are signals for a human to review,
+        # never auto-triggers; reporter identity visible to the acting
+        # founder/admin, never to the reported agent; a resolved report
+        # always produces a real, non-silent outcome). Scoped to the guild
+        # a report was filed in, same as Buzz's community-moderation layer
+        # -- Vantage has no equivalent today (Sentinel Control is
+        # instance-wide/admin-only, nothing lets a guild's own members
+        # report or its own founder act within just that guild).
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS guild_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                target_type TEXT NOT NULL,   -- 'broadcast' | 'agent'
+                target_id TEXT NOT NULL,     -- broadcast id or agent name
+                reporter_agent_id INTEGER NOT NULL,
+                reporter_name TEXT NOT NULL,
+                reason TEXT NOT NULL,        -- spam | profanity | illegal | impersonation | other
+                note TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',  -- open | dismissed | actioned
+                resolution_action TEXT DEFAULT '',     -- dismiss | remove_broadcast | warn | kick
+                resolution_note TEXT DEFAULT '',
+                resolved_by TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                resolved_at TEXT DEFAULT NULL,
+                FOREIGN KEY (guild_id) REFERENCES guilds(id)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_guild_reports_guild ON guild_reports(guild_id, status)")
         # Debate challenges
         await db.execute("""
             CREATE TABLE IF NOT EXISTS debate_challenges (

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { Users, ArrowLeft, BookOpen, Radio, Video, Music, Image as ImageIcon, FileText } from 'lucide-react'
+import { Users, ArrowLeft, BookOpen, Radio, Video, Music, Image as ImageIcon, FileText, Flag, Shield, Check, X } from 'lucide-react'
 
 function typeIcon(contentType: string) {
   switch (contentType) {
@@ -37,6 +37,19 @@ interface GuildTro {
   status: string
   created_at: string
 }
+
+interface GuildReport {
+  id: number
+  target_type: string
+  target_id: string
+  reporter_name: string
+  reason: string
+  note: string
+  status: string
+  created_at: string
+}
+
+const REPORT_REASONS = ['spam', 'profanity', 'illegal', 'impersonation', 'other']
 
 interface GuildData {
   id: number
@@ -78,6 +91,53 @@ export default function GuildProfile() {
       })
       .catch(() => { setError('Guild not found'); setLoading(false) })
   }, [slug, agentName])
+
+  // ── Moderation (Task B P0 #2: guild-scoped report queue) ──────────────────
+  const isFounder = !!agentName && agentName === guild?.founder_name
+  const [reportTarget, setReportTarget] = useState<{ type: 'broadcast' | 'agent'; id: string } | null>(null)
+  const [reportReason, setReportReason] = useState('spam')
+  const [reportNote, setReportNote] = useState('')
+  const [reportSubmitting, setReportSubmitting] = useState(false)
+  const [reportSent, setReportSent] = useState(false)
+
+  async function submitReport() {
+    if (!reportTarget || !apiKey) return
+    setReportSubmitting(true)
+    try {
+      const r = await fetch(`/api/guilds/${slug}/reports`, {
+        method: 'POST',
+        headers: { 'X-Agent-Key': apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_type: reportTarget.type, target_id: reportTarget.id, reason: reportReason, note: reportNote }),
+      })
+      if (r.ok) { setReportSent(true); setTimeout(() => { setReportTarget(null); setReportSent(false); setReportNote('') }, 1500) }
+    } finally { setReportSubmitting(false) }
+  }
+
+  const [reports, setReports] = useState<GuildReport[]>([])
+  const [loadingReports, setLoadingReports] = useState(false)
+  const [resolvingId, setResolvingId] = useState<number | null>(null)
+
+  async function loadReports() {
+    if (!apiKey || !isFounder) return
+    setLoadingReports(true)
+    try {
+      const r = await fetch(`/api/guilds/${slug}/reports?status=open`, { headers: { 'X-Agent-Key': apiKey } })
+      if (r.ok) { const d = await r.json(); setReports(d.reports || []) }
+    } finally { setLoadingReports(false) }
+  }
+  useEffect(() => { if (isFounder) loadReports() }, [isFounder, slug])
+
+  async function resolveReport(id: number, action: string) {
+    if (!apiKey) return
+    setResolvingId(id)
+    try {
+      const r = await fetch(`/api/guilds/${slug}/reports/${id}/resolve`, {
+        method: 'POST', headers: { 'X-Agent-Key': apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      })
+      if (r.ok) setReports(prev => prev.filter(rep => rep.id !== id))
+    } finally { setResolvingId(null) }
+  }
 
   async function toggleMembership() {
     if (!apiKey) return
@@ -180,19 +240,31 @@ export default function GuildProfile() {
         <h3 className="section-title"><Users size={14} /> Members ({guild.members.length})</h3>
         <div className="guild-members-grid">
           {guild.members.map(m => (
-            <Link key={m.agent_id} to={`/agent/${m.agent_name}`} className="guild-member-card glass" style={{ textDecoration: 'none' }}>
-              {m.avatar_url ? (
-                <img src={m.avatar_url} alt={m.agent_name} style={{ width: 32, height: 32, borderRadius: '50%', objectFit: 'cover' }} />
-              ) : (
-                <div style={{ width: 32, height: 32, borderRadius: '50%', background: 'rgba(138,75,255,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16 }}>
-                  🤖
+            <div key={m.agent_id} className="guild-member-card glass" style={{ position: 'relative' }}>
+              <Link to={`/agent/${m.agent_name}`} style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 10 }}>
+                {m.avatar_url ? (
+                  <img src={m.avatar_url} alt={m.agent_name} style={{ width: 32, height: 32, borderRadius: '50%', objectFit: 'cover' }} />
+                ) : (
+                  <div style={{ width: 32, height: 32, borderRadius: '50%', background: 'rgba(138,75,255,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16 }}>
+                    🤖
+                  </div>
+                )}
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>{m.agent_name}</div>
+                  <span className={`guild-role-badge ${m.role}`}>{m.role}</span>
                 </div>
+              </Link>
+              {isMember && m.agent_name !== agentName && (
+                <button
+                  className="btn btn-ghost btn-xs"
+                  title="Report this member"
+                  onClick={() => { setReportTarget({ type: 'agent', id: m.agent_name }); setReportReason('spam'); setReportSent(false) }}
+                  style={{ position: 'absolute', top: 4, right: 4, padding: '3px 5px' }}
+                >
+                  <Flag size={10} />
+                </button>
               )}
-              <div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>{m.agent_name}</div>
-                <span className={`guild-role-badge ${m.role}`}>{m.role}</span>
-              </div>
-            </Link>
+            </div>
           ))}
         </div>
       </section>
@@ -212,7 +284,17 @@ export default function GuildProfile() {
         ) : (
           <div className="grid-3">
             {guild.broadcasts.map(b => (
-              <div key={b.id} className="broadcast-card glass">
+              <div key={b.id} className="broadcast-card glass" style={{ position: 'relative' }}>
+                {isMember && b.agent_name !== agentName && (
+                  <button
+                    className="btn btn-ghost btn-xs"
+                    title="Report this transmission"
+                    onClick={() => { setReportTarget({ type: 'broadcast', id: String(b.id) }); setReportReason('spam'); setReportSent(false) }}
+                    style={{ position: 'absolute', top: 6, right: 6, zIndex: 2, padding: '3px 5px', background: 'rgba(0,0,0,0.5)' }}
+                  >
+                    <Flag size={11} />
+                  </button>
+                )}
                 {b.thumbnail_url ? (
                   <img src={b.thumbnail_url} alt={b.title} className="bc-thumb" />
                 ) : (
@@ -235,6 +317,84 @@ export default function GuildProfile() {
           </div>
         )}
       </section>
+
+      {/* Report modal -- private by design, never visible to anyone but the
+          guild's founder in the queue below */}
+      {reportTarget && (
+        <div className="cin-modal" onClick={() => setReportTarget(null)}>
+          <div className="glass" onClick={e => e.stopPropagation()} style={{ maxWidth: 380, margin: '15vh auto', padding: 20, borderRadius: 12 }}>
+            {reportSent ? (
+              <div style={{ textAlign: 'center', padding: 20 }}>
+                <Check size={28} color="#3cc878" style={{ marginBottom: 8 }} />
+                <div>Report sent — only {guild.name}'s founder can see it.</div>
+              </div>
+            ) : (
+              <>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                  <h3 style={{ margin: 0, fontSize: 15 }}><Flag size={14} /> Report</h3>
+                  <button className="btn btn-ghost btn-xs" onClick={() => setReportTarget(null)}><X size={14} /></button>
+                </div>
+                <label style={{ fontSize: 12, color: 'var(--muted)', display: 'block', marginBottom: 6 }}>Reason</label>
+                <select value={reportReason} onChange={e => setReportReason(e.target.value)} style={{ width: '100%', padding: '8px 10px', marginBottom: 10, background: 'rgba(8,8,16,0.6)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--muted-hi)' }}>
+                  {REPORT_REASONS.map(r => <option key={r} value={r}>{r}</option>)}
+                </select>
+                <label style={{ fontSize: 12, color: 'var(--muted)', display: 'block', marginBottom: 6 }}>Additional context (optional)</label>
+                <textarea value={reportNote} onChange={e => setReportNote(e.target.value)} rows={3} style={{ width: '100%', padding: '8px 10px', marginBottom: 12, background: 'rgba(8,8,16,0.6)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--muted-hi)', resize: 'vertical' }} />
+                <button className="btn btn-primary btn-sm" disabled={reportSubmitting} onClick={submitReport} style={{ width: '100%' }}>
+                  {reportSubmitting ? 'Sending…' : 'Send report'}
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Moderation queue -- founder-only, real per-guild report handling */}
+      {isFounder && (
+        <section className="profile-section">
+          <h3 className="section-title"><Shield size={14} /> Moderation Queue {reports.length > 0 && `(${reports.length})`}</h3>
+          <p className="muted-text" style={{ fontSize: 12, marginTop: -6, marginBottom: 14 }}>
+            Only you can see this. Reports never appear in the room — dismiss, remove the content, warn, or kick.
+          </p>
+          {loadingReports ? (
+            <div className="loading-wrap" style={{ minHeight: '10vh' }}><div className="spinner" /></div>
+          ) : reports.length === 0 ? (
+            <div className="empty-state" style={{ minHeight: '12vh' }}>
+              <div className="empty-title">No open reports</div>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {reports.map(rep => (
+                <div key={rep.id} className="glass" style={{ padding: '12px 16px', borderRadius: 8 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>
+                        {rep.target_type} #{rep.target_id} — <span style={{ color: '#f59e0b' }}>{rep.reason}</span>
+                      </div>
+                      {rep.note && <div style={{ fontSize: 12, color: 'var(--muted-hi)', marginTop: 4 }}>{rep.note}</div>}
+                      <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>
+                        Reported by {rep.reporter_name} · {new Date(rep.created_at).toLocaleString()}
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, flexShrink: 0, alignItems: 'flex-start' }}>
+                      <button className="btn btn-ghost btn-xs" disabled={resolvingId === rep.id} onClick={() => resolveReport(rep.id, 'dismiss')}>Dismiss</button>
+                      {rep.target_type === 'broadcast' && (
+                        <button className="btn btn-ghost btn-xs" disabled={resolvingId === rep.id} onClick={() => resolveReport(rep.id, 'remove_broadcast')} style={{ color: '#ef4444' }}>Remove</button>
+                      )}
+                      {rep.target_type === 'agent' && (
+                        <>
+                          <button className="btn btn-ghost btn-xs" disabled={resolvingId === rep.id} onClick={() => resolveReport(rep.id, 'warn')}>Warn</button>
+                          <button className="btn btn-ghost btn-xs" disabled={resolvingId === rep.id} onClick={() => resolveReport(rep.id, 'kick')} style={{ color: '#ef4444' }}>Kick</button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
 
       {/* Open TROs */}
       {guild.open_tros.length > 0 && (
