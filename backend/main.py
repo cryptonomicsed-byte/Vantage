@@ -554,6 +554,15 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(GZipMiddleware, minimum_size=500)  # Compress more aggressively for faster loads
 
+# Real request-count/latency/in-progress metrics at GET /metrics (Prometheus
+# text format) -- audit flagged zero operational monitoring on a single-VPS
+# deployment with 35 daemons and no health visibility. This covers the API
+# surface itself; ops/monitoring/ has the actual Prometheus+Grafana stack
+# that scrapes it (adapted from the already-built kanban/TradingOS compose
+# stack rather than written from scratch).
+from prometheus_fastapi_instrumentator import Instrumentator
+Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
+
 # CORS
 app.add_middleware(
     CORSMiddleware,

@@ -1,0 +1,66 @@
+version: "3.8"
+
+# Prometheus + Grafana for Vantage -- adapted from the already-built
+# ~/kanban (TradingOS prototype) monitoring stack rather than written from
+# scratch, since that compose file + Grafana provisioning already existed
+# and worked; this just repoints the scrape target at Vantage's real
+# /metrics (backend/main.py, prometheus-fastapi-instrumentator) and picks
+# host ports that don't collide with what's already running on the VPS
+# (3000/3001/9090 area is heavily used by other services here -- checked
+# live via `ss -tlnp` before picking 9091/3301).
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: vantage_prometheus
+    restart: unless-stopped
+    ports:
+      # Bound to localhost only -- Prometheus has no auth of its own, and
+      # this is an internal ops tool, not meant to be reachable from the
+      # public internet. Use an SSH tunnel or add a Traefik router with
+      # real auth if you want remote access.
+      - "127.0.0.1:9091:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9090/-/healthy || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: vantage_grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    ports:
+      # Bound to localhost -- Grafana has real login auth (unlike
+      # Prometheus above), but there's no reason to expose it publicly
+      # either; use an SSH tunnel (`ssh -L 3301:localhost:3301 ...`) or add
+      # a Traefik router with its own TLS/auth if remote access is wanted.
+      - "127.0.0.1:3301:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-changeme}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  prometheus_data:
+  grafana_data:
