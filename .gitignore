@@ -26,3 +26,4 @@ hermes_soul_seed.json
 # Playwright E2E test artifacts (generated, not source)
 frontend/playwright-report/
 frontend/test-results/
+backend/data/*.db*
