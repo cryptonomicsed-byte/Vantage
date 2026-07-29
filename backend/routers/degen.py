@@ -72,6 +72,27 @@ async def get_agent(key):
     finally:
         await db.close()
 
+
+async def ensure_degen_indexes():
+    """token_wallet_roles is created by an external daemon
+    (pumpfun_wallet_intel.py, outside this repo), not backend/db.py's own
+    schema, so there's nowhere else to put this. Without it, the
+    correlated-subquery queries in /fresh-deployers and /high-conviction
+    do a full table scan per outer row -- confirmed live at 109,856 rows
+    this made /fresh-deployers hang indefinitely (EXPLAIN QUERY PLAN showed
+    SCAN, not SEARCH; fixed query dropped from timeout to 8ms after adding
+    these). Idempotent, safe to call on every startup."""
+    try:
+        db = await _db()
+        try:
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_twr_wallet_role ON token_wallet_roles(wallet_address, role)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_twr_role_discovered ON token_wallet_roles(role, discovered_at DESC)")
+            await db.commit()
+        finally:
+            await db.close()
+    except Exception as e:
+        print(f"degen index init skipped (table may not exist yet): {e}")
+
 def _trending_pools_cached():
     """The one upstream call every endpoint here shares — fetch once, cache,
     reuse. Cuts GeckoTerminal call volume ~5x and is the actual fix for the
@@ -526,22 +547,38 @@ async def token_conviction(mint: str, x_agent_key: str=Header(...)):
 async def high_conviction_tokens(limit: int=20, x_agent_key: str=Header(...)):
     """Every currently-tracked token ranked by smart-money overlap — the
     'finding plays before they run' view: which tokens have known-good
-    wallets already positioned in them, right now."""
+    wallets already positioned in them, right now.
+
+    Was looping _token_conviction() (its own JOIN query) once per DISTINCT
+    mint before ranking/limiting -- confirmed live there are currently
+    105,292 distinct mints matching the base filter, so this was 105k+
+    sequential queries on every single call, timing out completely (a real
+    N+1 query bug, not something the sync->async conversion caused -- the
+    old blocking version had the exact same loop and would have been just
+    as broken). Rewritten to rank with ONE aggregate query, then only call
+    _token_conviction() for the `limit` tokens actually being returned."""
     if not await get_agent(x_agent_key): raise HTTPException(401)
     db = await _db()
     try:
         cur = await db.execute("""
-            SELECT DISTINCT twr.mint, twr.symbol FROM token_wallet_roles twr
-            JOIN wallet_reputation wr ON wr.wallet_address = twr.wallet_address
-            WHERE wr.copy_trade_score > 0
-        """)
-        mints = await cur.fetchall()
+            WITH per_wallet AS (
+                SELECT DISTINCT twr.mint, twr.symbol, twr.wallet_address, wr.copy_trade_score
+                FROM token_wallet_roles twr
+                JOIN wallet_reputation wr ON wr.wallet_address = twr.wallet_address
+                WHERE wr.copy_trade_score > 0
+            )
+            SELECT mint, MAX(symbol) as symbol, COUNT(*) as smart_wallet_count,
+                   SUM(copy_trade_score) as conviction_score
+            FROM per_wallet
+            GROUP BY mint
+            ORDER BY conviction_score DESC
+            LIMIT ?
+        """, (limit,))
+        top = await cur.fetchall()
         ranked = []
-        for m in mints:
-            conv = await _token_conviction(db, m["mint"])
-            if conv["smart_wallet_count"] == 0:
-                continue
-            ranked.append({"mint": m["mint"], "symbol": m["symbol"], **conv})
+        for t in top:
+            conv = await _token_conviction(db, t["mint"])
+            ranked.append({"mint": t["mint"], "symbol": t["symbol"], **conv})
     finally:
         await db.close()
     ranked.sort(key=lambda t: -t["conviction_score"])

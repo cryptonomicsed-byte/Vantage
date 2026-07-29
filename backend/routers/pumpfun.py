@@ -205,10 +205,22 @@ async def add_watchlist(mint: str=Query(...), label: str=Query(""), x_agent_key:
 
 @router.get("/signals")
 async def signals(limit: int=20, x_agent_key: str=Header(...)):
+    # Was querying `WHERE type='pumpfun' ORDER BY timestamp` -- trading_signals
+    # has neither column (real columns: source, created_at), so this has
+    # been an unconditional 500 on every call, same class of bug already
+    # found and fixed for /graduations in this file. There's no signal
+    # source actually tagged "pumpfun" in the live data yet either (checked
+    # live: only "vantage-predictor" rows exist today) -- LIKE match is
+    # forward-compatible with whatever a future pumpfun-specific pipeline
+    # tags itself, and correctly returns an honest empty list today rather
+    # than fabricating rows.
     if not await get_agent(x_agent_key): raise HTTPException(401)
     db = await _db()
     try:
-        cur = await db.execute("SELECT * FROM trading_signals WHERE type='pumpfun' ORDER BY timestamp DESC LIMIT ?", (limit,))
+        cur = await db.execute(
+            "SELECT * FROM trading_signals WHERE source LIKE '%pumpfun%' ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        )
         rows = await cur.fetchall()
     finally:
         await db.close()

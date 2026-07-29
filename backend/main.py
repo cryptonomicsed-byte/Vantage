@@ -442,6 +442,8 @@ async def lifespan(app: FastAPI):
     await init_collectives_db()
     from .routers.wallets import init_wallet_tables
     await init_wallet_tables()
+    from .routers.degen import ensure_degen_indexes
+    await ensure_degen_indexes()
 
     # Check FFmpeg availability on startup
     try:
