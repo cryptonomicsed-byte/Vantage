@@ -16,9 +16,11 @@ services:
       # wallet-encryption keys/hashes -- confirmed live that Metabase's
       # container user, uid 2000, can't read it, and loosening those
       # permissions isn't the right fix). refresh_mirror.sh maintains a
-      # periodic read-only copy instead, owned by a host group matching
-      # this container's uid -- see that script + its systemd timer.
-      - ./vantage_mirror.db:/data/vantage.db:ro
+      # disposable, periodically-replaced copy instead, in a directory
+      # (not a single read-only file -- SQLite needs to create its own
+      # -journal/-wal companion files even just to read, confirmed live)
+      # owned by a host group matching this container's uid.
+      - ./mirror:/data
 
 volumes:
   metabase_data:
