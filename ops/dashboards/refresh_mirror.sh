@@ -25,7 +25,10 @@ sqlite3 "$SRC" ".backup '$DEST.tmp'"
 mv -f "$DEST.tmp" "$DEST"
 rm -f "$DEST-journal" "$DEST-wal" "$DEST-shm"
 chown -R root:metabase-mirror "$MIRROR_DIR"
-chmod 750 "$MIRROR_DIR"
+# 770, not 750: the container needs to CREATE its own -journal/-wal
+# companion files in this directory (confirmed live -- read+execute alone
+# isn't enough, group needs write on the directory itself too).
+chmod 770 "$MIRROR_DIR"
 chmod 660 "$DEST"
 
 echo "[$(date -u -Iseconds)] mirrored $SRC -> $DEST"
