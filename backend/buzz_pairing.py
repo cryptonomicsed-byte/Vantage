@@ -51,10 +51,27 @@ KIND_PAIRING = 24134
 
 # The backend's own connection to the relay stays internal (same as every
 # other Buzz integration in this codebase); the QR code must point phones
-# at a URL actually reachable from the public internet, which for this
-# relay is the same host on the docker-published (non-TLS) port.
+# at a URL actually reachable from the public internet.
+#
+# This is NOT just "the same host, different port" -- the relay's tenant
+# resolution (crates/buzz-relay/src/tenant.rs, bind_community) binds purely
+# off the inbound Host header against a single seeded `communities` row
+# (host="localhost:3000", no alias mechanism in that schema). A phone
+# dialing ws://omokoda.duckdns.org:3000 directly would send
+# Host: omokoda.duckdns.org:3000 and get "no community configured for this
+# host" -- confirmed live, this is exactly why the first real device-pairing
+# attempt failed even after the NIP-42 auth-exemption fix landed.
+#
+# Real fix (infra-level, no relay rebuild): a new Traefik router
+# (/docker/traefik/dynamic.yml, `buzz-relay`) terminates real TLS at the
+# existing edge for omokoda.duckdns.org and forwards to the relay with
+# passHostHeader:false + url:"http://localhost:3000", which makes Traefik
+# send Host: localhost:3000 to the backend regardless of what the client
+# dialed in with -- exactly the substitution needed. Verified live: a real
+# external `wss://` handshake through this path gets the relay's normal
+# AUTH challenge, identical to a direct localhost:3000 connection.
 INTERNAL_RELAY_WS_URL = "ws://localhost:3000"
-PUBLIC_RELAY_WS_URL = "ws://omokoda.duckdns.org:3000"
+PUBLIC_RELAY_WS_URL = "wss://omokoda.duckdns.org/buzz-relay"
 
 SESSION_TIMEOUT = 120
 STEP_TIMEOUT = 30
