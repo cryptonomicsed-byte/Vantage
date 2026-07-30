@@ -87,8 +87,29 @@ KIND_PAIRING = 24134
 # handshake + WS upgrade, a real NIP-42 AUTH challenge/response with a
 # FRESH, NEVER-REGISTERED ephemeral key succeeds (OK:true), and a full
 # NIP-AB pairing session completes over this exact URL.
+#
+# 4. Fourth bug, found by actually running source+target together: the
+#    relay's tenant binding is per-connection, keyed off the raw Host
+#    header (crates/buzz-relay/src/tenant.rs, bind_community) -- and
+#    ephemeral kind:24134 event fan-out is tenant-scoped. The SOURCE's own
+#    internal connection (this module, dialing ws://localhost:3000
+#    directly) was binding to the ORIGINAL "localhost:3000" community,
+#    while the TARGET (a real external client, or our own simulator)
+#    binds to the NEW "omokoda.duckdns.org:3443" community seeded for the
+#    public entrypoint -- two different tenants, so the target's offer
+#    event could never reach the source's subscription no matter how long
+#    it waited. Fixed by having the source's internal connection present
+#    the SAME literal Host header as the public path
+#    (PUBLIC_TENANT_HOST, via websockets.connect's additional_headers) even
+#    though it physically dials localhost:3000 -- the relay only looks at
+#    the Host header for tenant binding, not the actual TCP destination,
+#    so this puts both sides in the identical community without touching
+#    the relay at all. Source never sends a real NIP-42 AUTH event (it's
+#    exempted via the kind:24134-only bypass), so there's no relay-url
+#    matching concern for this side -- only tenant binding needs to agree.
 INTERNAL_RELAY_WS_URL = "ws://localhost:3000"
 PUBLIC_RELAY_WS_URL = "wss://omokoda.duckdns.org:3443"
+PUBLIC_TENANT_HOST = "omokoda.duckdns.org:3443"
 
 SESSION_TIMEOUT = 120
 STEP_TIMEOUT = 30
@@ -213,7 +234,10 @@ def deny_pairing(token: str) -> dict:
 async def _source_flow(session: dict):
     token = session["token"]
     try:
-        async with websockets.connect(INTERNAL_RELAY_WS_URL, open_timeout=10) as ws:
+        async with websockets.connect(
+            INTERNAL_RELAY_WS_URL, open_timeout=10,
+            additional_headers={"Host": PUBLIC_TENANT_HOST},
+        ) as ws:
             sub_id = secrets.token_hex(8)
             await ws.send(json.dumps(
                 ["REQ", sub_id, {"kinds": [KIND_PAIRING], "#p": [session["ephemeral_pub_hex"]]}]
