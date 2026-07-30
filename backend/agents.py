@@ -804,6 +804,191 @@ async def buzz_pairing_deny(token: str, agent: dict = Depends(get_agent)):
         raise HTTPException(400, str(e))
 
 
+# ── Buzz Social: Persona/Team catalog, Managed-Agent, Engram, Observer ─────
+# frames, DMs, cross-channel feed. ALL of this is additive -- every module
+# is opt-in (nothing here runs unless explicitly called) and mirrors data
+# that already lives authoritatively elsewhere in Vantage (agent records,
+# the memory_vault, the receipts/activity-feed table). Disabling any one of
+# these endpoints removes zero existing Vantage capability.
+
+@router.post("/me/buzz/persona/publish")
+async def publish_buzz_persona(body: dict, agent: dict = Depends(get_agent)):
+    from .buzz_persona import publish_persona
+    try:
+        return await publish_persona(
+            agent["id"],
+            display_name=body.get("display_name") or agent["name"],
+            system_prompt=body.get("system_prompt", ""),
+            avatar_url=body.get("avatar_url", ""),
+            runtime=body.get("runtime", "vantage"),
+            model=body.get("model"),
+            provider=body.get("provider"),
+            shared=bool(body.get("shared", False)),
+            slug=body.get("slug"),
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"Persona publish failed: {e}")
+
+
+@router.get("/me/buzz/persona")
+async def get_buzz_persona(agent: dict = Depends(get_agent)):
+    from .buzz_persona import get_own_persona
+    persona = await get_own_persona(agent["id"])
+    if persona is None:
+        raise HTTPException(404, "no persona published yet")
+    return persona
+
+
+@router.get("/buzz/personas")
+async def browse_buzz_personas(limit: int = Query(100, ge=1, le=500), agent: dict = Depends(get_agent)):
+    """Public persona catalog browser -- every kind:30175 with shared:true,
+    from any author."""
+    from .buzz_persona import browse_public_personas
+    try:
+        return await browse_public_personas(agent["id"], limit=limit)
+    except Exception as e:
+        raise HTTPException(502, f"Persona browse failed: {e}")
+
+
+@router.post("/me/buzz/team/publish")
+async def publish_buzz_team(body: dict, agent: dict = Depends(get_agent)):
+    from .buzz_persona import publish_team
+    team_id = body.get("team_id")
+    name = body.get("name")
+    if not team_id or not name:
+        raise HTTPException(400, "team_id and name are required")
+    try:
+        return await publish_team(
+            agent["id"], team_id=team_id, name=name,
+            description=body.get("description", ""), persona_ids=body.get("persona_ids"),
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"Team publish failed: {e}")
+
+
+@router.post("/me/buzz/managed-agent/publish")
+async def publish_buzz_managed_agent(body: dict, agent: dict = Depends(get_agent)):
+    from .buzz_managed_agent import publish_managed_agent
+    try:
+        return await publish_managed_agent(agent["id"], body.get("projection") or {})
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"Managed-agent publish failed: {e}")
+
+
+@router.get("/me/buzz/managed-agent")
+async def get_buzz_managed_agent(agent: dict = Depends(get_agent)):
+    from .buzz_managed_agent import get_managed_agent
+    result = await get_managed_agent(agent["id"])
+    if result is None:
+        raise HTTPException(404, "no managed-agent record published yet")
+    return result
+
+
+@router.post("/me/buzz/engram/mirror")
+async def mirror_buzz_engram(body: dict, agent: dict = Depends(get_agent)):
+    from .buzz_engram import mirror_note_to_engram
+    note_id = body.get("note_id")
+    title = body.get("title", "")
+    note_body = body.get("body", "")
+    tags = body.get("tags") or []
+    if not note_id:
+        raise HTTPException(400, "note_id is required")
+    try:
+        return await mirror_note_to_engram(agent["id"], note_id, title, note_body, tags)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"Engram mirror failed: {e}")
+
+
+@router.delete("/me/buzz/engram/{note_id}")
+async def tombstone_buzz_engram(note_id: str, agent: dict = Depends(get_agent)):
+    from .buzz_engram import tombstone_engram
+    try:
+        return await tombstone_engram(agent["id"], note_id)
+    except Exception as e:
+        raise HTTPException(502, f"Engram tombstone failed: {e}")
+
+
+@router.get("/me/buzz/engram/{note_id}")
+async def get_buzz_engram(note_id: str, agent: dict = Depends(get_agent)):
+    from .buzz_engram import get_mirrored_engram
+    try:
+        result = await get_mirrored_engram(agent["id"], note_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"Engram read failed: {e}")
+    if result is None:
+        raise HTTPException(404, "no mirrored engram for this note")
+    return result
+
+
+@router.post("/me/buzz/observer-frame")
+async def publish_buzz_observer_frame(body: dict, agent: dict = Depends(get_agent)):
+    from .buzz_observer import publish_observer_frame
+    event_type = body.get("event_type")
+    summary = body.get("summary")
+    if not event_type or not summary:
+        raise HTTPException(400, "event_type and summary are required")
+    try:
+        return await publish_observer_frame(
+            agent["id"], event_type, summary,
+            severity=body.get("severity", "info"),
+            owner_pubkey_hex=body.get("owner_pubkey_hex"),
+        )
+    except Exception as e:
+        raise HTTPException(502, f"Observer frame publish failed: {e}")
+
+
+@router.post("/me/buzz/dm/open")
+async def open_buzz_dm(body: dict, agent: dict = Depends(get_agent)):
+    from .buzz_dm import open_dm
+    other_pubkey_hex = body.get("pubkey")
+    if not other_pubkey_hex:
+        raise HTTPException(400, "pubkey is required")
+    try:
+        return await open_dm(agent["id"], other_pubkey_hex)
+    except Exception as e:
+        raise HTTPException(502, f"DM open failed: {e}")
+
+
+@router.post("/me/buzz/dm/{channel_id}/send")
+async def send_buzz_dm(channel_id: str, body: dict, agent: dict = Depends(get_agent)):
+    from .buzz_dm import send_dm_message
+    text = body.get("text")
+    if not text:
+        raise HTTPException(400, "text is required")
+    try:
+        return await send_dm_message(agent["id"], channel_id, text)
+    except Exception as e:
+        raise HTTPException(502, f"DM send failed: {e}")
+
+
+@router.get("/me/buzz/dm/{channel_id}/messages")
+async def list_buzz_dm_messages(channel_id: str, limit: int = Query(50, ge=1, le=200), agent: dict = Depends(get_agent)):
+    from .buzz_dm import list_dm_messages
+    try:
+        return await list_dm_messages(agent["id"], channel_id, limit=limit)
+    except Exception as e:
+        raise HTTPException(502, f"DM list failed: {e}")
+
+
+@router.get("/me/buzz/feed")
+async def get_buzz_feed(limit: int = Query(100, ge=1, le=500), agent: dict = Depends(get_agent)):
+    from .buzz_feed import get_feed
+    try:
+        return await get_feed(agent["id"], limit=limit)
+    except Exception as e:
+        raise HTTPException(502, f"Feed fetch failed: {e}")
+
+
 # ── Real 'mind' behind Copilot -- generic webhook contract, Omo-Koda2 is ────
 # one convenience option among several, not a hardcoded requirement. See
 # mind_link.py's module docstring for the full contract.

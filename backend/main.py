@@ -1168,6 +1168,7 @@ app.mount("/media/agents", StaticFiles(directory=str(settings.MEDIA_DIR), check_
 @app.get("/playlists/{playlist_id}")
 @app.get("/agenttv")
 @app.get("/creator-analytics")
+@app.get("/buzz-social")
 async def serve_spa():
     from fastapi.responses import FileResponse
     index = settings.WEBUI_DIR / "index.html"

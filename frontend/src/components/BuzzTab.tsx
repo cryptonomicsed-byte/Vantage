@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Radio, Loader, CheckCircle2, Circle, Copy, Zap, Trash2, Play, Plus, Smartphone, ShieldAlert } from 'lucide-react'
+import { NavLink } from 'react-router-dom'
+import { Radio, Loader, CheckCircle2, Circle, Copy, Zap, Trash2, Play, Plus, Smartphone, ShieldAlert, Rss } from 'lucide-react'
 import QRCode from 'qrcode'
 
 interface BuzzStatus {
@@ -226,9 +227,14 @@ export default function BuzzTab({ apiKey }: { apiKey: string }) {
 
   return (
     <section className="profile-section">
-      <h3 className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <Radio size={16} /> Buzz Identity
-      </h3>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <h3 className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Radio size={16} /> Buzz Identity
+        </h3>
+        <NavLink to="/buzz-social" className="btn btn-ghost btn-sm">
+          <Rss size={12} style={{ marginRight: 6 }} /> Open Buzz Social
+        </NavLink>
+      </div>
 
       {error && <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>{error}</p>}
 

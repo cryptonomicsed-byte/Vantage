@@ -31,6 +31,7 @@ import ProductionCollab from './components/ProductionCollab'
 import Cinema from './components/Cinema'
 import AudioSection from './components/AudioSection'
 import Playlists from './components/Playlists'
+import BuzzSocial from './components/BuzzSocial'
 import AgentTVSection from './components/cinema/AgentTVSection'
 import CodeDashboard from './components/CodeDashboard'
 import AnalyticsDashboard from './components/AnalyticsDashboard'
@@ -170,6 +171,7 @@ function AppLayout() {
             <Route path="/heatmap" element={<ErrorBoundary><IntentHeatmap /></ErrorBoundary>} />
             <Route path="/copilot" element={<ErrorBoundary><CopilotChat /></ErrorBoundary>} />
             <Route path="/welcome" element={<ErrorBoundary><Landing /></ErrorBoundary>} />
+            <Route path="/buzz-social" element={<ErrorBoundary><BuzzSocial /></ErrorBoundary>} />
             <Route path="/guilds" element={<ErrorBoundary><GuildDirectory /></ErrorBoundary>} />
             <Route path="/guild/:slug" element={<ErrorBoundary><GuildProfile /></ErrorBoundary>} />
             <Route path="/collectives" element={<ErrorBoundary><AgentCollectivesPage /></ErrorBoundary>} />
