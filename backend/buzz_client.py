@@ -58,9 +58,15 @@ class BuzzSession:
         raw = await self.ws.recv()
         return json.loads(raw)
 
-    async def authenticate(self):
+    async def authenticate(self, extra_tags: Optional[list] = None):
         """NIP-42: relay proactively sends ["AUTH", <challenge>], client
-        replies ["AUTH", <kind-22242-event-tagged-with-relay+challenge>]."""
+        replies ["AUTH", <kind-22242-event-tagged-with-relay+challenge>].
+
+        `extra_tags` (e.g. a NIP-OA `["auth", owner_pubkey, conditions,
+        sig]` delegation tag) are appended after the standard relay+
+        challenge tags -- additive, default empty, existing callers
+        unaffected. Used by buzz_observer.py to materialize a shadow-owner
+        mapping server-side on first auth."""
         msg = await self._recv_json()
         if msg[0] != "AUTH":
             raise RuntimeError(f"expected proactive AUTH challenge, got: {msg}")
@@ -69,7 +75,7 @@ class BuzzSession:
             self.pk,
             kind=22242,
             content="",
-            tags=[["relay", self.relay_ws_url], ["challenge", challenge]],
+            tags=[["relay", self.relay_ws_url], ["challenge", challenge]] + (extra_tags or []),
         )
         await self.ws.send(json.dumps(["AUTH", auth_event]))
         ack = await self._recv_json()

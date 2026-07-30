@@ -8,20 +8,30 @@ changes nothing about how the Activity Feed itself works.
 kind:24200 is in P_GATED_KINDS (buzz-relay's kind.rs): the relay only
 delivers it to a reader whose own pubkey matches the event's `#p` tag.
 It's ALSO validated at ingest (handlers/event.rs's agent_observer_route,
-confirmed live): the `p` tag (owner) and `agent` tag MUST be genuinely
-different pubkeys -- a naive self-owned frame (p == agent) satisfies
-neither the telemetry direction (needs recipient != agent) nor the
-control direction (needs event.pubkey != agent), and gets rejected
-outright at publish, not just left unreadable.
+confirmed live): the `p` (owner) and `agent` tags MUST be genuinely
+different pubkeys -- self-owned (p == agent) is rejected outright:
+"invalid: observer frame must be agent-to-owner telemetry or owner-to-
+agent control".
 
 Real NIP-OA owner-delegation (a human owner with their own key, distinct
-from the agent) isn't built in Vantage yet, so this publishes using a
-"shadow owner" -- a second keypair Vantage itself derives and holds for
-the same agent (buzz_identity.derive_shadow_owner_keypair), satisfying the
-relay's real two-party requirement without inventing a fake human. When a
-real owner-key layer exists, only `owner_pubkey_hex` needs to point
-elsewhere -- the frame format is unchanged.
+from the agent) isn't built in Vantage yet, so this uses a "shadow owner"
+-- a second keypair Vantage itself derives and holds for the same agent
+(buzz_identity.derive_shadow_owner_keypair). Vantage holds both keys, so
+it can always decrypt; this satisfies the relay's real two-party
+requirement without inventing a fake human.
+
+Second real finding (live-tested): even with two distinct keys, the relay
+separately enforces "restricted: observer frame is not authorized for
+this agent owner" -- handle_agent_observer_event checks a server-side
+agent<->owner mapping (`is_agent_owner`), which is only materialized when
+the agent's own NIP-42 AUTH event carries a valid NIP-OA `auth` tag (see
+docs/nips/NIP-OA.md): a delegation proof signed by the OWNER key over
+`sha256("nostr:agent-auth:" + agent_pubkey_hex + ":" + conditions)`. Since
+Vantage holds the shadow-owner's private key too, it can construct this
+proof itself -- again, a real protocol requirement satisfied honestly,
+not bypassed.
 """
+import hashlib
 import json
 import time
 from typing import Optional
@@ -37,17 +47,32 @@ OBSERVER_AGENT_TAG = "agent"
 OBSERVER_FRAME_TAG = "frame"
 OBSERVER_FRAME_TELEMETRY = "telemetry"
 
+_NIP_OA_DOMAIN = b"nostr:agent-auth:"
+
+
+def _build_nip_oa_auth_tag(owner_pk, agent_pubkey_hex: str, conditions: str = "") -> list:
+    """["auth", owner_pubkey_hex, conditions, sig_hex] per NIP-OA -- the
+    owner key signs a delegation proof over the agent's pubkey; the event
+    itself stays authored (and signed) by the agent as normal."""
+    owner_pubkey_hex = public_key_xonly_hex(owner_pk)
+    preimage = _NIP_OA_DOMAIN + agent_pubkey_hex.encode("utf-8") + b":" + conditions.encode("utf-8")
+    digest = hashlib.sha256(preimage).digest()
+    sig_hex = owner_pk.sign_schnorr(digest).hex()
+    return ["auth", owner_pubkey_hex, conditions, sig_hex]
+
 
 async def publish_observer_frame(
     agent_id: int, event_type: str, summary: str, severity: str = "info",
     owner_pubkey_hex: Optional[str] = None,
 ) -> dict:
     """Mirror one activity-feed entry as a live encrypted observer frame.
-    `owner_pubkey_hex` defaults to this agent's shadow-owner pubkey (see
-    module docstring) -- pass a real owner pubkey once that layer exists."""
+    Defaults to this agent's shadow-owner pubkey (see module docstring);
+    pass a real owner pubkey once that layer exists (NIP-OA tag
+    construction would then need the real owner's signature instead)."""
     pk = await derive_buzz_keypair(agent_id)
     agent_pubkey_hex = public_key_xonly_hex(pk)
 
+    shadow_owner_pk = None
     if owner_pubkey_hex is None:
         shadow_owner_pk = await derive_shadow_owner_keypair(agent_id)
         owner_pubkey_hex = public_key_xonly_hex(shadow_owner_pk)
@@ -63,7 +88,10 @@ async def publish_observer_frame(
 
     sess = BuzzSession(RELAY_WS_URL, pk)
     await sess.connect()
-    await sess.authenticate()
+    extra_tags = []
+    if shadow_owner_pk is not None:
+        extra_tags = [_build_nip_oa_auth_tag(shadow_owner_pk, agent_pubkey_hex)]
+    await sess.authenticate(extra_tags=extra_tags)
     try:
         result = await sess.publish(
             KIND_AGENT_OBSERVER_FRAME, content,
