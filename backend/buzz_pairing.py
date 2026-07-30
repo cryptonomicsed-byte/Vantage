@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import secrets
+import socket
 import time
 import urllib.parse
 
@@ -98,16 +99,30 @@ KIND_PAIRING = 24134
 #    binds to the NEW "omokoda.duckdns.org:3443" community seeded for the
 #    public entrypoint -- two different tenants, so the target's offer
 #    event could never reach the source's subscription no matter how long
-#    it waited. Fixed by having the source's internal connection present
-#    the SAME literal Host header as the public path
-#    (PUBLIC_TENANT_HOST, via websockets.connect's additional_headers) even
-#    though it physically dials localhost:3000 -- the relay only looks at
-#    the Host header for tenant binding, not the actual TCP destination,
-#    so this puts both sides in the identical community without touching
-#    the relay at all. Source never sends a real NIP-42 AUTH event (it's
-#    exempted via the kind:24134-only bypass), so there's no relay-url
-#    matching concern for this side -- only tenant binding needs to agree.
-INTERNAL_RELAY_WS_URL = "ws://localhost:3000"
+#    it waited.
+#
+#    First fix attempt (websockets.connect's additional_headers={"Host":
+#    ...}) looked right in isolation but was WRONG: `websockets` still
+#    auto-generates its own Host header from the connection URI and sends
+#    it FIRST, then appends the override as a SECOND, duplicate Host
+#    header -- confirmed by capturing the raw request with a raw `nc`
+#    listener. The relay (like most HTTP implementations) uses the first
+#    Host header it sees, so the override was silently ignored the whole
+#    time; a dedicated two-connection tenant-isolation test proved the
+#    fan-out still failed even with the "fix" in place.
+#
+#    Real fix: connect via a manually-created, already-connected TCP
+#    socket (`sock=`) while passing the DESIRED public URL as the
+#    connection URI. `websockets` then derives its Host header purely
+#    from the URI (as designed for exactly this reverse-tunnel pattern),
+#    with no auto-generated duplicate, while the actual TCP traffic still
+#    goes to the real internal address. Verified with the same raw `nc`
+#    capture: exactly one Host header, correct value. Source never sends
+#    a real NIP-42 AUTH event (exempted via the kind:24134-only bypass),
+#    so there's no relay-url matching concern for this side -- only
+#    tenant binding needs to agree.
+INTERNAL_RELAY_HOST = "localhost"
+INTERNAL_RELAY_PORT = 3000
 PUBLIC_RELAY_WS_URL = "wss://omokoda.duckdns.org:3443"
 PUBLIC_TENANT_HOST = "omokoda.duckdns.org:3443"
 
@@ -234,9 +249,9 @@ def deny_pairing(token: str) -> dict:
 async def _source_flow(session: dict):
     token = session["token"]
     try:
+        raw_sock = socket.create_connection((INTERNAL_RELAY_HOST, INTERNAL_RELAY_PORT), timeout=10)
         async with websockets.connect(
-            INTERNAL_RELAY_WS_URL, open_timeout=10,
-            additional_headers={"Host": PUBLIC_TENANT_HOST},
+            f"ws://{PUBLIC_TENANT_HOST}/", sock=raw_sock, open_timeout=10,
         ) as ws:
             sub_id = secrets.token_hex(8)
             await ws.send(json.dumps(
