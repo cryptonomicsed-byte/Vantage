@@ -117,7 +117,12 @@ async def get_mirrored_engram(agent_id: int, note_id: str) -> Optional[dict]:
     await sess.connect()
     await sess.authenticate()
     try:
-        sub_id = await sess.subscribe([{"kinds": [KIND_AGENT_ENGRAM], "#d": [d_tag]}])
+        # req.rs's engram_filters_authorized requires authors=[self] or
+        # #p=[self] on any filter that can match kind:30174 -- confirmed
+        # live (a filter with neither got CLOSED, not silently ignored).
+        sub_id = await sess.subscribe([
+            {"kinds": [KIND_AGENT_ENGRAM], "#d": [d_tag], "authors": [pubkey_hex]}
+        ])
         events = await sess.recv_until_eose(sub_id, max_events=5)
     finally:
         await sess.close()

@@ -91,6 +91,13 @@ class BuzzSession:
         return sub_id
 
     async def recv_until_eose(self, sub_id: str, max_events=50):
+        """Real bug found live: a relay-side rejection (e.g. a filter that
+        fails req.rs's authors=[self]/#p=[self] gate for gated kinds) comes
+        back as ["CLOSED", sub_id, reason] per NIP-01, not EVENT/EOSE. This
+        used to loop forever waiting for an EOSE that would never arrive,
+        hanging the whole request until the caller's own timeout. CLOSED
+        (and any other non-EVENT/EOSE frame targeting this sub_id) now ends
+        the wait immediately with a clear error instead of a silent hang."""
         events = []
         while len(events) < max_events:
             msg = await self._recv_json()
@@ -98,4 +105,7 @@ class BuzzSession:
                 events.append(msg[2])
             elif msg[0] == "EOSE" and msg[1] == sub_id:
                 break
+            elif msg[0] == "CLOSED" and msg[1] == sub_id:
+                reason = msg[2] if len(msg) > 2 else ""
+                raise RuntimeError(f"subscription {sub_id} closed by relay: {reason}")
         return events
