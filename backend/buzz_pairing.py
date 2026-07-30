@@ -17,7 +17,9 @@ shared store, and matches the protocol's own guidance that session state
 need not persist beyond the 120s session lifetime.
 
 SECURITY NOTE (flagged, not silently decided): this transfers the agent's
-actual private key (payload_type "nsec") to the phone. Once transferred,
+actual private key (payload_type "custom", carrying {relayUrl, pubkey,
+nsec} -- matching the real desktop client's own contract, see
+_source_flow's payload-building comment) to the phone. Once transferred,
 Vantage's usual sealed-seed/encrypted-at-rest model no longer covers that
 copy -- the key now also lives wherever the phone's Buzz app stores it,
 with no revocation mechanism (per NIP-AB's own "Limitations" section). This
@@ -41,7 +43,7 @@ from coincurve import PrivateKey
 
 from .bech32 import bech32_encode
 from .buzz_client import _event_id, build_event
-from .buzz_identity import derive_buzz_keypair
+from .buzz_identity import derive_buzz_keypair, public_key_xonly_hex
 from .nip44 import decrypt as nip44_decrypt
 from .nip44 import encrypt as nip44_encrypt
 from .nip44 import get_conversation_key
@@ -125,6 +127,10 @@ INTERNAL_RELAY_HOST = "localhost"
 INTERNAL_RELAY_PORT = 3000
 PUBLIC_RELAY_WS_URL = "wss://omokoda.duckdns.org:3443"
 PUBLIC_TENANT_HOST = "omokoda.duckdns.org:3443"
+# HTTP-scheme twin of PUBLIC_RELAY_WS_URL -- the real client's "custom"
+# payload JSON carries a relayUrl field it uses to know which relay to talk
+# to post-import, matching desktop's own relay_api_base_url_with_override().
+PUBLIC_RELAY_HTTP_URL = "https://omokoda.duckdns.org:3443"
 
 SESSION_TIMEOUT = 120
 STEP_TIMEOUT = 30
@@ -332,10 +338,28 @@ async def _source_flow(session: dict):
             )
             await _publish(ws, session, sas_confirm_content)
 
+            # payload_type MUST be "custom" with a JSON-in-string payload of
+            # {relayUrl, pubkey, nsec} -- NOT a bare "nsec" payload_type.
+            # Confirmed against the real desktop client's source
+            # (desktop/src-tauri/src/commands/pairing.rs,
+            # confirm_pairing_sas): it builds exactly this JSON object and
+            # sends it via session.send_payload(PayloadType::Custom, ...).
+            # A bare "nsec"-typed payload isn't a contract the real mobile
+            # client understands at all -- it JSON-decodes every payload's
+            # content generically, so a raw "nsec1..." bech32 string (not
+            # valid JSON) throws exactly the FormatException a real device
+            # hit: "unexpected character at character 1" (bech32's leading
+            # "n" isn't a valid JSON start character).
             agent_keypair = await derive_buzz_keypair(session["agent_id"])
             nsec = bech32_encode("nsec", agent_keypair.secret)
+            agent_pubkey_hex = public_key_xonly_hex(agent_keypair)
+            custom_payload = json.dumps({
+                "relayUrl": PUBLIC_RELAY_HTTP_URL,
+                "pubkey": agent_pubkey_hex,
+                "nsec": nsec,
+            })
             payload_content = nip44_encrypt(
-                json.dumps({"type": "payload", "payload_type": "nsec", "payload": nsec}),
+                json.dumps({"type": "payload", "payload_type": "custom", "payload": custom_payload}),
                 target_conv_key,
             )
             await _publish(ws, session, payload_content)
