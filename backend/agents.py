@@ -757,6 +757,53 @@ async def trigger_buzz_workflow(workflow_id: str, body: Optional[dict] = None, a
         raise HTTPException(502, f"Buzz workflow trigger failed: {e}")
 
 
+# ── NIP-AB device pairing -- links this agent's real Buzz identity to the ──
+# official Buzz mobile app via QR code. See buzz_pairing.py's module
+# docstring for the exact protocol + the security tradeoff of the "nsec"
+# payload type (real private key export, no revocation).
+
+@router.post("/me/buzz/pairing/start")
+async def start_buzz_pairing(agent: dict = Depends(get_agent)):
+    from .buzz_pairing import start_pairing
+    try:
+        return await start_pairing(agent["id"])
+    except Exception as e:
+        raise HTTPException(502, f"Could not start pairing session: {e}")
+
+
+@router.get("/me/buzz/pairing/{token}/status")
+async def buzz_pairing_status(token: str, agent: dict = Depends(get_agent)):
+    from .buzz_pairing import get_pairing_status, PAIRING_SESSIONS
+    session = PAIRING_SESSIONS.get(token)
+    if session and session["agent_id"] != agent["id"]:
+        raise HTTPException(404, "session not found")
+    return get_pairing_status(token)
+
+
+@router.post("/me/buzz/pairing/{token}/confirm")
+async def buzz_pairing_confirm(token: str, agent: dict = Depends(get_agent)):
+    from .buzz_pairing import confirm_pairing, PAIRING_SESSIONS
+    session = PAIRING_SESSIONS.get(token)
+    if not session or session["agent_id"] != agent["id"]:
+        raise HTTPException(404, "session not found")
+    try:
+        return confirm_pairing(token)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/me/buzz/pairing/{token}/deny")
+async def buzz_pairing_deny(token: str, agent: dict = Depends(get_agent)):
+    from .buzz_pairing import deny_pairing, PAIRING_SESSIONS
+    session = PAIRING_SESSIONS.get(token)
+    if not session or session["agent_id"] != agent["id"]:
+        raise HTTPException(404, "session not found")
+    try:
+        return deny_pairing(token)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 # ── Real 'mind' behind Copilot -- generic webhook contract, Omo-Koda2 is ────
 # one convenience option among several, not a hardcoded requirement. See
 # mind_link.py's module docstring for the full contract.

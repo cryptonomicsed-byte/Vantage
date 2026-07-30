@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react'
-import { Radio, Loader, CheckCircle2, Circle, Copy, Zap, Trash2, Play, Plus } from 'lucide-react'
+import React, { useState, useEffect, useRef } from 'react'
+import { Radio, Loader, CheckCircle2, Circle, Copy, Zap, Trash2, Play, Plus, Smartphone, ShieldAlert } from 'lucide-react'
+import QRCode from 'qrcode'
 
 interface BuzzStatus {
   pubkey: string
@@ -44,6 +45,71 @@ export default function BuzzTab({ apiKey }: { apiKey: string }) {
   const [draft, setDraft] = useState(DEFAULT_DEF)
   const [saving, setSaving] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
+
+  const [pairing, setPairing] = useState<{ token: string; qrUri: string } | null>(null)
+  const [pairingStatus, setPairingStatus] = useState<{ state: string; sas_code: string | null; error: string | null } | null>(null)
+  const [pairingStarting, setPairingStarting] = useState(false)
+  const [pairingError, setPairingError] = useState('')
+  const qrCanvasRef = useRef<HTMLCanvasElement>(null)
+
+  async function startPairing() {
+    setPairingStarting(true)
+    setPairingError('')
+    setPairingStatus(null)
+    try {
+      const r = await fetch('/api/agents/me/buzz/pairing/start', {
+        method: 'POST',
+        headers: { 'X-Agent-Key': apiKey },
+      })
+      const data = await r.json()
+      if (!r.ok) { setPairingError(data.detail || 'Could not start pairing.'); return }
+      setPairing({ token: data.token, qrUri: data.qr_uri })
+    } catch {
+      setPairingError('Network error starting pairing.')
+    } finally {
+      setPairingStarting(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!pairing) return
+    let stop = false
+    async function poll() {
+      if (stop) return
+      const r = await fetch(`/api/agents/me/buzz/pairing/${pairing!.token}/status`, {
+        headers: { 'X-Agent-Key': apiKey },
+      })
+      const data = await r.json()
+      if (stop) return
+      setPairingStatus(data)
+      if (!['waiting_for_offer', 'sas_ready', 'confirmed', 'payload_sent'].includes(data.state)) return
+      setTimeout(poll, 1000)
+    }
+    poll()
+    return () => { stop = true }
+  }, [pairing])
+
+  useEffect(() => {
+    if (pairing?.qrUri && qrCanvasRef.current) {
+      QRCode.toCanvas(qrCanvasRef.current, pairing.qrUri, { width: 220 }).catch(() => {})
+    }
+  }, [pairing])
+
+  async function confirmPairing() {
+    if (!pairing) return
+    await fetch(`/api/agents/me/buzz/pairing/${pairing.token}/confirm`, {
+      method: 'POST',
+      headers: { 'X-Agent-Key': apiKey },
+    })
+  }
+
+  async function denyPairing() {
+    if (!pairing) return
+    await fetch(`/api/agents/me/buzz/pairing/${pairing.token}/deny`, {
+      method: 'POST',
+      headers: { 'X-Agent-Key': apiKey },
+    })
+  }
 
   function loadWorkflows() {
     setWfLoading(true)
@@ -290,6 +356,102 @@ export default function BuzzTab({ apiKey }: { apiKey: string }) {
             Automations are real Buzz workflow definitions published as signed Nostr events (kind 30620)
             to your agent's default channel, triggered via kind 46020. Run history isn't shown here yet --
             the Buzz relay doesn't currently emit execution events, so that view would only ever be empty.
+          </p>
+
+          <h3 className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 28 }}>
+            <Smartphone size={16} /> Pair with Buzz Mobile
+          </h3>
+
+          {pairingError && <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>{pairingError}</p>}
+
+          <div className="glass" style={{ padding: 16, borderRadius: 12, maxWidth: 400 }}>
+            {!pairing ? (
+              <>
+                <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>
+                  Generate a QR code to link this agent's real Buzz identity to the official Buzz
+                  mobile app (NIP-AB device pairing).
+                </p>
+                <button className="btn btn-primary btn-sm" disabled={pairingStarting} onClick={startPairing}>
+                  {pairingStarting ? <Loader size={12} className="spin" /> : <Smartphone size={12} />} Generate pairing QR
+                </button>
+              </>
+            ) : (
+              <div>
+                {(!pairingStatus || pairingStatus.state === 'waiting_for_offer') && (
+                  <>
+                    <canvas ref={qrCanvasRef} style={{ display: 'block', margin: '0 auto 12px', borderRadius: 8 }} />
+                    <p style={{ fontSize: 12, color: 'var(--muted)', textAlign: 'center' }}>
+                      Scan with the Buzz app. Waiting for it to connect...
+                    </p>
+                  </>
+                )}
+
+                {pairingStatus?.state === 'sas_ready' && (
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }}>
+                      Confirm this code matches what's shown on your phone:
+                    </div>
+                    <div style={{ fontSize: 32, fontWeight: 700, letterSpacing: 4, marginBottom: 16, fontFamily: 'monospace' }}>
+                      {pairingStatus.sas_code}
+                    </div>
+                    <div style={{
+                      display: 'flex', gap: 8, alignItems: 'flex-start', textAlign: 'left',
+                      background: 'rgba(255,80,80,0.08)', border: '1px solid rgba(255,80,80,0.25)',
+                      borderRadius: 8, padding: 10, marginBottom: 14, fontSize: 11, color: 'var(--muted)',
+                    }}>
+                      <ShieldAlert size={28} color="#f87171" style={{ flexShrink: 0 }} />
+                      <span>
+                        Confirming transfers this agent's real private key to your phone. This cannot be
+                        revoked or undone -- only confirm if the code above truly matches your device.
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
+                      <button className="btn btn-primary btn-sm" onClick={confirmPairing}>Codes match -- confirm</button>
+                      <button className="btn btn-ghost btn-sm" onClick={denyPairing}>Deny</button>
+                    </div>
+                  </div>
+                )}
+
+                {(pairingStatus?.state === 'confirmed' || pairingStatus?.state === 'payload_sent') && (
+                  <div style={{ textAlign: 'center', fontSize: 12, color: 'var(--muted)' }}>
+                    <Loader size={16} className="spin" style={{ marginBottom: 8 }} /><br />
+                    Sending identity to your phone...
+                  </div>
+                )}
+
+                {pairingStatus?.state === 'completed' && (
+                  <div style={{ textAlign: 'center' }}>
+                    <CheckCircle2 size={24} color="#4ade80" style={{ marginBottom: 8 }} />
+                    <div style={{ fontSize: 13 }}>Paired successfully.</div>
+                    <button className="btn btn-ghost btn-sm" style={{ marginTop: 10 }} onClick={() => { setPairing(null); setPairingStatus(null) }}>Done</button>
+                  </div>
+                )}
+
+                {pairingStatus?.state === 'sent_unconfirmed' && (
+                  <div style={{ textAlign: 'center', fontSize: 12, color: 'var(--muted)' }}>
+                    Identity sent -- verify on your phone that it imported correctly.
+                    <br />
+                    <button className="btn btn-ghost btn-sm" style={{ marginTop: 10 }} onClick={() => { setPairing(null); setPairingStatus(null) }}>Done</button>
+                  </div>
+                )}
+
+                {['timeout', 'denied', 'error', 'completed_with_error'].includes(pairingStatus?.state || '') && (
+                  <div style={{ textAlign: 'center', fontSize: 12, color: 'var(--muted)' }}>
+                    Pairing {pairingStatus?.state === 'denied' ? 'denied' : pairingStatus?.state === 'timeout' ? 'timed out' : 'failed'}.
+                    {pairingStatus?.error && <div style={{ marginTop: 4 }}>{pairingStatus.error}</div>}
+                    <br />
+                    <button className="btn btn-ghost btn-sm" style={{ marginTop: 10 }} onClick={() => { setPairing(null); setPairingStatus(null) }}>Try again</button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <p style={{ fontSize: 11, color: 'var(--muted)', marginTop: 12, maxWidth: 640 }}>
+            Uses Buzz's NIP-AB device-pairing protocol: an ephemeral keypair + session secret encoded
+            in the QR, a 6-digit SAS code you confirm matches on both devices, then this agent's real
+            identity is sent end-to-end encrypted (NIP-44) directly to your phone over the relay --
+            the relay itself never sees the identity, only opaque ciphertext.
           </p>
         </div>
       )}
