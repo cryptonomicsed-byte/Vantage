@@ -53,25 +53,42 @@ KIND_PAIRING = 24134
 # other Buzz integration in this codebase); the QR code must point phones
 # at a URL actually reachable from the public internet.
 #
-# This is NOT just "the same host, different port" -- the relay's tenant
-# resolution (crates/buzz-relay/src/tenant.rs, bind_community) binds purely
-# off the inbound Host header against a single seeded `communities` row
-# (host="localhost:3000", no alias mechanism in that schema). A phone
-# dialing ws://omokoda.duckdns.org:3000 directly would send
-# Host: omokoda.duckdns.org:3000 and get "no community configured for this
-# host" -- confirmed live, this is exactly why the first real device-pairing
-# attempt failed even after the NIP-42 auth-exemption fix landed.
+# Getting here took three separate real bugs, each only visible once the
+# previous one was fixed:
 #
-# Real fix (infra-level, no relay rebuild): a new Traefik router
-# (/docker/traefik/dynamic.yml, `buzz-relay`) terminates real TLS at the
-# existing edge for omokoda.duckdns.org and forwards to the relay with
-# passHostHeader:false + url:"http://localhost:3000", which makes Traefik
-# send Host: localhost:3000 to the backend regardless of what the client
-# dialed in with -- exactly the substitution needed. Verified live: a real
-# external `wss://` handshake through this path gets the relay's normal
-# AUTH challenge, identical to a direct localhost:3000 connection.
+# 1. Tenant resolution (crates/buzz-relay/src/tenant.rs, bind_community)
+#    binds purely off the inbound Host header against a `communities` row
+#    with a UNIQUE index on host -- no alias mechanism. A phone dialing the
+#    public domain directly got "no community configured for this host".
+#    Fixed by seeding a SECOND communities row for the exact public
+#    host:port and routing it through a DEDICATED Traefik entrypoint (see
+#    below) rather than rewriting the Host header to fake the internal one.
+#
+# 2. NIP-42 requires the client's signed AUTH event's `relay` tag to equal
+#    {scheme}://{tenant.host()} after normalization -- INCLUDING path. A
+#    path-prefixed route (an earlier /buzz-relay attempt) can never satisfy
+#    this: a real client's dial URL has no extra path to add. Fixed with a
+#    dedicated entrypoint (`buzzrelay`, port 3443, see
+#    /docker/traefik/docker-compose.yml) on the SAME hostname with NO path,
+#    plus a relay-side patch (ConnectionState::forwarded_tls, populated from
+#    the request's X-Forwarded-Proto header) so the relay's own "ws" vs
+#    "wss" scheme guess matches what a TLS-terminating proxy actually saw --
+#    the relay itself only ever speaks plain ws:// and has no TLS context
+#    of its own to derive "wss" from otherwise.
+#
+# 3. UFW (host firewall) was default-deny on incoming with an explicit
+#    allowlist -- port 3443 was never in it. Every test run over SSH *on*
+#    the VPS looked fine because that traffic never crosses the external
+#    network boundary; a real external client got nothing at all. Fixed
+#    with `ufw allow 3443/tcp`.
+#
+# Verified live end-to-end after all three: a genuinely external client
+# (tested from a machine outside the VPS, not over SSH) gets a real TLS
+# handshake + WS upgrade, a real NIP-42 AUTH challenge/response with a
+# FRESH, NEVER-REGISTERED ephemeral key succeeds (OK:true), and a full
+# NIP-AB pairing session completes over this exact URL.
 INTERNAL_RELAY_WS_URL = "ws://localhost:3000"
-PUBLIC_RELAY_WS_URL = "wss://omokoda.duckdns.org/buzz-relay"
+PUBLIC_RELAY_WS_URL = "wss://omokoda.duckdns.org:3443"
 
 SESSION_TIMEOUT = 120
 STEP_TIMEOUT = 30
