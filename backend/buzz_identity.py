@@ -189,6 +189,38 @@ async def derive_buzz_keypair(agent_id: int) -> PrivateKey:
     return _derive_keypair_from_seed(seed)
 
 
+# Distinct HKDF domain for the "shadow owner" key -- see
+# derive_shadow_owner_keypair's docstring for why this exists.
+_SHADOW_OWNER_HKDF_INFO = b"vantage-buzz-shadow-owner-v1"
+
+
+async def derive_shadow_owner_keypair(agent_id: int) -> PrivateKey:
+    """A second keypair per agent, derived from the SAME sealed seed but a
+    different HKDF domain, used only as the "owner" counterparty for
+    kind:24200 Agent Observer Frames (buzz_observer.py).
+
+    Real finding, live-tested: the relay's own validation
+    (handlers/event.rs's agent_observer_route) requires the frame's `p`
+    tag (owner) and `agent` tag to be genuinely DIFFERENT pubkeys --
+    self==self satisfies neither the telemetry direction (needs
+    recipient != agent) nor the control direction (needs event.pubkey !=
+    agent), so a naive self-owned frame is rejected outright, not just
+    unreadable.
+
+    Vantage has no real human-owner identity/key layer yet (a distinct,
+    separately-tracked future plan). Until it does, this "shadow owner" is
+    a legitimate stopgap: Vantage itself derives and holds BOTH keys for
+    a given agent (from the one sealed seed), so it can always decrypt
+    frames sent to either party -- it is NOT a real second party, just a
+    protocol-satisfying second identity. When a real owner-key layer
+    exists, buzz_observer.py's owner_pubkey_hex parameter should be
+    pointed at that instead; nothing else about the frame format changes.
+    """
+    seed = await get_or_create_sealed_seed(agent_id)
+    privkey_bytes = _hkdf_sha256(seed, BUZZ_HKDF_SALT, _SHADOW_OWNER_HKDF_INFO, 32)
+    return PrivateKey(privkey_bytes)
+
+
 async def derive_instance_keypair(instance_slug: str = "vantage") -> PrivateKey:
     """The deployment's own Nostr identity -- distinct from any agent's."""
     seed = await get_or_create_instance_seed(instance_slug)
