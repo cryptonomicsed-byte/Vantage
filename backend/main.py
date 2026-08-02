@@ -808,6 +808,62 @@ async def mcp_manifest():
     }
 
 
+@app.websocket("/api/agents/me/voice/ws")
+async def voice_proxy_ws(ws: WebSocket):
+    """Browsers can't reach the speech-to-speech pipeline's loopback port
+    directly (127.0.0.1:8770, see voice_session.py) or set custom headers
+    on a WebSocket handshake -- this proxies a browser connection straight
+    through to the pipeline's own ws://127.0.0.1:8770/v1/realtime (the
+    real OpenAI-Realtime-API-compatible transport the package already
+    implements), auth'd the same `key` query-param way as /ws/feed. The
+    pipeline must already be running (started via POST /me/voice/start) --
+    this does not start it itself, so a client that connects here before
+    starting a session just gets an immediate close."""
+    agent_id = await _ws_agent_id(ws)
+    if agent_id is None:
+        await ws.close(code=4401)
+        return
+
+    from .voice_session import get_status
+    status = get_status()
+    if not status.get("running") or status.get("agent_id") != agent_id:
+        await ws.close(code=4404)
+        return
+
+    await ws.accept()
+    import websockets as _ws_client
+    try:
+        async with _ws_client.connect("ws://127.0.0.1:8770/v1/realtime") as upstream:
+            async def browser_to_pipeline():
+                try:
+                    while True:
+                        msg = await ws.receive_text()
+                        await upstream.send(msg)
+                except WebSocketDisconnect:
+                    pass
+
+            async def pipeline_to_browser():
+                try:
+                    async for msg in upstream:
+                        await ws.send_text(msg if isinstance(msg, str) else msg.decode("utf-8", "ignore"))
+                except Exception:
+                    pass
+
+            done, pending = await asyncio.wait(
+                [asyncio.ensure_future(browser_to_pipeline()), asyncio.ensure_future(pipeline_to_browser())],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+    except Exception as e:
+        logger.warning("voice proxy ws failed for agent_id=%s: %s", agent_id, e)
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
 @app.websocket("/ws/feed")
 async def feed_ws(ws: WebSocket):
     await ws.accept()

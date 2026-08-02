@@ -1,6 +1,47 @@
 import React, { useState, useRef, useEffect } from 'react'
-import { Send, Bot, MessageSquare, TrendingUp, DollarSign, Bell, Navigation, AlertTriangle, X, Loader, Brain, Sparkles } from 'lucide-react'
+import { Send, Bot, MessageSquare, TrendingUp, DollarSign, Bell, Navigation, AlertTriangle, X, Loader, Brain, Sparkles, Mic, MicOff } from 'lucide-react'
 import { hasHumanSession, getHumanSession, listMyAgents, LinkedAgent } from '../utils/humanSession'
+
+// ── Voice (speech-to-speech) helpers ──────────────────────────────────────
+// Wire format is the real OpenAI Realtime API event set the vendored
+// huggingface/speech-to-speech package speaks (confirmed by reading its
+// websocket_router.py) -- 16kHz mono PCM16 in, `input_audio_buffer.append`;
+// `response.output_audio.delta` (base64 PCM16, also 16kHz) out.
+const VOICE_SAMPLE_RATE = 16000
+
+function floatTo16BitPCM(input: Float32Array): Int16Array {
+  const out = new Int16Array(input.length)
+  for (let i = 0; i < input.length; i++) {
+    const s = Math.max(-1, Math.min(1, input[i]))
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff
+  }
+  return out
+}
+
+function downsampleTo16k(buffer: Float32Array, inputRate: number): Float32Array {
+  if (inputRate === VOICE_SAMPLE_RATE) return buffer
+  const ratio = inputRate / VOICE_SAMPLE_RATE
+  const outLength = Math.round(buffer.length / ratio)
+  const out = new Float32Array(outLength)
+  for (let i = 0; i < outLength; i++) {
+    out[i] = buffer[Math.floor(i * ratio)]
+  }
+  return out
+}
+
+function base64ToInt16(b64: string): Int16Array {
+  const bin = atob(b64)
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  return new Int16Array(bytes.buffer)
+}
+
+function int16ToBase64(pcm: Int16Array): string {
+  const bytes = new Uint8Array(pcm.buffer)
+  let bin = ''
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
+  return btoa(bin)
+}
 
 type Message = {
   role: 'user' | 'assistant'
@@ -298,6 +339,122 @@ export default function CopilotChat() {
   const [mindConnected, setMindConnected] = useState<boolean | null>(null)
   const [mindKind, setMindKind] = useState<'omokoda' | 'custom' | null>(null)
 
+  // ── Voice session state ──
+  const [voiceState, setVoiceState] = useState<'idle' | 'connecting' | 'live'>('idle')
+  const [voiceError, setVoiceError] = useState('')
+  const voiceWsRef = useRef<WebSocket | null>(null)
+  const micStreamRef = useRef<MediaStream | null>(null)
+  const captureCtxRef = useRef<AudioContext | null>(null)
+  const captureNodeRef = useRef<ScriptProcessorNode | null>(null)
+  const playbackCtxRef = useRef<AudioContext | null>(null)
+  const nextPlayTimeRef = useRef(0)
+
+  function playPcm16(pcm: Int16Array) {
+    if (!playbackCtxRef.current) playbackCtxRef.current = new AudioContext({ sampleRate: VOICE_SAMPLE_RATE })
+    const ctx = playbackCtxRef.current
+    const buf = ctx.createBuffer(1, pcm.length, VOICE_SAMPLE_RATE)
+    const channel = buf.getChannelData(0)
+    for (let i = 0; i < pcm.length; i++) channel[i] = pcm[i] / 0x8000
+    const src = ctx.createBufferSource()
+    src.buffer = buf
+    src.connect(ctx.destination)
+    const startAt = Math.max(ctx.currentTime, nextPlayTimeRef.current)
+    src.start(startAt)
+    nextPlayTimeRef.current = startAt + buf.duration
+  }
+
+  async function stopVoice() {
+    voiceWsRef.current?.close()
+    voiceWsRef.current = null
+    captureNodeRef.current?.disconnect()
+    captureNodeRef.current = null
+    captureCtxRef.current?.close().catch(() => {})
+    captureCtxRef.current = null
+    micStreamRef.current?.getTracks().forEach(t => t.stop())
+    micStreamRef.current = null
+    nextPlayTimeRef.current = 0
+    setVoiceState('idle')
+    if (apiKey) {
+      try { await fetch('/api/agents/me/voice/stop', { method: 'POST', headers: { 'X-Agent-Key': apiKey } }) } catch {}
+    }
+  }
+
+  async function startVoice() {
+    if (!apiKey) { setVoiceError('Connect your API key first (Dashboard).'); return }
+    setVoiceError('')
+    setVoiceState('connecting')
+    try {
+      const startRes = await fetch('/api/agents/me/voice/start', { method: 'POST', headers: { 'X-Agent-Key': apiKey } })
+      if (!startRes.ok) {
+        const d = await startRes.json().catch(() => ({}))
+        setVoiceError(d.detail || 'Could not start voice session.')
+        setVoiceState('idle')
+        return
+      }
+
+      // The pipeline needs a few seconds to load STT/TTS models before its
+      // websocket route will accept connections -- retry with backoff
+      // rather than a fixed sleep.
+      let ws: WebSocket | null = null
+      for (let attempt = 0; attempt < 20; attempt++) {
+        ws = await new Promise<WebSocket | null>(resolve => {
+          const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+          const sock = new WebSocket(`${proto}://${location.host}/api/agents/me/voice/ws?key=${encodeURIComponent(apiKey)}`)
+          const timer = setTimeout(() => { sock.close(); resolve(null) }, 1500)
+          sock.onopen = () => { clearTimeout(timer); resolve(sock) }
+          sock.onerror = () => { clearTimeout(timer); resolve(null) }
+        })
+        if (ws) break
+        await new Promise(r => setTimeout(r, 1000))
+      }
+      if (!ws) {
+        setVoiceError('Voice pipeline did not come up in time. Try again.')
+        setVoiceState('idle')
+        await fetch('/api/agents/me/voice/stop', { method: 'POST', headers: { 'X-Agent-Key': apiKey } }).catch(() => {})
+        return
+      }
+      voiceWsRef.current = ws
+
+      ws.onmessage = (ev) => {
+        let msg: any
+        try { msg = JSON.parse(ev.data) } catch { return }
+        if (msg.type === 'response.output_audio.delta' && msg.delta) {
+          playPcm16(base64ToInt16(msg.delta))
+        } else if (msg.type === 'response.output_audio_transcript.done' && msg.transcript) {
+          setMessages(prev => [...prev, { role: 'assistant', text: msg.transcript, intent: null }])
+        } else if (msg.type === 'conversation.item.input_audio_transcription.completed' && msg.transcript) {
+          setMessages(prev => [...prev, { role: 'user', text: msg.transcript }])
+        }
+      }
+      ws.onclose = () => { setVoiceState('idle') }
+
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      micStreamRef.current = stream
+      const ctx = new AudioContext()
+      captureCtxRef.current = ctx
+      const source = ctx.createMediaStreamSource(stream)
+      const processor = ctx.createScriptProcessor(4096, 1, 1)
+      captureNodeRef.current = processor
+      processor.onaudioprocess = (e) => {
+        if (voiceWsRef.current?.readyState !== WebSocket.OPEN) return
+        const input = e.inputBuffer.getChannelData(0)
+        const down = downsampleTo16k(input, ctx.sampleRate)
+        const pcm = floatTo16BitPCM(down)
+        voiceWsRef.current.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: int16ToBase64(pcm) }))
+      }
+      source.connect(processor)
+      processor.connect(ctx.destination)
+
+      setVoiceState('live')
+    } catch (e: any) {
+      setVoiceError(e?.message?.includes('Permission') ? 'Microphone permission denied.' : 'Could not start voice session.')
+      setVoiceState('idle')
+      stopVoice()
+    }
+  }
+
+  useEffect(() => () => { stopVoice() }, [])
+
   useEffect(() => {
     if (!apiKey) return
     fetch('/api/agents/me/mind/status', { headers: { 'X-Agent-Key': apiKey } })
@@ -440,6 +597,19 @@ export default function CopilotChat() {
         )}
       </div>
 
+      {apiKey && !selectedAgentId && agentName.startsWith('viewer-') && (
+        <div style={{
+          marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, padding: '6px 10px',
+          borderRadius: 8, background: 'rgba(255,255,255,0.04)', border: '1px solid var(--border)',
+        }}>
+          <Sparkles size={13} color="var(--muted)" />
+          <span style={{ color: 'var(--muted)' }}>
+            You're talking as an anonymous throwaway visitor identity ({agentName}), not your own agent.
+          </span>
+          <a href="/dashboard" style={{ color: 'var(--purple-bright)', marginLeft: 4 }}>Log in as your agent →</a>
+        </div>
+      )}
+
       {apiKey && !selectedAgentId && mindConnected !== null && (
         <div style={{
           marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, padding: '6px 10px',
@@ -491,8 +661,8 @@ export default function CopilotChat() {
         </div>
       )}
 
-      <div className="glass" style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        <div style={{ flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div className="glass" style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
           {messages.map((m, i) => (
             <div key={i} style={{
               display: 'flex',
@@ -546,6 +716,13 @@ export default function CopilotChat() {
         )}
       </div>
 
+      {voiceError && <p style={{ fontSize: 11, color: 'var(--danger, #ff5c7a)', marginTop: 8 }}>{voiceError}</p>}
+      {voiceState === 'live' && (
+        <p style={{ fontSize: 11, color: 'var(--cyan)', marginTop: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+          <Mic size={12} /> Listening — talk naturally, replies play back automatically.
+        </p>
+      )}
+
       <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
         <input
           style={{ flex: 1 }}
@@ -555,6 +732,14 @@ export default function CopilotChat() {
           onKeyDown={handleKey}
           disabled={loading}
         />
+        <button
+          className={voiceState === 'live' ? 'btn btn-cyan' : 'btn btn-ghost'}
+          title={voiceState === 'live' ? 'Stop voice session' : 'Talk to Copilot'}
+          onClick={() => voiceState === 'idle' ? startVoice() : stopVoice()}
+          disabled={voiceState === 'connecting'}
+        >
+          {voiceState === 'connecting' ? <Loader size={14} className="spin" /> : voiceState === 'live' ? <MicOff size={14} /> : <Mic size={14} />}
+        </button>
         <button className="btn btn-primary" onClick={() => send(input)} disabled={loading || !input.trim()}>
           <Send size={14} />
         </button>
