@@ -51,7 +51,16 @@ export default function BuzzTab({ apiKey }: { apiKey: string }) {
   const [pairingStatus, setPairingStatus] = useState<{ state: string; sas_code: string | null; error: string | null } | null>(null)
   const [pairingStarting, setPairingStarting] = useState(false)
   const [pairingError, setPairingError] = useState('')
+  const [pairingCodeCopied, setPairingCodeCopied] = useState(false)
   const qrCanvasRef = useRef<HTMLCanvasElement>(null)
+
+  function copyPairingCode() {
+    if (!pairing?.qrUri) return
+    navigator.clipboard.writeText(pairing.qrUri).then(() => {
+      setPairingCodeCopied(true)
+      setTimeout(() => setPairingCodeCopied(false), 1500)
+    })
+  }
 
   async function startPairing() {
     setPairingStarting(true)
@@ -396,9 +405,20 @@ export default function BuzzTab({ apiKey }: { apiKey: string }) {
               <div>
                 {(!pairingStatus || pairingStatus.state === 'waiting_for_offer') && (
                   <>
+                    <div style={{ marginBottom: 12 }}>
+                      <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 4, textAlign: 'center' }}>
+                        Can't scan? In the Buzz app, choose "Use pairing code" and paste this instead:
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: 'monospace', fontSize: 11, background: 'rgba(8,8,16,0.6)', padding: '8px 10px', borderRadius: 6, wordBreak: 'break-all' }}>
+                        {pairing.qrUri}
+                        <button className="btn btn-ghost btn-sm" onClick={copyPairingCode} style={{ flexShrink: 0 }}>
+                          <Copy size={12} /> {pairingCodeCopied ? 'Copied' : 'Copy'}
+                        </button>
+                      </div>
+                    </div>
                     <canvas ref={qrCanvasRef} style={{ display: 'block', margin: '0 auto 12px', borderRadius: 8 }} />
                     <p style={{ fontSize: 12, color: 'var(--muted)', textAlign: 'center' }}>
-                      Scan with the Buzz app. Waiting for it to connect...
+                      Scan with the Buzz app, or paste the code above. Waiting for it to connect...
                     </p>
                   </>
                 )}
