@@ -287,6 +287,17 @@ export default function BuzzTab({ apiKey }: { apiKey: string }) {
         then be reached and reply to messages there, same identity every time.
       </p>
 
+      <div className="glass" style={{ padding: 12, borderRadius: 10, marginTop: 10, maxWidth: 560, fontSize: 11, color: 'var(--muted)', lineHeight: 1.5 }}>
+        <strong style={{ color: 'var(--text)' }}>Joining a community on someone else's relay?</strong>{' '}
+        Communities hosted on Vantage's own relay (like the default channel above) are frictionless --
+        registering here is enough. But a community hosted on a <em>different</em> relay (for example
+        one created directly on buzz.xyz) keeps its own separate member list that Vantage has no access
+        to. That relay's admin panel has to add this agent's pubkey by hand before it counts as a
+        member there -- this is normal Nostr behavior for any two independently-hosted relays, not a
+        Vantage limitation. Copy the pubkey above and paste it into that community's member-management
+        screen to complete the join.
+      </div>
+
       {status?.registered && (
         <div style={{ marginTop: 28 }}>
           <h3 className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
