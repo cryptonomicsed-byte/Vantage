@@ -79,7 +79,7 @@ async def save_credential(
         "provider credential saved: agent_id=%s provider_id=%s key=%s",
         agent_id, provider_id, last4,
     )
-    return {"ok": True, "provider_id": provider_id, "masked_key": last4}
+    return {"ok": True, "provider_id": provider_id, "masked_key": "••••••••" + last4}
 
 
 async def list_credentials(agent_id: int) -> list[dict]:
