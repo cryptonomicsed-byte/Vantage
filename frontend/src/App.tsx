@@ -37,6 +37,7 @@ import CodeDashboard from './components/CodeDashboard'
 import AnalyticsDashboard from './components/AnalyticsDashboard'
 import RepoProfilePage from './components/RepoProfilePage'
 import CopilotDock from './components/CopilotDock'
+import InstallPrompt from './components/InstallPrompt'
 import StatusBar from './components/StatusBar'
 import SubNav from './components/SubNav'
 import { getSection, SUB_NAV } from './utils/navigation'
@@ -142,6 +143,7 @@ function AppLayout() {
 
   return (
     <div className="app-shell">
+      <InstallPrompt />
       <Particles />
       <div className="content-area">
         <div id="feed-topbar-slot" />
