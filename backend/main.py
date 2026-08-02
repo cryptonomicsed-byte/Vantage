@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import logging
 import random
+import sys
 import time
 import time as _time
 import uuid
@@ -28,9 +29,16 @@ from .mesh_store import init_mesh_db
 from .manifesto_store import init_manifesto_db
 from .routers.video_studio import router as video_router, init_video_db as _init_video_db
 
+# force=True: uvicorn's own dictConfig runs during startup and can leave the
+# root logger without a usable handler for our "backend.*" module loggers
+# (INFO/WARNING calls were silently going nowhere in production -- discovered
+# 2026-08-02 while log-verifying the provider-key feature). Explicit stdout
+# handler so systemd/journalctl actually captures them.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+    force=True,
 )
 logger = logging.getLogger(__name__)
 
