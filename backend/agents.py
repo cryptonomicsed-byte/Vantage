@@ -1162,6 +1162,28 @@ async def set_my_active_provider(request: Request, agent: dict = Depends(get_age
         raise HTTPException(422, str(e))
 
 
+@router.post("/me/voice/start", tags=["mind"])
+async def start_voice_session(agent: dict = Depends(get_agent)):
+    """Starts Vantage's own on-demand speech-to-speech pipeline
+    (num_pipelines=1) for THIS agent -- see voice_session.py. Single
+    global slot on this box: starting a session for another agent while
+    one is already running stops the previous one first."""
+    from .voice_session import start_session
+    return await start_session(agent["id"], agent["name"])
+
+
+@router.post("/me/voice/stop", tags=["mind"])
+async def stop_voice_session(_agent: dict = Depends(get_agent)):
+    from .voice_session import stop_session
+    return await stop_session()
+
+
+@router.get("/me/voice/status", tags=["mind"])
+async def voice_session_status(_agent: dict = Depends(get_agent)):
+    from .voice_session import get_status
+    return get_status()
+
+
 @router.post("/me/mind/disconnect", tags=["mind"])
 async def my_mind_disconnect(agent: dict = Depends(get_agent)):
     from .mind_link import disconnect_mind
