@@ -1,15 +1,18 @@
 """On-demand speech-to-speech voice sessions for Copilot.
 
 Owns the process lifecycle: this is Vantage's OWN deployment of the real
-huggingface/speech-to-speech pipeline (already installed at /opt/s2s on the
-VPS, confirmed via `pip show speech-to-speech` -> Home-page
-github.com/huggingface/speech-to-speech), not a dependency on Hermes's
-always-on systemd service. That service (speech-to-speech.service) ran
-`--num_pipelines 2`, double-loading every model (STT+TTS) into RAM for no
-reason Vantage needs -- 3.47GB / ~42% of the whole box, contributing to a
-live swap-maxed crisis found 2026-08-02. Vantage always uses
---num_pipelines 1, and only runs the process while a Copilot voice session
-is actually open, not 24/7.
+huggingface/speech-to-speech pipeline, vendored as a real git submodule at
+vendor/speech-to-speech (pinned to a commit like any other dependency,
+not an untracked pip install someone else set up). The VPS's shared ML
+venv (/opt/s2s -- torch, faster-whisper, kokoro, etc.) runs it `pip
+install -e --no-deps` against that submodule path, so heavy model deps
+stay shared/unduplicated but the code that actually executes is this
+repo's own vendored source. Not a dependency on Hermes's always-on
+systemd service, which ran `--num_pipelines 2`, double-loading every
+model (STT+TTS) into RAM for no reason Vantage needs -- 3.47GB / ~42% of
+the whole box, contributing to a live swap-maxed crisis found
+2026-08-02. Vantage always uses --num_pipelines 1, and only runs the
+process while a Copilot voice session is actually open, not 24/7.
 
 Wiring: the pipeline's --llm_backend responses-api points at Vantage's own
 loopback shim (routers/voice_responses.py), authenticated with a random
