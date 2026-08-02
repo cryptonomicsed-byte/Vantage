@@ -735,6 +735,36 @@ CREATE TABLE IF NOT EXISTS external_conversations (
             )
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_guild_reports_guild ON guild_reports(guild_id, status)")
+        # Per-agent, user-managed LLM/AI provider API keys (Settings > Mind
+        # & LLM). Deliberately generic/scalable: one row per (agent,
+        # provider), never per-provider columns -- adding a new provider is
+        # a provider_registry.py entry, not a migration. key_encrypted is
+        # AES-256-GCM via secret_vault.py (server-side master key, never the
+        # user's password, since the backend must be able to read it back
+        # on its own to actually call the provider). key_last4 is stored in
+        # PLAINTEXT deliberately -- it's not sensitive on its own (can't
+        # reconstruct a key from its last 4 characters) and lets the
+        # dashboard display a masked value without ever decrypting the real
+        # secret just to render the settings page.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS provider_credentials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id INTEGER NOT NULL,
+                provider_id TEXT NOT NULL,       -- registry id, or 'custom:<slug>'
+                display_name TEXT NOT NULL,
+                base_url TEXT,                    -- NULL = use registry default
+                model_default TEXT,
+                key_encrypted TEXT NOT NULL,
+                key_last4 TEXT NOT NULL,
+                is_custom INTEGER NOT NULL DEFAULT 0,
+                is_active INTEGER NOT NULL DEFAULT 0,  -- selected for Copilot chat (chat_compatible providers only)
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (agent_id) REFERENCES agents(id),
+                UNIQUE(agent_id, provider_id)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_provider_credentials_agent ON provider_credentials(agent_id)")
         # Debate challenges
         await db.execute("""
             CREATE TABLE IF NOT EXISTS debate_challenges (

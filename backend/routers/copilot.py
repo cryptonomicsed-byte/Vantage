@@ -300,10 +300,24 @@ async def _dispatch_chat(agent_row: dict, text: str, human_id: Optional[str] = N
         except Exception as e:
             logger.warning(f"cognition_url call failed for agent {agent_row.get('name')}: {e} -- falling back to OmniRoute")
 
-    # No agent-specific mind connected (or it just failed) -- default to a
-    # real LLM via OmniRoute rather than going straight to the regex parser.
-    # Same graceful-degrade rule: any failure here falls through to the
-    # regex parser below instead of raising.
+    # No agent-specific mind connected (or it just failed). If the owner has
+    # configured their own provider key (Settings > Mind & LLM), that takes
+    # precedence over the built-in OmniRoute fallback -- falls through to
+    # OmniRoute if no key is set or the call fails, so nothing that works
+    # today changes for agents that haven't touched this feature.
+    from ..provider_credentials import get_active_provider_for_chat
+    from ..llm_provider_client import try_active_provider
+
+    credential = await get_active_provider_for_chat(agent_row["id"])
+    if credential:
+        provider_reply = await try_active_provider(agent_row, text, credential)
+        if provider_reply:
+            return {"action": "chat_reply", "target": agent_row.get("name", ""),
+                    "data": {"reply": provider_reply}, "confidence": 0.95}
+
+    # Default to a real LLM via OmniRoute rather than going straight to the
+    # regex parser. Same graceful-degrade rule: any failure here falls
+    # through to the regex parser below instead of raising.
     omniroute_reply = await _try_omniroute(agent_row, text)
     if omniroute_reply:
         return {"action": "chat_reply", "target": agent_row.get("name", ""),

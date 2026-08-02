@@ -1106,6 +1106,62 @@ async def my_mind_connect(request: Request, agent: dict = Depends(get_agent)):
         raise HTTPException(422, str(e))
 
 
+# ── Provider API keys -- user-managed alternative to .env-only provider ────
+# config. Real encryption at rest (secret_vault.py), masked-only display,
+# never logs a raw key. Falls back to OmniRoute/.env when unset; a stored
+# key set active here takes precedence for Copilot chat. See
+# provider_credentials.py / provider_registry.py / llm_provider_client.py.
+
+@router.get("/me/providers/registry", tags=["mind"])
+async def list_provider_registry(_agent: dict = Depends(get_agent)):
+    from .provider_registry import list_registry
+    return list_registry()
+
+
+@router.get("/me/providers", tags=["mind"])
+async def list_my_providers(agent: dict = Depends(get_agent)):
+    from .provider_credentials import list_credentials
+    return await list_credentials(agent["id"])
+
+
+@router.post("/me/providers", tags=["mind"])
+async def save_my_provider(request: Request, agent: dict = Depends(get_agent)):
+    from .provider_credentials import save_credential
+    body = await _parse_body(request)
+    provider_id = str(body.get("provider_id", "")).strip()
+    api_key = str(body.get("api_key", ""))
+    if not provider_id:
+        raise HTTPException(422, "provider_id is required")
+    try:
+        return await save_credential(
+            agent["id"], provider_id, api_key,
+            display_name=body.get("display_name"),
+            base_url=body.get("base_url"),
+            model_default=body.get("model_default"),
+        )
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+
+
+@router.delete("/me/providers/{provider_id}", tags=["mind"])
+async def delete_my_provider(provider_id: str, agent: dict = Depends(get_agent)):
+    from .provider_credentials import delete_credential
+    return await delete_credential(agent["id"], provider_id)
+
+
+@router.post("/me/providers/active", tags=["mind"])
+async def set_my_active_provider(request: Request, agent: dict = Depends(get_agent)):
+    from .provider_credentials import set_active_provider
+    body = await _parse_body(request)
+    provider_id = body.get("provider_id") or None
+    try:
+        return await set_active_provider(agent["id"], provider_id)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
 @router.post("/me/mind/disconnect", tags=["mind"])
 async def my_mind_disconnect(agent: dict = Depends(get_agent)):
     from .mind_link import disconnect_mind
