@@ -395,6 +395,15 @@ async def create_repo(req: CreateRepoRequest, agent: dict = Depends(get_agent)):
                     "events": ["push"], "active": True,
                 }
                 await cl.post(f"{GITEA_API}/repos/ares-bot/{req.name}/hooks", json=webhook_payload, headers=_headers)
+
+                import asyncio as _asyncio
+                from ..buzz_git import announce_repo
+                clone_url = data.get("clone_url", f"{GITEA_URL}/ares-bot/{req.name}.git")
+                _asyncio.create_task(announce_repo(
+                    agent["id"], f"ares-bot/{req.name}", req.name, req.description or "",
+                    clone_url, f"{GITEA_URL}/ares-bot/{req.name}",
+                ))
+
                 return {"status": "created", "repo": data.get("full_name", req.name),
                         "html_url": f"{GITEA_URL}/ares-bot/{req.name}",
                         "strix_hook": "auto-registered"}
