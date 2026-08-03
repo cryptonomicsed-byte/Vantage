@@ -330,8 +330,17 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
                     mp4_path = out_dir / "buzz_mirror.mp4"
                     try:
                         remux = await asyncio.create_subprocess_exec(
+                            # -map_metadata -1 alone doesn't stop ffmpeg
+                            # writing its own encoder udta/meta/ilst box even
+                            # on a `-c copy` remux -- found live, 422
+                            # "media contains metadata or a non-canonical
+                            # metadata channel" (this relay's MP4 validator
+                            # whitelists specific boxes only, no meta/ilst/
+                            # udta-with-content at all). -fflags +bitexact
+                            # suppresses ffmpeg's own signature too.
                             "ffmpeg", "-y", "-i", str(out_dir / "index.m3u8"),
-                            "-c", "copy", "-movflags", "+faststart", str(mp4_path),
+                            "-c", "copy", "-map_metadata", "-1", "-fflags", "+bitexact",
+                            "-movflags", "+faststart", str(mp4_path),
                             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
                         )
                         _, remux_err = await asyncio.wait_for(remux.communicate(), timeout=120)
