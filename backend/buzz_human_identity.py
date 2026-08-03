@@ -1,33 +1,31 @@
 """Section 1.4 of the buzz_vantage_blueprint: humans get their own real
 Buzz/Nostr identity (same sealed-seed pattern as agents, distinct
-principal namespace), and an agent_grants row translates into buzz
-channel membership for that human's own pubkey -- never the agent's key
-being "shared" with the human.
+principal namespace), and agent_grants changes translate into the
+human's own relay membership role -- never the agent's key being
+"shared" with the human.
 
-Role mapping (blueprint's own vocabulary, Section 5): admin_full grants
-the buzz "admin" role in the agent's channels; every other scope
-combination (view_state/copilot_chat/trading_execute/wallet_manage)
-maps to plain "member" -- this relay's kind:9030 add-member only
-recognizes member/admin/owner, so finer Vantage-side scopes aren't all
-individually representable as a buzz role today. The grant itself (which
-scopes a human has) still lives in Vantage's own agent_grants table as
+Role mapping is RELAY-WIDE, not per-channel/per-agent -- found live: a
+plain "member" pubkey publishing kind:9030 (add-member) itself is
+rejected outright ("invalid: actor not authorized: must be admin or
+owner"), so there is no authenticated per-channel path available to an
+ordinary agent session. The only real mechanism is the same root-level
+`buzz-admin add-member --role` CLI registration itself already uses.
+Since that sets a relay-wide role, a human's actual role is recomputed as
+the MAX across ALL their active grants (admin_full anywhere -> relay
+"admin", else "member") every time any one grant changes -- see
+_max_role_across_active_grants. The grant itself (which scopes a human
+has on which agent) still lives in Vantage's own agent_grants table as
 the real source of truth; this is a *mirror* of that state into buzz's
-membership model, not a replacement for it.
-
-Current topology note: today every agent only belongs to the one shared,
-open MAIN_FEED channel (no restricted per-agent channels exist yet --
-those land in P4/rooms and P3/guilds). So a 9030/9031 add/remove-member
-event on that open channel is real, signed, and lands on the relay, but
-has limited practical access-control effect until private per-agent
-channels exist. Wiring it now means grant changes already flow into buzz
-membership state with zero further work once those channels exist.
+relay-wide membership model, coarser than Vantage's own per-agent scopes
+until this relay grows real per-channel role authorization.
 """
 import asyncio
 import json
 import logging
+from typing import Optional
 
 from .buzz_client import BuzzSession
-from .buzz_identity import derive_buzz_keypair, derive_human_buzz_keypair, public_key_xonly_hex, get_owner_attestation_tag
+from .buzz_identity import derive_human_buzz_keypair, public_key_xonly_hex, get_owner_attestation_tag
 from .buzz_registration import RELAY_WS_URL, RELAY_CONTAINER
 from .db import get_db
 
@@ -89,57 +87,73 @@ async def register_human_on_buzz(human_id: int) -> dict:
     return {"ok": True, "pubkey": pubkey}
 
 
-async def _agent_channels_and_session(agent_id: int) -> tuple[list[str], BuzzSession]:
+async def _max_role_across_active_grants(human_id: int) -> Optional[str]:
+    """The relay's membership model (confirmed live: buzz-admin add-member
+    --role) is RELAY-WIDE, not per-channel -- there is no authenticated way
+    for a plain member to grant another pubkey a per-channel role via
+    kind:9030 (found live: "invalid: actor not authorized: must be admin
+    or owner" -- a regular member publishing 9030 itself is rejected,
+    correctly, by the relay). So a human's actual buzz role must be the
+    MAX across all their active grants, not scoped to one agent at a time.
+    Returns None if the human has no active grants at all (caller should
+    then remove relay membership entirely rather than downgrade)."""
     async with get_db() as db:
-        cur = await db.execute("SELECT buzz_joined_channels FROM agents WHERE id = ?", (agent_id,))
-        row = await cur.fetchone()
-    channels = json.loads(row[0]) if row and row[0] else []
-    pk = await derive_buzz_keypair(agent_id)
-    sess = BuzzSession(RELAY_WS_URL, pk)
-    await sess.connect()
-    await sess.authenticate()
-    return channels, sess
+        cur = await db.execute(
+            "SELECT scopes FROM agent_grants WHERE human_id=? AND revoked_at IS NULL", (human_id,)
+        )
+        rows = await cur.fetchall()
+    if not rows:
+        return None
+    all_scopes: set[str] = set()
+    for (scopes_json,) in rows:
+        try:
+            all_scopes.update(json.loads(scopes_json))
+        except Exception:
+            pass
+    return "admin" if "admin_full" in all_scopes else "member"
+
+
+async def _set_human_relay_role(human_id: int, role: Optional[str]) -> None:
+    status = await get_human_buzz_status(human_id)
+    if not status["registered"]:
+        if role is None:
+            return
+        await register_human_on_buzz(human_id)
+        status = await get_human_buzz_status(human_id)
+    pubkey = status["pubkey"]
+    if role is None:
+        code, out, err = await _docker_exec("remove-member", "--pubkey", pubkey)
+        if code != 0 and "not found" not in (out + err).lower():
+            raise RuntimeError(f"buzz-admin remove-member failed: {err.strip() or out.strip()}")
+    else:
+        code, out, err = await _docker_exec("add-member", "--pubkey", pubkey, "--role", role)
+        if code != 0 and "already" not in (out + err).lower() and "exists" not in (out + err).lower():
+            raise RuntimeError(f"buzz-admin add-member --role {role} failed: {err.strip() or out.strip()}")
 
 
 async def sync_grant_to_buzz(human_id: int, agent_id: int, scopes: list[str]) -> None:
-    """Mirrors an agent_grants row into buzz channel membership for the
-    human's own pubkey. Never raises -- a failed mirror shouldn't break
-    the actual Vantage-side grant, which is the real source of truth."""
+    """A grant change recomputes the human's relay-wide role from the MAX
+    across ALL their active grants (see _max_role_across_active_grants) --
+    `agent_id`/`scopes` identify which grant just changed, triggering the
+    recompute, not a per-channel target. Never raises -- a failed mirror
+    shouldn't break the actual Vantage-side grant, which is the real
+    source of truth."""
     try:
-        status = await get_human_buzz_status(human_id)
-        if not status["registered"]:
-            await register_human_on_buzz(human_id)
-        human_pk = await derive_human_buzz_keypair(human_id)
-        human_pubkey = public_key_xonly_hex(human_pk)
-        role = "admin" if "admin_full" in scopes else "member"
-
-        channels, sess = await _agent_channels_and_session(agent_id)
-        if not channels:
-            await sess.close()
-            return
-        try:
-            for channel in channels:
-                await sess.publish(9030, "", tags=[["h", channel], ["p", human_pubkey], ["role", role]])
-        finally:
-            await sess.close()
-        logger.info("buzz_human_identity: synced grant human_id=%s agent_id=%s role=%s to %d channel(s)", human_id, agent_id, role, len(channels))
+        role = await _max_role_across_active_grants(human_id)
+        await _set_human_relay_role(human_id, role)
+        logger.info("buzz_human_identity: synced human_id=%s (grant on agent_id=%s changed) -> relay role=%s", human_id, agent_id, role)
     except Exception as e:
         logger.warning("buzz_human_identity: sync_grant_to_buzz failed human_id=%s agent_id=%s: %s", human_id, agent_id, e)
 
 
 async def revoke_grant_from_buzz(human_id: int, agent_id: int) -> None:
+    """Called AFTER the grant's revoked_at is already set, so
+    _max_role_across_active_grants naturally excludes it -- recomputes
+    from whatever grants remain, or removes relay membership entirely if
+    none do."""
     try:
-        human_pk = await derive_human_buzz_keypair(human_id)
-        human_pubkey = public_key_xonly_hex(human_pk)
-        channels, sess = await _agent_channels_and_session(agent_id)
-        if not channels:
-            await sess.close()
-            return
-        try:
-            for channel in channels:
-                await sess.publish(9031, "", tags=[["h", channel], ["p", human_pubkey]])
-        finally:
-            await sess.close()
-        logger.info("buzz_human_identity: revoked grant human_id=%s agent_id=%s from %d channel(s)", human_id, agent_id, len(channels))
+        role = await _max_role_across_active_grants(human_id)
+        await _set_human_relay_role(human_id, role)
+        logger.info("buzz_human_identity: synced human_id=%s (grant on agent_id=%s revoked) -> relay role=%s", human_id, agent_id, role)
     except Exception as e:
         logger.warning("buzz_human_identity: revoke_grant_from_buzz failed human_id=%s agent_id=%s: %s", human_id, agent_id, e)
