@@ -870,6 +870,46 @@ async def _ensure_signal_tables(db) -> None:
         pass  # column already exists
 
 
+async def ingest_signal_internal(symbol: str, source: str, type_: str, conviction: float = 1.0,
+                                  direction: str = "", detail: str = "", mint: str = "") -> dict:
+    """The real body of POST /signals/ingest, factored out so in-process
+    callers (last30days_bridge.py's daemon loop) can post a signal
+    directly -- same process, no reason to round-trip through HTTP with
+    a system-tool key just to call itself."""
+    signal = {
+        "symbol": str(symbol)[:20],
+        "source": str(source)[:30],
+        "type": str(type_)[:20],
+        "conviction": float(conviction),
+        "direction": direction,
+        "detail": detail,
+        "mint": str(mint)[:64],
+        "ts": int(time.time()),
+    }
+    with _signal_lock:
+        _signal_pool.append(signal)
+        if len(_signal_pool) > MAX_POOL_SIZE:
+            _signal_pool.pop(0)
+
+    # Durable write-through (best-effort — the in-memory pool is still the fast path).
+    try:
+        async with get_db() as db:
+            await _ensure_signal_tables(db)
+            await db.execute(
+                "INSERT INTO signal_pool (symbol, source, type, conviction, direction, detail, mint, ts) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (signal["symbol"], signal["source"], signal["type"], signal["conviction"],
+                 signal["direction"], signal["detail"], signal["mint"], signal["ts"]),
+            )
+            await db.execute(
+                "DELETE FROM signal_pool WHERE id NOT IN "
+                "(SELECT id FROM signal_pool ORDER BY id DESC LIMIT ?)", (_POOL_DB_KEEP,))
+            await db.commit()
+    except aiosqlite.Error as e:
+        logger.debug("signal_pool persist failed: %s", e)
+    return {"status": "ingested", "signal": signal["symbol"], "pool_size": len(_signal_pool)}
+
+
 @router.post("/signals/ingest")
 async def ingest_signal(payload: dict, tool: dict = Depends(get_system_tool)):
     """System-only signal ingestion (worldmonitor, data feeds, external intel sources).
@@ -893,41 +933,11 @@ async def ingest_signal(payload: dict, tool: dict = Depends(get_system_tool)):
     for f in required:
         if f not in payload:
             return {"error": f"Missing required field: {f}"}
-
-    signal = {
-        "symbol": str(payload["symbol"])[:20],
-        "source": str(payload["source"])[:30],
-        "type": str(payload["type"])[:20],
-        "conviction": float(payload.get("conviction", 1.0)),
-        "direction": payload.get("direction", ""),
-        "detail": payload.get("detail", ""),
-        "mint": str(payload.get("mint", ""))[:64],
-        "ts": int(time.time()),
-    }
-    with _signal_lock:
-        _signal_pool.append(signal)
-        if len(_signal_pool) > MAX_POOL_SIZE:
-            _signal_pool.pop(0)
-
-    # Durable write-through (best-effort — the in-memory pool is still the fast path).
-    try:
-        async with get_db() as db:
-            await _ensure_signal_tables(db)
-            await db.execute(
-                "INSERT INTO signal_pool (symbol, source, type, conviction, direction, detail, mint, ts) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (signal["symbol"], signal["source"], signal["type"], signal["conviction"],
-                 signal["direction"], signal["detail"], signal["mint"], signal["ts"]),
-            )
-            # Trim to the most-recent _POOL_DB_KEEP rows.
-            await db.execute(
-                "DELETE FROM signal_pool WHERE id NOT IN "
-                "(SELECT id FROM signal_pool ORDER BY id DESC LIMIT ?)", (_POOL_DB_KEEP,))
-            await db.commit()
-    except aiosqlite.Error as e:
-        logger.debug("signal_pool persist failed: %s", e)
-
-    return {"status": "ingested", "signal": signal["symbol"], "pool_size": len(_signal_pool)}
+    return await ingest_signal_internal(
+        payload["symbol"], payload["source"], payload["type"],
+        conviction=float(payload.get("conviction", 1.0)), direction=payload.get("direction", ""),
+        detail=payload.get("detail", ""), mint=payload.get("mint", ""),
+    )
 
 
 async def _durable_pool(limit: int = 50) -> list[dict]:
