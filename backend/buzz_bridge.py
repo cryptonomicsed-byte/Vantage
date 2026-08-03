@@ -123,6 +123,19 @@ class BuzzBridge:
             logger.info("buzz_bridge: opened session for agent_id=%s", agent_id)
             return session
 
+    async def get_buzz_event_id(self, vantage_event_id: str, direction: str = "outbound") -> Optional[str]:
+        """Looks up the buzz event id a given vantage object (e.g.
+        "broadcast:123") was mirrored as -- used by NIP-10 threading
+        (Section 3.3) to find a debate root's buzz event id when mirroring
+        a reply."""
+        async with get_db() as db:
+            cur = await db.execute(
+                "SELECT buzz_event_id FROM buzz_event_map WHERE vantage_event_id=? AND direction=?",
+                (vantage_event_id, direction),
+            )
+            row = await cur.fetchone()
+            return row[0] if row else None
+
     async def _already_mirrored(self, vantage_event_id: str, direction: str) -> bool:
         async with get_db() as db:
             cur = await db.execute(

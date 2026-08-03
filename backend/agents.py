@@ -316,6 +316,38 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
                     agent_name=row["agent_name"],
                 ))
 
+            if surface and walrus_blob_id == "":
+                # Section 3.2 + Section 11: this pipeline outputs HLS
+                # (m3u8 + .ts segments), which Blossom can't store as-is --
+                # BUD-01/02 is one-file-one-blob, and buzz's own video
+                # validator expects a real single MP4 container. Remux (no
+                # re-encode -- `-c copy`, the segments are already H.264/AAC)
+                # into one MP4 purely for the Blossom mirror; the HLS
+                # version stays the actual playback path everywhere else.
+                async def _mirror_video_to_buzz():
+                    from .blossom_client import upload_media
+                    from .buzz_bridge import bridge as _buzz_bridge
+                    mp4_path = out_dir / "buzz_mirror.mp4"
+                    try:
+                        remux = await asyncio.create_subprocess_exec(
+                            "ffmpeg", "-y", "-i", str(out_dir / "index.m3u8"),
+                            "-c", "copy", "-movflags", "+faststart", str(mp4_path),
+                            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+                        )
+                        _, remux_err = await asyncio.wait_for(remux.communicate(), timeout=120)
+                        if remux.returncode != 0 or not mp4_path.exists():
+                            logger.warning("broadcast_id=%d MP4 remux for Blossom failed: %s", broadcast_id, remux_err.decode(errors="replace")[-500:])
+                            return
+                        data = mp4_path.read_bytes()
+                        blob = await upload_media(row["agent_id"], data, "video/mp4")
+                        if blob:
+                            imeta = ["imeta", f"url {blob['url']}", f"m {blob.get('type', '')}", f"x {blob['sha256']}", f"size {blob.get('size', len(data))}"]
+                            await _buzz_bridge.publish_feed(row["agent_id"], broadcast_id, row["title"], extra_tags=[imeta])
+                    finally:
+                        mp4_path.unlink(missing_ok=True)
+
+                asyncio.create_task(_mirror_video_to_buzz())
+
     except asyncio.TimeoutError:
         logger.error("broadcast_id=%d FFmpeg timed out after 600s", broadcast_id)
         async with get_db() as db:
@@ -2134,6 +2166,29 @@ async def create_image_post(
             "thumbnail_url": thumb_url,
             "stream_url": "",
         })
+
+        async def _mirror_images_to_buzz():
+            # Section 3.2 + Section 11: Blossom-store the first image (the
+            # one already used as the broadcast's own thumbnail), then
+            # kind:9 with a real NIP-92 imeta tag. Multi-image posts only
+            # mirror the cover image -- buzz's imeta tag is singular per
+            # NIP-92; a full multi-image gallery mirror isn't representable
+            # in one event and isn't worth N separate posts for one broadcast.
+            from .blossom_client import upload_media
+            from .buzz_bridge import bridge as _buzz_bridge
+            first_path = out_dir / Path(image_urls[0]).name
+            if not first_path.exists():
+                return
+            data = first_path.read_bytes()
+            ext = first_path.suffix.lower().lstrip(".")
+            mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif", "webp": "image/webp"}.get(ext, "application/octet-stream")
+            blob = await upload_media(agent["id"], data, mime)
+            if not blob:
+                return
+            imeta = ["imeta", f"url {blob['url']}", f"m {blob.get('type', '')}", f"x {blob['sha256']}", f"size {blob.get('size', len(data))}"]
+            await _buzz_bridge.publish_feed(agent["id"], broadcast_id, title, extra_tags=[imeta])
+
+        asyncio.create_task(_mirror_images_to_buzz())
     asyncio.create_task(_append_receipt(str(agent["name"]), "publish_image", {"broadcast_id": broadcast_id, "title": title, "image_count": len(image_urls), "status": final_status}, tier=agent.get("tier", 0)))
     return {"broadcast_id": broadcast_id, "image_count": len(image_urls), "status": final_status}
 
@@ -2221,6 +2276,11 @@ async def create_graph_post(
             "thumbnail_url": "",
         })
         asyncio.create_task(_fire_webhooks(agent["id"], "broadcast_ready", {"broadcast_id": broadcast_id, "title": title, "content_type": "graph"}))
+        from .buzz_bridge import bridge as _buzz_bridge
+        asyncio.create_task(_buzz_bridge.publish_feed(
+            agent["id"], broadcast_id, graph_data, kind=30023,
+            extra_tags=[["t", "graph"], ["d", f"vantage-broadcast-{broadcast_id}"]],
+        ))
     asyncio.create_task(_append_receipt(str(agent["name"]), "publish_graph", {"broadcast_id": broadcast_id, "title": title, "status": initial_status}, tier=agent.get("tier", 0)))
     return {"broadcast_id": broadcast_id, "status": initial_status}
 
@@ -2445,6 +2505,17 @@ async def fork_broadcast(
         except Exception:
             pass
         await db.commit()
+
+    async def _mirror_fork():
+        # Section 3.5: "fork = new root + link" -- a genuinely new kind:9
+        # post (not a reply/thread) carrying a ["fork", <original_buzz_id>]
+        # tag back to whatever the source was mirrored as, if anything.
+        from .buzz_bridge import bridge as _buzz_bridge
+        original_buzz_id = await _buzz_bridge.get_buzz_event_id(f"broadcast:{broadcast_id}")
+        extra = [["fork", original_buzz_id]] if original_buzz_id else []
+        await _buzz_bridge.publish_feed(agent["id"], fork_id, f"{title}\n\n{description}" if description else title, extra_tags=extra)
+
+    asyncio.create_task(_mirror_fork())
     return {
         "broadcast_id": fork_id,
         "forked_from": broadcast_id,
@@ -3081,6 +3152,8 @@ async def create_debate_post(
         "stream_url": "",
         "thumbnail_url": thumb_url or "",
     })
+    from .buzz_bridge import bridge as _buzz_bridge
+    asyncio.create_task(_buzz_bridge.publish_feed(agent["id"], broadcast_id, f"{title}\n\n{content}"))
     return {"broadcast_id": broadcast_id, "status": "ready", "debate_topic": debate_topic}
 
 
@@ -3162,6 +3235,19 @@ async def debate_reply(
             await db.execute("UPDATE broadcasts SET thumbnail_url=? WHERE id=?", (thumb_url, reply_id))
             await db.commit()
 
+    async def _mirror_debate_reply():
+        # Section 3.3: NIP-10 threaded reply -- tags the immediate parent's
+        # buzz event id as ["e", <id>, "", "reply"], which is what actually
+        # creates thread_metadata on this relay (confirmed via its own
+        # NOSTR.md). Falls back to an untagged post if the parent was never
+        # mirrored (e.g. mirrored before this feature existed) -- never
+        # blocks the reply itself.
+        from .buzz_bridge import bridge as _buzz_bridge
+        parent_buzz_id = await _buzz_bridge.get_buzz_event_id(f"broadcast:{broadcast_id}")
+        extra = [["e", parent_buzz_id, "", "reply"]] if parent_buzz_id else []
+        await _buzz_bridge.publish_feed(agent["id"], reply_id, f"{reply_title}\n\n{content}", extra_tags=extra)
+
+    asyncio.create_task(_mirror_debate_reply())
     return {"broadcast_id": reply_id, "debate_topic": source["debate_topic"], "position": reply_position}
 
 
@@ -3681,6 +3767,15 @@ async def seal_broadcast(
             (policy, broadcast_id),
         )
         await db.commit()
+
+    # Section 3.5: seal stays Vantage-native (no buzz equivalent), mirrored
+    # only as an addressable kind:30078 read-state marker -- audit trail,
+    # not an access gate (buzz has no concept of Vantage's Seal policies).
+    from .buzz_bridge import bridge as _buzz_bridge
+    asyncio.create_task(_buzz_bridge.publish_feed(
+        agent["id"], f"seal:{broadcast_id}", f"sealed (policy={policy})", kind=30078,
+        extra_tags=[["d", f"vantage-broadcast-{broadcast_id}-seal"]],
+    ))
     return {"ok": True, "broadcast_id": broadcast_id, "seal_policy": policy}
 
 
@@ -3712,6 +3807,12 @@ async def unseal_broadcast(broadcast_id: int, agent: dict = Depends(get_agent)):
             "UPDATE broadcasts SET is_sealed=0, seal_policy='' WHERE id=?", (broadcast_id,)
         )
         await db.commit()
+
+    from .buzz_bridge import bridge as _buzz_bridge
+    asyncio.create_task(_buzz_bridge.publish_feed(
+        agent["id"], f"unseal:{broadcast_id}", "unsealed", kind=30078,
+        extra_tags=[["d", f"vantage-broadcast-{broadcast_id}-seal"]],
+    ))
     return {"ok": True, "broadcast_id": broadcast_id}
 
 

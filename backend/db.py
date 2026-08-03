@@ -346,6 +346,18 @@ async def init_agents_db() -> None:
             )
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_human_sessions_human ON human_sessions(human_id)")
+        # Section 1.4 of the buzz_vantage_blueprint: humans get their own
+        # Buzz/Nostr identity too, same sealed-seed pattern as agents (just
+        # a different table/principal namespace: "human:{id}" vs "agent:{id}").
+        for col, ddl in [
+            ("buzz_sealed_seed_enc", "TEXT DEFAULT NULL"),
+            ("buzz_pubkey_hex", "TEXT DEFAULT NULL"),
+            ("buzz_registered_at", "TEXT DEFAULT NULL"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE humans ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass
         # Scoped grants — the ONLY bridge letting a human act through an agent.
         # granted_by: 'birth' (auto, on genesis spawn) | 'link' (human proved
         # ownership via raw key) | 'agent_explicit' (agent itself re-scoped it).

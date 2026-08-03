@@ -248,6 +248,11 @@ async def spawn_agent(
 
         await db.commit()
 
+    if birthing_human is not None:
+        from .agent_links import STARTER_SCOPES
+        from ..buzz_human_identity import sync_grant_to_buzz
+        asyncio.create_task(sync_grant_to_buzz(birthing_human["id"], new_agent_id, STARTER_SCOPES))
+
     omokoda_link_result = None
     if data.link_omokoda:
         # Must happen here, not later -- `api_key` (still raw/plaintext in

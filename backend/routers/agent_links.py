@@ -2,6 +2,7 @@
 This is deliberately the ONLY way a human's session can act through an agent
 -- an agent's own X-Agent-Key remains fully sovereign and untouched by any of
 this. A human never gets implicit access; every grant is explicit and scoped."""
+import asyncio
 import hashlib as _hlib
 import json
 
@@ -69,6 +70,9 @@ async def link_agent(request: Request, human: dict = Depends(get_human)):
     except aiosqlite.IntegrityError:
         raise HTTPException(409, "This agent is already linked to your account")
 
+    from ..buzz_human_identity import sync_grant_to_buzz
+    asyncio.create_task(sync_grant_to_buzz(human["id"], agent_row["id"], STARTER_SCOPES))
+
     return {"agent_id": agent_row["id"], "name": agent_row["name"], "scopes": STARTER_SCOPES}
 
 
@@ -127,6 +131,9 @@ async def update_grant(agent_id: int, request: Request, human: dict = Depends(ge
             )
         await db.commit()
 
+    from ..buzz_human_identity import sync_grant_to_buzz
+    asyncio.create_task(sync_grant_to_buzz(human["id"], agent_id, scopes))
+
     return {"agent_id": agent_id, "scopes": scopes, "granted_by": granted_by}
 
 
@@ -138,4 +145,8 @@ async def revoke_grant(agent_id: int, human: dict = Depends(get_human)):
             (human["id"], agent_id),
         )
         await db.commit()
+
+    from ..buzz_human_identity import revoke_grant_from_buzz
+    asyncio.create_task(revoke_grant_from_buzz(human["id"], agent_id))
+
     return {"status": "revoked", "agent_id": agent_id}

@@ -3,7 +3,9 @@ X-Agent-Key stays sovereign and unchanged; a human logging in here gets NO
 implicit access to any agent. Bridging happens only through agent_grants
 rows (see agent_links.py) created at genesis-birth, explicit linking, or an
 agent's own re-scoping decision."""
+import asyncio
 import hashlib as _hlib
+import json
 import re as _rexp
 import secrets
 
@@ -109,3 +111,34 @@ async def get_me(human: dict = Depends(get_human)):
     human = dict(human)
     human.pop("password_hash", None)
     return human
+
+
+@router.get("/me/buzz/status")
+async def human_buzz_status(human: dict = Depends(get_human)):
+    from ..buzz_human_identity import get_human_buzz_status
+    return await get_human_buzz_status(human["id"])
+
+
+@router.post("/me/buzz/register")
+async def human_buzz_register(human: dict = Depends(get_human)):
+    """Section 1.4: a human gets their own real Buzz/Nostr identity,
+    distinct from any agent they hold a grant on. Existing grants are
+    re-synced immediately so channel membership catches up without
+    waiting for the next grant change."""
+    from ..buzz_human_identity import register_human_on_buzz, sync_grant_to_buzz
+    result = await register_human_on_buzz(human["id"])
+
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            "SELECT agent_id, scopes FROM agent_grants WHERE human_id=? AND revoked_at IS NULL",
+            (human["id"],),
+        )).fetchall()
+    for r in rows:
+        try:
+            scopes = json.loads(r["scopes"])
+        except Exception:
+            scopes = []
+        asyncio.create_task(sync_grant_to_buzz(human["id"], r["agent_id"], scopes))
+
+    return result

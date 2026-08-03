@@ -189,6 +189,35 @@ async def derive_buzz_keypair(agent_id: int) -> PrivateKey:
     return _derive_keypair_from_seed(seed)
 
 
+async def get_or_create_human_sealed_seed(human_id: int) -> bytes:
+    """Same sealed-seed pattern as agents (get_or_create_sealed_seed), just
+    against the `humans` table / "human:{id}" principal namespace --
+    Section 1.4 of the buzz_vantage_blueprint. Humans get their own real
+    Buzz/Nostr identity, distinct from any agent they're granted access
+    to (a human never "borrows" an agent's key)."""
+    principal = f"human:{human_id}"
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT buzz_sealed_seed_enc FROM humans WHERE id = ?", (human_id,)
+        )
+        row = await cur.fetchone()
+        if row and row[0]:
+            return _decrypt_seed(principal, row[0])
+
+        seed = secrets.token_bytes(32)
+        enc_new = _encrypt_seed(principal, seed)
+        await db.execute(
+            "UPDATE humans SET buzz_sealed_seed_enc = ? WHERE id = ?", (enc_new, human_id)
+        )
+        await db.commit()
+        return seed
+
+
+async def derive_human_buzz_keypair(human_id: int) -> PrivateKey:
+    seed = await get_or_create_human_sealed_seed(human_id)
+    return _derive_keypair_from_seed(seed)
+
+
 # Distinct HKDF domain for the "shadow owner" key -- see
 # derive_shadow_owner_keypair's docstring for why this exists.
 _SHADOW_OWNER_HKDF_INFO = b"vantage-buzz-shadow-owner-v1"
