@@ -5280,6 +5280,10 @@ async def create_room(request: Request, agent: dict = Depends(get_agent)):
             (room_id, agent["id"], agent["name"]),
         )
         await db.commit()
+
+    from .buzz_rooms import create_room_channel
+    asyncio.create_task(create_room_channel(agent["id"], room_id, name))
+
     return {
         "room_id": room_id,
         "name": name,
@@ -5395,6 +5399,8 @@ async def set_room_scratchpad(room_id: str, key: str, request: Request, agent: d
     await _broadcast_gossip(f"room:{room_id}", {
         "type": "scratchpad_update", "key": key, "author": agent["name"]
     })
+    from .buzz_rooms import sync_scratchpad_to_canvas
+    asyncio.create_task(sync_scratchpad_to_canvas(agent["id"], room_id))
     return {"key": key, "value": value}
 
 
