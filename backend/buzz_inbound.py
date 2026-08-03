@@ -198,7 +198,7 @@ async def _maybe_dispatch_mention(event: dict, content: str) -> None:
 
     try:
         result = await _dispatch_chat(agent_row, content.replace(f"@{mentioned_name}", "", 1).strip())
-        reply_text = (result.get("data") or {}).get("reply") or ""
+        reply_text = _format_intent_reply(result)
         if not reply_text:
             return
         await _buzz_bridge.publish_feed(
@@ -207,6 +207,44 @@ async def _maybe_dispatch_mention(event: dict, content: str) -> None:
         )
     except Exception as e:
         logger.warning("buzz_inbound: mention dispatch to agent %s failed: %s", mentioned_name, e)
+
+
+def _format_intent_reply(result: dict) -> str:
+    """_dispatch_chat's result shape varies by action -- only "chat_reply"
+    (a real connected mind, or the OmniRoute/LLM fallback) carries a
+    ready-made data.reply string. Every other action the regex parser can
+    produce (navigate/show_price/check_pnl/place_trade/set_alert/unknown)
+    has its own data shape with no "reply" key at all -- found live: a
+    mention that coincidentally regex-matched "show_price" produced an
+    empty reply and silently mirrored nothing. Mirrors (a reduced form of)
+    the same per-action formatting CopilotChat.tsx already does on the
+    frontend, so a buzz mention gets a real reply regardless of which
+    action the parser lands on."""
+    action = result.get("action")
+    target = result.get("target") or ""
+    data = result.get("data") or {}
+
+    if action == "chat_reply":
+        return data.get("reply") or ""
+    if action == "navigate":
+        return f"Navigating to {target}."
+    if action == "show_price":
+        price = data.get("price")
+        if price is None:
+            return f"Couldn't fetch a price for {target}."
+        change = data.get("change_24h")
+        suffix = f" ({float(change):+.2f}% 24h)" if change is not None else ""
+        return f"{target} is at ${float(price):,.2f}{suffix}"
+    if action == "check_pnl":
+        return "Your P&L is available on the Trading page."
+    if action == "place_trade":
+        side = data.get("side", "trade")
+        return f"Ready to {side} {target}. Confirm in the Vantage app to place the order."
+    if action == "set_alert":
+        return f"Noted -- I'll watch for: {data.get('condition') or target}."
+    if action == "unknown":
+        return "I didn't catch that -- try asking me something more specific."
+    return ""
 
 
 async def derive_agent_keypair_for_typing(agent_id: int):
