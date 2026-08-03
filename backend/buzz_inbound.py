@@ -104,10 +104,19 @@ def _tag(event: dict, name: str) -> list[str]:
     return [t for t in event.get("tags", []) if t and t[0] == name]
 
 
-async def _handle_kind_9_or_1(event: dict) -> None:
+async def _handle_kind_9_or_1(event: dict, skip_feed_row: bool = False) -> None:
+    content = event.get("content", "")
+
+    # Mention-dispatch happens regardless of skip_feed_row -- a Vantage
+    # agent's own post mentioning another Vantage agent is exactly as
+    # real as one from an external client (see _process_event's comment).
+    await _maybe_dispatch_mention(event, content)
+
+    if skip_feed_row:
+        return  # we already have our own broadcast row for this event
+
     reply_tags = [t for t in _tag(event, "e") if len(t) > 3 and t[3] == "reply"]
     agent_id = await _agent_id_for_pubkey(event["pubkey"])
-    content = event.get("content", "")
 
     if reply_tags:
         # NIP-10 threaded reply to something we can resolve -> a real
@@ -146,8 +155,6 @@ async def _handle_kind_9_or_1(event: dict) -> None:
         "broadcast_id": broadcast_id, "agent_name": f"buzz:{event['pubkey'][:8]}",
         "title": title, "content_type": content_type, "stream_url": "", "thumbnail_url": "",
     })
-
-    await _maybe_dispatch_mention(event, content)
 
 
 _MENTION_RE = re.compile(r"@([A-Za-z0-9_.-]+)")
@@ -239,13 +246,19 @@ async def _handle_kind_7(event: dict) -> None:
 async def _process_event(event: dict) -> None:
     if await _already_processed(event["id"]):
         return
-    if await _is_our_own_outbound(event["id"]):
-        await _mark_processed(event["id"])
-        return
+    # "Is this our own outbound mirror" only gates creating a DUPLICATE
+    # feed row for something we already have a broadcast row for -- it
+    # must NOT gate mention-dispatch or reaction handling. A Vantage agent
+    # posting "@other_agent ..." through Vantage's own /posts/text is
+    # exactly as real a mention as one from an external nostr client; the
+    # first version of this listener short-circuited on is_our_own_outbound
+    # BEFORE checking for mentions, silently making Vantage-to-Vantage
+    # @mentions never dispatch at all. Found live, fixed here.
+    is_own_outbound = await _is_our_own_outbound(event["id"])
     try:
         if event["kind"] in (9, 1):
-            await _handle_kind_9_or_1(event)
-        elif event["kind"] == 7:
+            await _handle_kind_9_or_1(event, skip_feed_row=is_own_outbound)
+        elif event["kind"] == 7 and not is_own_outbound:
             await _handle_kind_7(event)
     except Exception as e:
         logger.warning("buzz_inbound: failed processing event %s (kind=%s): %s", event.get("id"), event.get("kind"), e)
