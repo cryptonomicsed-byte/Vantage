@@ -263,23 +263,54 @@ async def _process_event(event: dict) -> None:
     except Exception as e:
         logger.warning("buzz_inbound: failed processing event %s (kind=%s): %s", event.get("id"), event.get("kind"), e)
     await _mark_processed(event["id"])
+    await _save_last_ts(event.get("created_at"))
+
+
+async def _get_last_ts() -> int:
+    async with get_db() as db:
+        cur = await db.execute("SELECT value FROM buzz_config WHERE key='inbound_last_ts'")
+        row = await cur.fetchone()
+    return int(row[0]) if row else int(time.time())
+
+
+async def _save_last_ts(ts) -> None:
+    if not ts:
+        return
+    async with get_db() as db:
+        await db.execute(
+            "INSERT INTO buzz_config (key, value) VALUES ('inbound_last_ts', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(ts),),
+        )
+        await db.commit()
 
 
 async def run_inbound_listener() -> None:
     """Reconnect-with-backoff forever. Meant to be launched once as a
     fire-and-forget background task at app startup and left running for
-    the life of the process -- never awaited/joined."""
+    the life of the process -- never awaited/joined.
+
+    `since` matters a lot here: found live that without it, EVERY
+    reconnect (including every app restart) re-fetches this channel's
+    ENTIRE history from the relay -- thousands of events on a busy shared
+    channel -- and the listener spends minutes working through backlog
+    before it ever reaches "now", making @mention dispatch (Section 12.2)
+    look broken when it was just badly behind. Persists the last
+    processed event's created_at in buzz_config and resumes from there;
+    first-ever run starts from "now" (no historical backfill), not the
+    dawn of the channel."""
     await _ensure_instance_relay_membership()
     backoff = RECONNECT_BACKOFF_SECONDS
     while True:
         try:
             channel = await get_main_feed_channel()
+            since = await _get_last_ts()
             pk = await derive_instance_keypair()
             sess = BuzzSession(RELAY_WS_URL, pk)
             await sess.connect()
             await sess.authenticate()
-            sub_id = await sess.subscribe([{"kinds": [1, 7, 9], "#h": [channel]}])
-            logger.info("buzz_inbound: listening on channel %s", channel)
+            sub_id = await sess.subscribe([{"kinds": [1, 7, 9], "#h": [channel], "since": since}])
+            logger.info("buzz_inbound: listening on channel %s (since=%s)", channel, since)
             backoff = RECONNECT_BACKOFF_SECONDS  # reset after a successful connect
             async for event in sess.stream_events(sub_id):
                 await _process_event(event)
