@@ -92,7 +92,11 @@ async def resolve_call(score_id: int, request: Request, agent: dict = Depends(ge
     # Public scoring with cryptographic authorship, per the blueprint.
     import asyncio as _asyncio
     from ..buzz_bridge import bridge as _buzz_bridge
-    original_buzz_id = await _buzz_bridge.get_buzz_event_id(f"prediction:{score_id}")
+    # publish_feed prefixes whatever id it's given with "broadcast:" internally
+    # (vantage_event_id = f"broadcast:{broadcast_id}") -- found live: this
+    # lookup was missing that same prefix, so it always returned None and
+    # neither the reply-tag nor the reaction ever fired.
+    original_buzz_id = await _buzz_bridge.get_buzz_event_id(f"broadcast:prediction:{score_id}")
     extra = [["e", original_buzz_id, "", "reply"]] if original_buzz_id else []
     _asyncio.create_task(_buzz_bridge.publish_feed(
         agent["id"], f"prediction-resolved:{score_id}",
