@@ -275,6 +275,19 @@ async def create_proposal(request: Request, agent: dict = Depends(get_agent)):
         "give": give,
         "take": take,
     })
+
+    # Section 34.1: mesh proposal -> real kind:9 in the shared feed
+    # (structured JSON content), signed by the actual authenticated
+    # caller's own key -- governance history becomes channel history,
+    # signed and permanent, not just a DB row.
+    import asyncio as _asyncio
+    from ..buzz_bridge import bridge as _buzz_bridge
+    _asyncio.create_task(_buzz_bridge.publish_feed(
+        agent["id"], f"mesh-proposal:{proposal_id}",
+        _json.dumps({"proposal_id": proposal_id, "block_id": block_id, "give": give, "take": take}),
+        extra_tags=[["t", "governance"]],
+    ))
+
     return {"proposal_id": proposal_id, "status": "open"}
 
 
@@ -396,6 +409,32 @@ async def respond_to_proposal(
         "respondent_id": respondent_id,
         "decision": decision,
     })
+
+    # Section 34.1: response as a real NIP-10 threaded reply + kind:7
+    # reaction (accept=thumbs up, reject=thumbs down, counter=eyes).
+    import asyncio as _asyncio
+    from ..buzz_bridge import bridge as _buzz_bridge
+    original_buzz_id = await _buzz_bridge.get_buzz_event_id(f"broadcast:mesh-proposal:{proposal_id}")
+    extra = [["e", original_buzz_id, "", "reply"]] if original_buzz_id else []
+    _asyncio.create_task(_buzz_bridge.publish_feed(
+        agent["id"], f"mesh-response:{proposal_id}", f"{decision}: {new_status}", extra_tags=extra,
+    ))
+    if original_buzz_id:
+        async def _react():
+            from ..buzz_client import BuzzSession
+            from ..buzz_identity import derive_buzz_keypair
+            from ..buzz_registration import RELAY_WS_URL
+            reaction = {"accept": "👍", "reject": "👎", "counter": "👀"}[decision]
+            pk = await derive_buzz_keypair(agent["id"])
+            sess = BuzzSession(RELAY_WS_URL, pk)
+            await sess.connect()
+            await sess.authenticate()
+            try:
+                await sess.publish(7, reaction, tags=[["e", original_buzz_id]])
+            finally:
+                await sess.close()
+        _asyncio.create_task(_react())
+
     return {"ok": True, "proposal_id": proposal_id, "status": new_status}
 
 

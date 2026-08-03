@@ -4861,6 +4861,16 @@ async def upsert_agent_state(
             (agent["id"], key, value),
         )
         await db.commit()
+
+    # Section 24.1: KV write mirrors as a real kind:30078 read-state event
+    # (addressable per-author, d=key -- confirmed already-real usage
+    # pattern from Section 3.5's seal/unseal markers). Relay-persistent,
+    # recoverable from any client, survives a Vantage DB wipe.
+    from .buzz_bridge import bridge as _buzz_bridge
+    asyncio.create_task(_buzz_bridge.publish_feed(
+        agent["id"], f"kv:{agent['id']}:{key}", value, kind=30078,
+        extra_tags=[["d", f"vantage-kv-{agent['id']}-{key}"]],
+    ))
     return {"key": key, "value": value}
 
 
@@ -6173,6 +6183,29 @@ async def initiate_negotiation(
         await db.commit()
         async with db.execute("SELECT * FROM negotiations WHERE id=?", (neg_id,)) as cur:
             row = await cur.fetchone()
+
+    # Section 35.1: negotiation state as a real DM to the target agent's
+    # own npub (this relay's real DM model -- kind:41010 open + kind:9 in
+    # the resulting channel, see buzz_dm.py -- not literally NIP-17
+    # gift-wrap, same finding as Section 6.4). Known limitation, not
+    # fixed here: the recipient's OWN client must independently open its
+    # side of that channel to read it (a pre-existing buzz_dm.py gap
+    # found in Section 6.4/P3, not something this call introduces).
+    async def _mirror_negotiation_dm():
+        from .buzz_dm import open_dm, send_dm_message
+        from .buzz_identity import derive_buzz_keypair, public_key_xonly_hex
+        target_pk = await derive_buzz_keypair(target["id"])
+        target_pubkey = public_key_xonly_hex(target_pk)
+        try:
+            dm = await open_dm(agent["id"], target_pubkey)
+            await send_dm_message(agent["id"], dm["channel_id"], _json.dumps({
+                "negotiation_id": neg_id, "offer_type": offer_type, "offer_data": offer_data_raw,
+            }))
+        except Exception as e:
+            logger.warning("buzz negotiation DM mirror failed neg_id=%s: %s", neg_id, e)
+
+    asyncio.create_task(_mirror_negotiation_dm())
+
     return dict(row)
 
 
@@ -7307,6 +7340,11 @@ async def report_agent_error(request: Request, agent: dict = Depends(get_agent))
         )
         report_id = cur.lastrowid
         await db.commit()
+
+    from .buzz_ops_channel import post_ops_message
+    asyncio.create_task(post_ops_message(
+        f"[{error_type}] {agent['name']}: {message}" + (f" (code={error_code})" if error_code else ""),
+    ))
 
     return {"report_id": report_id, "error_type": error_type, "message": message}
 
@@ -9367,6 +9405,16 @@ async def register_sidecar(request: Request, agent: dict = Depends(get_agent)):
         await db.commit()
         async with db.execute("SELECT * FROM agent_sidecars WHERE id=?", (sidecar_id,)) as c:
             row = await c.fetchone()
+
+    # Section 27.1: sidecar create -> encrypted observer frame (kind:24200,
+    # already built in buzz_observer.py for Section 14) announcing sidecar
+    # metadata to the owner. Operators watch sidecar lifecycle in the buzz
+    # activity feed instead of a separate dashboard.
+    from .buzz_observer import publish_observer_frame
+    asyncio.create_task(publish_observer_frame(
+        agent["id"], "sidecar_registered", f"Sidecar '{module_name}' v{version} ({module_type}) registered", severity="info",
+    ))
+
     return dict(row)
 
 
