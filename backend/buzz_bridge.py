@@ -224,6 +224,15 @@ class BuzzBridge:
             kind = 22 if short else 21
             session = await self.get_session(agent_id)
             result = await session.publish(kind, description or "", tags=tags)
+            ack = result.get("ack") or []
+            if not (len(ack) > 2 and ack[2]):
+                # BuzzSession.publish doesn't raise on relay rejection --
+                # it only sends and returns the client-built event, so a
+                # rejection (e.g. "restricted: unknown event kind") looks
+                # identical to success unless the ack is checked explicitly.
+                reason = ack[3] if len(ack) > 3 else "no ack"
+                logger.warning("buzz_bridge: relay rejected video event for broadcast_id=%s: %s", broadcast_id, reason)
+                return None
         except Exception as e:
             logger.warning("buzz_bridge: publish_video_event failed for broadcast_id=%s agent_id=%s: %s", broadcast_id, agent_id, e)
             await self._close_session(agent_id)
