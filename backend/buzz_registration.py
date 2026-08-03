@@ -18,6 +18,7 @@ import logging
 
 from .buzz_identity import derive_buzz_keypair, public_key_xonly_hex, get_owner_attestation_tag
 from .buzz_client import BuzzSession
+from .buzz_pairing import PUBLIC_RELAY_WS_URL as RELAY_WS_URL_PUBLIC
 from .db import get_db
 
 logger = logging.getLogger(__name__)
@@ -107,6 +108,14 @@ async def register_agent_on_buzz(agent_id: int) -> dict:
                 30175, agent_bio,
                 tags=[["d", f"vantage-agent-{agent_id}"], attestation],
             )
+        # NIP-65: relay list metadata (kind:10002) -- lets any standard
+        # Nostr client discover which relay to read/write this agent on,
+        # instead of only Buzz-aware federation peers understanding our
+        # bespoke manifest (federation_buzz_discovery.py).
+        await sess.publish(
+            10002, "",
+            tags=[["r", RELAY_WS_URL_PUBLIC], attestation],
+        )
     finally:
         await sess.close()
 
@@ -124,3 +133,20 @@ async def register_agent_on_buzz(agent_id: int) -> dict:
         "joined_channels": [DEFAULT_CHANNEL_ID],
         "relay_ack": {"join": join_result["ack"], "verify_publish": verify_result["ack"]},
     }
+
+
+async def publish_relay_list(agent_id: int) -> dict:
+    """Standalone NIP-65 (re-)publish for agents already registered before
+    this was added -- register_agent_on_buzz publishes it inline for new
+    registrations, this is the backfill/refresh path."""
+    pk = await derive_buzz_keypair(agent_id)
+    pubkey = public_key_xonly_hex(pk)
+    attestation = await get_owner_attestation_tag(pubkey)
+    sess = BuzzSession(RELAY_WS_URL, pk)
+    await sess.connect()
+    await sess.authenticate()
+    try:
+        result = await sess.publish(10002, "", tags=[["r", RELAY_WS_URL_PUBLIC], attestation])
+    finally:
+        await sess.close()
+    return {"ok": True, "pubkey": pubkey, "relay_ack": result["ack"]}

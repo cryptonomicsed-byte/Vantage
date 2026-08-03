@@ -740,6 +740,18 @@ async def my_buzz_register(agent: dict = Depends(get_agent)):
         raise HTTPException(502, f"Buzz registration failed: {e}")
 
 
+@router.post("/me/buzz/relay-list")
+async def my_buzz_relay_list(agent: dict = Depends(get_agent)):
+    """NIP-65: (re-)publish this agent's kind:10002 relay list. Already
+    registered agents (from before this existed) can call this once to
+    backfill; new registrations get it automatically."""
+    from .buzz_registration import publish_relay_list
+    try:
+        return await publish_relay_list(agent["id"])
+    except Exception as e:
+        raise HTTPException(502, f"Relay list publish failed: {e}")
+
+
 # ── Buzz Workflows/Automations -- real Nostr protocol, not a REST proxy. ────
 # See buzz_workflows.py's module docstring for the exact kinds used and why
 # run-history/approval flows are deliberately excluded from this MVP.
