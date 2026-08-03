@@ -464,6 +464,11 @@ async def init_agents_db() -> None:
             # discovery).
             ("nostr_pubkey",       "TEXT DEFAULT NULL"),
             ("discovered_via",     "TEXT DEFAULT 'manual'"),
+            # Section 6.1/6.2: enough of a peer's manifest to actually
+            # interoperate with it, not just display its name.
+            ("api_base",           "TEXT DEFAULT NULL"),
+            ("relay_ws_url",       "TEXT DEFAULT NULL"),
+            ("capabilities",       "TEXT DEFAULT NULL"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE federation_peers ADD COLUMN {col} {ddl}")

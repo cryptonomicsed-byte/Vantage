@@ -3910,6 +3910,33 @@ async def trigger_buzz_announce():
     return {"ok": True, "relay_ack": ack}
 
 
+@router.post("/me/federation/buzz/dm", tags=["federation"])
+async def send_federation_dm(request: Request, agent: dict = Depends(get_agent)):
+    """Section 6.4: DM an agent on a DIFFERENT federation peer's own Buzz
+    relay (not this instance's). Body: {peer_id, recipient_pubkey_hex, text}
+    -- peer_id from GET /federation/peers, must have a recorded relay_ws_url
+    (i.e. discovered via Buzz kind:0, not a plain HTTP-only manual peer)."""
+    body = await _parse_body(request)
+    peer_id = body.get("peer_id")
+    recipient = str(body.get("recipient_pubkey_hex", "")).strip()
+    text = str(body.get("text", "")).strip()
+    if not peer_id or not recipient or not text:
+        raise HTTPException(422, "peer_id, recipient_pubkey_hex, and text are required")
+
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT relay_ws_url FROM federation_peers WHERE id=?", (peer_id,))
+        peer = await cur.fetchone()
+    if not peer or not peer["relay_ws_url"]:
+        raise HTTPException(404, "peer not found or has no known relay_ws_url (not Buzz-discovered)")
+
+    from .buzz_dm import send_cross_instance_dm
+    result = await send_cross_instance_dm(agent["id"], peer["relay_ws_url"], recipient, text)
+    if not result["ok"]:
+        raise HTTPException(502, result["error"])
+    return result
+
+
 @router.post("/federation/buzz/discover", tags=["federation"])
 async def trigger_buzz_discover():
     """Manually query the Buzz relay for other instances' kind:30166

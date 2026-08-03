@@ -56,6 +56,13 @@ async def _instance_manifest() -> dict:
         "url": settings.PUBLIC_URL,
         "onion_url": settings.ONION_URL or None,
         "agent_count": agent_count,
+        # Section 6.1: api_base (distinct from `url` -- a human-facing site
+        # can differ from its API root) and capabilities[] (what a peer can
+        # actually expect to interoperate with) so discover_peers_via_buzz
+        # has enough to do more than just record a name.
+        "api_base": f"{settings.PUBLIC_URL.rstrip('/')}/api",
+        "relay_ws_url": RELAY_WS_URL,
+        "capabilities": ["feed", "buzz-bridge", "copilot", "federation-dm"],
     }
 
 
@@ -103,13 +110,17 @@ async def discover_peers_via_buzz(limit: int = 50) -> int:
             if not url or url == settings.PUBLIC_URL.rstrip("/"):
                 continue
             name = str(manifest.get("name", ""))[:100] or url
+            api_base = str(manifest.get("api_base", "")).strip() or None
+            relay_ws_url = str(manifest.get("relay_ws_url", "")).strip() or None
+            capabilities = json.dumps(manifest.get("capabilities", []))
             async with get_db() as db:
                 cur = await db.execute(
-                    "INSERT INTO federation_peers (url, name, status, reputation, nostr_pubkey, discovered_via) "
-                    "VALUES (?,?,'unknown',0.5,?,'buzz') "
-                    "ON CONFLICT (url) DO UPDATE SET nostr_pubkey=excluded.nostr_pubkey "
+                    "INSERT INTO federation_peers (url, name, status, reputation, nostr_pubkey, discovered_via, api_base, relay_ws_url, capabilities) "
+                    "VALUES (?,?,'unknown',0.5,?,'buzz',?,?,?) "
+                    "ON CONFLICT (url) DO UPDATE SET nostr_pubkey=excluded.nostr_pubkey, "
+                    "api_base=excluded.api_base, relay_ws_url=excluded.relay_ws_url, capabilities=excluded.capabilities "
                     "WHERE federation_peers.nostr_pubkey IS NULL",
-                    (url, name, event["pubkey"]),
+                    (url, name, event["pubkey"], api_base, relay_ws_url, capabilities),
                 )
                 await db.commit()
                 if cur.rowcount and cur.rowcount > 0:
