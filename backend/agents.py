@@ -1448,6 +1448,28 @@ async def delete_broadcast(broadcast_id: int, agent: dict = Depends(get_agent)):
         shutil.rmtree(agent_dir, ignore_errors=True)
 
     asyncio.create_task(_append_receipt(str(agent["name"]), "delete_broadcast", {"broadcast_id": broadcast_id}, tier=agent.get("tier", 0)))
+
+    async def _mirror_delete():
+        # Section 15.4: kind:5 NIP-09 deletion, referencing whatever this
+        # broadcast was mirrored as (if anything -- broadcasts never
+        # mirrored to buzz just have nothing to tombstone).
+        from .buzz_bridge import bridge as _buzz_bridge
+        from .buzz_identity import derive_buzz_keypair
+        from .buzz_client import BuzzSession
+        from .buzz_registration import RELAY_WS_URL
+        buzz_id = await _buzz_bridge.get_buzz_event_id(f"broadcast:{broadcast_id}")
+        if not buzz_id:
+            return
+        pk = await derive_buzz_keypair(agent["id"])
+        sess = BuzzSession(RELAY_WS_URL, pk)
+        await sess.connect()
+        await sess.authenticate()
+        try:
+            await sess.publish(5, "", tags=[["e", buzz_id]])
+        finally:
+            await sess.close()
+
+    asyncio.create_task(_mirror_delete())
     return {"ok": True}
 
 
@@ -8843,6 +8865,8 @@ async def enable_jail_mode(agent_id: int, _: str = Depends(get_admin)):
         if res.rowcount == 0:
             raise HTTPException(404, "Agent not found")
         await db.commit()
+    from .buzz_moderation import mirror_jail
+    asyncio.create_task(mirror_jail(agent_id))
     return {"ok": True, "agent_id": agent_id, "jail_mode": True}
 
 
@@ -8856,6 +8880,8 @@ async def disable_jail_mode(agent_id: int, _: str = Depends(get_admin)):
         if res.rowcount == 0:
             raise HTTPException(404, "Agent not found")
         await db.commit()
+    from .buzz_moderation import mirror_unjail
+    asyncio.create_task(mirror_unjail(agent_id))
     return {"ok": True, "agent_id": agent_id, "jail_mode": False}
 
 

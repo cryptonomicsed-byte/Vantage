@@ -1316,6 +1316,14 @@ CREATE TABLE IF NOT EXISTS external_conversations (
                 )
             """)
             await db.execute("""
+                CREATE TABLE IF NOT EXISTS trading_channel_map (
+                    agent_id INTEGER PRIMARY KEY,
+                    channel_id TEXT NOT NULL,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (agent_id) REFERENCES agents(id)
+                )
+            """)
+            await db.execute("""
                 CREATE TABLE IF NOT EXISTS room_channel_map (
                     room_id TEXT PRIMARY KEY,
                     channel_id TEXT NOT NULL,

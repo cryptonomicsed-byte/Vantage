@@ -592,7 +592,17 @@ async def paper_fill_order(order_id: int, agent: dict = Depends(get_agent)):
         updated = await (await db.execute(
             "SELECT * FROM trading_orders WHERE id=? AND agent_id=?", (order_id, agent["id"])
         )).fetchone()
-        return dict(updated)
+
+    # Section 16.1: fills go to a PRIVATE per-agent channel only -- never
+    # the public feed (buzz_bridge.publish_feed is deliberately not used
+    # here at all).
+    from ..buzz_trading_channel import post_private_trading_message
+    import asyncio as _asyncio
+    _asyncio.create_task(post_private_trading_message(
+        agent["id"], f"[SIMULATED] Filled {order['side']} {order['quantity']} {order['symbol']} @ {fill_price} ({tx_hash})",
+    ))
+
+    return dict(updated)
 
 @router.post("/orders/{order_id}/journal")
 async def add_journal(order_id: int, data: JournalCreate, agent: dict = Depends(get_agent)):
