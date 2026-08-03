@@ -374,6 +374,15 @@ async def _process_broadcast(broadcast_id: int, input_path: Path, agent_dir: Pat
                         if blob:
                             imeta = ["imeta", f"url {blob['url']}", f"m {blob.get('type', '')}", f"x {blob['sha256']}", f"size {blob.get('size', len(data))}"]
                             await _buzz_bridge.publish_feed(row["agent_id"], broadcast_id, row["title"], extra_tags=[imeta])
+                            # NIP-71: also publish a dedicated video event (kind:21)
+                            # alongside the kind:9 feed mirror above, so
+                            # video-first Nostr clients surface this properly
+                            # instead of only generic microblogging clients.
+                            await _buzz_bridge.publish_video_event(
+                                row["agent_id"], broadcast_id, row["title"], row["description"] or "",
+                                video_url=blob["url"], sha256_hex=blob["sha256"],
+                                mime_type=blob.get("type", "video/mp4"), thumbnail_url=abs_thumb,
+                            )
                     finally:
                         mp4_path.unlink(missing_ok=True)
 

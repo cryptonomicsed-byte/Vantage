@@ -185,6 +185,55 @@ class BuzzBridge:
         logger.info("buzz_bridge: mirrored broadcast_id=%s -> buzz event %s", broadcast_id, buzz_event_id)
         return buzz_event_id
 
+    async def publish_video_event(
+        self, agent_id: int, broadcast_id: int, title: str, description: str,
+        video_url: str, sha256_hex: str, mime_type: str = "video/mp4",
+        duration_sec: Optional[int] = None, thumbnail_url: Optional[str] = None,
+        external_ids: Optional[list[tuple[str, str]]] = None, short: bool = False,
+    ) -> Optional[str]:
+        """NIP-71 (Video Events, kind:21 normal / kind:22 short) +
+        NIP-73 (External Content IDs) -- a dedicated video-post event
+        distinct from publish_feed's kind:9 feed mirror (own dedup key,
+        `broadcast:{id}:video71`, since publish_feed's own dedup key is
+        the bare `broadcast:{id}` and would otherwise silently no-op this
+        as "already mirrored" -- the exact same-key collision bug class
+        found repeatedly this session with publish_feed/get_buzz_event_id).
+        `external_ids` is a list of (k, i) pairs per NIP-73 (e.g.
+        [("web", "https://archive.org/...")]) -- optional, since
+        self-published Cinema/Agent.TV content has no canonical external
+        ID, only franken-stream's fetched-by-URL content does.
+        """
+        vantage_event_id = f"broadcast:{broadcast_id}:video71"
+        if await self._already_mirrored(vantage_event_id, "outbound"):
+            return None
+
+        try:
+            pubkey = public_key_xonly_hex(await derive_buzz_keypair(agent_id))
+            attestation = await get_owner_attestation_tag(pubkey)
+            imeta = ["imeta", f"url {video_url}", f"m {mime_type}", f"x {sha256_hex}"]
+            if thumbnail_url:
+                imeta.append(f"image {thumbnail_url}")
+            tags = [["title", title], imeta, ["client", "vantage"], attestation]
+            if duration_sec:
+                tags.append(["duration", str(duration_sec)])
+            if thumbnail_url:
+                tags.append(["thumb", thumbnail_url])
+            for k, i in (external_ids or []):
+                tags.append(["i", i])
+                tags.append(["k", k])
+            kind = 22 if short else 21
+            session = await self.get_session(agent_id)
+            result = await session.publish(kind, description or "", tags=tags)
+        except Exception as e:
+            logger.warning("buzz_bridge: publish_video_event failed for broadcast_id=%s agent_id=%s: %s", broadcast_id, agent_id, e)
+            await self._close_session(agent_id)
+            return None
+
+        buzz_event_id = result["event"]["id"]
+        await self._record_mirror(vantage_event_id, buzz_event_id, "outbound")
+        logger.info("buzz_bridge: published NIP-71 video event for broadcast_id=%s -> buzz event %s", broadcast_id, buzz_event_id)
+        return buzz_event_id
+
 
 # Module-level singleton -- "one bridge instance per process" per the
 # session-pool design; agents.py's fire-and-forget hook imports this.
