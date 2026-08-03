@@ -29,6 +29,7 @@ from typing import Optional
 
 from .buzz_identity import derive_instance_keypair, public_key_xonly_hex
 from .buzz_client import BuzzSession, build_event
+from .buzz_pairing import PUBLIC_RELAY_WS_URL
 from .config import settings
 from .db import get_db
 
@@ -61,7 +62,11 @@ async def _instance_manifest() -> dict:
         # actually expect to interoperate with) so discover_peers_via_buzz
         # has enough to do more than just record a name.
         "api_base": f"{settings.PUBLIC_URL.rstrip('/')}/api",
-        "relay_ws_url": RELAY_WS_URL,
+        # Found live: RELAY_WS_URL (ws://localhost:3000) is only reachable
+        # from inside this VPS -- useless to an actual external peer. The
+        # real externally-reachable relay address is the public Traefik
+        # entrypoint already used for device pairing (buzz_pairing.py).
+        "relay_ws_url": PUBLIC_RELAY_WS_URL,
         "capabilities": ["feed", "buzz-bridge", "copilot", "federation-dm"],
     }
 
