@@ -253,6 +253,9 @@ async def spawn_agent(
         from ..buzz_human_identity import sync_grant_to_buzz
         asyncio.create_task(sync_grant_to_buzz(birthing_human["id"], new_agent_id, STARTER_SCOPES))
 
+    from ..buzz_genesis import mirror_genesis_birth
+    asyncio.create_task(mirror_genesis_birth(new_agent_id, parent["id"], gen))
+
     omokoda_link_result = None
     if data.link_omokoda:
         # Must happen here, not later -- `api_key` (still raw/plaintext in

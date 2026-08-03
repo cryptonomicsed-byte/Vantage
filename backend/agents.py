@@ -6680,6 +6680,17 @@ async def post_swarm_task(request: Request, agent: dict = Depends(get_agent)):
         "reward_usdc": reward_usdc,
     })
 
+    # Section 22.3: swarm task dispatch also mirrors to buzz -- workers see
+    # work in their feed, not just a separate gossip WS. No real per-team
+    # channel exists yet (see buzz_genesis.py/Section 22 notes), so this
+    # goes to the shared MAIN_FEED tagged with the required capability.
+    from .buzz_bridge import bridge as _buzz_bridge
+    asyncio.create_task(_buzz_bridge.publish_feed(
+        agent["id"], f"swarm-task:{task_id}",
+        f"[swarm task] {title} (capability={required_capability or 'any'}, reward={reward_usdc} USDC)",
+        extra_tags=[["t", "swarm-task"]],
+    ))
+
     return {
         "task_id": task_id,
         "status": "open",
@@ -7137,6 +7148,10 @@ async def vibe_alias(request: Request, agent: dict = Depends(get_agent)):
             (agent["id"], agent["name"], vibe, status_code),
         )
         await db.commit()
+
+    from .buzz_status import publish_vibe_status
+    asyncio.create_task(publish_vibe_status(agent["id"], vibe, status_code))
+
     return {"status": "published", "vibe": vibe}
 
 
@@ -7162,6 +7177,10 @@ async def publish_vibe(request: Request, agent: dict = Depends(get_agent)):
         )
         vibe_id = cur.lastrowid
         await db.commit()
+
+    from .buzz_status import publish_vibe_status
+    asyncio.create_task(publish_vibe_status(agent["id"], vibe, status_code))
+
     return {"vibe_id": vibe_id, "vibe": vibe, "status_code": status_code}
 
 
