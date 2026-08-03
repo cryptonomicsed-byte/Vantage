@@ -172,15 +172,19 @@ async def _maybe_dispatch_mention(event: dict, content: str) -> None:
     if not m:
         return
     mentioned_name = m.group(1)
+    logger.info("buzz_inbound: mention detected -> @%s (event %s)", mentioned_name, event.get("id"))
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT * FROM agents WHERE name = ? AND is_external = 0", (mentioned_name,))
         agent_row = await cur.fetchone()
     if not agent_row:
+        logger.info("buzz_inbound: mention target @%s is not a known local agent, skipping", mentioned_name)
         return
     agent_row = dict(agent_row)
     if agent_row["nostr_pubkey_hex"] == event["pubkey"]:
+        logger.info("buzz_inbound: mention is agent @%s mentioning itself, skipping", mentioned_name)
         return  # don't reply to our own mention of ourselves
+    logger.info("buzz_inbound: dispatching mention to agent_id=%s (@%s)", agent_row["id"], mentioned_name)
 
     from .buzz_bridge import bridge as _buzz_bridge
     from .routers.copilot import _dispatch_chat
@@ -193,20 +197,24 @@ async def _maybe_dispatch_mention(event: dict, content: str) -> None:
         await typing_sess.authenticate()
         await typing_sess.publish(20002, "", tags=[["h", channel]])
         await typing_sess.close()
-    except Exception:
-        pass  # typing indicator is cosmetic, never block the actual reply on it
+    except Exception as e:
+        logger.info("buzz_inbound: typing indicator skipped (%s)", e)  # cosmetic, never blocks the reply
 
     try:
+        logger.info("buzz_inbound: calling _dispatch_chat for agent_id=%s", agent_row["id"])
         result = await _dispatch_chat(agent_row, content.replace(f"@{mentioned_name}", "", 1).strip())
+        logger.info("buzz_inbound: _dispatch_chat returned action=%s for agent_id=%s", result.get("action"), agent_row["id"])
         reply_text = _format_intent_reply(result)
         if not reply_text:
+            logger.info("buzz_inbound: no formattable reply text for action=%s, not mirroring", result.get("action"))
             return
-        await _buzz_bridge.publish_feed(
+        buzz_id = await _buzz_bridge.publish_feed(
             agent_row["id"], f"mention-reply:{event['id']}", reply_text,
             extra_tags=[["e", event["id"], "", "reply"]],
         )
+        logger.info("buzz_inbound: mention reply published, buzz_event_id=%s", buzz_id)
     except Exception as e:
-        logger.warning("buzz_inbound: mention dispatch to agent %s failed: %s", mentioned_name, e)
+        logger.warning("buzz_inbound: mention dispatch to agent %s failed: %s", mentioned_name, e, exc_info=True)
 
 
 def _format_intent_reply(result: dict) -> str:
