@@ -113,6 +113,21 @@ async def _max_role_across_active_grants(human_id: int) -> Optional[str]:
     return "admin" if "admin_full" in all_scopes else "member"
 
 
+async def _current_relay_role(pubkey: str) -> Optional[str]:
+    """buzz-admin has no query-by-pubkey; list-members and grep its plain-
+    text table output is the only way to read a specific member's current
+    role back (list-members' full output isn't machine-structured, but
+    each row starts with the pubkey followed by whitespace-padded role)."""
+    code, out, _ = await _docker_exec("list-members")
+    if code != 0:
+        return None
+    for line in out.splitlines():
+        if line.strip().startswith(pubkey):
+            parts = line.split()
+            return parts[1] if len(parts) > 1 else None
+    return None
+
+
 async def _set_human_relay_role(human_id: int, role: Optional[str]) -> None:
     status = await get_human_buzz_status(human_id)
     if not status["registered"]:
@@ -121,14 +136,29 @@ async def _set_human_relay_role(human_id: int, role: Optional[str]) -> None:
         await register_human_on_buzz(human_id)
         status = await get_human_buzz_status(human_id)
     pubkey = status["pubkey"]
+
     if role is None:
         code, out, err = await _docker_exec("remove-member", "--pubkey", pubkey)
         if code != 0 and "not found" not in (out + err).lower():
             raise RuntimeError(f"buzz-admin remove-member failed: {err.strip() or out.strip()}")
-    else:
-        code, out, err = await _docker_exec("add-member", "--pubkey", pubkey, "--role", role)
-        if code != 0 and "already" not in (out + err).lower() and "exists" not in (out + err).lower():
-            raise RuntimeError(f"buzz-admin add-member --role {role} failed: {err.strip() or out.strip()}")
+        return
+
+    current = await _current_relay_role(pubkey)
+    if current == role:
+        return  # already correct, avoid a pointless remove+re-add round trip
+
+    if current is not None:
+        # add-member is insert-only (found live: re-running it on an
+        # existing member is a silent no-op, "already a member (no
+        # change)" -- it does NOT update the role). remove-then-re-add is
+        # the only way to actually change an existing member's role.
+        code, out, err = await _docker_exec("remove-member", "--pubkey", pubkey)
+        if code != 0 and "not found" not in (out + err).lower():
+            raise RuntimeError(f"buzz-admin remove-member (for role change) failed: {err.strip() or out.strip()}")
+
+    code, out, err = await _docker_exec("add-member", "--pubkey", pubkey, "--role", role)
+    if code != 0 and "already" not in (out + err).lower() and "exists" not in (out + err).lower():
+        raise RuntimeError(f"buzz-admin add-member --role {role} failed: {err.strip() or out.strip()}")
 
 
 async def sync_grant_to_buzz(human_id: int, agent_id: int, scopes: list[str]) -> None:
