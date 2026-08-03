@@ -525,8 +525,10 @@ async def lifespan(app: FastAPI):
     from .buzz_inbound import run_inbound_listener
     buzz_inbound_task = asyncio.create_task(run_inbound_listener())
 
+    last30days_task = asyncio.create_task(_last30days_watch_loop())
+
     yield
-    for t in (task, gossip_task, watch_task, weather_task, rate_limit_prune_task, buzz_inbound_task):
+    for t in (task, gossip_task, watch_task, weather_task, rate_limit_prune_task, buzz_inbound_task, last30days_task):
         t.cancel()
         try:
             await t
@@ -1140,6 +1142,20 @@ async def _weather_alert_loop():
         except Exception as _exc:
             logger.warning("Weather alert loop error: %s", _exc)
         await asyncio.sleep(60)
+
+
+async def _last30days_watch_loop():
+    """Every 4h: run all enabled last30days_watch topics, ingesting new
+    findings as intel signals (backend/last30days_bridge.py)."""
+    from .last30days_bridge import run_watch_cycle
+    await asyncio.sleep(120)
+    while True:
+        try:
+            summary = await run_watch_cycle()
+            logger.info("last30days watch cycle: %s", summary)
+        except Exception as _exc:
+            logger.warning("last30days watch loop error: %s", _exc)
+        await asyncio.sleep(4 * 3600)
 
 
 @app.get("/api/platform/weather", tags=["platform"])

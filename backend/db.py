@@ -1323,6 +1323,27 @@ CREATE TABLE IF NOT EXISTS external_conversations (
                     FOREIGN KEY (agent_id) REFERENCES agents(id)
                 )
             """)
+            # last30days research signal daemon (backend/last30days_bridge.py):
+            # watched topics, optionally tied to a trading symbol so new
+            # findings become real intel signals.
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS last30days_watch (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    topic TEXT NOT NULL UNIQUE,
+                    symbol TEXT,
+                    lookback_days INTEGER DEFAULT 30,
+                    enabled INTEGER DEFAULT 1,
+                    created_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS last30days_seen (
+                    topic TEXT NOT NULL,
+                    item_id TEXT NOT NULL,
+                    seen_at INTEGER NOT NULL,
+                    PRIMARY KEY (topic, item_id)
+                )
+            """)
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS room_channel_map (
                     room_id TEXT PRIMARY KEY,

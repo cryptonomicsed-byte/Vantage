@@ -8088,6 +8088,56 @@ async def semantic_agent_search(
 admin_router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
+# ── last30days research signal daemon ────────────────────────────────────────
+# Real integration: github.com/mvanhorn/last30days-skill (vendored,
+# vendor/last30days-skill), a multi-source social/market research tool
+# (Reddit, HN, Polymarket, GitHub, etc.) confirmed to run headless with zero
+# API keys. Watched topics with a `symbol` feed real intel signals; topics
+# without one still run/dedupe but currently have nowhere to post (news/
+# general-topic feed mirroring is a natural fast-follow, not built yet).
+
+@admin_router.post("/last30days/topics")
+async def add_last30days_topic(request: Request, _: str = Depends(get_admin)):
+    body = await _parse_body(request)
+    topic = str(body.get("topic", "")).strip()[:200]
+    symbol = str(body.get("symbol", "")).strip()[:20] or None
+    lookback_days = int(body.get("lookback_days", 30) or 30)
+    if not topic:
+        raise HTTPException(422, "topic is required")
+    async with get_db() as db:
+        await db.execute(
+            "INSERT INTO last30days_watch (topic, symbol, lookback_days) VALUES (?,?,?) "
+            "ON CONFLICT(topic) DO UPDATE SET symbol=excluded.symbol, lookback_days=excluded.lookback_days, enabled=1",
+            (topic, symbol, lookback_days),
+        )
+        await db.commit()
+    return {"ok": True, "topic": topic, "symbol": symbol}
+
+
+@admin_router.get("/last30days/topics")
+async def list_last30days_topics(_: str = Depends(get_admin)):
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM last30days_watch ORDER BY id")
+        return [dict(r) for r in await cur.fetchall()]
+
+
+@admin_router.delete("/last30days/topics/{topic}")
+async def remove_last30days_topic(topic: str, _: str = Depends(get_admin)):
+    async with get_db() as db:
+        await db.execute("UPDATE last30days_watch SET enabled=0 WHERE topic=?", (topic,))
+        await db.commit()
+    return {"ok": True, "topic": topic, "enabled": False}
+
+
+@admin_router.post("/last30days/run")
+async def trigger_last30days_run(_: str = Depends(get_admin)):
+    """Manually trigger one watch cycle now, without waiting for the
+    background loop's schedule -- for testing/on-demand runs."""
+    from .last30days_bridge import run_watch_cycle
+    return await run_watch_cycle()
+
+
 # ── Feature D: Autonomous Sentinel Policy Engine ─────────────────────────────
 
 _SENTINEL_ACTIONS = {"archive", "flag", "notify_admin", "quarantine"}

@@ -1,3 +1,6 @@
 [submodule "vendor/speech-to-speech"]
 	path = vendor/speech-to-speech
 	url = https://github.com/huggingface/speech-to-speech
+[submodule "vendor/last30days-skill"]
+	path = vendor/last30days-skill
+	url = https://github.com/mvanhorn/last30days-skill
