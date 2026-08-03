@@ -51,7 +51,16 @@ async def upload_media(agent_id: int, data: bytes, mime_type: str) -> Optional[d
             r = await client.put(
                 f"{RELAY_HTTP_URL}/media/upload",
                 content=data,
-                headers={"Authorization": auth_header, "Content-Type": mime_type},
+                headers={
+                    "Authorization": auth_header,
+                    "Content-Type": mime_type,
+                    # BUD-11: mandatory alongside the auth event's own `x`
+                    # tag -- the relay checks this HEADER matches an `x` tag
+                    # in the auth event body; found live (401, generic
+                    # "authentication failed") that this is required
+                    # separately, not implied by the tag alone.
+                    "X-SHA-256": sha256_hex,
+                },
             )
         if r.status_code in (200, 201):
             return r.json()
