@@ -1129,6 +1129,41 @@ async def my_mind_fallback_model(request: Request, agent: dict = Depends(get_age
     return {"ok": True, "fallback_model": model or settings.OMNIROUTE_MODEL}
 
 
+@router.post("/me/webhooks/buzz-trigger", tags=["mind"])
+async def buzz_workflow_webhook(request: Request, agent: dict = Depends(get_agent)):
+    """Section 9.5: a real target for a buzz workflow's CallWebhook action
+    (confirmed schema via buzz-workflow/src/schema.rs -- url/method/
+    headers/body, headers support is what lets X-Agent-Key auth this the
+    same way every other Vantage endpoint already works, no new secret
+    type needed). Also the mechanism behind Section 9.3 (scheduled scans):
+    a workflow with `on: schedule` + `action: call_webhook` pointed here
+    lets the RELAY wake this agent on a cron the relay itself owns,
+    surviving Vantage backend restarts.
+
+    body: {"action": "dispatch_chat", "text": "..."} -- routes through
+    the same _dispatch_chat Copilot/mentions use, posting the reply back
+    to the feed. Only one action implemented; unrecognized actions 422
+    rather than silently no-op.
+    """
+    body = await _parse_body(request)
+    action = body.get("action")
+    if action == "dispatch_chat":
+        text = str(body.get("text", "")).strip()
+        if not text:
+            raise HTTPException(422, "text is required for action=dispatch_chat")
+        from .routers.copilot import _dispatch_chat
+        from .buzz_inbound import _format_intent_reply
+        from .buzz_bridge import bridge as _buzz_bridge
+        result = await _dispatch_chat(agent, text)
+        reply_text = _format_intent_reply(result)
+        if reply_text:
+            asyncio.create_task(_buzz_bridge.publish_feed(
+                agent["id"], f"webhook-trigger:{secrets.token_hex(8)}", reply_text,
+            ))
+        return {"ok": True, "action": result.get("action"), "reply": reply_text}
+    raise HTTPException(422, f"unsupported action: {action!r}")
+
+
 @router.post("/me/mind/connect", tags=["mind"])
 async def my_mind_connect(request: Request, agent: dict = Depends(get_agent)):
     """Generic path: paste any agent framework's own webhook URL (+
@@ -6457,6 +6492,16 @@ async def complete_task(task_id: int, request: Request, agent=Depends(get_agent)
             "UPDATE task_listings SET status='pending_review' WHERE id=?", (task_id,)
         )
         await db.commit()
+
+    # Section 9.2: task completion -> channel post, so managers/posters see
+    # completion in the shared feed without polling the tasks API.
+    from .buzz_bridge import bridge as _buzz_bridge
+    trace = f" (result: /api/agents/broadcasts/{result_broadcast_id})" if result_broadcast_id else ""
+    asyncio.create_task(_buzz_bridge.publish_feed(
+        agent["id"], f"task-complete:{task_id}",
+        f"Task #{task_id} completed by {agent['name']}: {result_description[:300]}{trace}".strip(),
+    ))
+
     return {"completion_id": completion_id, "task_id": task_id, "status": "pending_review"}
 
 
