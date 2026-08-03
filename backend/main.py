@@ -1204,6 +1204,36 @@ app.mount("/media/thumbnails", StaticFiles(directory="/opt/ares/media/thumbnails
 app.mount("/media/audio", StaticFiles(directory="/opt/ares/media/audio", check_dir=False), name="media_audio")
 app.mount("/media/agents", StaticFiles(directory=str(settings.MEDIA_DIR), check_dir=False), name="media")
 
+
+@app.get("/.well-known/nostr.json")
+async def nip05_well_known(name: str = None):
+    """NIP-05: maps agent names to Nostr pubkeys so `agentname@omokoda.duckdns.org`
+    resolves. Public, unauthenticated -- this is a discovery document, not an
+    API. If `name` is omitted, per spec, don't dump the whole registry; require it."""
+    from .db import get_db
+    names = {}
+    relays = {}
+    async with get_db() as db:
+        if name:
+            cur = await db.execute(
+                "SELECT name, nostr_pubkey_hex FROM agents WHERE name = ? AND nostr_pubkey_hex IS NOT NULL",
+                (name,),
+            )
+        else:
+            cur = await db.execute(
+                "SELECT name, nostr_pubkey_hex FROM agents WHERE nostr_pubkey_hex IS NOT NULL LIMIT 500"
+            )
+        rows = await cur.fetchall()
+        from .buzz_pairing import PUBLIC_RELAY_WS_URL
+        for row in rows:
+            names[row[0]] = row[1]
+            relays[row[1]] = [PUBLIC_RELAY_WS_URL]
+    return JSONResponse(
+        {"names": names, "relays": relays},
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
+
+
 # Serve frontend (must be last)
 # SPA client-side routes -- REAL GAP FOUND via the new Playwright E2E suite
 # (frontend/e2e/smoke.spec.ts): this Starlette version's StaticFiles(html=True)
