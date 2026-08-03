@@ -252,7 +252,19 @@ def _format_intent_reply(result: dict) -> str:
         return f"Noted -- I'll watch for: {data.get('condition') or target}."
     if action == "unknown":
         return "I didn't catch that -- try asking me something more specific."
-    return ""
+
+    # Generic fallback -- found live: the real intent parser has FAR more
+    # action types than CopilotChat.tsx's own hardcoded list covers (e.g.
+    # "learning_quiz"), each with its own data shape. Silently returning ""
+    # for anything unlisted meant a real, successful dispatch could vanish
+    # with zero reply and zero error -- worse than a generic-but-honest
+    # acknowledgment. Prefer an explicit reply/message/text field if the
+    # action happens to have one; otherwise name the action so the mention
+    # gets SOME response rather than silence.
+    for key in ("reply", "message", "text", "summary"):
+        if data.get(key):
+            return str(data[key])
+    return f"({action.replace('_', ' ')} on {target})" if target else f"Handled: {action.replace('_', ' ')}."
 
 
 async def derive_agent_keypair_for_typing(agent_id: int):
