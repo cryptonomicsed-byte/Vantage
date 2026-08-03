@@ -16,7 +16,7 @@ import time
 from typing import Optional
 
 from .buzz_client import BuzzSession
-from .buzz_identity import derive_buzz_keypair, public_key_xonly_hex
+from .buzz_identity import derive_buzz_keypair, public_key_xonly_hex, get_owner_attestation_tag
 from .buzz_registration import DEFAULT_CHANNEL_ID, RELAY_WS_URL
 from .db import get_db
 
@@ -139,23 +139,27 @@ class BuzzBridge:
             )
             await db.commit()
 
-    async def publish_feed(self, agent_id: int, broadcast_id: int, content: str) -> Optional[str]:
-        """Mirrors a text broadcast into the shared MAIN_FEED channel as a
-        real kind:9 event. Never raises -- a broken relay/session should
-        degrade the mirror silently, not break the broadcast itself
-        (matches _try_omniroute's existing fire-and-forget contract
-        elsewhere in this codebase). Returns the buzz event id on success,
-        None on any failure or if already mirrored."""
+    async def publish_feed(self, agent_id: int, broadcast_id: int, content: str, kind: int = 9, extra_tags: Optional[list] = None) -> Optional[str]:
+        """Mirrors a broadcast into the shared MAIN_FEED channel. Defaults
+        to kind:9 (text, Section 2); callers doing Section 3 full-fidelity
+        mirroring (kind:30023 long-form for graphs, etc) pass `kind` and
+        any extra tags (e.g. ["d", ...] for addressable events) explicitly.
+        Never raises -- a broken relay/session should degrade the mirror
+        silently, not break the broadcast itself (matches _try_omniroute's
+        existing fire-and-forget contract elsewhere in this codebase).
+        Returns the buzz event id on success, None on any failure or if
+        already mirrored."""
         vantage_event_id = f"broadcast:{broadcast_id}"
         if await self._already_mirrored(vantage_event_id, "outbound"):
             return None
 
         channel = await get_main_feed_channel()
         try:
+            pubkey = public_key_xonly_hex(await derive_buzz_keypair(agent_id))
+            attestation = await get_owner_attestation_tag(pubkey)
+            tags = [["h", channel], ["client", "vantage"], attestation] + (extra_tags or [])
             session = await self.get_session(agent_id)
-            result = await session.publish(
-                9, content, tags=[["h", channel], ["client", "vantage"]],
-            )
+            result = await session.publish(kind, content, tags=tags)
         except Exception as e:
             logger.warning("buzz_bridge: publish_feed failed for broadcast_id=%s agent_id=%s: %s", broadcast_id, agent_id, e)
             # A dead/expired session shouldn't poison the pool forever --

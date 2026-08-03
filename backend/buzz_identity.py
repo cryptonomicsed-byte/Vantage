@@ -254,3 +254,24 @@ def sign_event_id(pk: PrivateKey, event_id_hex: str) -> str:
     coincurve's sign_schnorr."""
     sig = pk.sign_schnorr(bytes.fromhex(event_id_hex))
     return sig.hex()
+
+
+async def get_owner_attestation_tag(agent_pubkey_hex: str, conditions: str = "") -> list:
+    """NIP-OA owner attestation (blueprint Section 1.3, marked optional but
+    recommended): the instance identity (bino's key, derive_instance_keypair)
+    signs a binding over (agent_pubkey, conditions) so every event this
+    agent publishes can carry provenance -- "this instance's agent did X" --
+    without that agent's own key needing to be the instance key. Not a
+    formal capability system (conditions is an opaque string, unchecked by
+    Vantage itself); this is the "optional but recommended" provenance tag
+    the blueprint describes, not a full NIP-OA implementation of every
+    optional field that spec might define.
+
+    Returns a single tag: ["auth", <instance_owner_pubkey_hex>, <conditions>,
+    <schnorr_sig_hex>]. Append to any event's tags list before publish.
+    """
+    instance_pk = await derive_instance_keypair()
+    owner_pubkey_hex = public_key_xonly_hex(instance_pk)
+    binding = hashlib.sha256(f"{agent_pubkey_hex}:{conditions}".encode()).hexdigest()
+    sig_hex = sign_event_id(instance_pk, binding)
+    return ["auth", owner_pubkey_hex, conditions, sig_hex]

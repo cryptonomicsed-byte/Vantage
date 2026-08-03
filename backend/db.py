@@ -311,6 +311,12 @@ async def init_agents_db() -> None:
             # buzz_joined_channels is a JSON array of channel-id strings.
             ("buzz_registered_at", "TEXT DEFAULT NULL"),
             ("buzz_joined_channels", "TEXT DEFAULT NULL"),
+            # Section 1.1 of the buzz_vantage_blueprint -- whether the
+            # kind:0 profile + kind:30175 persona have been published for
+            # this agent (both happen at registration; this flag exists so
+            # a later "republish persona" action can check state without
+            # re-deriving it from buzz_registered_at's mere presence).
+            ("buzz_persona_published", "INTEGER DEFAULT 0"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")

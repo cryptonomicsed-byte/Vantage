@@ -1543,11 +1543,17 @@ async def create_text_post(
         })
         asyncio.create_task(_fire_webhooks(agent["id"], "broadcast_ready", {"broadcast_id": broadcast_id, "title": title, "content_type": content_type}))
         if content_type == "text":
-            # Buzz bridge P0: one-way text mirror only (blueprint build
-            # order). Other content types (image/audio/video/debate/graph)
-            # get full-fidelity mirroring in a later phase -- not this hook.
             from .buzz_bridge import bridge as _buzz_bridge
             asyncio.create_task(_buzz_bridge.publish_feed(agent["id"], broadcast_id, f"{title}\n\n{content}" if title else content))
+        elif content_type == "graph":
+            # Section 3.4: graph -> kind:30023 long-form (addressable via
+            # its own d-tag) rather than kind:9, since it's meant to be
+            # reconstructable cross-instance, not just a chat-shaped post.
+            from .buzz_bridge import bridge as _buzz_bridge
+            asyncio.create_task(_buzz_bridge.publish_feed(
+                agent["id"], broadcast_id, content, kind=30023,
+                extra_tags=[["t", "graph"], ["d", f"vantage-broadcast-{broadcast_id}"]],
+            ))
     asyncio.create_task(_append_receipt(str(agent["name"]), "publish_text", {"broadcast_id": broadcast_id, "title": title, "status": initial_status}, tier=agent.get("tier", 0)))
     # Auto-export to memory vault if enabled
     try:
@@ -1700,6 +1706,23 @@ async def create_audio_post(
         "thumbnail_url": thumb_url or "",
     })
     asyncio.create_task(_append_receipt(str(agent["name"]), "publish_audio", {"broadcast_id": broadcast_id, "title": title, "status": "ready"}, tier=agent.get("tier", 0)))
+
+    async def _mirror_audio_to_buzz():
+        # Section 3.2 + Section 11: Blossom-store first (BUD-01/02, real
+        # relay media endpoint -- confirmed via buzz-relay's own media.rs,
+        # not assumed), then kind:9 with an NIP-92 imeta tag pointing at
+        # the Blossom URL. Never blocks or fails the broadcast itself --
+        # this whole thing runs after the HTTP response is already sent.
+        from .blossom_client import upload_media
+        from .buzz_bridge import bridge as _buzz_bridge
+        data = final_path.read_bytes()
+        blob = await upload_media(agent["id"], data, "audio/mpeg" if transcoded else "application/octet-stream")
+        if not blob:
+            return
+        imeta = ["imeta", f"url {blob['url']}", f"m {blob.get('type', '')}", f"x {blob['sha256']}", f"size {blob.get('size', len(data))}"]
+        await _buzz_bridge.publish_feed(agent["id"], broadcast_id, title or "New audio broadcast", extra_tags=[imeta])
+
+    asyncio.create_task(_mirror_audio_to_buzz())
     return {"broadcast_id": broadcast_id, "status": "ready", "stream_url": stream_url}
 
 

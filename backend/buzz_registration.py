@@ -16,7 +16,7 @@ import asyncio
 import json
 import logging
 
-from .buzz_identity import derive_buzz_keypair, public_key_xonly_hex
+from .buzz_identity import derive_buzz_keypair, public_key_xonly_hex, get_owner_attestation_tag
 from .buzz_client import BuzzSession
 from .db import get_db
 
@@ -72,25 +72,48 @@ async def register_agent_on_buzz(agent_id: int) -> dict:
     # real signed publish) before claiming success -- matches the pattern
     # used throughout this integration's own live verification, rather
     # than trusting the CLI's exit code alone.
+    async with get_db() as db:
+        cur = await db.execute("SELECT name, bio FROM agents WHERE id = ?", (agent_id,))
+        agent_row = await cur.fetchone()
+    agent_name, agent_bio = (agent_row or ("", ""))
+
+    # NIP-OA owner attestation (Section 1.3) -- appended to every event
+    # this registration flow publishes, so a relay observer can trace
+    # "this instance's agent did X" back to the instance identity.
+    attestation = await get_owner_attestation_tag(pubkey)
+
     sess = BuzzSession(RELAY_WS_URL, pk)
     await sess.connect()
     await sess.authenticate()
     try:
         join_result = await sess.publish(
-            9021, "", tags=[["h", DEFAULT_CHANNEL_ID]],
+            9021, "", tags=[["h", DEFAULT_CHANNEL_ID], attestation],
         )
         verify_result = await sess.publish(
             9,
             "Registered on Buzz via Vantage self-service.",
-            tags=[["h", DEFAULT_CHANNEL_ID]],
+            tags=[["h", DEFAULT_CHANNEL_ID], attestation],
         )
+        # Section 1.2: kind:0 profile + kind:30175 persona, so this agent
+        # is a real, discoverable Nostr identity beyond just a member row.
+        profile_content = json.dumps({
+            "name": agent_name,
+            "about": agent_bio or "",
+            "client": "vantage-federation",
+        })
+        await sess.publish(0, profile_content, tags=[attestation])
+        if agent_bio:
+            await sess.publish(
+                30175, agent_bio,
+                tags=[["d", f"vantage-agent-{agent_id}"], attestation],
+            )
     finally:
         await sess.close()
 
     async with get_db() as db:
         await db.execute(
             "UPDATE agents SET buzz_registered_at = datetime('now'), "
-            "buzz_joined_channels = ?, nostr_pubkey_hex = ? WHERE id = ?",
+            "buzz_joined_channels = ?, nostr_pubkey_hex = ?, buzz_persona_published = 1 WHERE id = ?",
             (json.dumps([DEFAULT_CHANNEL_ID]), pubkey, agent_id),
         )
         await db.commit()
