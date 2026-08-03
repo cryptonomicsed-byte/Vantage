@@ -1713,6 +1713,18 @@ async def create_audio_post(
         # not assumed), then kind:9 with an NIP-92 imeta tag pointing at
         # the Blossom URL. Never blocks or fails the broadcast itself --
         # this whole thing runs after the HTTP response is already sent.
+        #
+        # KNOWN CURRENT LIMITATION (found live, not a bug in this code):
+        # this relay's media validator explicitly rejects ALL audio
+        # uploads today ("audio is rejected until Buzz has an explicit
+        # sanitizer" -- buzz-media/src/validation.rs) -- only images
+        # (jpeg/png/gif/webp) and video (mp4) currently succeed. This call
+        # will therefore fail-soft (logged warning, no imeta mirror) for
+        # every audio broadcast until the relay adds audio support. Left
+        # wired rather than removed since blossom_client.py itself is
+        # proven correct (verified live with a real image upload) and
+        # this starts working the moment the relay does, with no Vantage
+        # change needed.
         from .blossom_client import upload_media
         from .buzz_bridge import bridge as _buzz_bridge
         data = final_path.read_bytes()
