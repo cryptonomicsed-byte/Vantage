@@ -1,4 +1,5 @@
 """Guild / Collective endpoints."""
+import asyncio
 import json as _json
 import re as _re
 import secrets
@@ -79,6 +80,26 @@ async def create_guild(
     await _broadcast_gossip("guild.events", {
         "type": "guild_formed", "slug": slug, "name": name, "founder": agent["name"]
     })
+
+    async def _provision_buzz_community():
+        # Section 5.1: real attempt, real result recorded either way --
+        # currently expected to fail with "not a relay operator" until
+        # this instance's identity is added to the relay's
+        # RELAY_OPERATOR_PUBKEYS (a relay-operator config change, not
+        # something Vantage can grant itself). Never blocks guild creation.
+        from ..buzz_guild_provisioning import provision_guild_community
+        from ..buzz_identity import derive_buzz_keypair, public_key_xonly_hex
+        owner_pubkey = public_key_xonly_hex(await derive_buzz_keypair(agent["id"]))
+        result = await provision_guild_community(slug, owner_pubkey)
+        if result.get("ok"):
+            async with get_db() as db:
+                await db.execute("UPDATE guilds SET buzz_community_id=? WHERE id=?", (result["community_id"], guild_id))
+                await db.commit()
+            logger.info("guild %s provisioned as buzz community %s", slug, result["community_id"])
+        else:
+            logger.info("guild %s buzz community provisioning not available: %s", slug, result.get("error"))
+
+    asyncio.create_task(_provision_buzz_community())
     return {"guild_id": guild_id, "slug": slug, "name": name, "guild_api_key": guild_api_key,
             "note": "Store your guild_api_key securely — it won't be shown again."}
 

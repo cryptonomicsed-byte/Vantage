@@ -721,6 +721,18 @@ CREATE TABLE IF NOT EXISTS external_conversations (
             )
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_guilds_slug ON guilds(slug)")
+        for col, ddl in [
+            # Section 5.1: the real buzz community tenant this guild
+            # provisions on create, if the relay operator has granted
+            # Vantage's instance identity operator access (see
+            # buzz_guild_provisioning.py -- currently blocked on that
+            # relay-side config, NULL until it is).
+            ("buzz_community_id", "TEXT DEFAULT NULL"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE guilds ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS guild_members (
                 guild_id INTEGER NOT NULL,
