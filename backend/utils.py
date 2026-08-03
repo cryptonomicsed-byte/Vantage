@@ -252,13 +252,18 @@ async def _append_receipt(agent_id: str, action: str, payload: dict, tier: int =
             )
             await db.commit()
 
-        # Section 19.2: mirror this same hash-chained receipt as a real
-        # kind:48001 event -- confirmed real/publishable via
-        # handlers/event.rs's classify_kind (no special relay-side chain
-        # logic exists for this kind; the relay just allows clients to
-        # publish it, so THIS is the chain, same hash-linkage as the
-        # local receipts table). Uses the instance identity since receipts
-        # are a system-wide sequence, not scoped to one agent's own key.
+        # Section 19.2: attempts to mirror this hash-chained receipt as a
+        # kind:48001 event. KNOWN BLOCKED, confirmed live (not assumed):
+        # classify_kind's match arm listing 48001 is cosmetic/for metrics
+        # categorization only -- the relay's actual ingest allowlist
+        # rejects it outright with "restricted: unknown event kind" on
+        # every attempt, isolated and reproduced directly. This is a
+        # relay-code gap (48001 defined in kind.rs but never wired into
+        # real ingest admission), not a permissions issue like the
+        # moderator/operator blockers found in P3/P5 -- left wired (fails
+        # silently, never blocks the real local receipt) since it costs
+        # nothing and will start working the moment the relay adds this
+        # kind to its allowlist.
         asyncio.create_task(_mirror_receipt_as_audit_event(data, receipt_hash))
         # Section 14.1: same receipt, mirrored as a live encrypted
         # observer frame too (kind:24200, already built in
