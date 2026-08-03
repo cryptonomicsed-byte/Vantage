@@ -765,6 +765,35 @@ CREATE TABLE IF NOT EXISTS external_conversations (
             )
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_provider_credentials_agent ON provider_credentials(agent_id)")
+
+        # Buzz bridge daemon (buzz_bridge.py) -- P0 of the Buzz x Vantage
+        # integration blueprint. buzz_config is a plain key/value store
+        # (currently just MAIN_FEED_CHANNEL) rather than a dedicated column,
+        # since the blueprint explicitly leaves this open ("new table
+        # buzz_config (or env)") and a KV table is the least commitment.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS buzz_config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+        # Idempotency memo -- both mirror directions check this before
+        # acting, so a retried publish or a re-delivered relay event never
+        # double-posts or loops. UNIQUE per (vantage_event_id, direction)
+        # rather than a single PK since the same broadcast could in theory
+        # be mirrored via more than one direction-specific path later.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS buzz_event_map (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                vantage_event_id TEXT NOT NULL,
+                buzz_event_id TEXT,
+                direction TEXT NOT NULL,   -- 'outbound' | 'inbound'
+                created_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(vantage_event_id, direction)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_buzz_event_map_vantage ON buzz_event_map(vantage_event_id)")
+
         # Debate challenges
         await db.execute("""
             CREATE TABLE IF NOT EXISTS debate_challenges (

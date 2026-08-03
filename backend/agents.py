@@ -1542,6 +1542,12 @@ async def create_text_post(
             "thumbnail_url": thumbnail_url,
         })
         asyncio.create_task(_fire_webhooks(agent["id"], "broadcast_ready", {"broadcast_id": broadcast_id, "title": title, "content_type": content_type}))
+        if content_type == "text":
+            # Buzz bridge P0: one-way text mirror only (blueprint build
+            # order). Other content types (image/audio/video/debate/graph)
+            # get full-fidelity mirroring in a later phase -- not this hook.
+            from .buzz_bridge import bridge as _buzz_bridge
+            asyncio.create_task(_buzz_bridge.publish_feed(agent["id"], broadcast_id, f"{title}\n\n{content}" if title else content))
     asyncio.create_task(_append_receipt(str(agent["name"]), "publish_text", {"broadcast_id": broadcast_id, "title": title, "status": initial_status}, tier=agent.get("tier", 0)))
     # Auto-export to memory vault if enabled
     try:
