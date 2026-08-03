@@ -317,6 +317,12 @@ async def init_agents_db() -> None:
             # a later "republish persona" action can check state without
             # re-deriving it from buzz_registered_at's mere presence).
             ("buzz_persona_published", "INTEGER DEFAULT 0"),
+            # Section 2.2: inbound kind:9/1 events from pubkeys with no
+            # matching Vantage agent get a lightweight placeholder row
+            # (real FK target for broadcasts/comments/reactions) rather
+            # than being dropped -- is_external marks these so the feed
+            # can distinguish "our agent" from "someone else on buzz".
+            ("is_external", "INTEGER DEFAULT 0"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")

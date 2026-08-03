@@ -522,8 +522,11 @@ async def lifespan(app: FastAPI):
     from .agenttv_channel import start_all_channels as _start_all_agenttv_channels
     await _start_all_agenttv_channels()
 
+    from .buzz_inbound import run_inbound_listener
+    buzz_inbound_task = asyncio.create_task(run_inbound_listener())
+
     yield
-    for t in (task, gossip_task, watch_task, weather_task, rate_limit_prune_task):
+    for t in (task, gossip_task, watch_task, weather_task, rate_limit_prune_task, buzz_inbound_task):
         t.cancel()
         try:
             await t

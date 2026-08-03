@@ -115,3 +115,17 @@ class BuzzSession:
                 reason = msg[2] if len(msg) > 2 else ""
                 raise RuntimeError(f"subscription {sub_id} closed by relay: {reason}")
         return events
+
+    async def stream_events(self, sub_id: str):
+        """Like recv_until_eose, but doesn't stop there -- yields every
+        EVENT for this subscription indefinitely (EOSE just means "caught
+        up", not "done"), for long-lived listeners (buzz_bridge's inbound
+        feed subscription). Raises the same way on CLOSED."""
+        while True:
+            msg = await self._recv_json()
+            if msg[0] == "EVENT" and msg[1] == sub_id:
+                yield msg[2]
+            elif msg[0] == "CLOSED" and msg[1] == sub_id:
+                reason = msg[2] if len(msg) > 2 else ""
+                raise RuntimeError(f"subscription {sub_id} closed by relay: {reason}")
+            # EOSE and anything else (other sub_ids) are just ignored here.

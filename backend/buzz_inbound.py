@@ -1,0 +1,278 @@
+"""Section 2.2 (inbound) + Section 2's reaction/thread mapping table +
+Section 12's typing-indicator note: the other half of the bridge, reading
+FROM the shared MAIN_FEED channel INTO Vantage.
+
+One long-lived listener (not per-agent -- there's exactly one shared
+channel today), authenticated as the deployment's own instance identity
+(registered as a relay member the same way agents/humans are). Runs as a
+background task started at app startup (see main.py).
+"""
+import asyncio
+import json
+import logging
+import re
+import time
+
+import aiosqlite
+
+from .buzz_client import BuzzSession
+from .buzz_identity import derive_instance_keypair, public_key_xonly_hex
+from .buzz_registration import RELAY_CONTAINER, RELAY_WS_URL
+from .buzz_bridge import get_main_feed_channel
+from .db import get_db
+
+logger = logging.getLogger(__name__)
+
+RECONNECT_BACKOFF_SECONDS = 2
+MAX_RECONNECT_BACKOFF_SECONDS = 60
+
+
+async def _docker_exec(*args: str) -> tuple[int, str, str]:
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "exec", RELAY_CONTAINER, "buzz-admin", *args,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    return proc.returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")
+
+
+async def _ensure_instance_relay_membership() -> None:
+    pk = await derive_instance_keypair()
+    pubkey = public_key_xonly_hex(pk)
+    code, out, err = await _docker_exec("add-member", "--pubkey", pubkey, "--role", "member")
+    if code != 0 and "already" not in (out + err).lower() and "exists" not in (out + err).lower():
+        raise RuntimeError(f"buzz-admin add-member (instance identity) failed: {err.strip() or out.strip()}")
+
+
+async def _already_processed(buzz_event_id: str) -> bool:
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT 1 FROM buzz_event_map WHERE buzz_event_id=? AND direction='inbound'", (buzz_event_id,)
+        )
+        return (await cur.fetchone()) is not None
+
+
+async def _is_our_own_outbound(buzz_event_id: str) -> bool:
+    """The listener subscribes to the same channel it mirrors INTO, so
+    every outbound mirror comes back as an inbound event too -- without
+    this check, every broadcast would double as a duplicate "external"
+    feed entry of itself, and every kind:7 reaction we publish nowhere
+    (we don't self-react) would be a non-issue, but the kind:9 case is
+    real and was caught in testing this exact listener."""
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT 1 FROM buzz_event_map WHERE buzz_event_id=? AND direction='outbound'", (buzz_event_id,)
+        )
+        return (await cur.fetchone()) is not None
+
+
+async def _mark_processed(buzz_event_id: str) -> None:
+    async with get_db() as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO buzz_event_map (vantage_event_id, buzz_event_id, direction) VALUES (?,?,'inbound')",
+            (f"buzz:{buzz_event_id}", buzz_event_id),
+        )
+        await db.commit()
+
+
+async def _agent_id_for_pubkey(pubkey_hex: str) -> int:
+    """Resolves a buzz pubkey to a Vantage agent_id, creating a lightweight
+    external/"guest" agent row if this pubkey has never been seen before
+    (Section 2.2: "external pubkeys become lightweight guest-agent
+    records"). The placeholder api_key is random and never handed to
+    anyone -- these rows can never actually authenticate as themselves,
+    they only exist as a real FK target for broadcasts/comments/reactions."""
+    async with get_db() as db:
+        cur = await db.execute("SELECT id FROM agents WHERE nostr_pubkey_hex = ?", (pubkey_hex,))
+        row = await cur.fetchone()
+        if row:
+            return row[0]
+
+        import hashlib
+        import secrets as _secrets
+        placeholder_key_hash = hashlib.sha256(_secrets.token_bytes(32)).hexdigest()
+        name = f"buzz-guest-{pubkey_hex[:12]}"
+        cur = await db.execute(
+            "INSERT INTO agents (name, api_key, bio, nostr_pubkey_hex, is_external) VALUES (?,?,?,?,1)",
+            (name, placeholder_key_hash, "External Buzz identity (mirrored, not a Vantage-native agent)", pubkey_hex),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+def _tag(event: dict, name: str) -> list[str]:
+    return [t for t in event.get("tags", []) if t and t[0] == name]
+
+
+async def _handle_kind_9_or_1(event: dict) -> None:
+    reply_tags = [t for t in _tag(event, "e") if len(t) > 3 and t[3] == "reply"]
+    agent_id = await _agent_id_for_pubkey(event["pubkey"])
+    content = event.get("content", "")
+
+    if reply_tags:
+        # NIP-10 threaded reply to something we can resolve -> a real
+        # comment on the parent broadcast, not a new top-level feed post.
+        parent_buzz_id = reply_tags[0][1]
+        async with get_db() as db:
+            cur = await db.execute(
+                "SELECT vantage_event_id FROM buzz_event_map WHERE buzz_event_id=? LIMIT 1", (parent_buzz_id,)
+            )
+            row = await cur.fetchone()
+        if row and row[0].startswith("broadcast:"):
+            parent_broadcast_id = row[0].split(":", 1)[1]
+            if parent_broadcast_id.isdigit():
+                async with get_db() as db:
+                    await db.execute(
+                        "INSERT INTO comments (broadcast_id, agent_id, content) VALUES (?,?,?)",
+                        (int(parent_broadcast_id), agent_id, content[:2000]),
+                    )
+                    await db.commit()
+                return
+        # Parent not resolvable locally -- fall through to a normal feed post.
+
+    title = content.split("\n", 1)[0][:200] or "(untitled)"
+    content_type = "announcement" if event["kind"] == 1 else "text"
+    async with get_db() as db:
+        cur = await db.execute(
+            """INSERT INTO broadcasts (agent_id, title, content_type, status, post_content, surface)
+               VALUES (?,?,?,'ready',?,'external')""",
+            (agent_id, title, content_type, content),
+        )
+        broadcast_id = cur.lastrowid
+        await db.commit()
+
+    from .agents import notify_feed_clients
+    await notify_feed_clients({
+        "broadcast_id": broadcast_id, "agent_name": f"buzz:{event['pubkey'][:8]}",
+        "title": title, "content_type": content_type, "stream_url": "", "thumbnail_url": "",
+    })
+
+    await _maybe_dispatch_mention(event, content)
+
+
+_MENTION_RE = re.compile(r"@([A-Za-z0-9_.-]+)")
+
+
+async def _maybe_dispatch_mention(event: dict, content: str) -> None:
+    """Section 12.2: rather than running a separate per-agent systemd
+    bridge instance for every copilot-enabled agent, the ONE shared
+    inbound listener dispatches any "@agentname ..." mention straight to
+    that agent's own _dispatch_chat (the exact same path Copilot's HTTP
+    endpoint and the original single-agent buzz_acp_bridge.py use), then
+    posts the reply back as a real NIP-10 threaded kind:9. Publishes a
+    kind:20002 typing indicator for the duration (Section 12.4)."""
+    m = _MENTION_RE.search(content)
+    if not m:
+        return
+    mentioned_name = m.group(1)
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM agents WHERE name = ? AND is_external = 0", (mentioned_name,))
+        agent_row = await cur.fetchone()
+    if not agent_row:
+        return
+    agent_row = dict(agent_row)
+    if agent_row["nostr_pubkey_hex"] == event["pubkey"]:
+        return  # don't reply to our own mention of ourselves
+
+    from .buzz_bridge import bridge as _buzz_bridge
+    from .routers.copilot import _dispatch_chat
+
+    channel = await get_main_feed_channel()
+    try:
+        pk = await derive_agent_keypair_for_typing(agent_row["id"])
+        typing_sess = BuzzSession(RELAY_WS_URL, pk)
+        await typing_sess.connect()
+        await typing_sess.authenticate()
+        await typing_sess.publish(20002, "", tags=[["h", channel]])
+        await typing_sess.close()
+    except Exception:
+        pass  # typing indicator is cosmetic, never block the actual reply on it
+
+    try:
+        result = await _dispatch_chat(agent_row, content.replace(f"@{mentioned_name}", "", 1).strip())
+        reply_text = (result.get("data") or {}).get("reply") or ""
+        if not reply_text:
+            return
+        await _buzz_bridge.publish_feed(
+            agent_row["id"], f"mention-reply:{event['id']}", reply_text,
+            extra_tags=[["e", event["id"], "", "reply"]],
+        )
+    except Exception as e:
+        logger.warning("buzz_inbound: mention dispatch to agent %s failed: %s", mentioned_name, e)
+
+
+async def derive_agent_keypair_for_typing(agent_id: int):
+    from .buzz_identity import derive_buzz_keypair
+    return await derive_buzz_keypair(agent_id)
+
+
+async def _handle_kind_7(event: dict) -> None:
+    """A reaction on one of OUR mirrored events -- map back to the local
+    broadcast via buzz_event_map and record it in the real reactions
+    table, same shape the REST react endpoint already writes."""
+    e_tags = _tag(event, "e")
+    if not e_tags:
+        return
+    target_buzz_id = e_tags[-1][1]
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT vantage_event_id FROM buzz_event_map WHERE buzz_event_id=? AND direction='outbound' LIMIT 1",
+            (target_buzz_id,),
+        )
+        row = await cur.fetchone()
+    if not row or not row[0].startswith("broadcast:"):
+        return
+    broadcast_id_str = row[0].split(":", 1)[1]
+    if not broadcast_id_str.isdigit():
+        return
+    agent_id = await _agent_id_for_pubkey(event["pubkey"])
+    reaction_type = event.get("content") or "+"
+    async with get_db() as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO reactions (broadcast_id, agent_id, reaction_type) VALUES (?,?,?)",
+            (int(broadcast_id_str), agent_id, reaction_type[:20]),
+        )
+        await db.commit()
+
+
+async def _process_event(event: dict) -> None:
+    if await _already_processed(event["id"]):
+        return
+    if await _is_our_own_outbound(event["id"]):
+        await _mark_processed(event["id"])
+        return
+    try:
+        if event["kind"] in (9, 1):
+            await _handle_kind_9_or_1(event)
+        elif event["kind"] == 7:
+            await _handle_kind_7(event)
+    except Exception as e:
+        logger.warning("buzz_inbound: failed processing event %s (kind=%s): %s", event.get("id"), event.get("kind"), e)
+    await _mark_processed(event["id"])
+
+
+async def run_inbound_listener() -> None:
+    """Reconnect-with-backoff forever. Meant to be launched once as a
+    fire-and-forget background task at app startup and left running for
+    the life of the process -- never awaited/joined."""
+    await _ensure_instance_relay_membership()
+    backoff = RECONNECT_BACKOFF_SECONDS
+    while True:
+        try:
+            channel = await get_main_feed_channel()
+            pk = await derive_instance_keypair()
+            sess = BuzzSession(RELAY_WS_URL, pk)
+            await sess.connect()
+            await sess.authenticate()
+            sub_id = await sess.subscribe([{"kinds": [1, 7, 9], "#h": [channel]}])
+            logger.info("buzz_inbound: listening on channel %s", channel)
+            backoff = RECONNECT_BACKOFF_SECONDS  # reset after a successful connect
+            async for event in sess.stream_events(sub_id):
+                await _process_event(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("buzz_inbound: listener disconnected (%s), reconnecting in %ss", e, backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, MAX_RECONNECT_BACKOFF_SECONDS)
