@@ -66,6 +66,26 @@ async def _run_job(job_id: int, agent: dict, topic: str, kind: str):
                 (bid, job_id),
             )
             await db.commit()
+
+        # Section 29.1: podcast done -> kind:30023 shownotes (addressable
+        # long-form, searchable) + kind:9 feed announcement. Real Blossom
+        # upload of the audio/video itself is out of scope here (that's
+        # Section 3.2/11's existing image/video/audio path, already
+        # covered for audio/video broadcasts generally -- this just adds
+        # the long-form shownotes companion the blueprint specifically asks for).
+        import asyncio as _asyncio
+        from ..buzz_bridge import bridge as _buzz_bridge
+        shownotes = _json.dumps({
+            "title": topic[:300], "summary": f"AI-hosted podcast: {topic}",
+            "script": result["script"],
+        })
+        _asyncio.create_task(_buzz_bridge.publish_feed(
+            agent["id"], f"podcast-shownotes:{bid}", shownotes,
+            kind=30023, extra_tags=[["t", "podcast"], ["d", f"vantage-broadcast-{bid}"]],
+        ))
+        _asyncio.create_task(_buzz_bridge.publish_feed(
+            agent["id"], f"podcast-announce:{bid}", f"New podcast: {topic}",
+        ))
     except Exception as e:
         logger.warning("podcast job %s failed: %s", job_id, e)
         async with get_db() as db:

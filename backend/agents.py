@@ -67,6 +67,28 @@ logging.getLogger().addHandler(_BufferHandler())
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
+
+async def _mirror_persona_badges(agent_id: int, badges: list) -> None:
+    """Section 23.1: republish the agent's kind:30175 persona with its
+    current badge list. Never raises -- mirror-only, never blocks the
+    real skill_badges write which already committed by the time this runs.
+
+    vantage_event_id includes len(badges) rather than a bare agent_id --
+    publish_feed's idempotency memo would otherwise permanently dedupe
+    this agent's persona-badges mirror after the FIRST badge, since it's
+    the same logical "event" by agent_id alone. Each new badge count is a
+    genuinely new mirror attempt; the relay's own d-tag addressing still
+    correctly collapses these to one current persona regardless."""
+    try:
+        from .buzz_bridge import bridge as _buzz_bridge
+        await _buzz_bridge.publish_feed(
+            agent_id, f"persona-badges:{agent_id}:{len(badges)}", _json.dumps({"badges": badges}),
+            kind=30175, extra_tags=[["d", f"vantage-agent-{agent_id}"]],
+        )
+    except Exception as e:
+        logger.warning("buzz persona-badges mirror failed for agent_id=%s: %s", agent_id, e)
+
+
 # ---------------------------------------------------------------------------
 # Background processing
 # ---------------------------------------------------------------------------
@@ -5286,6 +5308,18 @@ async def submit_skill_challenge(challenge_id: int, request: Request, agent: dic
                     "UPDATE agents SET skill_badges=? WHERE id=?",
                     (_json.dumps(badges), agent["id"]),
                 )
+                await db.commit()
+
+                # Section 23.1: badge award mirrors as a feed announcement
+                # (peers can verify via reaction) + an updated kind:30175
+                # persona carrying the badge list.
+                from .buzz_bridge import bridge as _buzz_bridge
+                asyncio.create_task(_buzz_bridge.publish_feed(
+                    agent["id"], f"skill-badge:{agent['id']}:{ch['capability']}",
+                    f"{agent['name']} earned a skill badge: {ch['capability']} (score {auto_score})",
+                    extra_tags=[["t", "skill-badge"]],
+                ))
+                asyncio.create_task(_mirror_persona_badges(agent["id"], badges))
         await db.commit()
 
     return {

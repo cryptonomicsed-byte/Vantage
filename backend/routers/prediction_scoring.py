@@ -51,6 +51,17 @@ async def record_call(request: Request, agent: dict = Depends(get_agent)):
         score_id = cur.lastrowid
         await db.commit()
 
+    # Section 28.1: prediction made -> real feed post, public + cryptographically
+    # signed by the agent's own key -- reputation follows the npub, not a
+    # database row only Vantage can see.
+    import asyncio as _asyncio
+    from ..buzz_bridge import bridge as _buzz_bridge
+    _asyncio.create_task(_buzz_bridge.publish_feed(
+        agent["id"], f"prediction:{score_id}",
+        f"Called {call} on {market_slug or '(unnamed market)'} (implied prob {market_prob:.2f})",
+        extra_tags=[["t", "prediction"]],
+    ))
+
     return {"id": score_id, "call": call, "market_prob": market_prob, "value": value,
             "status": "resolved" if is_correct is not None else "pending"}
 
@@ -76,6 +87,32 @@ async def resolve_call(score_id: int, request: Request, agent: dict = Depends(ge
             (int(is_correct), value, score_id),
         )
         await db.commit()
+
+    # Section 28.2: resolution -> reaction + a real "resolved" reply post.
+    # Public scoring with cryptographic authorship, per the blueprint.
+    import asyncio as _asyncio
+    from ..buzz_bridge import bridge as _buzz_bridge
+    original_buzz_id = await _buzz_bridge.get_buzz_event_id(f"prediction:{score_id}")
+    extra = [["e", original_buzz_id, "", "reply"]] if original_buzz_id else []
+    _asyncio.create_task(_buzz_bridge.publish_feed(
+        agent["id"], f"prediction-resolved:{score_id}",
+        f"Resolved: {'correct' if is_correct else 'incorrect'} (value {value:.3f})",
+        extra_tags=extra,
+    ))
+    if original_buzz_id:
+        async def _react():
+            from ..buzz_client import BuzzSession
+            from ..buzz_identity import derive_buzz_keypair
+            from ..buzz_registration import RELAY_WS_URL
+            pk = await derive_buzz_keypair(agent["id"])
+            sess = BuzzSession(RELAY_WS_URL, pk)
+            await sess.connect()
+            await sess.authenticate()
+            try:
+                await sess.publish(7, "👍" if is_correct else "👎", tags=[["e", original_buzz_id]])
+            finally:
+                await sess.close()
+        _asyncio.create_task(_react())
 
     return {"id": score_id, "is_correct": is_correct, "value": value}
 
