@@ -44,9 +44,19 @@ async def _parent_attestation_tag(parent_agent_id: int, child_pubkey_hex: str) -
 async def mirror_genesis_birth(child_agent_id: int, parent_agent_id: int, generation: int) -> dict:
     """Never raises -- a failed buzz mirror must never block a real
     Vantage agent spawn, which already succeeded by the time this runs."""
+    import asyncio
     try:
         reg_result = await register_agent_on_buzz(child_agent_id)
         child_pubkey = reg_result["pubkey"]
+
+        # register_agent_on_buzz just published its own kind:30175 persona
+        # (same addressable d-tag this function republishes with lineage
+        # tags a moment later). Found live: this relay treats a same-second
+        # created_at on an addressable event as a stale duplicate no-op,
+        # not a replacement (same class of issue the reconstructed doc
+        # flagged for kind:13534 rosters) -- without this, the lineage-
+        # tagged republish silently never took effect.
+        await asyncio.sleep(1)
 
         parent_pk = await derive_buzz_keypair(parent_agent_id)
         parent_pubkey = public_key_xonly_hex(parent_pk)
