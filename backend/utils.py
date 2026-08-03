@@ -251,10 +251,57 @@ async def _append_receipt(agent_id: str, action: str, payload: dict, tier: int =
                 (agent_id, action, payload_hash, previous_hash, receipt_hash, tier, severity, summary),
             )
             await db.commit()
-            return receipt_hash
+
+        # Section 19.2: mirror this same hash-chained receipt as a real
+        # kind:48001 event -- confirmed real/publishable via
+        # handlers/event.rs's classify_kind (no special relay-side chain
+        # logic exists for this kind; the relay just allows clients to
+        # publish it, so THIS is the chain, same hash-linkage as the
+        # local receipts table). Uses the instance identity since receipts
+        # are a system-wide sequence, not scoped to one agent's own key.
+        asyncio.create_task(_mirror_receipt_as_audit_event(data, receipt_hash))
+        # Section 14.1: same receipt, mirrored as a live encrypted
+        # observer frame too (kind:24200, already built in
+        # buzz_observer.py) -- a real per-agent activity feed, using the
+        # SAME meaningful-action events as the audit chain rather than
+        # the separate high-frequency per-request agent_activity_log
+        # table (mirroring every HTTP request as a frame would flood the
+        # relay for near-zero signal).
+        asyncio.create_task(_mirror_receipt_as_observer_frame(agent_id, action, summary, severity))
+        return receipt_hash
     except Exception as _e:
         logger.debug("receipt write failed: %s", _e)
         return ""
+
+
+async def _mirror_receipt_as_observer_frame(agent_name: str, action: str, summary: str, severity: str) -> None:
+    try:
+        async with get_db() as db:
+            row = await (await db.execute("SELECT id FROM agents WHERE name=?", (agent_name,))).fetchone()
+        if not row:
+            return
+        from .buzz_observer import publish_observer_frame
+        frame_severity = "warning" if severity in ("Critical", "Warning") else "info"
+        await publish_observer_frame(row[0], action, summary, severity=frame_severity)
+    except Exception as e:
+        logger.debug("buzz observer-frame mirror failed: %s", e)
+
+
+async def _mirror_receipt_as_audit_event(data: dict, receipt_hash: str) -> None:
+    try:
+        from .buzz_client import BuzzSession
+        from .buzz_identity import derive_instance_keypair
+        from .buzz_registration import RELAY_WS_URL
+        pk = await derive_instance_keypair()
+        sess = BuzzSession(RELAY_WS_URL, pk)
+        await sess.connect()
+        await sess.authenticate()
+        try:
+            await sess.publish(48001, _json_receipts.dumps({**data, "receipt_hash": receipt_hash}), tags=[])
+        finally:
+            await sess.close()
+    except Exception as e:
+        logger.debug("buzz audit-chain mirror failed: %s", e)
 
 
 # File magic byte validation
