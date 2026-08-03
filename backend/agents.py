@@ -5883,6 +5883,14 @@ async def create_knowledge_snippet(
             asyncio.create_task(vault.export_knowledge(snippet_id))
     except Exception:
         pass
+
+    # Section 8.1: mirror as a NIP-AE engram, slug hash-derived from the
+    # triple's content -- real content-addressed dedup for free (the same
+    # fact written twice always lands on the same slug/d-tag).
+    triple_hash = _hashlib.sha256(f"{subject}|{predicate}|{obj}".encode()).hexdigest()[:32]
+    from .buzz_engrams import write_engram
+    asyncio.create_task(write_engram(agent["id"], f"mem/{triple_hash}", _json.dumps({"subject": subject, "predicate": predicate, "object": obj})))
+
     return {"id": snippet_id, "subject": subject, "predicate": predicate, "object": obj, "confidence": confidence}
 
 
