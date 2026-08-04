@@ -2,9 +2,8 @@ import React, { useState, useEffect, useCallback } from 'react'
 import { NavLink } from 'react-router-dom'
 import { BookOpen, Code, Copy, Check, Settings as SettingsIcon, Radio, Plus, Trash2, RefreshCw, ExternalLink, Wifi, WifiOff, AlertCircle, Brain, CheckCircle2, Circle, Tv, Film } from 'lucide-react'
 import MindTab from './MindTab'
-import BuzzTab from './BuzzTab'
 
-const TABS = ['General', 'Mind & LLM', 'Buzz', 'Integrations', 'Cinema & Live TV', 'Network', 'Developer'] as const
+const TABS = ['General', 'Mind & LLM', 'Integrations', 'Cinema & Live TV', 'Network', 'Developer'] as const
 type Tab = typeof TABS[number]
 
 interface IntegrationsStatus {
@@ -58,7 +57,7 @@ function StatusDot({ status }: { status: string }) {
   )
 }
 
-const HASH_TO_TAB: Record<string, Tab> = { mind: 'Mind & LLM', buzz: 'Buzz', integrations: 'Integrations', cinema: 'Cinema & Live TV', network: 'Network', developer: 'Developer' }
+const HASH_TO_TAB: Record<string, Tab> = { mind: 'Mind & LLM', integrations: 'Integrations', cinema: 'Cinema & Live TV', network: 'Network', developer: 'Developer' }
 
 export default function Settings() {
   const initialTab = HASH_TO_TAB[window.location.hash.replace('#', '')] || 'General'
@@ -319,19 +318,6 @@ export default function Settings() {
         </div>
       )}
 
-      {/* ── Buzz ── */}
-      {tab === 'Buzz' && (
-        <div className="settings-section">
-          {apiKey ? (
-            <BuzzTab apiKey={apiKey} />
-          ) : (
-            <div className="empty-state" style={{ marginTop: 40 }}>
-              <Radio size={32} style={{ marginBottom: 12, opacity: 0.4 }} />
-              <p>Connect your API key in <NavLink to="/dashboard">Dashboard</NavLink> to manage Buzz.</p>
-            </div>
-          )}
-        </div>
-      )}
 
       {/* ── Integrations (read-only status) ── */}
       {tab === 'Integrations' && (

@@ -1,8 +1,6 @@
 import React, { useState, useEffect } from 'react'
-import { NavLink } from 'react-router-dom'
-import { Rss, MessageSquare, Users, Loader, Send, ArrowLeft } from 'lucide-react'
-
-type SubTab = 'feed' | 'dms' | 'personas'
+import { Navigate } from 'react-router-dom'
+import { Loader, Send, ArrowLeft } from 'lucide-react'
 
 interface FeedItem {
   channel_id: string | null
@@ -29,7 +27,11 @@ interface DmMessage {
   created_at: number
 }
 
-function FeedView() {
+// This module used to be its own standalone page. It's now consolidated
+// into BuzzHome.tsx (the "Buzz" bottom-nav tab) -- these sub-views are
+// exported for reuse there, and the default export below just redirects
+// old /buzz-social links/bookmarks to the new home.
+export function FeedView() {
   const [items, setItems] = useState<FeedItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -62,7 +64,7 @@ function FeedView() {
   )
 }
 
-function DmsView() {
+export function DmsView() {
   const [openTo, setOpenTo] = useState('')
   const [channelId, setChannelId] = useState<string | null>(null)
   const [messages, setMessages] = useState<DmMessage[]>([])
@@ -170,7 +172,7 @@ function DmsView() {
   )
 }
 
-function PersonasView() {
+export function PersonasView() {
   const [personas, setPersonas] = useState<Persona[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -204,39 +206,5 @@ function PersonasView() {
 }
 
 export default function BuzzSocial() {
-  const [tab, setTab] = useState<SubTab>('feed')
-
-  return (
-    <div style={{ maxWidth: 900, margin: '0 auto', padding: '24px 16px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 700 }}>Buzz Social</h1>
-        <NavLink to="/settings#buzz" className="btn btn-ghost btn-sm">Buzz identity settings</NavLink>
-      </div>
-      <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 20 }}>
-        A cross-agent social layer on top of Buzz (Nostr) -- additive to everything else in Vantage.
-        Nothing here replaces your existing chat, guilds, or workflows.
-      </p>
-
-      <div style={{ display: 'flex', gap: 8, marginBottom: 20, borderBottom: '1px solid var(--border)', paddingBottom: 10 }}>
-        {([
-          ['feed', 'Feed', Rss],
-          ['dms', 'Direct Messages', MessageSquare],
-          ['personas', 'Personas', Users],
-        ] as const).map(([key, label, Icon]) => (
-          <button
-            key={key}
-            className={tab === key ? 'btn btn-primary btn-sm' : 'btn btn-ghost btn-sm'}
-            onClick={() => setTab(key)}
-          >
-            <Icon size={14} style={{ marginRight: 6 }} />
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {tab === 'feed' && <FeedView />}
-      {tab === 'dms' && <DmsView />}
-      {tab === 'personas' && <PersonasView />}
-    </div>
-  )
+  return <Navigate to="/buzz" replace />
 }

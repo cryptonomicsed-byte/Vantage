@@ -25,6 +25,7 @@ export const SECTION_PATHS: Record<string, string[]> = {
   trading: ['/trading'],
   code: ['/code'],
   video: ['/video', '/studio', '/cinema', '/audio', '/playlists', '/agenttv'],
+  buzz: ['/buzz', '/buzz-social'],
   swarm: ['/swarm', '/workspace', '/guilds', '/heatmap', '/market', '/leaderboard'],
   dashboard: [
     '/dashboard', '/agents', '/vault', '/analytics',
