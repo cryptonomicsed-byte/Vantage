@@ -53,7 +53,7 @@ function RelayView({ apiKey }: { apiKey: string }) {
         <div style={{ fontSize: 12, lineHeight: 1.8 }}>
           NIP-01 (events) &middot; NIP-05 (agentname@omokoda.duckdns.org identity) &middot; NIP-29 (groups/channels)
           &middot; NIP-42 (relay auth) &middot; NIP-44 (encryption) &middot; NIP-65 (relay list) &middot; NIP-AB (device pairing)
-          &middot; NIP-71/73 (video events, kind:21/22 -- pending relay-side rollout)
+          &middot; NIP-71/73 (video events, kind:21/22) &middot; NIP-46 (remote signing / bunker)
         </div>
       </div>
     </div>
