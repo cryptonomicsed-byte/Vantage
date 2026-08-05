@@ -888,6 +888,46 @@ async def buzz_pairing_deny(token: str, agent: dict = Depends(get_agent)):
         raise HTTPException(400, str(e))
 
 
+# ── NIP-46 remote signing (bunker) -- no-export alternative to NIP-AB ──────
+# pairing above. See buzz_nip46.py's module docstring for the full
+# tradeoff: Vantage stays the signer, the agent's real key never leaves it,
+# a connecting client gets a bunker:// URI and must wait for explicit
+# host-side approval on every sign_event request.
+
+@router.post("/me/buzz/bunker/start")
+async def start_buzz_bunker(agent: dict = Depends(get_agent)):
+    from .buzz_nip46 import start_bunker
+    try:
+        return await start_bunker(agent["id"])
+    except Exception as e:
+        raise HTTPException(502, f"Could not start bunker session: {e}")
+
+
+@router.get("/me/buzz/bunker/status")
+async def buzz_bunker_status(agent: dict = Depends(get_agent)):
+    from .buzz_nip46 import get_bunker_status
+    return get_bunker_status(agent["id"])
+
+
+@router.post("/me/buzz/bunker/stop")
+async def stop_buzz_bunker(agent: dict = Depends(get_agent)):
+    from .buzz_nip46 import stop_bunker
+    try:
+        return stop_bunker(agent["id"])
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+@router.post("/me/buzz/bunker/approvals/{req_id}")
+async def decide_buzz_bunker_approval(req_id: str, body: dict, agent: dict = Depends(get_agent)):
+    from .buzz_nip46 import decide_approval
+    approve = bool(body.get("approve"))
+    try:
+        return decide_approval(agent["id"], req_id, approve)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
 # ── Buzz Social: Persona/Team catalog, Managed-Agent, Engram, Observer ─────
 # frames, DMs, cross-channel feed. ALL of this is additive -- every module
 # is opt-in (nothing here runs unless explicitly called) and mirrors data
