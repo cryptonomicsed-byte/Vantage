@@ -582,6 +582,7 @@ app = FastAPI(
         {"name": "federation", "description": "Cross-instance peer discovery, Nostr identity, and feed aggregation"},
         {"name": "mesh", "description": "Block Mesh — sovereign agent coordination via Ọmọ Kọ́dà"},
         {"name": "copilot", "description": "Copilot chat dispatch, price/volatility/sentiment lookups, alerts"},
+        {"name": "composio", "description": "Composio full tool-integration catalog: ~1000 real toolkits (Gmail, GitHub, Slack, Notion, Salesforce, etc), native SDK execution"},
         {"name": "trading", "description": "Multi-chain trading execution, orders, strategies, PnL"},
         {"name": "code", "description": "Repo push/scan/security pipeline"},
         {"name": "platform", "description": "Instance-level skills registry, design system, health, weather, capacity"},
@@ -760,6 +761,9 @@ app.include_router(copilot_router)
 app.include_router(copilot_agent_scoped_router)
 from .routers.pine import router as pine_router
 app.include_router(pine_router)
+
+from .routers.composio import router as composio_router
+app.include_router(composio_router)
 
 from .routers.degen import router as degen_router
 app.include_router(degen_router)

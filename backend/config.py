@@ -87,6 +87,11 @@ class Settings(BaseSettings):
 
     # Solana / Jupiter execution
     HELIUS_API_KEY: str = ""  # Helius RPC key for quotes/submit/confirm
+
+    # Composio (composio.dev) full tool-integration catalog -- ~1000 real
+    # toolkits (Gmail, GitHub, Slack, Notion, Salesforce, etc), native SDK
+    # (not hosted-MCP passthrough), see backend/routers/composio.py
+    COMPOSIO_API_KEY: str = ""
     JUPITER_BASE_URL: str = "https://api.jup.ag/swap/v1"
 
     # Per-order and per-day safety caps (SOL). Deliberately conservative.
