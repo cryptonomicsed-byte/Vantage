@@ -18,6 +18,10 @@ from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, Header, HTTPException, Query, Body
 from pydantic import BaseModel
 import aiosqlite
+import base58
+from solders.keypair import Keypair
+from solders.pubkey import Pubkey
+from solders.signature import Signature
 
 from ..config import settings
 from ..crypto_utils import encrypt_key_for_agent, decrypt_key_for_agent
@@ -168,22 +172,21 @@ async def create_wallet(
 
     try:
         if request.type == "custom":
-            # NOTE (real functional gap, separate from the encryption fix
-            # below): private_key and address here are still two
-            # INDEPENDENTLY random values, not a real derived keypair --
-            # this "custom" wallet type doesn't produce a usable on-chain
-            # wallet for any chain. Nothing else in the codebase reads
-            # private_key_encrypted/private_key_salt back out to sign a
-            # real transaction (verified: this table is disconnected from
-            # the actual trading path, which loads a real key from
-            # hermes_soul_seed.json instead) -- so this is inert/placeholder
-            # today, but genuine keypair generation would be needed before
-            # this endpoint could be trusted for anything real.
-            private_key = f"0x{secrets.token_hex(32)}"  # Placeholder, not a real keypair
+            # Real ed25519 keypair (matches the `network DEFAULT 'solana'`
+            # column this table already had) -- was previously two
+            # independently-random hex strings with no cryptographic
+            # relationship, so nothing could ever sign with this "wallet".
+            # solders.Keypair() is a real Solana/ed25519 keypair; the
+            # secret is stored base58-encoded (Solana convention) before
+            # AES-256-GCM encryption, and the address is the real derived
+            # base58 pubkey -- verifiable against signatures this wallet
+            # produces later, not a cosmetic placeholder.
+            keypair = Keypair()
+            private_key = base58.b58encode(bytes(keypair)).decode()
             encrypted_key = encrypt_private_key(private_key, agent_id, x_agent_key)
 
-            # Derive address from private key (placeholder)
-            address = f"0x{secrets.token_hex(20)}"
+            # Real derived address (base58 pubkey), not random hex
+            address = str(keypair.pubkey())
 
             await db.execute("""
                 INSERT INTO agent_wallets
@@ -335,7 +338,7 @@ async def sign_transaction(
     try:
         # Verify wallet exists and belongs to agent
         cur = await db.execute(
-            "SELECT id, type, address FROM agent_wallets WHERE id = ? AND agent_id = ?",
+            "SELECT id, type, address, private_key_encrypted FROM agent_wallets WHERE id = ? AND agent_id = ?",
             (wallet_id, agent_id)
         )
         wallet = await cur.fetchone()
@@ -343,13 +346,37 @@ async def sign_transaction(
         if not wallet:
             raise HTTPException(status_code=404, detail="Wallet not found")
 
+        wallet_type, wallet_address, encrypted_key = wallet[1], wallet[2], wallet[3]
+
+        if wallet_type != "custom" or not encrypted_key:
+            # Alchemy wallets are session-token signed on Alchemy's side
+            # (see the /alchemy/approve endpoint) -- this endpoint only
+            # holds the real private key for "custom" wallets.
+            raise HTTPException(
+                status_code=400,
+                detail=f"Wallet type '{wallet_type}' has no locally-held key to sign with here"
+            )
+
         # Create signature record
         sig_id = f"sig_{secrets.token_hex(16)}"
-        tx_preview = json.dumps(request.transaction)[:100]
+        canonical_tx = json.dumps(request.transaction, sort_keys=True, separators=(",", ":"))
+        tx_preview = canonical_tx[:100]
 
-        # Placeholder: In production, actually sign the transaction
-        # For now, return a mock signed tx
-        signed_tx = f"0x_signed_{secrets.token_hex(32)}"
+        # Real ed25519 signature: decrypt this agent's own key (never
+        # leaves this request), sign the canonical transaction bytes, and
+        # discard the plaintext key immediately. Verifiable by anyone
+        # against `wallet_address` -- was previously an unrelated random
+        # hex string with no cryptographic connection to the wallet at all.
+        plaintext_key = decrypt_private_key(encrypted_key, agent_id, x_agent_key)
+        if not plaintext_key:
+            raise HTTPException(status_code=500, detail="Failed to decrypt wallet key")
+        try:
+            keypair = Keypair.from_base58_string(plaintext_key)
+            signature: Signature = keypair.sign_message(canonical_tx.encode())
+        finally:
+            del plaintext_key
+
+        signed_tx = str(signature)
 
         await db.execute("""
             INSERT INTO agent_wallet_signatures
@@ -362,6 +389,8 @@ async def sign_transaction(
         return {
             "signed_tx": signed_tx,
             "tx_hash_preview": signed_tx[:10] + "...",
+            "signer_address": wallet_address,
+            "signature_scheme": "ed25519",
             "agent_signed": False,
             "vantage_signed": True,
             "intent": request.intent,
