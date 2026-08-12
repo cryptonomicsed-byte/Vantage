@@ -372,11 +372,27 @@ async def sign_transaction(
             raise HTTPException(status_code=500, detail="Failed to decrypt wallet key")
         try:
             keypair = Keypair.from_base58_string(plaintext_key)
-            signature: Signature = keypair.sign_message(canonical_tx.encode())
+
+            tx_b64 = request.transaction.get("tx_b64")
+            if tx_b64:
+                # A real unsigned Solana transaction was supplied (same
+                # tx_b64 convention trading.py's live execution path uses)
+                # -- sign it as an actual VersionedTransaction so the result
+                # is submittable on-chain, not just a signature over the
+                # JSON description of the intent.
+                from base64 import b64decode, b64encode
+                from solders.transaction import VersionedTransaction
+                from solders.message import to_bytes_versioned
+
+                unsigned = VersionedTransaction.from_bytes(b64decode(tx_b64))
+                sig = keypair.sign_message(to_bytes_versioned(unsigned.message))
+                signed = VersionedTransaction.populate(unsigned.message, [sig])
+                signed_tx = b64encode(bytes(signed)).decode()
+            else:
+                signature: Signature = keypair.sign_message(canonical_tx.encode())
+                signed_tx = str(signature)
         finally:
             del plaintext_key
-
-        signed_tx = str(signature)
 
         await db.execute("""
             INSERT INTO agent_wallet_signatures
