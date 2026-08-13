@@ -406,8 +406,16 @@ async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent)
     response = {
         "id": wallet_id, "label": label, "chain": chain,
         "address": address, "system": system,
-        "mnemonic": result.get("mnemonic", ""),
-        "warning": "Private key encrypted at rest. Store the mnemonic safely.",
+        # Was returning the raw BIP-39 mnemonic in the response -- never
+        # persisted anywhere (only the encrypted private key is stored),
+        # so this was the one and only place it existed outside the
+        # ephemeral generation call. For agent-first infra that's a real
+        # leak vector: a calling agent will very likely log/memorize/
+        # vault-store a mnemonic handed to it in a tool response,
+        # permanently. Signing still works via the encrypted private key
+        # (decrypted with the agent's own API key, same as wallets.py) --
+        # only the human-portable backup phrase is no longer surfaced.
+        "warning": "Private key encrypted at rest, decryptable only with your own API key. No separate mnemonic backup is issued.",
     }
     if "ifascript" in result:
         response.update(result["ifascript"])
