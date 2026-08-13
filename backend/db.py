@@ -292,6 +292,12 @@ async def init_agents_db() -> None:
             # extra fields, never required by the contract itself.
             ("omokoda_agent_id",  "TEXT DEFAULT NULL"),
             ("omokoda_agent_key", "TEXT DEFAULT NULL"),
+            # Bondhive (Solana/Anchor stake+slash reputation) account this
+            # agent is bound to, if any. NULL = no Bondhive link. Deliberately
+            # NOT reconciled with the existing reputation/tier columns above
+            # (tier, reputation) -- that's a real open decision, not
+            # something this column silently resolves.
+            ("bondhive_stake_account", "TEXT DEFAULT NULL"),
             # Copilot LLM fallback model choice (OmniRoute model id, e.g.
             # 'auto') -- only consulted when this agent has no cognition_url
             # of its own. NULL/empty means settings.OMNIROUTE_MODEL default.
@@ -1632,6 +1638,19 @@ CREATE TABLE IF NOT EXISTS external_conversations (
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_job_tasks_job ON job_tasks(job_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_job_tasks_status ON job_tasks(status)")
+        # OSOVM (Proof-of-Simulation) attestation hook -- a completed
+        # job_task can carry the determinism proof OSOVM produced for the
+        # work it represents. NULL = no proof attached (current default for
+        # every task; nothing writes these columns yet). See
+        # settings.OSOVM_URL / osovm_client.py.
+        for col, ddl in [
+            ("osovm_proof_id", "TEXT DEFAULT NULL"),
+            ("osovm_sim_hash", "TEXT DEFAULT NULL"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE job_tasks ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS security_scans (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

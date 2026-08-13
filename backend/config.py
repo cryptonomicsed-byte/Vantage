@@ -234,6 +234,28 @@ class Settings(BaseSettings):
     OMNIROUTE_URL: str = "http://localhost:8300"
     OMNIROUTE_MODEL: str = "auto"
 
+    # OSOVM (Proof-of-Simulation VM, Sui/Move settlement) -- when set,
+    # Vantage can ask OSOVM to attest a completed job_task with a real
+    # determinism proof (sim hash / proof id) before it's approved/paid out.
+    # Empty = disabled: osovm_client.py's calls become no-ops and
+    # job_tasks.osovm_proof_id simply stays NULL, exactly like OMOKODA_URL's
+    # empty-means-disabled contract above. No code coupling existed between
+    # OSOVM and Vantage before this -- this is the pluggable hook, not a
+    # claim that a live OSOVM endpoint is reachable from here yet.
+    OSOVM_URL: str = ""
+    OSOVM_API_KEY: str = ""
+
+    # Bondhive (Solana/Anchor stake+slash reputation system, real Schnorr
+    # signing, BondScore). Empty = disabled: bondhive_client.py's calls
+    # become no-ops and agents.bondhive_stake_account stays NULL. Vantage's
+    # own BlockMesh trust/reputation system (/api/mesh/trust/*) is separate
+    # and NOT reconciled with BondScore by this change -- an agent can have
+    # a Vantage trust score and a Bondhive stake account that disagree.
+    # Wiring this hook does not resolve that; it only makes the connection
+    # possible to build once the reconciliation decision is made.
+    BONDHIVE_RPC_URL: str = ""
+    BONDHIVE_PROGRAM_ID: str = ""
+
 
 settings = Settings()
 
