@@ -11,6 +11,7 @@ from backend.deps import get_agent, _parse_body, require_scope
 from backend.config import settings
 from backend import market_sources as ms
 from ..db import get_db
+from .. import genoffice_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/copilot", tags=["copilot"])
@@ -32,6 +33,7 @@ def sym(raw): return ALIASES.get((raw or "").strip().lower(), (raw or "").upper(
 
 # ── Intent patterns (ordered: specific → generic) ──
 INTENTS = [
+    ("generate_document", r"(?:generate|create|draft|write)\s+(?:a\s+|an\s+)?(?:document|doc|report|docx)\b(?:\s+(?:about|on|for|titled)?\s*(.+))?"),
     ("set_alert", r"(?:set|create|add)\s+(?:a\s+|an\s+)?alert\s+(?:for|when|if)\s+(.+)"),
     ("backtest", r"(?:run|start|begin)\s+(?:a\s+)?backtest|backtest\s+(.+)"),
     ("stress_test", r"(?:stress.test|scenario.test|what.if|worst.case)\s+(?:my\s+)?(?:portfolio|pf)"),
@@ -150,6 +152,7 @@ async def _handle_intent(action, groups, text):
     """Returns (target, data_dict) for a parsed intent."""
     g = groups
     handlers = {
+        "generate_document": lambda: ("document", {"topic": g[0].strip() if g and g[0] else text, "endpoint": "/api/copilot/execute"}),
         "show_price":       lambda: (sym(g[0]) if g else "", _price_data(sym(g[0]) if g else "")),
         "buy":              lambda: (sym(g[1]) if len(g)>1 else "", {"symbol":sym(g[1]) if len(g)>1 else "","side":"buy","endpoint":"/api/trading/orders"}),
         "sell":             lambda: (sym(g[1]) if len(g)>1 else "", {"symbol":sym(g[1]) if len(g)>1 else "","side":"sell","endpoint":"/api/trading/orders"}),
@@ -390,6 +393,27 @@ async def copilot_execute(request: Request, agent: dict = Depends(get_agent)):
 
     if action == "navigate":
         return {"action":action,"target":target,"data":{"path":PAGES.get(target,f"/{target}")},"confidence":1.0}
+    if action == "generate_document":
+        # Real trigger for wM/Fold-4's de_package_docx skill (2026-08-14
+        # PLAN-LOCK: direct synchronous invocation). Schema is theirs,
+        # confirmed and live-verified on their side: {template_path,
+        # output_path, paragraphs}. template_path/output_path may be
+        # supplied explicitly in `data`; paragraphs falls back to the
+        # topic/free text split into non-empty lines if not given.
+        if not genoffice_client.enabled():
+            return {"action":action,"target":"document","data":{"error":"GenOffice not configured (GENOFFICE_INVOKE_CMD unset)"},"confidence":0.0}
+        template_path = data.get("template_path", "")
+        output_path = data.get("output_path", "")
+        paragraphs = data.get("paragraphs")
+        if not paragraphs:
+            topic = (data.get("topic") or target or "").strip()
+            paragraphs = [p.strip() for p in topic.split("\n") if p.strip()] or [topic] if topic else []
+        if not template_path or not output_path:
+            return {"action":action,"target":"document","data":{"error":"template_path and output_path are required"},"confidence":0.0}
+        result = await genoffice_client.generate_document(template_path, output_path, paragraphs)
+        if result is None:
+            return {"action":action,"target":"document","data":{"error":"document generation failed"},"confidence":0.3}
+        return {"action":action,"target":"document","data":result,"confidence":0.9}
     if action == "show_price" and target:
         price = await _price_data(target)
         return {"action":action,"target":target,"data":price or {},"confidence":0.9}

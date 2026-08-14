@@ -256,6 +256,18 @@ class Settings(BaseSettings):
     BONDHIVE_RPC_URL: str = ""
     BONDHIVE_PROGRAM_ID: str = ""
 
+    # GenOffice document-generation adapter (wM/Fold-4 coordination,
+    # 2026-08-14 PLAN-LOCK: direct synchronous invocation, not the
+    # engram/async path -- that would depend on minipae's cross-relay
+    # bridge, which is explicitly not wired yet, see
+    # Vantage-to-wM_minipae_relay_check). wM's de_package_docx skill is
+    # "invocable as Python function or CLI", not yet exposed as a network
+    # service -- so this hook is a subprocess CLI invocation, same
+    # empty-means-disabled contract as every other pluggable hook here.
+    # Command template gets {template_path}/{output_path}/{paragraphs_json}
+    # substituted in; empty = disabled, generate_document intent no-ops.
+    GENOFFICE_INVOKE_CMD: str = ""
+
 
 settings = Settings()
 
