@@ -260,13 +260,17 @@ class Settings(BaseSettings):
     # 2026-08-14 PLAN-LOCK: direct synchronous invocation, not the
     # engram/async path -- that would depend on minipae's cross-relay
     # bridge, which is explicitly not wired yet, see
-    # Vantage-to-wM_minipae_relay_check). wM's de_package_docx skill is
-    # "invocable as Python function or CLI", not yet exposed as a network
-    # service -- so this hook is a subprocess CLI invocation, same
-    # empty-means-disabled contract as every other pluggable hook here.
-    # Command template gets {template_path}/{output_path}/{paragraphs_json}
-    # substituted in; empty = disabled, generate_document intent no-ops.
-    GENOFFICE_INVOKE_CMD: str = ""
+    # Vantage-to-wM_minipae_relay_check). Real invocation surface from wM:
+    # a local minipae clone's skills/de_package_docx/de_package_docx.py,
+    # called in-process (genoffice_client.py), which itself needs a local
+    # genspark-ai/genoffice clone (GENOFFICE_REPO) to run the real
+    # @genoffice/docx-engine via npx/tsx. Both empty = disabled, same
+    # contract as every other pluggable hook here. Not wired:
+    # de_deliver_client_artifact (writes an engram via NIPAE_NSEC/
+    # NIPAE_RELAY -- the cross-relay dependency above, out of scope until
+    # that's resolved).
+    GENOFFICE_SKILLS_PATH: str = ""
+    GENOFFICE_REPO: str = ""
 
 
 settings = Settings()
