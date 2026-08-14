@@ -8,7 +8,7 @@ import json as _json
 import re as _rexp
 from pathlib import Path
 from typing import List, Optional
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel
 from pydantic import BaseModel
 from slowapi import Limiter
@@ -26,6 +26,7 @@ from ..db import DB_PATH, MEDIA_ROOT, get_db
 from ..deps import get_agent, _parse_body, _update_last_seen, _log_agent_activity
 from ..config import settings
 from ..utils import _compute_reputation_badges, _validate_file_magic, _security_scan_and_normalize
+from ..crypto_utils import encrypt_key_for_agent, decrypt_key_for_agent
 
 router = APIRouter(prefix="/api/agents", tags=["identity"])
 
@@ -69,6 +70,96 @@ async def register(request: Request):
     except aiosqlite.IntegrityError:
         raise HTTPException(status_code=409, detail="Agent name already taken")
     return {"name": name, "api_key": api_key}
+
+
+@router.post("/me/rotate-key")
+async def rotate_api_key(agent: dict = Depends(get_agent), x_agent_key: str = Header(...)):
+    """Rotate this agent's own API key.
+
+    P2 fix (Hermes trading-surface audit, 2026-08-13): there was no
+    rotation endpoint at all, and every wallet's encryption key (both
+    agent_wallets.private_key_encrypted and trading_wallets.encrypted_
+    private_key) is derived from the agent's own raw API key. Adding
+    rotation without also re-encrypting every wallet under the new key
+    would have permanently orphaned them the moment anyone used it --
+    the exact "key rotation bricks wallets" finding, just not yet
+    reachable because rotation didn't exist yet. This ships rotation and
+    the re-encryption together so that failure mode can never exist.
+
+    All decryption happens first and is read-only -- if any wallet fails
+    to decrypt under the CURRENT key (corruption, a key that was already
+    orphaned by some other path, etc.) nothing is written at all and the
+    old key stays valid. Only once every wallet has been proven
+    decryptable does this move on to re-encrypting and committing the new
+    key, all in one connection/transaction, committed once at the end.
+    """
+    old_agent_ref = {"id": agent["id"], "api_key": x_agent_key}
+    new_api_key = "vantage_" + secrets.token_hex(24)
+    new_agent_ref = {"id": agent["id"], "api_key": new_api_key}
+
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+
+        agent_wallets = [dict(r) for r in await (await db.execute(
+            "SELECT id, private_key_encrypted FROM agent_wallets WHERE agent_id=? AND private_key_encrypted IS NOT NULL AND private_key_encrypted != ''",
+            (agent["id"],),
+        )).fetchall()]
+        trading_wallets = [dict(r) for r in await (await db.execute(
+            "SELECT id, encrypted_private_key FROM trading_wallets WHERE agent_id=? AND encrypted_private_key IS NOT NULL AND encrypted_private_key != ''",
+            (agent["id"],),
+        )).fetchall()]
+
+        # Phase 1: decrypt everything under the OLD key. Read-only, no
+        # writes yet -- if this fails partway, nothing has been mutated.
+        decrypted_agent_wallets = []
+        for w in agent_wallets:
+            try:
+                plaintext = decrypt_key_for_agent(w["private_key_encrypted"], old_agent_ref)
+            except Exception as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"key rotation aborted: could not decrypt agent_wallets id={w['id']} under current key ({e}); no changes made, old key is still valid",
+                )
+            decrypted_agent_wallets.append((w["id"], plaintext))
+
+        decrypted_trading_wallets = []
+        for w in trading_wallets:
+            try:
+                plaintext = decrypt_key_for_agent(w["encrypted_private_key"], old_agent_ref)
+            except Exception as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"key rotation aborted: could not decrypt trading_wallets id={w['id']} under current key ({e}); no changes made, old key is still valid",
+                )
+            decrypted_trading_wallets.append((w["id"], plaintext))
+
+        # Phase 2: everything decrypted successfully -- re-encrypt under
+        # the NEW key and write. Single connection, single commit at the
+        # end; any exception here leaves the transaction uncommitted (old
+        # key stays the valid one on disk).
+        for wallet_id, plaintext in decrypted_agent_wallets:
+            re_encrypted = encrypt_key_for_agent(plaintext, new_agent_ref)
+            await db.execute(
+                "UPDATE agent_wallets SET private_key_encrypted=? WHERE id=?",
+                (re_encrypted, wallet_id),
+            )
+        for wallet_id, plaintext in decrypted_trading_wallets:
+            re_encrypted = encrypt_key_for_agent(plaintext, new_agent_ref)
+            await db.execute(
+                "UPDATE trading_wallets SET encrypted_private_key=? WHERE id=?",
+                (re_encrypted, wallet_id),
+            )
+
+        new_hash = _hlib.sha256(new_api_key.encode()).hexdigest()
+        await db.execute("UPDATE agents SET api_key=? WHERE id=?", (new_hash, agent["id"]))
+        await db.commit()
+
+    return {
+        "new_api_key": new_api_key,
+        "wallets_reencrypted": len(decrypted_agent_wallets) + len(decrypted_trading_wallets),
+        "note": "Save this key now -- it is never shown again. The old key is now invalid.",
+    }
+
 
 @router.get("/me/profile")
 async def get_own_profile(agent: dict = Depends(get_agent)):
