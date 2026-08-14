@@ -335,7 +335,7 @@ async def sync_wallet(wallet_id: int, agent: dict = Depends(get_agent)):
 # ── Wallet Generation ────────────────────────────────────
 
 @router.post("/wallets/generate")
-async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent)):
+async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent), x_agent_key: str = Header(...)):
     """Generate a new wallet (BIP-39 or BIPON39) and store encrypted."""
     import asyncio as _asyncio
     import subprocess as _sp, json as _json
@@ -392,7 +392,17 @@ async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent)
     if not address or not private_key:
         raise HTTPException(422, f"Chain '{chain}' not available in generated wallet")
     
-    encrypted = encrypt_key_for_agent(private_key, agent)
+    # F1 fix (security audit, Hermes): encrypt_key_for_agent(private_key, agent)
+    # was deriving the KEK from agent["api_key"] -- but get_agent() populates
+    # that field from `SELECT * FROM agents WHERE api_key=?`, i.e. the
+    # SHA-256 HASH stored in the DB, not the raw secret. KEK = f(value living
+    # in the same SQLite file as the ciphertext it protects) means DB theft
+    # alone (no raw key needed) decrypts every wallet offline -- "encrypted
+    # at rest" was obfuscation against grep, not a real boundary. Fixed to
+    # use the raw X-Agent-Key header instead, matching wallets.py's already-
+    # correct pattern (crypto_utils's whole design principle is "the raw API
+    # key is the only secret needed" -- it was just never actually raw here).
+    encrypted = encrypt_key_for_agent(private_key, {"id": agent["id"], "api_key": x_agent_key})
 
     async with get_db() as db:
         cur = await db.execute(
@@ -423,7 +433,7 @@ async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent)
 
 
 @router.get("/wallets/{wallet_id}/key")
-async def reveal_wallet_key(wallet_id: int, agent: dict = Depends(get_agent)):
+async def reveal_wallet_key(wallet_id: int, agent: dict = Depends(get_agent), x_agent_key: str = Header(...)):
     """Reveal the decrypted private key. Requires explicit request."""
     async with get_db() as db:
         row = await (await db.execute(
@@ -432,7 +442,8 @@ async def reveal_wallet_key(wallet_id: int, agent: dict = Depends(get_agent)):
         if not row or not row[0]:
             raise HTTPException(404, "Wallet or key not found")
         try:
-            key = decrypt_key_for_agent(row[0], agent)
+            # F1 fix: raw header, not agent["api_key"] (the DB-stored hash) -- see generate_wallet's comment.
+            key = decrypt_key_for_agent(row[0], {"id": agent["id"], "api_key": x_agent_key})
             return {"private_key": key, "warning": "Never share this."}
         except Exception:
             raise HTTPException(500, "Failed to decrypt wallet key")
@@ -1113,7 +1124,7 @@ async def _jupiter_swap_tx(quote: dict, user_pubkey: str) -> str:
         return r.json().get("swapTransaction", "")
 
 @router.post("/orders/{order_id}/execute-live", operation_id="execute_live_order")
-async def execute_live_order(order_id: int, agent: dict = Depends(get_agent)):
+async def execute_live_order(order_id: int, agent: dict = Depends(get_agent), x_agent_key: str = Header(...)):
     """Actually sign and submit a pending order on-chain via Jupiter, using
     the owning agent's own decrypted wallet key. This is the ONLY path in
     this codebase (besides the pre-existing, unrelated moonshot signer) that
@@ -1187,7 +1198,8 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent)):
             )
 
     try:
-        plaintext_key = decrypt_key_for_agent(wallet["encrypted_private_key"], agent)
+        # F1 fix: raw header, not agent["api_key"] (the DB-stored hash) -- see generate_wallet's comment.
+        plaintext_key = decrypt_key_for_agent(wallet["encrypted_private_key"], {"id": agent["id"], "api_key": x_agent_key})
     except Exception:
         raise HTTPException(500, "Failed to decrypt wallet key — wrong agent for this wallet, or corrupted key")
 
