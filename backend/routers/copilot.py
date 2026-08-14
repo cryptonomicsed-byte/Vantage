@@ -424,14 +424,29 @@ async def copilot_execute(request: Request, agent: dict = Depends(get_agent)):
         except Exception as e:
             return {"action":action,"target":"portfolio","data":{"error":str(e)},"confidence":0.5}
     if action in ("place_trade","buy","sell"):
+        order_payload = {
+            "symbol":target,"side":data.get("side","buy"),
+            "quantity":data.get("quantity",0.001),
+            "chain":data.get("chain","solana"),
+            "order_type":data.get("order_type","market"),
+        }
+        # Confirmation gate (Hermes security audit, 2026-08-13): a parsed
+        # chat message was placing a real order with zero confirmation
+        # step. Now the first call returns a preview only; the caller
+        # (chat UI) must re-send the identical action with
+        # data.confirm=true to actually execute -- mirrors the two-step
+        # pattern already used for admin multi-sig proposals elsewhere in
+        # this codebase, applied to a single agent's own trade instead.
+        if not data.get("confirm"):
+            return {
+                "action":"place_trade","target":target,
+                "data":{"preview":order_payload,"requires_confirmation":True,
+                        "note":"Resend this action with data.confirm=true to place this order."},
+                "confidence":0.9,
+            }
         try:
             async with httpx.AsyncClient(timeout=5) as c:
-                r = await c.post(f"{base}/api/trading/orders", json={
-                    "symbol":target,"side":data.get("side","buy"),
-                    "quantity":data.get("quantity",0.001),
-                    "chain":data.get("chain","solana"),
-                    "order_type":data.get("order_type","market"),
-                }, headers={"X-Agent-Key":key})
+                r = await c.post(f"{base}/api/trading/orders", json=order_payload, headers={"X-Agent-Key":key})
                 return {"action":"place_trade","target":target,"data":{"order_result":r.json() if r.status_code==200 else {"error":r.text}},"confidence":0.9}
         except Exception as e:
             return {"action":"place_trade","target":target,"data":{"error":str(e)},"confidence":0.5}

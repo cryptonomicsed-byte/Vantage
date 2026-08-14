@@ -449,11 +449,111 @@ async def reveal_wallet_key(wallet_id: int, agent: dict = Depends(get_agent), x_
             raise HTTPException(500, "Failed to decrypt wallet key")
 
 
+# ── Risk enforcement ────────────────────────────────────────
+# Hermes security audit (2026-08-13) found create_order/ingest_signal
+# never read the strategy's own documented max_position_size_usd /
+# max_concurrent_trades limits before inserting a real order -- the
+# fields existed and were shown in the UI, but nothing server-side
+# enforced them. This closes that gap for both callers.
+
+class RiskLimitExceeded(HTTPException):
+    def __init__(self, detail: str):
+        super().__init__(status_code=422, detail=detail)
+
+
+# Conservative default when no strategy_id is present at all -- matches
+# the scale of this codebase's own built-in strategy templates (which use
+# $20 max_position_size_usd), not an arbitrary number.
+_FALLBACK_MAX_POSITION_USD = 50.0
+_FALLBACK_MAX_CONCURRENT = 3
+
+
+async def _resolve_order_notional_usd(db, symbol: str, quantity: float, price: Optional[float]) -> Optional[float]:
+    """Best-effort USD notional for a proposed order. Uses the caller's
+    limit price if given, otherwise a live quote. Returns None if neither
+    is available -- callers must decide how to fail (fail-closed for
+    anything that actually risks real funds)."""
+    p = price
+    if p is None:
+        p = await _fetch_quote(symbol)
+    if p is None:
+        return None
+    return quantity * p
+
+
+async def _enforce_risk_limits(
+    db, agent_id: int, symbol: str, quantity: float, price: Optional[float],
+    strategy_id: Optional[int], chain: str,
+) -> None:
+    """Raises RiskLimitExceeded if the order would violate the strategy's
+    own documented risk limits. If no strategy_id is given (e.g. a manual
+    order or a signal with no matching strategy), falls back to a
+    conservative flat cap so there's never a zero-enforcement path for
+    real money -- fixing the audit finding rather than narrowing it to
+    only the strategy-linked case."""
+    db.row_factory = aiosqlite.Row
+    strategy = None
+    if strategy_id is not None:
+        strategy = await (await db.execute(
+            "SELECT * FROM trading_strategies WHERE id=? AND agent_id=?",
+            (strategy_id, agent_id),
+        )).fetchone()
+        if not strategy:
+            raise RiskLimitExceeded(f"strategy_id {strategy_id} not found for this agent")
+        if not strategy["enabled"]:
+            raise RiskLimitExceeded(f"strategy {strategy_id} is disabled")
+        strategy = dict(strategy)
+
+    if strategy:
+        max_position_usd = strategy["max_position_size_usd"] or 0
+        max_concurrent = strategy["max_concurrent_trades"] or 0
+    else:
+        # No strategy context (manual order with no strategy_id, or a
+        # signal that matched none) -- a conservative flat default so
+        # this path is never unenforced, not a strategy-specific number.
+        max_position_usd = _FALLBACK_MAX_POSITION_USD
+        max_concurrent = _FALLBACK_MAX_CONCURRENT
+
+    if max_position_usd > 0:
+        notional = await _resolve_order_notional_usd(db, symbol, quantity, price)
+        if notional is None:
+            raise RiskLimitExceeded(
+                "cannot verify order notional against risk limit (no price/quote available) -- "
+                "provide a limit price or try again once a live quote is available"
+            )
+        if notional > max_position_usd:
+            raise RiskLimitExceeded(
+                f"order notional ${notional:.2f} exceeds max_position_size_usd ${max_position_usd:.2f}"
+            )
+
+    if max_concurrent > 0:
+        if strategy_id is not None:
+            open_count = (await (await db.execute(
+                "SELECT COUNT(*) FROM trading_orders WHERE strategy_id=? AND status IN ('pending','open')",
+                (strategy_id,),
+            )).fetchone())[0]
+        else:
+            open_count = (await (await db.execute(
+                "SELECT COUNT(*) FROM trading_orders WHERE agent_id=? AND chain=? AND strategy_id IS NULL "
+                "AND status IN ('pending','open')",
+                (agent_id, chain),
+            )).fetchone())[0]
+        if open_count >= max_concurrent:
+            raise RiskLimitExceeded(
+                f"max_concurrent_trades ({max_concurrent}) already reached ({open_count} open)"
+            )
+
+
 # ── Orders ──────────────────────────────────────────────────
 
 @router.post("/orders")
 async def create_order(data: OrderCreate, agent: dict = Depends(get_agent)):
     async with get_db() as db:
+        await _enforce_risk_limits(
+            db, agent["id"], data.symbol, data.quantity, data.price,
+            data.strategy_id, data.chain,
+        )
+
         cur = await db.execute(
             """INSERT INTO trading_orders
                (agent_id, wallet_id, order_type, side, symbol, chain, quantity, price, trigger_reason, signal_id, strategy_id, notes, slippage_bps, status)
@@ -464,14 +564,14 @@ async def create_order(data: OrderCreate, agent: dict = Depends(get_agent)):
         )
         order_id = cur.lastrowid
         await db.commit()
-        
+
         # Auto-create journal entry
         await db.execute(
             "INSERT INTO trading_trade_journal (order_id, agent_id, entry_reasoning) VALUES (?,?,?)",
             (order_id, agent["id"], f"Order placed: {data.side} {data.quantity} {data.symbol} on {data.chain} ({data.trigger_reason})")
         )
         await db.commit()
-        
+
         return {"id": order_id, "status": "pending", "symbol": data.symbol, "side": data.side}
 
 @router.get("/orders")
@@ -1738,26 +1838,64 @@ async def ingest_signal(request: Request, tool: dict = Depends(get_system_tool))
 
     # Auto-create order for high-conviction signals
     if side:
+        signal_id = body.get("signal_id")
         async with get_db() as db:
+            db.row_factory = aiosqlite.Row
             wallet = await (await db.execute(
                 "SELECT id, address FROM trading_wallets WHERE agent_id=? AND chain=? ORDER BY created_at LIMIT 1",
                 (agent_id, chain)
             )).fetchone()
 
-        if wallet:
+            # Idempotency: a retried/redelivered signal (same signal_id)
+            # must not create a second order -- was previously unchecked,
+            # so any webhook retry from a signal source silently doubled
+            # the real position.
+            existing_order = None
+            if signal_id is not None:
+                existing_order = await (await db.execute(
+                    "SELECT id FROM trading_orders WHERE agent_id=? AND signal_id=?",
+                    (agent_id, signal_id),
+                )).fetchone()
+
+        if existing_order:
+            result["order_created"] = existing_order["id"]
+            result["action"] = side
+            result["idempotent"] = True
+            result["note"] = f"signal_id {signal_id} already ingested as order {existing_order['id']}; not duplicated"
+        elif wallet:
             quantity = body.get("quantity", 0.1)
             async with get_db() as db:
-                cur = await db.execute(
-                    """INSERT INTO trading_orders (agent_id, wallet_id, order_type, side, symbol, chain,
-                       quantity, trigger_reason, signal_id, status)
-                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                    (agent_id, wallet[0], "market", side, symbol, chain, quantity,
-                     f"{source}_conviction_{conviction:.1f}", body.get("signal_id"), "pending")
-                )
-                await db.commit()
-                result["order_created"] = cur.lastrowid
-                result["action"] = side
-                result["wallet_address"] = wallet[1]
+                db.row_factory = aiosqlite.Row
+                # Risk enforcement: use the agent's own enabled strategy
+                # for this chain if one exists (matches how a manually
+                # placed order would be strategized), else the
+                # conservative flat fallback -- same helper create_order
+                # uses, so a signal-triggered order is never less
+                # enforced than a human-placed one.
+                strategy = await (await db.execute(
+                    "SELECT id FROM trading_strategies WHERE agent_id=? AND target_chain=? AND enabled=1 "
+                    "ORDER BY created_at LIMIT 1",
+                    (agent_id, chain),
+                )).fetchone()
+                strategy_id = strategy["id"] if strategy else None
+
+                try:
+                    await _enforce_risk_limits(db, agent_id, symbol, quantity, None, strategy_id, chain)
+                except RiskLimitExceeded as e:
+                    result["action"] = "HOLD"
+                    result["warning"] = f"signal would violate risk limits, not executed: {e.detail}"
+                else:
+                    cur = await db.execute(
+                        """INSERT INTO trading_orders (agent_id, wallet_id, order_type, side, symbol, chain,
+                           quantity, trigger_reason, signal_id, strategy_id, status)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                        (agent_id, wallet["id"], "market", side, symbol, chain, quantity,
+                         f"{source}_conviction_{conviction:.1f}", signal_id, strategy_id, "pending")
+                    )
+                    await db.commit()
+                    result["order_created"] = cur.lastrowid
+                    result["action"] = side
+                    result["wallet_address"] = wallet["address"]
         else:
             result["warning"] = f"No {chain} wallet configured for agent {agent_id}."
     else:
