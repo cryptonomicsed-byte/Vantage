@@ -401,7 +401,7 @@ async def copilot_execute(request: Request, agent: dict = Depends(get_agent)):
         # supplied explicitly in `data`; paragraphs falls back to the
         # topic/free text split into non-empty lines if not given.
         if not genoffice_client.enabled():
-            return {"action":action,"target":"document","data":{"error":"GenOffice not configured (GENOFFICE_INVOKE_CMD unset)"},"confidence":0.0}
+            return {"action":action,"target":"document","data":{"error":"GenOffice not configured (VANTAGE_GENOFFICE_SKILLS_PATH/VANTAGE_GENOFFICE_REPO unset)"},"confidence":0.0}
         template_path = data.get("template_path", "")
         output_path = data.get("output_path", "")
         paragraphs = data.get("paragraphs")
