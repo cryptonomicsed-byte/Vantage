@@ -145,6 +145,49 @@ async def get_vault_connector(x_vault_connector_key: Optional[str] = Header(None
     return connector
 
 
+# ── Voice session tokens (scoped to one open session, write-only) ─────────────
+# Same idea as the connector token above: a voice surface holds this instead of
+# the agent's real key, so a compromised voice client can append turns and tool
+# calls to the one session it owns and nothing else. Rate limited per session
+# because a live conversation writes far more often than an ingest connector.
+_VOICE_RATE_WINDOW: float = 60.0
+_VOICE_RATE_LIMIT: int = 600
+_voice_rate_buckets: dict[str, list[float]] = {}
+
+
+def _check_voice_session_rate(session_id: str) -> None:
+    now = _time.monotonic()
+    times = [t for t in _voice_rate_buckets.get(session_id, []) if now - t < _VOICE_RATE_WINDOW]
+    times.append(now)
+    _voice_rate_buckets[session_id] = times
+    if len(times) > _VOICE_RATE_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded — {_VOICE_RATE_LIMIT} writes per {int(_VOICE_RATE_WINDOW)}s per voice session",
+            headers={"Retry-After": "60"},
+        )
+
+
+async def get_voice_session(authorization: Optional[str] = Header(None)) -> dict:
+    """Auth for voice-session write-through (turns, tool calls).
+
+    Accepts `Authorization: Bearer vvoice_...`. The token resolves only while
+    its session is still active and inside its idle TTL; a stopped or expired
+    session's token is dead, so a client that goes away and comes back has to
+    open a new session rather than resuming a closed one.
+    """
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Authorization: Bearer <voice session token> required")
+    token = authorization.split(" ", 1)[1].strip()
+
+    from .voice_session_store import resolve_ws_token
+    session = await resolve_ws_token(token)
+    if not session:
+        raise HTTPException(status_code=401, detail="Invalid, expired, or stopped voice session token")
+    _check_voice_session_rate(session["id"])
+    return session
+
+
 # ── Human accounts (separate identity layer, bridged to agents only via
 # scoped agent_grants rows — agents stay sovereign; a human never gets
 # implicit access to an agent just by holding a session) ──────────────────────
