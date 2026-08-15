@@ -76,6 +76,30 @@ async def join_block(request: Request, agent: dict = Depends(get_agent)):
     verified = 1 if verify_identity(public_key, agent_id, signature) else 0
 
     async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        # Security fix (2026-08-15, found while verifying the record_trust_
+        # signal ownership fix above): this UPSERT used to overwrite
+        # vantage_name UNCONDITIONALLY on conflict -- any authenticated
+        # agent could re-join with an EXISTING agent_id and silently
+        # steal its Vantage-account binding with zero proof, which fully
+        # bypassed the ownership check just added to record_trust_signal
+        # (live-confirmed exploitable before this fix: agent B joined
+        # claiming agent A's agent_id, then successfully emitted a trust
+        # signal AS agent A). Now a conflicting claim on an already-bound
+        # agent_id is only accepted if THIS join brings a valid signature
+        # (the strongest proof this codebase has) -- a bare re-join from
+        # a different account is rejected, not silently absorbed.
+        existing = await (await db.execute(
+            "SELECT vantage_name FROM mesh_agents WHERE agent_id=? AND block_id=?",
+            (agent_id, block_id),
+        )).fetchone()
+        if existing and existing["vantage_name"] and existing["vantage_name"] != agent["name"] and not verified:
+            raise HTTPException(
+                status_code=409,
+                detail=f"agent_id {agent_id!r} in block {block_id!r} is already bound to a different "
+                       f"Vantage account -- provide a valid identity_signature to reclaim it",
+            )
+
         await db.execute(
             """INSERT INTO mesh_agents
                    (agent_id, block_id, vantage_name, role, capabilities_json,
