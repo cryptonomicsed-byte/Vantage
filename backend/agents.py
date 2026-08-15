@@ -3838,21 +3838,105 @@ async def search(
 
 
 # ── Phase C: Sui Wallet ──────────────────────────────────────────────────────
+#
+# P2 fix (cross-pillar connection survey, round 3, 2026-08-13): sui_address
+# was self-reported free text, stored and displayed (analytics.py,
+# token-milestones) but never verified against anything -- any string under
+# 100 chars was accepted as a wallet address. Now requires a real Ed25519
+# signature (pysui_fastcrypto) over a short-lived server-issued nonce,
+# mirroring the existing Nostr federation challenge pattern below. Verifies
+# BOTH that the signature is valid for the claimed public key AND that the
+# public key actually derives (blake2b(flag||pubkey), flag=0x00 for
+# Ed25519 -- the documented Sui address derivation) to the claimed address,
+# so a caller can't sign with key A and claim someone else's address B.
+
+_wallet_nonces: dict = {}
+
+
+@router.get("/me/wallet-challenge")
+async def wallet_challenge(agent: dict = Depends(get_agent)):
+    """Issue a short-lived nonce to prove ownership of a Sui address.
+    Sign the returned `nonce` string (as raw UTF-8 bytes, base64-encode the
+    signature) with your Sui Ed25519 keypair, then POST /me/connect-wallet
+    with {sui_address, public_key_b64, signature_b64, nonce}."""
+    now = datetime.utcnow()
+    expired = [n for n, exp in list(_wallet_nonces.items()) if datetime.fromisoformat(exp) < now]
+    for n in expired:
+        _wallet_nonces.pop(n, None)
+
+    nonce = f"vantage-wallet-proof:{agent['id']}:{secrets.token_hex(16)}"
+    expires_at = (now + timedelta(minutes=5)).isoformat() + "Z"
+    _wallet_nonces[nonce] = expires_at
+    return {"nonce": nonce, "expires_at": expires_at, "scheme": "ED25519"}
+
 
 @router.post("/me/connect-wallet")
 async def connect_wallet(
     request: Request,
     agent: dict = Depends(get_agent),
 ):
-    """Associate a Sui wallet address with the agent account."""
+    """Associate a Sui wallet address with the agent account -- only after
+    proving ownership via a real Ed25519 signature over a server-issued
+    nonce (see GET /me/wallet-challenge). Replaces the old self-reported,
+    unverified flow."""
+    import base64 as _b64
+    import hashlib as _hashlib2
+    import pysui_fastcrypto as _fc
+
     body = await _parse_body(request)
-    sui_address = str(body.get("sui_address", "")).strip()[:100]
-    if not sui_address:
-        raise HTTPException(status_code=422, detail="sui_address is required")
+    sui_address = str(body.get("sui_address", "")).strip().lower()[:100]
+    public_key_b64 = str(body.get("public_key_b64", ""))
+    signature_b64 = str(body.get("signature_b64", ""))
+    nonce = str(body.get("nonce", ""))
+
+    if not sui_address or not public_key_b64 or not signature_b64 or not nonce:
+        raise HTTPException(
+            status_code=422,
+            detail="sui_address, public_key_b64, signature_b64, and nonce are all required "
+                   "-- get a nonce from GET /me/wallet-challenge first",
+        )
+
+    exp_str = _wallet_nonces.pop(nonce, None)
+    if not exp_str:
+        raise HTTPException(status_code=422, detail="unknown or already-used nonce")
+    if datetime.fromisoformat(exp_str.rstrip("Z")) < datetime.utcnow():
+        raise HTTPException(status_code=422, detail="nonce expired -- request a new one")
+    if not nonce.startswith(f"vantage-wallet-proof:{agent['id']}:"):
+        raise HTTPException(status_code=422, detail="nonce does not belong to this agent")
+
+    try:
+        pub_bytes = _b64.b64decode(public_key_b64)
+    except Exception:
+        raise HTTPException(status_code=422, detail="public_key_b64 is not valid base64")
+
+    # Derive the Sui address from the claimed public key and confirm it
+    # matches -- without this check, a caller could sign with their OWN
+    # key but claim ANY address string, and the signature check alone
+    # would still pass.
+    derived_address = "0x" + _hashlib2.blake2b(bytes([0]) + pub_bytes, digest_size=32).hexdigest()
+    claimed = sui_address if sui_address.startswith("0x") else f"0x{sui_address}"
+    if derived_address != claimed:
+        raise HTTPException(
+            status_code=422,
+            detail="public key does not derive to the claimed sui_address -- "
+                   "you can only connect an address you actually control",
+        )
+
+    nonce_b64 = _b64.b64encode(nonce.encode()).decode()
+    try:
+        sig_valid = _fc.verify_pubk(0, pub_bytes, nonce_b64, signature_b64)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"signature verification error: {e}")
+    if not sig_valid:
+        raise HTTPException(status_code=422, detail="signature does not verify against the claimed public key")
+
     async with get_db() as db:
-        await db.execute("UPDATE agents SET sui_address=? WHERE id=?", (sui_address, agent["id"]))
+        await db.execute(
+            "UPDATE agents SET sui_address=?, sui_address_verified=1 WHERE id=?",
+            (claimed, agent["id"]),
+        )
         await db.commit()
-    return {"ok": True, "sui_address": sui_address}
+    return {"ok": True, "sui_address": claimed, "verified": True}
 
 
 @router.get("/me/token-milestones")
@@ -3885,6 +3969,7 @@ async def get_token_milestones(agent: dict = Depends(get_agent)):
     return {
         "token_balance": agent.get("token_balance", 0.0),
         "sui_address": agent.get("sui_address", ""),
+        "sui_address_verified": bool(agent.get("sui_address_verified", 0)),
         "milestones_reached": milestones,
         "next_targets": next_targets,
         "sui_enabled": settings.SUI_ENABLED,

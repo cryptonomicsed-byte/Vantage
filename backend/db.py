@@ -298,6 +298,15 @@ async def init_agents_db() -> None:
             # (tier, reputation) -- that's a real open decision, not
             # something this column silently resolves.
             ("bondhive_stake_account", "TEXT DEFAULT NULL"),
+            # Was sui_address self-reported/never verified (any string
+            # under 100 chars was accepted, stored, and displayed as if it
+            # meant something). 0 = existing/legacy addresses, including
+            # every row written before this column existed -- they are NOT
+            # retroactively trusted. Only the new signature-verified
+            # /me/connect-wallet flow ever sets this to 1. Downstream
+            # consumers of sui_address should check this flag, not just
+            # presence of the address.
+            ("sui_address_verified", "INTEGER DEFAULT 0"),
             # Copilot LLM fallback model choice (OmniRoute model id, e.g.
             # 'auto') -- only consulted when this agent has no cognition_url
             # of its own. NULL/empty means settings.OMNIROUTE_MODEL default.

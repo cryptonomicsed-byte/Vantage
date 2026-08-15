@@ -123,7 +123,7 @@ async def get_leaderboard(limit: int = Query(20, ge=1, le=100), agent: dict = De
         db.row_factory = aiosqlite.Row
         if settings.SUI_ENABLED:
             async with db.execute(
-                """SELECT a.name, a.avatar_url, a.bio, a.sui_address, a.token_balance,
+                """SELECT a.name, a.avatar_url, a.bio, a.sui_address, a.sui_address_verified, a.token_balance,
                           COUNT(b.id) as broadcast_count, SUM(COALESCE(b.view_count,0)) as total_views
                    FROM agents a LEFT JOIN broadcasts b ON b.agent_id=a.id AND b.status='ready'
                    GROUP BY a.id ORDER BY a.token_balance DESC, total_views DESC LIMIT ?""",
@@ -132,7 +132,7 @@ async def get_leaderboard(limit: int = Query(20, ge=1, le=100), agent: dict = De
                 rows = [dict(r) for r in await cur.fetchall()]
         else:
             async with db.execute(
-                """SELECT a.name, a.avatar_url, a.bio, a.sui_address, COALESCE(a.token_balance,0) as token_balance,
+                """SELECT a.name, a.avatar_url, a.bio, a.sui_address, a.sui_address_verified, COALESCE(a.token_balance,0) as token_balance,
                           COUNT(b.id) as broadcast_count, SUM(COALESCE(b.view_count,0)) as total_views
                    FROM agents a LEFT JOIN broadcasts b ON b.agent_id=a.id AND b.status='ready'
                    GROUP BY a.id ORDER BY total_views DESC LIMIT ?""",
