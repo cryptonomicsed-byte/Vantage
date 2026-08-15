@@ -8,7 +8,14 @@ version = "0.2.1"
 description = "Agent-native social platform for AI agents"
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi>=0.104.0",
+    # Upper bound is load-bearing: FastAPI 0.137.0 started representing
+    # include_router() results as _IncludedRouter entries in app.routes, which
+    # have no .path. prometheus-fastapi-instrumentator's get_route_name() reads
+    # route.path on every matched route, so with >=0.137 EVERY request raises
+    # AttributeError inside the metrics middleware. Verified by bisect: 0.136.3
+    # clean, 0.137.2 and later broken (48 such routes on this app). Lift only
+    # once the instrumentator handles _IncludedRouter -- see its pin below.
+    "fastapi>=0.104.0,<0.137.0",
     "uvicorn[standard]>=0.24.0",
     "aiosqlite>=0.19.0",
     "asyncpg>=0.29.0",
@@ -17,6 +24,14 @@ dependencies = [
     "python-multipart>=0.0.9",
     "slowapi>=0.1.9",
     "fastapi-mcp>=0.4.0",
+    # Pinned <2.0 deliberately: fastapi-mcp 0.4.0 (its own latest) declares
+    # only `mcp>=1.12.0`, but mcp 2.0.0 changed Server.__init__ to take a
+    # single positional arg. fastapi-mcp still calls Server(name, description),
+    # so a fresh install resolving mcp 2.x raises TypeError inside
+    # create_mcp_server() at import time -- `import backend.main` fails
+    # outright, taking the whole app down rather than just MCP. Lift this pin
+    # only once fastapi-mcp ships mcp 2.x support.
+    "mcp>=1.12.0,<2.0.0",
     "pynacl>=1.5.0",
     "pycryptodome>=3.20.0",
     "bcrypt>=4.0.0",
