@@ -1856,6 +1856,88 @@ CREATE TABLE IF NOT EXISTS external_conversations (
         await db.execute("CREATE INDEX IF NOT EXISTS idx_podcast_jobs_agent ON podcast_jobs(agent_id)")
         await db.commit()
 
+    # Voice sessions -- makes a voice conversation a first-class, durable object
+    # rather than the scattered MCP calls and /api/copilot/chat POSTs it looks
+    # like today. voice_session.py's in-process _state dict only ever held one
+    # global session and lost it on restart; these tables are what the REST/MCP
+    # surface, the dashboard's live-session panel, and transcript search read.
+    async with get_db() as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS voice_sessions (
+                id TEXT PRIMARY KEY,
+                agent_id INTEGER NOT NULL REFERENCES agents(id),
+                engine TEXT NOT NULL,
+                framework TEXT DEFAULT 'native',
+                persona TEXT DEFAULT '',
+                voice TEXT DEFAULT '',
+                tools_allowlist_json TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                last_activity_at TEXT NOT NULL DEFAULT (datetime('now')),
+                stopped_at TEXT,
+                stop_reason TEXT DEFAULT '',
+                ttl_seconds INTEGER DEFAULT 1800,
+                ws_token_hash TEXT,
+                metadata_json TEXT DEFAULT '{}'
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_voice_sessions_agent ON voice_sessions(agent_id, status)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_voice_sessions_started ON voice_sessions(started_at DESC)")
+        # Looked up on every frame of an authenticated voice websocket, so the
+        # token hash needs its own index rather than a scan of active sessions.
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_voice_sessions_ws_token ON voice_sessions(ws_token_hash)")
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS voice_session_turns (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES voice_sessions(id) ON DELETE CASCADE,
+                agent_id INTEGER NOT NULL REFERENCES agents(id),
+                role TEXT NOT NULL,
+                content_text TEXT DEFAULT '',
+                content_audio_path TEXT DEFAULT '',
+                content_audio_transcript TEXT DEFAULT '',
+                tool_call_id TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                sequence_num INTEGER NOT NULL,
+                UNIQUE(session_id, sequence_num)
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_voice_turns_session ON voice_session_turns(session_id, sequence_num)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_voice_turns_agent_time ON voice_session_turns(agent_id, created_at DESC)")
+
+        # Transcript search. Kept as a plain (non-external-content) fts5 table to
+        # match memory_fts above -- rows are written alongside the turn insert,
+        # not synced by trigger.
+        await db.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS voice_session_turns_fts USING fts5(
+                session_id UNINDEXED,
+                agent_id UNINDEXED,
+                turn_id UNINDEXED,
+                role,
+                content_text,
+                tokenize='porter'
+            )
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS voice_session_tool_calls (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES voice_sessions(id) ON DELETE CASCADE,
+                turn_id TEXT REFERENCES voice_session_turns(id),
+                agent_id INTEGER NOT NULL REFERENCES agents(id),
+                tool_name TEXT NOT NULL,
+                tool_source TEXT NOT NULL DEFAULT 'vantage_mcp',
+                arguments_json TEXT DEFAULT '{}',
+                result_json TEXT DEFAULT '',
+                is_error INTEGER DEFAULT 0,
+                duration_ms INTEGER,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_voice_toolcalls_session ON voice_session_tool_calls(session_id, created_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_voice_toolcalls_agent ON voice_session_tool_calls(agent_id, tool_name)")
+        await db.commit()
+
     # One-time migration: hash any plaintext API keys still stored as "vantage_..." (idempotent)
     import hashlib as _hlib_key
     async with get_db() as db:
