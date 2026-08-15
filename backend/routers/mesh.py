@@ -19,7 +19,7 @@ from ..db import DB_PATH, get_db
 from ..deps import get_agent, _parse_body
 from ..identity_verify import verify_identity
 from ..mesh_discovery import suggest_neighbors
-from ..reputation_pub import publish_julia_score
+from ..reputation_pub import publish_julia_score, resolve_bondhive_prior
 from ..trust_signals import emit_trust_signal, get_trust_signals
 from ..utils import _broadcast_gossip
 
@@ -608,7 +608,13 @@ async def record_trust_signal(
 
     await emit_trust_signal(block_id, agent_id, str(neighbor_id), kind, weight)
     signals = await get_trust_signals(block_id, agent_id, str(neighbor_id))
-    asyncio.create_task(publish_julia_score(block_id, agent_id, str(neighbor_id), signals))
+    # Decision 3: Bondhive's BondScore seeds the prior Julia starts from,
+    # instead of the flat 0.5 default -- BlockMesh stays the authority
+    # (Julia still computes the final score from real trust_signal
+    # history), Bondhive is one input into that computation, not a
+    # second competing score.
+    prior = await resolve_bondhive_prior(block_id, str(neighbor_id))
+    asyncio.create_task(publish_julia_score(block_id, agent_id, str(neighbor_id), signals, prior=prior))
     return {"status": "recorded", "kind": kind}
 
 
