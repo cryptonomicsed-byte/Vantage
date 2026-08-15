@@ -584,6 +584,48 @@ async def get_trust(agent_id: str, block_id: str = "", agent: dict = Depends(get
     return {"agent_id": agent_id, "blocks": rows, "fulfilled_commitments": fulfilled}
 
 
+async def _assert_owns_mesh_agent_id(db, block_id: str, claimed_agent_id: str, caller_agent: dict) -> None:
+    """Security fix (wM flag, 2026-08-15): record_trust_signal took
+    `agent_id` as a caller-controlled URL path param and used it directly
+    as the FROM identity for a trust signal -- Depends(get_agent) only
+    proves *some* valid key was presented, never that the caller is
+    authorized to speak AS that agent_id. Any registered agent could
+    forge a trust signal from any other agent's identity, and that now
+    feeds directly into Julia's score computation (plus, since Decision 3,
+    Bondhive's prior). Same class of bug as the pre-fix wallet-signing
+    endpoint: an identity field that looked enforced but wasn't.
+
+    join_block() already has the real answer to this -- agents prove
+    control of a mesh agent_id via Ed25519 signature at join time
+    (identity_verified), or it's simply owned by the Vantage account that
+    created it (vantage_name). This reuses that existing binding instead
+    of inventing a new one: the caller passes iff their own Vantage name
+    matches the row's vantage_name, OR the row is signature-verified and
+    was never claimed by any Vantage account (a legitimately sovereign
+    external agent, e.g. an OSOVM witness node with no Vantage login).
+    """
+    db.row_factory = aiosqlite.Row
+    row = await (await db.execute(
+        "SELECT vantage_name, identity_verified FROM mesh_agents WHERE agent_id=? AND block_id=?",
+        (claimed_agent_id, block_id),
+    )).fetchone()
+    if not row:
+        raise HTTPException(
+            status_code=403,
+            detail=f"agent_id {claimed_agent_id!r} has not joined block {block_id!r} -- cannot emit signals as an unjoined identity",
+        )
+    if row["vantage_name"] and row["vantage_name"] != caller_agent["name"]:
+        raise HTTPException(
+            status_code=403,
+            detail=f"agent_id {claimed_agent_id!r} in block {block_id!r} belongs to a different Vantage account -- cannot emit signals on its behalf",
+        )
+    if not row["vantage_name"] and not row["identity_verified"]:
+        raise HTTPException(
+            status_code=403,
+            detail=f"agent_id {claimed_agent_id!r} has no Vantage account and no verified signature on file -- cannot confirm you control this identity",
+        )
+
+
 @router.post("/trust/{agent_id}/signal")
 async def record_trust_signal(
     agent_id: str,
@@ -605,6 +647,9 @@ async def record_trust_signal(
 
     if weight is not None:
         weight = float(weight)
+
+    async with get_db() as db:
+        await _assert_owns_mesh_agent_id(db, block_id, agent_id, agent)
 
     await emit_trust_signal(block_id, agent_id, str(neighbor_id), kind, weight)
     signals = await get_trust_signals(block_id, agent_id, str(neighbor_id))
