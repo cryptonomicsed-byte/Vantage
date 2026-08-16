@@ -20,6 +20,14 @@ os.environ.setdefault("VANTAGE_ADMIN_KEY", "a" * 32)
 # Needed by anything that runs the app lifespan (the buzz inbound listener
 # reaches seed encryption, which refuses to fall back to a default).
 os.environ.setdefault("VANTAGE_SEED_MASTER_KEY", "test-seed-master-key-for-ci-0123456789abcdef")
+# System-tool auth for the signal ingest endpoints. Without these, get_system_tool
+# short-circuits on "not configured" and every ingest test asserts against a 401
+# it would get no matter what the endpoint did -- which is how the ingest path
+# came to be covered by tests that could not fail. Must be >= 32 chars per
+# config.validate_tool_keys.
+os.environ.setdefault("VANTAGE_TOOL_INTEL", "test-tool-key-intel-not-a-real-secret")
+os.environ.setdefault("VANTAGE_TOOL_TRADING", "test-tool-key-trading-not-a-real-secret")
+os.environ.setdefault("VANTAGE_TOOL_SECURITY", "test-tool-key-security-not-a-real-secret")
 
 # Ensure repo root is importable
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))

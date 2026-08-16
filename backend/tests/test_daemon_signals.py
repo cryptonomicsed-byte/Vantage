@@ -20,8 +20,16 @@ from daemons import vantage_signals as vs  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
+    """Clear every name _tool_key() consults, in both spellings.
+
+    The bare VANTAGE_TOOL_<TOOL> forms matter: conftest sets them so the ingest
+    endpoints are actually reachable in tests, and they outrank the shared
+    VANTAGE_TOOL_KEY fallback -- so leaving them set makes the fallback
+    unreachable and the test asserting it fail.
+    """
     for var in ("VANTAGE_DAEMON_AUTO_EXECUTE", "VANTAGE_TOOL_KEY",
-                "VANTAGE_TOOL_INTEL_KEY", "VANTAGE_TOOL_TRADING_KEY"):
+                "VANTAGE_TOOL_INTEL_KEY", "VANTAGE_TOOL_TRADING_KEY",
+                "VANTAGE_TOOL_INTEL", "VANTAGE_TOOL_TRADING"):
         monkeypatch.delenv(var, raising=False)
 
 

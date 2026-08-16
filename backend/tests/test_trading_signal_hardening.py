@@ -17,7 +17,7 @@ from fastapi import HTTPException
 def _tool_headers():
     return {
         "X-Vantage-Tool": "trading",
-        "X-Vantage-Tool-Key": os.environ.get("VANTAGE_TOOL_TRADING", ""),
+        "X-Vantage-Tool-Key": os.environ["VANTAGE_TOOL_TRADING"],
     }
 
 
@@ -104,11 +104,12 @@ async def test_ingest_rejects_an_unnormalised_signal(client):
         json={"symbol": "SOL", "direction": "BUY", "conviction": 7.0,
               "source": "freqtrade", "agent_id": 1},
     )
-    # 401 when no tool key is configured in this environment; 422 when it is.
-    # Either way it is not a 200 that quietly created an order.
-    assert r.status_code in (401, 422)
-    if r.status_code == 422:
-        assert "between 0 and 1" in r.text
+    # This used to accept 401 as well, because no tool key was configured in the
+    # test environment -- so it passed without ever reaching the validation it
+    # claims to cover. conftest now configures the tool keys, so the assertion
+    # can be the real one.
+    assert r.status_code == 422, r.text
+    assert "between 0 and 1" in r.text
 
 
 # ── voice exposure ───────────────────────────────────────────────────────────
