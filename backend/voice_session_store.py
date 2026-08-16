@@ -13,6 +13,7 @@ own vvoice_ token, which is scoped to exactly one session and can do nothing
 else -- same shape as the vault_connectors token, and the replacement for the
 voice app's shared owner PIN.
 """
+import asyncio
 import hashlib
 import hmac
 import json
@@ -276,13 +277,13 @@ async def append_turn(
     indexed = text or transcript
 
     for attempt in range(5):
-        async with get_db() as db:
-            row = await (await db.execute(
-                "SELECT COALESCE(MAX(sequence_num), 0) + 1 FROM voice_session_turns WHERE session_id=?",
-                (session_id,),
-            )).fetchone()
-            seq = row[0]
-            try:
+        try:
+            async with get_db() as db:
+                row = await (await db.execute(
+                    "SELECT COALESCE(MAX(sequence_num), 0) + 1 FROM voice_session_turns WHERE session_id=?",
+                    (session_id,),
+                )).fetchone()
+                seq = row[0]
                 await db.execute(
                     """INSERT INTO voice_session_turns
                        (id, session_id, agent_id, role, content_text, content_audio_transcript,
@@ -299,10 +300,21 @@ async def append_turn(
                         (session_id, agent_id, turn_id, role, indexed),
                     )
                 await db.commit()
-            except aiosqlite.IntegrityError:
-                if attempt == 4:
-                    raise
-                continue
+        except aiosqlite.IntegrityError:
+            # Lost the race for this sequence_num; retry against the new max.
+            if attempt == 4:
+                raise
+            continue
+        except aiosqlite.OperationalError as exc:
+            # "database is locked" under concurrent writers. Previously this
+            # escaped the retry loop and was swallowed by the caller's broad
+            # except, so a turn was lost outright with only a log line -- in
+            # the feature whose entire point is that transcripts are durable.
+            # Transient by nature, so back off and try again.
+            if attempt == 4 or "locked" not in str(exc).lower():
+                raise
+            await asyncio.sleep(0.05 * (attempt + 1))
+            continue
         await touch(session_id)
         return {"turn_id": turn_id, "sequence_num": seq, "session_id": session_id}
     raise RuntimeError("could not assign a sequence number")  # pragma: no cover

@@ -177,3 +177,50 @@ async def test_session_is_scoped_to_its_agent(new_agent):
         )).fetchall()
 
     assert [r[0] for r in rows] == [my_session]
+
+
+async def test_a_locked_database_does_not_lose_a_turn(new_agent, monkeypatch):
+    """Under concurrent writers SQLite raises "database is locked". That used to
+    escape append_turn's retry loop and be swallowed by the relay's broad
+    except, dropping the turn with only a log line — in the feature whose whole
+    point is that transcripts are durable."""
+    import aiosqlite as _aio
+    from backend import voice_session_store as store
+
+    agent_id = await new_agent()
+    session_id = await _new_session(agent_id)
+
+    real_get_db = store.get_db
+    calls = {"n": 0}
+
+    def flaky_get_db():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _aio.OperationalError("database is locked")
+        return real_get_db()
+
+    monkeypatch.setattr(store, "get_db", flaky_get_db)
+    result = await store.append_turn(session_id, agent_id, "user", content_text="survived the lock")
+
+    assert result["sequence_num"] == 1
+    assert calls["n"] >= 2, "expected a retry after the lock error"
+
+    monkeypatch.undo()
+    turns = await store.get_transcript(session_id)
+    assert [t["content_text"] for t in turns] == ["survived the lock"]
+
+
+async def test_a_non_lock_operational_error_still_raises(new_agent, monkeypatch):
+    """Only lock contention is retried; a real schema error must surface."""
+    import aiosqlite as _aio
+    from backend import voice_session_store as store
+
+    agent_id = await new_agent()
+    session_id = await _new_session(agent_id)
+
+    def broken_get_db():
+        raise _aio.OperationalError("no such table: voice_session_turns")
+
+    monkeypatch.setattr(store, "get_db", broken_get_db)
+    with pytest.raises(_aio.OperationalError, match="no such table"):
+        await store.append_turn(session_id, agent_id, "user", content_text="x")
