@@ -8,6 +8,10 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: './src/test/setup.ts',
+    // e2e/ is Playwright's, and its specs call test() from @playwright/test.
+    // Without this vitest globs them too and fails with "Playwright Test did
+    // not expect test() to be called here".
+    include: ['src/**/*.{test,spec}.{ts,tsx}'],
   },
   server: {
     proxy: {
