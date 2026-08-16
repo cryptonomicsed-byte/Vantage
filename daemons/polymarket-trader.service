@@ -1,0 +1,32 @@
+[Unit]
+# Reads an authenticated Polymarket account into Vantage's intel pool. It does
+# not place orders, despite the file name -- see the module docstring.
+Description=Polymarket account daemon — balances, positions and markets → Vantage intel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ares/Vantage
+EnvironmentFile=/opt/ares/.env
+ExecStart=/opt/ares/venv/bin/python3 /opt/ares/Vantage/daemons/polymarket_trader.py
+Restart=always
+RestartSec=30
+
+# Unprivileged, matching the other daemon units in this repo. This process
+# holds live Polymarket API credentials, so running it as root — as this unit
+# originally did, uniquely among the daemons here — gave a compromised
+# dependency the whole box rather than one service account.
+User=ares
+Group=ares
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ares/Vantage/data
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vantage-polymarket-trader
+
+[Install]
+WantedBy=multi-user.target

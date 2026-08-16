@@ -60,6 +60,15 @@ DESTRUCTIVE_PATHS = (
     "/api/workspace/exec",
     "/api/workspace/write",
     "/api/workspace/remove",
+    # Anything that moves money or mints a key. These are POSTs, so a
+    # method-only gate would have let a spoken sentence place an order or
+    # generate a wallet with no confirmation, while stopping a far more
+    # harmless DELETE.
+    "/api/trading/orders*",
+    "/api/trading/execute*",
+    "/api/trading/wallets*",
+    "/api/trading/strategies/*/toggle",
+    "/api/agents/me/wallets*",
 )
 
 # Gemini function names must be [a-zA-Z0-9_.-]; Vantage operation ids are not.
@@ -143,9 +152,17 @@ def select_tools(app, allowlist: Optional[list[str]]) -> list[dict]:
 
 
 def is_destructive(tool: dict) -> bool:
-    """Whether a tool needs the session's explicit destructive opt-in."""
+    """Whether a tool needs the session's explicit destructive opt-in.
+
+    Path patterns only apply to methods that change state. Without that guard
+    a pattern like "/api/trading/orders*" also gates GET /orders/{id}, so
+    merely reading back an order would demand the same confirmation as placing
+    one -- which trains people to enable destructive mode for everything.
+    """
     if tool["method"] in DESTRUCTIVE_METHODS:
         return True
+    if tool["method"] not in MUTATING_METHODS:
+        return False
     return any(fnmatch.fnmatch(tool["path"], pattern) for pattern in DESTRUCTIVE_PATHS)
 
 

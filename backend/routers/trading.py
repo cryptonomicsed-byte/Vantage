@@ -1798,6 +1798,48 @@ async def get_price(symbol: str):
 
 # ── Signals ─────────────────────────────────────────────────
 
+# Conviction is a 0–1 confidence, and >0.7 auto-creates a real order. It used
+# to be read with a bare float() and no range check, which made the contract
+# unenforced in the one direction that matters: a caller using a 0–5, 0–7 or
+# 0–8 scale (several daemons in this repo do) clears the 0.7 threshold on
+# essentially every signal, so a scale mismatch reads as "maximum confidence"
+# rather than as the bug it is. Out-of-range now fails loudly at the edge
+# instead of silently becoming a trade.
+_MAX_CONVICTION = 1.0
+
+
+def _validated_conviction(body: dict) -> float:
+    raw = body.get("conviction", body.get("confidence", 0))
+    try:
+        conviction = float(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(422, f"conviction must be a number between 0 and 1, got {raw!r}")
+    if conviction != conviction or conviction in (float("inf"), float("-inf")):
+        raise HTTPException(422, "conviction must be a finite number between 0 and 1")
+    if not 0.0 <= conviction <= _MAX_CONVICTION:
+        raise HTTPException(
+            422,
+            f"conviction must be between 0 and 1, got {conviction}. "
+            "Signal sources using a 0-5/0-7/0-10 scale must normalise before posting — "
+            "an unnormalised value clears the 0.7 auto-execution threshold on every signal.",
+        )
+    return conviction
+
+
+def _validated_quantity(body: dict) -> float:
+    """Order size for an auto-executed signal. Rejected rather than defaulted
+    when nonsensical: a negative or non-finite size would reach risk
+    enforcement and order insertion as a real quantity."""
+    raw = body.get("quantity", 0.1)
+    try:
+        quantity = float(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(422, f"quantity must be a positive number, got {raw!r}")
+    if quantity != quantity or quantity in (float("inf"), float("-inf")) or quantity <= 0:
+        raise HTTPException(422, f"quantity must be a positive finite number, got {raw!r}")
+    return quantity
+
+
 @router.post("/signals/ingest")
 async def ingest_signal(request: Request, tool: dict = Depends(get_system_tool)):
     """System-only signal ingestion (freqtrade_bridge, worldmonitor, etc.).
@@ -1818,7 +1860,7 @@ async def ingest_signal(request: Request, tool: dict = Depends(get_system_tool))
 
     symbol = body.get("symbol", body.get("pair", "UNKNOWN"))
     direction = body.get("direction", body.get("signal", "NEUTRAL"))
-    conviction = float(body.get("conviction", body.get("confidence", 0)))
+    conviction = _validated_conviction(body)
     chain = body.get("chain", "solana")
     source = body.get("source", "unknown")
 
@@ -1863,7 +1905,7 @@ async def ingest_signal(request: Request, tool: dict = Depends(get_system_tool))
             result["idempotent"] = True
             result["note"] = f"signal_id {signal_id} already ingested as order {existing_order['id']}; not duplicated"
         elif wallet:
-            quantity = body.get("quantity", 0.1)
+            quantity = _validated_quantity(body)
             async with get_db() as db:
                 db.row_factory = aiosqlite.Row
                 # Risk enforcement: use the agent's own enabled strategy
