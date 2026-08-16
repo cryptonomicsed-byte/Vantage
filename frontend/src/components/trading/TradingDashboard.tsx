@@ -219,7 +219,10 @@ export default function TradingDashboard({ onOpenPortfolio }: { onOpenPortfolio?
           </div>
           <div className="ares-stat-grid" style={{ marginBottom: posList.length ? 12 : 0 }}>
             <StatTile label="Portfolio Value" value={perfData?.portfolio_value?.portfolio_value_usd != null ? `$${Number(perfData.portfolio_value.portfolio_value_usd).toLocaleString()}` : '—'} />
-            <StatTile label="Win Rate" value={perfData ? `${perfData.win_rate}%` : '—'} color={perfData?.win_rate >= 50 ? 'var(--green)' : undefined} />
+            {/* win_rate is null until realized PnL is recorded per trade — the
+                endpoint used to derive it from pre-trade conviction scores and
+                report a clamped 100%. An em dash is the honest reading. */}
+            <StatTile label="Win Rate" value={perfData?.win_rate != null ? `${perfData.win_rate}%` : '—'} color={perfData?.win_rate != null && perfData.win_rate >= 50 ? 'var(--green)' : undefined} />
             <StatTile label="Total Trades" value={perfData?.total_trades ?? '—'} />
             <StatTile label="Open Positions" value={posList.length} />
           </div>

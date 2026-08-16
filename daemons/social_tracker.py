@@ -10,6 +10,8 @@ Sentiment: FinBERT NLP + keyword extraction
 import sqlite3, json, subprocess, urllib.request, re, time, os
 from datetime import datetime, timezone
 
+from vantage_signals import post_signal as _post_signal
+
 DB_PATH = "/opt/ares/Vantage/data/vantage.db"
 VANTAGE_URL = "http://localhost:8001"
 VANTAGE_KEY = os.environ.get("VANTAGE_AGENT_KEY", "")
@@ -141,21 +143,15 @@ def post_signal(account_id, platform, username, ticker, ca, sentiment, confidenc
                (datetime.now(timezone.utc).isoformat(), account_id))
     db.commit()
     
-    # Post to Vantage signal pool
-    try:
-        req = urllib.request.Request(
-            f"{VANTAGE_URL}/api/intel/signals/ingest",
-            data=json.dumps({
-                "symbol": ticker or ca or "SOCIAL",
-                "source": f"social_{platform}",
-                "conviction": confidence,
-                "type": "sentiment",
-                "detail": f"{sentiment} | {username}: {text[:100]}"
-            }).encode(),
-            headers={"Content-Type": "application/json", "X-Agent-Key": VANTAGE_KEY}
-        )
-        urllib.request.urlopen(req, timeout=5)
-    except: pass
+    # Post to Vantage signal pool. The ingest endpoint takes system-tool auth,
+    # not the agent key this used to send inside a bare `except: pass` -- so
+    # every sentiment signal was discarded by an unrecorded 401.
+    _post_signal(
+        ticker or ca or "SOCIAL", f"social_{platform}",
+        type_="sentiment",
+        conviction=confidence,
+        detail=f"{sentiment} | {username}: {text[:100]}",
+    )
 
 # ── Main Scan Loop ───────────────────────────────────────────
 def scan_all(interval=300):

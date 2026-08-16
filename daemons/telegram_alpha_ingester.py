@@ -9,10 +9,15 @@ Configure: Add channels to CHANNELS list below
 """
 import json, re, sqlite3, os, sys, signal, time, urllib.request
 
+from vantage_signals import post_signal as _post_signal
+
 # ── Config ──────────────────────────────────────────────────────────
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-VANTAGE_URL = "http://localhost:8001/api/trading/signals/ingest"
+VANTAGE_URL = os.environ.get("VANTAGE_URL", "http://localhost:8001")
 VANTAGE_KEY = open(os.path.expanduser("~/.vantage_key")).read().strip()
+# Only consulted when auto-execution is switched on; the trading endpoint
+# requires it and there is no safe default for "whose order is this".
+TELEGRAM_AGENT_ID = os.environ.get("TELEGRAM_AGENT_ID") or None
 DB = "/opt/ares/Vantage/data/vantage.db"
 
 # Channels to monitor (username or invite link)
@@ -74,19 +79,33 @@ def parse_signal(text, channel_name="unknown"):
     return None
 
 def ingest(signal):
-    """Post signal to Vantage."""
-    try:
-        payload = json.dumps(signal).encode()
-        req = urllib.request.Request(VANTAGE_URL, data=payload, headers={
-            "Content-Type": "application/json",
-            "X-Agent-Key": VANTAGE_KEY,
-        })
-        urllib.request.urlopen(req, timeout=5)
-        print(f"  ✅ {signal['symbol']} {signal['direction']} (conv={signal['conviction']})")
-        return True
-    except Exception as e:
-        print(f"  ❌ Failed: {e}")
+    """Post a parsed Telegram signal to Vantage.
+
+    Worth being blunt about what this daemon is: it turns messages written by
+    third parties in Telegram channels into directional trade signals. The
+    keyword boost above reaches 0.8 on the word "urgent", which is past the
+    0.7 threshold at which the trading endpoint creates a real order -- so
+    anyone able to post in a monitored channel could have spent money here,
+    had the agent key it sent not been rejected with a 401.
+
+    Untrusted input therefore never reaches the executing endpoint on its own:
+    it goes to the intel pool for scoring unless an operator has explicitly
+    switched execution on, the same treatment routers/telegram_webhook.py
+    gives the same class of input.
+    """
+    result = _post_signal(
+        signal["symbol"], signal.get("source", "telegram_alpha_ingester"),
+        type_=signal.get("type", "telegram_alpha"),
+        conviction=signal.get("conviction", 0.5),
+        direction=signal.get("direction", ""),
+        detail=signal.get("detail", ""),
+        agent_id=TELEGRAM_AGENT_ID,
+        execute=True,
+    )
+    if result is None:
         return False
+    print(f"  ✅ {signal['symbol']} {signal['direction']} (conv={signal['conviction']})")
+    return True
 
 # ── Telegram polling (via getUpdates) ───────────────────────────────
 def poll_updates():

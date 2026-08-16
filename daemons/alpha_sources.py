@@ -19,6 +19,8 @@ import json, os, sys, time, logging, argparse, re
 from typing import Optional
 import urllib.request
 
+from vantage_signals import post_signal as _post_signal
+
 VANTAGE_URL = os.environ.get("VANTAGE_URL", "http://127.0.0.1:8001")
 VANTAGE_KEY = open(os.path.expanduser("~/.vantage_key")).read().strip()
 JUPITER_KEY = os.environ.get("JUPITER_KEY", "")
@@ -52,16 +54,14 @@ def fetch_text(url: str, timeout: int = 10) -> Optional[str]:
 
 def post_signal(symbol: str, source: str, stype: str, conviction: float = 0.5,
                 direction: str = "", detail: str = ""):
-    payload = json.dumps({
-        "symbol": symbol, "source": source, "type": stype,
-        "conviction": conviction, "direction": direction, "detail": detail,
-    }).encode()
-    try:
-        req = urllib.request.Request(SIGNALS_INGEST, data=payload,
-                                     headers={"Content-Type": "application/json", "X-Agent-Key": VANTAGE_KEY})
-        urllib.request.urlopen(req, timeout=5)
-    except:
-        pass
+    """Delegates to the shared client for system-tool auth.
+
+    This used to post X-Agent-Key, which the ingest endpoint rejects, inside a
+    bare `except: pass` -- so every signal this daemon produced was discarded
+    by a 401 that nothing recorded.
+    """
+    return _post_signal(symbol, source, type_=stype, conviction=conviction,
+                        direction=direction, detail=detail)
 
 _last_feed: dict[str, float] = {}
 _gdelt_last_call: float = 0.0

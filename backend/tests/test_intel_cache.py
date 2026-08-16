@@ -5,21 +5,30 @@ served fast from cache, and that a rehydrated snapshot means the feed is never
 empty on a cold process.
 """
 import asyncio
+import os
 import time
 
 import pytest
 
 
+def _tool_headers():
+    """Signal ingestion is system-tool auth, not agent auth: the endpoint's own
+    contract is "agents cannot post signals directly; signals come from
+    infrastructure only". This test used an agent key and had been failing on
+    the resulting 401."""
+    return {
+        "X-Vantage-Tool": "intel",
+        "X-Vantage-Tool-Key": os.environ["VANTAGE_TOOL_INTEL"],
+    }
+
+
 @pytest.mark.asyncio
 async def test_ingested_signal_persists_and_shows(client, fresh_agent):
-    agent = await fresh_agent()
-    headers = {"X-Agent-Key": agent["api_key"]}
-
     r = await client.post(
         "/api/intel/signals/ingest",
         json={"symbol": "PERSISTME", "source": "unit_test", "type": "alpha",
               "conviction": 0.9, "direction": "BUY", "detail": "durable"},
-        headers=headers,
+        headers=_tool_headers(),
     )
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "ingested"

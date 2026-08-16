@@ -24,6 +24,8 @@ from typing import Optional, List
 from datetime import datetime, timezone
 import urllib.request
 
+from vantage_signals import post_signal as _post_signal
+
 VANTAGE_URL = "http://127.0.0.1:8001"
 VANTAGE_KEY = open(os.path.expanduser("~/.vantage_key")).read().strip()
 SIGNALS_INGEST = f"{VANTAGE_URL}/api/intel/signals/ingest"
@@ -212,16 +214,14 @@ def post_findings(result: dict):
 
 
 def post_signal_vantage(symbol, source, stype, conviction=0.5, direction="", detail=""):
-    payload = json.dumps({
-        "symbol": symbol, "source": source, "type": stype,
-        "conviction": conviction, "direction": direction, "detail": detail,
-    }).encode()
-    try:
-        req = urllib.request.Request(SIGNALS_INGEST, data=payload,
-                                     headers={"Content-Type": "application/json", "X-Agent-Key": VANTAGE_KEY})
-        urllib.request.urlopen(req, timeout=5)
-    except:
-        pass
+    """Delegates to the shared client for system-tool auth.
+
+    This used to post X-Agent-Key, which the ingest endpoint rejects, inside a
+    bare `except: pass` -- so every signal this daemon produced was discarded
+    by a 401 that nothing recorded.
+    """
+    return _post_signal(symbol, source, type_=stype, conviction=conviction,
+                        direction=direction, detail=detail)
 
 _last_feed = {}
 def feed_alert(key, title, content, tags):

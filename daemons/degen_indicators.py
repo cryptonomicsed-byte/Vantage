@@ -12,13 +12,18 @@ BIRDEYE_KEY = os.environ.get("BIRDEYE_KEY", "")
 PUMPFUN_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 
 def rpc(method, params):
+    # Two bugs lived on these four lines, so every indicator in this module has
+    # always raised rather than returned: the key was interpolated as HELIUS
+    # (undefined -- NameError), and the response object was handed straight to
+    # json.loads without .read() (TypeError). Neighbouring daemons that do the
+    # same two calls -- see pumpfun_wallet_intel.rpc/birdeye -- have it right.
     payload = json.dumps(dict(jsonrpc="2.0", id=1, method=method, params=params)).encode()
-    req = urllib.request.Request(f"https://mainnet.helius-rpc.com/?api-key={HELIUS}", data=payload, headers={"Content-Type":"application/json"})
-    return json.loads(urllib.request.urlopen(req, timeout=10))
+    req = urllib.request.Request(f"https://mainnet.helius-rpc.com/?api-key={HELIUS_KEY}", data=payload, headers={"Content-Type":"application/json"})
+    return json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
 
 def birdeye_fetch(path):
-    req = urllib.request.Request(f"https://public-api.birdeye.so/{path}", headers={"X-API-KEY":BIRDEYE_KEY})
-    return json.loads(urllib.request.urlopen(req, timeout=10))
+    req = urllib.request.Request(f"https://public-api.birdeye.so/{path}", headers={"X-API-KEY":BIRDEYE_KEY, "accept":"application/json"})
+    return json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
 
 # ── Degen Indicator 1: Buy Pressure (first 5 minutes) ──────────────
 def buy_pressure_5m(mint):

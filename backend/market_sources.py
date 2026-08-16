@@ -138,23 +138,85 @@ async def _coingecko_price(symbol: str) -> Optional[float]:
     return None
 
 
+# Quote currencies stripped off a trading pair to get the base asset. USD
+# stablecoins are worth ~$1, so "SOL-USDC" prices as "SOL".
+_QUOTE_SUFFIXES = ("USDC", "USDT", "USD", "BUSD", "DAI")
+
+# Distinguishes "we looked and there is no price" from "not in the cache", since
+# _cache_get returns None for both.
+_PRICE_MISS = object()
+
+# Raw contract addresses that reach this function as a "symbol" -- the trading
+# path passes a Solana mint for anything without a ticker. Only the ones we can
+# name are priceable; the rest have no entry in either map by construction.
+_MINT_SYMBOLS = {
+    "So11111111111111111111111111111111111111112": "SOL",
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "USDC",
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": "USDT",
+    "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263": "BONK",
+    "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm": "WIF",
+}
+
+
+def normalize_symbol(symbol: str) -> str:
+    """Reduce a trading symbol to the bare ticker PYTH_IDS/CG_IDS are keyed by.
+
+    Both maps hold bare tickers ("SOL"), but the trading path deals in pairs
+    ("SOL-USDC", "SOL/USDC") and sometimes raw mint addresses. An unnormalised
+    pair missed Pyth, then reached CoinGecko as the id "sol-usdc" and 404'd, so
+    resolve_price returned None -- and because _enforce_risk_limits fails closed
+    when it cannot compute a notional, every such order was rejected with
+    "no price/quote available" rather than anything mentioning the symbol.
+    """
+    if not symbol:
+        return ""
+    symbol = symbol.strip().upper()
+    # Mint addresses are case-sensitive, so match before upper() can matter.
+    for mint, ticker in _MINT_SYMBOLS.items():
+        if symbol == mint.upper():
+            return ticker
+    for separator in ("-", "/", "_"):
+        if separator in symbol:
+            base, _, quote = symbol.partition(separator)
+            # Only treat it as a pair when the right side is a quote currency;
+            # "WEN-1" style tickers keep their whole name.
+            if quote in _QUOTE_SUFFIXES and base:
+                return base
+    # Concatenated pairs ("SOLUSDC") -- only when the remainder is a known base,
+    # so "USDC" itself isn't stripped down to nothing.
+    for suffix in _QUOTE_SUFFIXES:
+        if len(symbol) > len(suffix) and symbol.endswith(suffix):
+            base = symbol[: -len(suffix)]
+            if base in PYTH_IDS or base in CG_IDS:
+                return base
+    return symbol
+
+
 async def resolve_price(symbol: str) -> Optional[float]:
     """Best-effort live USD price: Pyth (fast majors) → CoinGecko fallback. Cached 30s."""
     if not symbol:
         return None
-    symbol = symbol.upper()
+    symbol = normalize_symbol(symbol)
+    if not symbol:
+        return None
     key = f"price:{symbol}"
     cached = _cache_get(key, 30)
     if cached is not None:
-        return cached
+        # A miss is cached too (see below), and reads back as the sentinel.
+        return None if cached is _PRICE_MISS else cached
     price: Optional[float] = None
     pyth = await _pyth_prices([symbol])
     if symbol in pyth:
         price = pyth[symbol]
     if price is None:
         price = await _coingecko_price(symbol)
-    if price is not None:
-        _cache_put(key, price)
+    # Failures are cached as well as successes. Each lookup can cost ~24s when
+    # upstream is down -- _get_json retries twice at a 6s timeout, across Pyth
+    # then CoinGecko -- and callers on the order path run this per order. Caching
+    # only successes meant a dead upstream was paid for again on every single
+    # call, turning an outage into a pile-up rather than one cheap failure per
+    # symbol per 30s.
+    _cache_put(key, price if price is not None else _PRICE_MISS)
     return price
 
 

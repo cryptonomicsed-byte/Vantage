@@ -951,9 +951,17 @@ async def ingest_signal(payload: dict, tool: dict = Depends(get_system_tool)):
     for f in required:
         if f not in payload:
             return {"error": f"Missing required field: {f}"}
+
+    # Same 0-1 contract the docstring states, now enforced. An unnormalised
+    # value (several daemons here use 0-5/0-7 scales) does not just mis-rank
+    # the pool -- these signals are what downstream consumers trade on, so a
+    # 7.0 reads as overwhelming confidence forever. Reject at the edge.
+    from .trading import _validated_conviction
+    conviction = _validated_conviction({"conviction": payload.get("conviction", 1.0)})
+
     return await ingest_signal_internal(
         payload["symbol"], payload["source"], payload["type"],
-        conviction=float(payload.get("conviction", 1.0)), direction=payload.get("direction", ""),
+        conviction=conviction, direction=payload.get("direction", ""),
         detail=payload.get("detail", ""), mint=payload.get("mint", ""),
     )
 
