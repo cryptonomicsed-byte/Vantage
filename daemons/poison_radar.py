@@ -9,7 +9,16 @@ Scans all tracked wallets from vantage.db for:
   - Suspicious token activity / unknown contracts
   - Rapid-fire transaction patterns
 
-Posts findings as signals to /api/trading/signals/ingest with type='poison_alert'.
+Posts findings as signals with type='poison_alert'.
+
+These go to the intel pool, not /api/trading/signals/ingest, which is where
+they used to go. The conviction field here carries a *risk* score -- the more
+dangerous the wallet, the higher the number -- while on the trading endpoint
+conviction means confidence in the trade and anything above 0.7 auto-creates
+a real order. Only the hardcoded direction="NEUTRAL" kept "this wallet is
+maximally poisoned" from being read as "maximum confidence, buy it"; one edit
+upstream, or one caller reusing this payload, and the inversion becomes an
+order. A threat scanner has no business addressing the executing endpoint.
 
 Usage: nohup python3 /opt/ares/poison_radar.py &
 """
@@ -26,10 +35,11 @@ from datetime import datetime, timezone
 import requests
 import urllib.parse
 
+from vantage_signals import post_signal
+
 # ── Config ────────────────────────────────────────────────────────────────
 
 VANTAGE_URL = os.environ.get("VANTAGE_URL", "http://localhost:8001")
-VANTAGE_KEY = os.environ.get("VANTAGE_KEY", "")
 DB_PATH = os.environ.get("VANTAGE_DB", "/opt/ares/Vantage/data/vantage.db")
 HELIUS_KEY = os.environ.get("HELIUS_API_KEY", "")
 
@@ -432,40 +442,29 @@ def post_poison_alert(wallet_row, report):
         log.debug(f"Suppressed duplicate alert for {chain}:{address}")
         return
 
-    payload = {
-        "symbol": f"{chain.upper()}:{address[:8]}",
-        "direction": "NEUTRAL",
-        "conviction": min(report["riskScore"] / 40.0, 1.0),  # Normalize to 0-1
+    detail = {
+        "wallet_address": address,
+        "wallet_label": label,
         "chain": chain,
-        "source": "poison_radar",
-        "type": "poison_alert",
-        "detail": {
-            "wallet_address": address,
-            "wallet_label": label,
-            "chain": chain,
-            "risk_level": report["risk"],
-            "risk_score": report["riskScore"],
-            "warnings": report["warnings"],
-            "patterns": report["suspiciousPatterns"],
-            "tx_count": report["txCount"],
-        },
+        "risk_level": report["risk"],
+        "risk_score": report["riskScore"],
+        "warnings": report["warnings"],
+        "patterns": report["suspiciousPatterns"],
+        "tx_count": report["txCount"],
     }
 
-    try:
-        url = f"{VANTAGE_URL}/api/trading/signals/ingest"
-        headers = {
-            "Content-Type": "application/json",
-            "X-Agent-Key": VANTAGE_KEY,
-        }
-        resp = requests.post(url, json=payload, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            log.info(f"Alert posted: {chain}:{address} risk={report['risk']} score={report['riskScore']}")
-            cache_set(cache_key)
-            return True
-        else:
-            log.warning(f"Signal ingest returned {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        log.error(f"Failed to post alert for {address}: {e}")
+    result = post_signal(
+        f"{chain.upper()}:{address[:8]}", "poison_radar",
+        type_="poison_alert",
+        conviction=report["riskScore"], scale=40.0,
+        direction="NEUTRAL",
+        chain=chain,
+        detail=json.dumps(detail),
+    )
+    if result is not None:
+        log.info(f"Alert posted: {chain}:{address} risk={report['risk']} score={report['riskScore']}")
+        cache_set(cache_key)
+        return True
     return False
 
 # ── Single Address Check ──────────────────────────────────────────────────

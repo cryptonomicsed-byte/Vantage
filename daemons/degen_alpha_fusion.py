@@ -4,6 +4,8 @@ Auto-lists high-scoring tokens to pumpfun watchlist. Posts fusion signals.
 """
 import time, json, sqlite3, os, sys, urllib.request, signal
 
+from vantage_signals import post_signal as _post_signal
+
 DB = "/opt/ares/Vantage/data/vantage.db"
 HELIUS_KEY = os.environ.get("HELIUS_API_KEY", "")
 BIRDEYE_KEY = os.environ.get("BIRDEYE_KEY", "")
@@ -12,7 +14,10 @@ try:
 except FileNotFoundError:
     print("  ⚠️ ~/.vantage_key not found -- signal ingest/snipe calls will fail until it exists")
     VANTAGE_KEY = ""
-VANTAGE_URL = "http://localhost:8001/api/trading/signals/ingest"
+VANTAGE_URL = os.environ.get("VANTAGE_URL", "http://localhost:8001")
+# Only consulted when auto-execution is switched on; the trading endpoint
+# requires it and there is no safe default for "whose order is this".
+DEGEN_AGENT_ID = os.environ.get("DEGEN_AGENT_ID") or None
 # Real-money auto-execution kill switch: was unconditionally firing a real
 # 0.01 SOL market buy on every moonshot>60 detection with zero human
 # confirmation, no circuit breaker, no daily loss cap. Off by default --
@@ -27,12 +32,26 @@ def fetch(url, headers=None):
     return json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
 
 def ingest(symbol, direction, conviction, detail):
-    try:
-        payload = json.dumps(dict(symbol=symbol, source="degen_alpha_fusion", direction=direction, conviction=min(1.0, conviction), type="degen_fusion", detail=detail[:500])).encode()
-        urllib.request.urlopen(urllib.request.Request(VANTAGE_URL, data=payload, headers={"Content-Type":"application/json","X-Agent-Key":VANTAGE_KEY}), timeout=5)
+    """Publish a fused degen signal.
+
+    Addressed the order-creating endpoint with an agent key, which 401s. That
+    401 is the only reason a directional signal from a memecoin scanner never
+    reached order creation, so restoring auth alone would have started placing
+    orders. Execution now runs through the same kind of operator switch
+    AUTOSNIPE_ENABLED already uses above; without it the signal lands in the
+    intel pool.
+    """
+    result = _post_signal(
+        symbol, "degen_alpha_fusion",
+        type_="degen_fusion",
+        conviction=conviction,
+        direction=direction,
+        detail=detail[:500],
+        agent_id=DEGEN_AGENT_ID,
+        execute=True,
+    )
+    if result is not None:
         print(f"  ✅ {symbol} {direction} c={conviction:.2f}")
-    except Exception as e:
-        print(f"  ❌ Ingest fail: {e}")
 
 def get_trending_pools():
     try:

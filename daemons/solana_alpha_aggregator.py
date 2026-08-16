@@ -8,6 +8,8 @@ Helius (on-chain wallets), DexScreener (trending)
 import time, json, sqlite3, os, sys, urllib.request, signal
 from collections import defaultdict
 
+from vantage_signals import post_signal as _post_signal
+
 DB = "/opt/ares/Vantage/data/vantage.db"
 HELIUS_KEY = os.environ.get("HELIUS_API_KEY", "")
 BIRDEYE_KEY = os.environ.get("BIRDEYE_KEY", "")
@@ -24,20 +26,21 @@ def rpc(method, params):
     return json.loads(urllib.request.urlopen(req,timeout=10).read().decode())
 
 def ingest_top5(data):
-    """Post Top 5 summary to Vantage signals."""
-    try:
-        summary = f"Top Degens: {', '.join([t['symbol'] for t in data.get('top_5_must_buy',[])][:5])}"
-        payload = json.dumps(dict(
-            symbol="TOP5", source="alpha_aggregator", type="top5_degen",
-            direction="BUY", conviction=0.85,
-            detail=json.dumps(data, default=str)[:500]
-        )).encode()
-        urllib.request.urlopen(urllib.request.Request(
-            "http://localhost:8001/api/trading/signals/ingest",
-            data=payload,
-            headers={"Content-Type":"application/json","X-Agent-Key":VANTAGE_KEY}
-        ), timeout=5)
-    except: pass
+    """Post Top 5 summary to Vantage signals.
+
+    This is a digest of what is trending, not a per-token recommendation, yet
+    it was sent to the order-creating endpoint as direction=BUY with a
+    hardcoded conviction of 0.85 -- above the 0.7 auto-execution threshold, on
+    a symbol ("TOP5") that is not a tradeable asset. The agent key it used
+    401s, which is all that stood between this and a standing order for a
+    ticker that does not exist. It belongs in the intel pool.
+    """
+    return _post_signal(
+        "TOP5", "alpha_aggregator",
+        type_="top5_degen",
+        conviction=0.85,
+        detail=json.dumps(data, default=str)[:500],
+    )
 
 # ════════════════════════════════════════════════════════════════
 # 1. GRADUATED TOKENS — Raydium pools with pump.fun history

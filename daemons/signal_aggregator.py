@@ -20,6 +20,8 @@ import json, os, sys, time, logging, argparse, re
 from datetime import datetime, timezone
 from typing import Optional
 import urllib.request
+
+from vantage_signals import post_signal as _post_signal
 import hashlib
 
 # ── Config ──────────────────────────────────────────────────────────────
@@ -71,19 +73,14 @@ def rpc_call(method: str, params: list = None) -> Optional[dict]:
 
 def post_signal(symbol: str, source: str, stype: str, conviction: float = 0.5,
                 direction: str = "", detail: str = ""):
-    """Post to signals ingest + feed."""
-    # Signals pool
-    payload = json.dumps({
-        "symbol": symbol, "source": source, "type": stype,
-        "conviction": conviction, "direction": direction, "detail": detail,
-    }).encode()
-    try:
-        req = urllib.request.Request(SIGNALS_INGEST, data=payload,
-                                     headers={"Content-Type": "application/json", "X-Agent-Key": VANTAGE_KEY})
-        with urllib.request.urlopen(req, timeout=5) as r:
-            pass
-    except:
-        pass
+    """Post to the signals pool via the shared client, for system-tool auth.
+
+    This used to post X-Agent-Key, which the ingest endpoint rejects, inside a
+    bare `except: pass` -- so every signal this daemon produced was discarded
+    by a 401 that nothing recorded.
+    """
+    return _post_signal(symbol, source, type_=stype, conviction=conviction,
+                        direction=direction, detail=detail)
 
 def post_feed(title: str, content: str, tags: list[str]):
     """Post to home page feed."""

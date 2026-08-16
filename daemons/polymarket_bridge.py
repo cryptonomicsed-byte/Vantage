@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
-"""Bridge: Polymarket → Vantage intel signals"""
+"""Bridge: Polymarket public markets → Vantage intel signals.
+
+Unauthenticated read of trending prediction markets. (polymarket_trader.py is
+the authenticated account-level sibling; neither places a bet.)
+
+Conviction used to be `abs(top - 0.5) * 10` capped at 7.0 -- a 0-5 range with
+a 0-7 cap, against a platform contract of 0-1. Any market priced past 57%
+scored above 1.0, so the whole feed read as certainty. It is now the same
+`* 2` proportion polymarket_trader.py uses: 0.5 is a coin flip, 1.0 is settled.
+"""
 import os, json, urllib.request, time
 from datetime import datetime, timezone
 
-VANTAGE_URL = os.environ.get("VANTAGE_URL", "http://localhost:8001")
-VANTAGE_KEY = os.environ.get("VANTAGE_KEY", "")
+from vantage_signals import post_signal
+
 POLYMARKET_URL = "https://gamma-api.polymarket.com"
 INTERVAL = int(os.environ.get("POLY_BRIDGE_INTERVAL", "600"))
 
 HEADERS = {"User-Agent": "curl/8.0"}
-
-def vantage_post(endpoint, data):
-    req = urllib.request.Request(f"{VANTAGE_URL}{endpoint}",
-        data=json.dumps(data).encode(),
-        headers={"Content-Type": "application/json", "X-Agent-Key": VANTAGE_KEY})
-    return json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
 
 def fetch_markets(limit=20):
     """Fetch trending prediction markets."""
@@ -35,16 +38,16 @@ def cycle():
         if volume < 10000:
             continue
         top_outcome = max(float(o) for o in outcomes) if outcomes else 0
-        conviction = abs(top_outcome - 0.5) * 10  # 0-5 scale based on certainty
+        # 0-1: 0.5 priced = coin flip = 0.0, 1.0 priced = settled = 1.0.
+        conviction = abs(top_outcome - 0.5) * 2
         tag = m.get("tags", [{}])[0].get("label", "prediction") if m.get("tags") else "prediction"
-        vantage_post("/api/intel/signals/ingest", {
-            "symbol": tag.upper()[:10] if tag else "PREDICT",
-            "source": "polymarket",
-            "conviction": min(conviction, 7.0),
-            "type": "prediction_market",
-            "chain": "polygon",
-            "detail": f"'{title}' | Vol:${volume:,.0f} | Top outcome:{top_outcome:.1%}"
-        })
+        post_signal(
+            tag.upper()[:10] if tag else "PREDICT", "polymarket",
+            type_="prediction_market",
+            conviction=conviction,
+            chain="polygon",
+            detail=f"'{title}' | Vol:${volume:,.0f} | Top outcome:{top_outcome:.1%}",
+        )
         count += 1
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Polymarket: {count} markets ingested")
 

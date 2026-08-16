@@ -73,24 +73,34 @@ def fetch_json(url: str, timeout: int = 10) -> Optional[dict]:
     return None
 
 
-def post_to_feed(title: str, content: str, tags: list[str], content_type: str = "text",
-                 stream_url: str = "", thumbnail_url: str = ""):
-    """Post a signal to Vantage feed as a visible broadcast."""
+def post_to_feed(title: str, content: str, tags: list[str], kind: str = "text",
+                 image_url: str = "", video_url: str = ""):
+    """Post a signal to Vantage feed as a visible broadcast.
+
+    This addressed /api/trading/signals/ingest -- the order-creating endpoint --
+    with a broadcast body (title/content/tags/stream_url/thumbnail_url) that
+    endpoint has no field for. Nothing was ever published to the feed, and
+    nothing ever errored visibly either: the agent key 401s there, and the
+    caller swallows every exception. The real surface is publish/feed, which
+    does take an agent key.
+    """
     payload = json.dumps({
-        "title": title, "content": content, "tags": tags,
-        "content_type": content_type, "stream_url": stream_url,
-        "thumbnail_url": thumbnail_url,
+        "kind": kind, "title": title, "post_content": content, "tags": tags,
+        "image_url": image_url, "video_url": video_url,
     }).encode()
     try:
         req = urllib.request.Request(
-            f"{VANTAGE_URL}/api/trading/signals/ingest",
+            f"{VANTAGE_URL}/api/publish/feed",
             data=payload,
             headers={"Content-Type": "application/json", "X-Agent-Key": VANTAGE_KEY},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read())
-    except Exception:
-        return None
+    except urllib.error.HTTPError as e:
+        log.warning("feed publish failed: %s %s", e.code, e.read()[:200].decode(errors="replace"))
+    except Exception as e:
+        log.warning("feed publish failed: %s", e)
+    return None
 
 # ── Signal store (shared across threads) ────────────────────────────────
 

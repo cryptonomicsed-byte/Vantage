@@ -22,11 +22,15 @@ import numpy as np
 import ccxt
 import urllib.request
 
+from vantage_signals import post_signal as _post_signal
+
 # ── Config ──────────────────────────────────────────────────────────────
 
 VANTAGE_URL = os.environ.get("VANTAGE_URL", "http://127.0.0.1:8001")
 VANTAGE_KEY = open(os.path.expanduser("~/.vantage_key")).read().strip()
-SIGNALS_ENDPOINT = f"{VANTAGE_URL}/api/trading/signals/ingest"
+# Only consulted when auto-execution is switched on; the trading endpoint
+# requires it and there is no safe default for "whose order is this".
+PREDICTOR_AGENT_ID = os.environ.get("PREDICTOR_AGENT_ID") or None
 
 # Dynamically populated from market/top
 KRAKEN_MAP = {"SOL/USD": "SOL/USD", "BTC/USD": "BTC/USD", "ETH/USD": "ETH/USD"}
@@ -271,46 +275,42 @@ def analyze_symbol(exchange: ccxt.Exchange, kraken_symbol: str, display_symbol: 
 
 def post_signal(signal: dict) -> bool:
     """Send signal to Vantage trading API AND post to feed for visibility."""
-    payload = {
-        "symbol": signal["symbol"],
-        "direction": signal["direction"],
-        "conviction": signal["conviction"],
-        "chain": signal["chain"],
-        "source": signal["source"],
-        "details": json.dumps(signal.get("details", {})),
-    }
-    success = False
-    try:
-        # Post to trading pipeline
-        req = urllib.request.Request(
-            SIGNALS_ENDPOINT,
-            data=json.dumps(payload).encode(),
-            headers={
-                "Content-Type": "application/json",
-                "X-Agent-Key": VANTAGE_KEY,
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            result = json.loads(resp.read())
-            log.info(f"✅ {signal['symbol']} {signal['direction']} "
-                     f"conviction={signal['conviction']:.2f} → {result}")
-            success = True
-    except Exception as e:
-        log.error(f"❌ POST failed for {signal['symbol']}: {e}")
+    # Directional output from eight indicators, posted with an agent key the
+    # ingest endpoint rejects. That 401 is the only reason a >0.7 conviction
+    # here never created a real order, so restoring auth alone would have
+    # started trading; execution is behind the operator switch instead.
+    result = _post_signal(
+        signal["symbol"], signal["source"],
+        type_="prediction",
+        conviction=signal["conviction"],
+        direction=signal["direction"],
+        chain=signal["chain"],
+        detail=json.dumps(signal.get("details", {})),
+        agent_id=PREDICTOR_AGENT_ID,
+        execute=True,
+    )
+    success = result is not None
+    if success:
+        log.info(f"✅ {signal['symbol']} {signal['direction']} "
+                 f"conviction={signal['conviction']:.2f} → {result}")
 
     # Also post to feed for visibility (if conviction is meaningful)
     if signal["conviction"] >= 0.6:
         try:
             direction_emoji = "🟢" if signal["direction"] == "BUY" else "🔴"
+            # This is a feed broadcast, and it was addressed to
+            # /api/trading/signals/ingest -- the order-creating endpoint, which
+            # has no title/content/tags fields and never returns the
+            # broadcast_id logged below. The real surface is publish/feed.
             feed_payload = json.dumps({
+                "kind": "text",
                 "title": f"{direction_emoji} {signal['direction']}: {signal['symbol']} ({signal['conviction']:.1%} conviction)",
-                "content": f"**{signal['direction']}** signal for **{signal['symbol']}** at ${signal.get('price', 0):.2f}. "
+                "post_content": f"**{signal['direction']}** signal for **{signal['symbol']}** at ${signal.get('price', 0):.2f}. "
                            f"Conviction: **{signal['conviction']:.1%}**. Source: vantage-predictor (8 indicators).",
                 "tags": ["signal", "predictor", signal["direction"].lower()],
             }).encode()
             req2 = urllib.request.Request(
-                f"{VANTAGE_URL}/api/trading/signals/ingest",
+                f"{VANTAGE_URL}/api/publish/feed",
                 data=feed_payload,
                 headers={"Content-Type": "application/json", "X-Agent-Key": VANTAGE_KEY},
             )
@@ -320,25 +320,16 @@ def post_signal(signal: dict) -> bool:
         except Exception as e:
             log.debug(f"Feed post skipped: {e}")
 
-    # Also post to signals pool for Trading dashboard
-    try:
-        sig_payload = json.dumps({
-            "symbol": signal["symbol"].split("/")[0],
-            "source": "predictor",
-            "type": "signal",
-            "conviction": signal["conviction"],
-            "direction": signal["direction"],
-            "detail": f"price=${signal.get('price',0):.2f}",
-        }).encode()
-        req3 = urllib.request.Request(
-            f"{VANTAGE_URL}/api/intel/signals/ingest",
-            data=sig_payload,
-            headers={"Content-Type": "application/json", "X-Agent-Key": VANTAGE_KEY},
-        )
-        with urllib.request.urlopen(req3, timeout=5) as resp3:
-            pass  # fire and forget
-    except Exception:
-        pass
+    # Also post to signals pool for Trading dashboard. The ingest endpoint
+    # takes system-tool auth, not the agent key this sent inside a bare
+    # `except: pass` -- so the dashboard never saw a prediction.
+    _post_signal(
+        signal["symbol"].split("/")[0], "predictor",
+        type_="signal",
+        conviction=signal["conviction"],
+        direction=signal["direction"],
+        detail=f"price=${signal.get('price',0):.2f}",
+    )
 
     return success
 

@@ -4,11 +4,16 @@ ingests signals when concentrated or insider activity detected.
 """
 import json, sqlite3, os, sys, signal, time, urllib.request
 
+from vantage_signals import post_signal as _post_signal
+
 DB = "/opt/ares/Vantage/data/vantage.db"
 HELIUS_KEY = os.environ.get("HELIUS_API_KEY", "")
 BIRDEYE_KEY = os.environ.get("BIRDEYE_KEY", "")
-VANTAGE_URL = "http://localhost:8001/api/trading/signals/ingest"
+VANTAGE_URL = os.environ.get("VANTAGE_URL", "http://localhost:8001")
 VANTAGE_KEY = open(os.path.expanduser("~/.vantage_key")).read().strip()
+# Only consulted when auto-execution is switched on; the trading endpoint
+# requires it and there is no safe default for "whose order is this".
+PUMPFUN_AGENT_ID = os.environ.get("PUMPFUN_AGENT_ID") or None
 
 def rpc(method, params):
     payload = json.dumps(dict(jsonrpc="2.0", id=1, method=method, params=params)).encode()
@@ -24,12 +29,22 @@ def pumpfun_api(mint):
     return json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
 
 def ingest(symbol, direction, conviction, sig_type, detail):
-    try:
-        payload = json.dumps(dict(symbol=symbol, source="pumpfun_wallet_intel", direction=direction, conviction=conviction, type=sig_type, detail=detail)).encode()
-        req = urllib.request.Request(VANTAGE_URL, data=payload, headers={"Content-Type":"application/json","X-Agent-Key":VANTAGE_KEY})
-        urllib.request.urlopen(req, timeout=5)
-    except:
-        pass
+    """Publish a wallet-intelligence signal.
+
+    Addressed the order-creating endpoint with an agent key inside a bare
+    `except: pass`, so every signal was discarded by an unrecorded 401 -- and
+    that 401 was the only thing stopping a holder-concentration reading from
+    creating a real order. Execution is now behind the operator switch.
+    """
+    return _post_signal(
+        symbol, "pumpfun_wallet_intel",
+        type_=sig_type,
+        conviction=conviction,
+        direction=direction,
+        detail=detail,
+        agent_id=PUMPFUN_AGENT_ID,
+        execute=True,
+    )
 
 def add_wallet_to_watchlist(address, chain, label):
     try:

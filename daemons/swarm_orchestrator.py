@@ -30,6 +30,8 @@ from urllib.error import HTTPError, URLError
 
 import requests  # for DeepSeek (OpenAI-compatible)
 
+from vantage_signals import post_signal as _post_signal
+
 # ── Config ──────────────────────────────────────────────────
 DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE = "https://api.deepseek.com/v1"
@@ -37,6 +39,9 @@ DEEPSEEK_MODEL = "deepseek-chat"
 
 VANTAGE_KEY = os.environ.get("VANTAGE_KEY", "")
 VANTAGE_URL = os.environ.get("VANTAGE_URL", "http://localhost:8001")
+# Only consulted when auto-execution is switched on; the trading endpoint
+# requires it and there is no safe default for "whose order is this".
+SWARM_AGENT_ID = os.environ.get("SWARM_AGENT_ID") or None
 
 # Database paths on the VPS
 DB_PATH = "/opt/ares/Vantage/data/vantage.db"
@@ -483,34 +488,31 @@ def post_consensus_signal(token: Dict, consensus: Dict, proposals: List[Dict]) -
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
-    try:
-        data = json.dumps(payload).encode()
-        req = Request(
-            f"{VANTAGE_URL}/api/trading/signals/ingest",
-            data=data,
-            headers={
-                "X-Agent-Key": VANTAGE_KEY,
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        with urlopen(req, timeout=10) as resp:
-            result = json.loads(resp.read())
-            log.info(
-                f"Consensus signal posted: {token['symbol']} {consensus['direction']} "
-                f"(conviction={consensus['conviction']:.2f}, "
-                f"votes={consensus['vote_counts']}) → {result.get('status', 'unknown')}"
-            )
-            if result.get("order_created"):
-                log.info(f"  Auto-order created: #{result['order_created']} ({result.get('action', '?')})")
-            return True
-    except HTTPError as e:
-        err_body = e.read().decode()[:200] if e.fp else ""
-        log.error(f"Signal post failed HTTP {e.code}: {err_body}")
+    # The ingest endpoint takes system-tool auth, not the agent key this used
+    # to send: every consensus this swarm ever reached was discarded by a 401,
+    # which is also why the auto-order branch below has never fired. Because
+    # this is a directional signal that can create a real order, execution
+    # stays behind the operator switch rather than switching on with auth.
+    result = _post_signal(
+        token["symbol"], "swarm_consensus",
+        type_="swarm_consensus",
+        conviction=consensus["conviction"],
+        direction=consensus["direction"],
+        chain=token.get("chain", "solana"),
+        detail=payload["extra"],
+        agent_id=SWARM_AGENT_ID,
+        execute=True,
+    )
+    if result is None:
         return False
-    except Exception as e:
-        log.error(f"Signal post failed: {e}")
-        return False
+    log.info(
+        f"Consensus signal posted: {token['symbol']} {consensus['direction']} "
+        f"(conviction={consensus['conviction']:.2f}, "
+        f"votes={consensus['vote_counts']}) → {result.get('status', 'unknown')}"
+    )
+    if result.get("order_created"):
+        log.info(f"  Auto-order created: #{result['order_created']} ({result.get('action', '?')})")
+    return True
 
 
 # ── Main orchestration loop ──────────────────────────────────

@@ -19,6 +19,8 @@ import json, os, sys, time, logging, argparse
 import urllib.request
 from datetime import datetime, timezone
 
+from vantage_signals import post_signal as _post_signal
+
 VANTAGE_URL = "http://127.0.0.1:8001"
 VANTAGE_KEY = open(os.path.expanduser("~/.vantage_key")).read().strip()
 
@@ -148,8 +150,13 @@ def technician_agent(context: dict) -> dict:
     conviction = 0
     reasoning = []
 
-    buy_signals = [s for s in signals if s.get("conviction", 0) >= 3 and s.get("type") in ("trending", "alpha")]
-    sell_signals = [s for s in signals if s.get("conviction", 0) >= 3 and s.get("type") == "arbitrage"]
+    # Pool conviction is 0-1 platform-wide (and the ingest endpoints now reject
+    # anything outside it). This filter read `>= 3`, a threshold from a 0-5
+    # era, so no signal could ever satisfy it and the technician silently
+    # returned HOLD forever. 0.6 is the same relative bar 3-out-of-5 was.
+    STRONG = 0.6
+    buy_signals = [s for s in signals if s.get("conviction", 0) >= STRONG and s.get("type") in ("trending", "alpha")]
+    sell_signals = [s for s in signals if s.get("conviction", 0) >= STRONG and s.get("type") == "arbitrage"]
 
     if len(buy_signals) >= 3:
         direction = "BUY"
@@ -278,17 +285,21 @@ def run_debate():
 
         # Also post to feed for visibility
         try:
-            direction_emoji = "🟢" if signal["direction"] == "BUY" else "🔴"
+            # This is a feed broadcast, and it was addressed to
+            # /api/trading/signals/ingest -- the order-creating endpoint, which
+            # has no title/content/tags fields and never returns the
+            # broadcast_id logged below. The real surface is publish/feed.
             feed_payload = json.dumps({
+                "kind": "text",
                 "title": f"🤖 Agent Debate: {signal['direction']} ({signal['conviction']:.1%} conviction)",
-                "content": f"**3-agent debate** result: **{signal['direction']}** (conviction: {signal['conviction']:.1%}). "
+                "post_content": f"**3-agent debate** result: **{signal['direction']}** (conviction: {signal['conviction']:.1%}). "
                            f"Analyst: {analyst['direction']} ({analyst['conviction']:.0%}) | "
                            f"Technician: {technician['direction']} ({technician['conviction']:.0%}) | "
                            f"Risk: {', '.join(risk['adjustments'][:1])}",
                 "tags": ["signal", "agent_debate", signal["direction"].lower()],
             }).encode()
             req2 = urllib.request.Request(
-                f"{VANTAGE_URL}/api/trading/signals/ingest",
+                f"{VANTAGE_URL}/api/publish/feed",
                 data=feed_payload,
                 headers={"Content-Type": "application/json", "X-Agent-Key": VANTAGE_KEY},
             )
@@ -297,25 +308,16 @@ def run_debate():
         except Exception as e:
             log.debug(f"Feed post skipped: {e}")
 
-        # Also post to signals pool for Trading dashboard
-        try:
-            sig_payload = json.dumps({
-                "symbol": signal["symbol"].split("/")[0],
-                "source": "trading_agents",
-                "type": "debate",
-                "conviction": signal["conviction"],
-                "direction": signal["direction"],
-                "detail": f"analyst={analyst['direction']} tech={technician['direction']} risk={risk['direction']}",
-            }).encode()
-            req3 = urllib.request.Request(
-                f"{VANTAGE_URL}/api/intel/signals/ingest",
-                data=sig_payload,
-                headers={"Content-Type": "application/json", "X-Agent-Key": VANTAGE_KEY},
-            )
-            with urllib.request.urlopen(req3, timeout=5) as resp3:
-                pass
-        except Exception:
-            pass
+        # Also post to signals pool for Trading dashboard. The ingest endpoint
+        # takes system-tool auth, not the agent key this sent inside a bare
+        # `except: pass` -- so the dashboard never saw a debate result.
+        _post_signal(
+            signal["symbol"].split("/")[0], "trading_agents",
+            type_="debate",
+            conviction=signal["conviction"],
+            direction=signal["direction"],
+            detail=f"analyst={analyst['direction']} tech={technician['direction']} risk={risk['direction']}",
+        )
     else:
         log.error(f"❌ Post failed: {result['error']}")
 

@@ -1,18 +1,32 @@
 #!/usr/bin/env python3
-"""Bridge: Freqtrade → Vantage trading signals"""
-import os, json, sqlite3, urllib.request, time
+"""Bridge: Freqtrade → Vantage signals.
+
+Publishes recently *closed* freqtrade trades. Note what that means: this is a
+record of what already happened, not a prediction. The original version
+derived direction from realised PnL ("it made money, so BUY") and scored
+conviction as `min(abs(profit) * 5, 7.0)` -- a 0-7 scale against a platform
+contract of 0-1, posted to the order-creating endpoint with an agent key.
+
+The agent key 401'd, which is the only reason this never traded: a 14% winning
+trade scored 0.7 on the real scale and would have auto-created an order on
+every cycle, in the direction of a position freqtrade had already closed.
+
+Conviction is now a true proportion of the observed range, and the report goes
+to the intel pool -- a finished trade is an observation, so it is never routed
+to the executing endpoint at all.
+"""
+import os, sqlite3, time
 from datetime import datetime, timezone
 
-VANTAGE_URL = os.environ.get("VANTAGE_URL", "http://localhost:8001")
-VANTAGE_KEY = os.environ.get("VANTAGE_KEY", "")
-FREQ_DB = "/opt/ares/freqtrade/tradesv3.dryrun.sqlite"
+from vantage_signals import post_signal
+
+FREQ_DB = os.environ.get("FREQ_DB", "/opt/ares/freqtrade/tradesv3.dryrun.sqlite")
 INTERVAL = int(os.environ.get("FREQ_BRIDGE_INTERVAL", "300"))
 
-def vantage_post(endpoint, data):
-    req = urllib.request.Request(f"{VANTAGE_URL}{endpoint}",
-        data=json.dumps(data).encode(),
-        headers={"Content-Type": "application/json", "X-Agent-Key": VANTAGE_KEY, "User-Agent": "curl/8.0"})
-    return json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
+# Freqtrade profit is a fraction (0.14 = +14%). Treating a 20% move as the top
+# of the range keeps a typical win in the middle of the 0-1 band instead of
+# pinning it at maximum confidence.
+PROFIT_FULL_SCALE = float(os.environ.get("FREQ_PROFIT_FULL_SCALE", "0.20"))
 
 def get_recent_trades(since_min: int = 5):
     """Get recent closed trades from freqtrade DB."""
@@ -31,15 +45,14 @@ def cycle():
     for pair, open_r, close_r, profit, amt, open_d, close_d in trades:
         symbol = pair.split("/")[0] if "/" in pair else pair[:8]
         direction = "BUY" if profit > 0 else "SELL"
-        # Post to trading signals
-        vantage_post("/api/trading/signals/ingest", {
-            "symbol": symbol,
-            "direction": direction,
-            "conviction": min(abs(profit) * 5, 7.0),
-            "source": "freqtrade",
-            "chain": "multi",
-            "detail": f"PnL:{profit*100:.1f}% | Amt:{amt} | Entry:{open_r} Exit:{close_r}"
-        })
+        post_signal(
+            symbol, "freqtrade",
+            type_="closed_trade",
+            conviction=abs(profit), scale=PROFIT_FULL_SCALE,
+            direction=direction,
+            chain="multi",
+            detail=f"PnL:{profit*100:.1f}% | Amt:{amt} | Entry:{open_r} Exit:{close_r}",
+        )
         count += 1
     if count:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Freqtrade: {count} trades ingested")

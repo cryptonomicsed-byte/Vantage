@@ -21,6 +21,8 @@ from typing import Optional
 import subprocess
 import urllib.request
 
+from vantage_signals import post_signal as _post_signal
+
 # ── Config ──────────────────────────────────────────────────────────────
 
 VANTAGE_URL = "http://127.0.0.1:8001"
@@ -85,18 +87,14 @@ def scan_diff_content(content: str, filename: str) -> list[dict]:
 
 
 def post_vantage_signal(symbol, source, stype, conviction, detail=""):
-    """Post to Vantage signals pool."""
-    payload = json.dumps({
-        "symbol": symbol, "source": source, "type": stype,
-        "conviction": conviction, "direction": "SELL", "detail": detail,
-    }).encode()
-    try:
-        req = urllib.request.Request(
-            f"{VANTAGE_URL}/api/intel/signals/ingest",
-            data=payload, headers={"Content-Type": "application/json", "X-Agent-Key": VANTAGE_KEY})
-        urllib.request.urlopen(req, timeout=5)
-    except:
-        pass
+    """Post to Vantage signals pool via the shared client, for system-tool auth.
+
+    This used to post X-Agent-Key, which the ingest endpoint rejects, inside a
+    bare `except: pass` -- so every signal this daemon produced was discarded
+    by a 401 that nothing recorded.
+    """
+    return _post_signal(symbol, source, type_=stype, conviction=conviction,
+                        direction="SELL", detail=detail)
 
 
 def post_gitea_comment(owner: str, repo: str, issue_index: int, body: str):
