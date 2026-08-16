@@ -16,6 +16,25 @@ from backend.crypto_utils import encrypt_key_for_agent
 from backend.db import get_db
 
 
+@pytest.fixture(autouse=True)
+def pinned_quote(monkeypatch):
+    """Pin the live SOL quote for every test in this module.
+
+    These tests are about RPC provider fallback, but they post `price: 150.0`
+    on the wrapped-SOL mint, and price resolution reaches Pyth/CoinGecko over
+    the real network. Once that mint resolves to a price at all, a hardcoded
+    150.0 against a real SOL near $74 is a ~100% deviation and the order is
+    (correctly) refused -- so the test would pass or fail depending on the
+    market rather than on the behaviour it names.
+    """
+    from backend.routers import trading
+
+    async def fake_fetch_quote(symbol):
+        return 150.0
+
+    monkeypatch.setattr(trading, "_fetch_quote", fake_fetch_quote)
+
+
 def _h(agent):
     return {"X-Agent-Key": agent["api_key"]}
 

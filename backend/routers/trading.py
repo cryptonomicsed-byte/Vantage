@@ -481,6 +481,40 @@ async def _resolve_order_notional_usd(db, symbol: str, quantity: float, price: O
     return quantity * p
 
 
+# A limit price this far from the live quote is treated as a mistake rather
+# than an intention. 0.5 is deliberately loose: it is meant to catch a fat
+# finger, a mis-parsed decimal or a stale/manipulated feed, not to second-guess
+# a trader taking a genuinely aggressive limit.
+_MAX_PRICE_DEVIATION = 0.5
+
+
+async def _enforce_price_sanity(symbol: str, price: Optional[float]) -> None:
+    """Reject a limit price wildly detached from the market.
+
+    Without this, the notional check alone is satisfiable by lying about the
+    price: quantity * price is computed from the caller's own limit when one is
+    given, so a deliberately tiny price makes any size look small enough to
+    pass. It is also the backstop for a bad quote -- if a feed returns a wrong
+    number, an order priced against it should not silently execute.
+
+    Fails OPEN when no live quote is available, because the notional check
+    immediately below already fails CLOSED in exactly that case. Duplicating the
+    rejection here would only make the error message worse.
+    """
+    if price is None or price <= 0:
+        return
+    market = await _fetch_quote(symbol)
+    if market is None or market <= 0:
+        return
+    deviation = abs(price - market) / market
+    if deviation > _MAX_PRICE_DEVIATION:
+        raise RiskLimitExceeded(
+            f"limit price ${price:,.6f} is {deviation * 100:.0f}% away from the live "
+            f"{symbol} price of ${market:,.6f} (max {_MAX_PRICE_DEVIATION * 100:.0f}%) -- "
+            "check the price and units, or place a market order"
+        )
+
+
 async def _enforce_risk_limits(
     db, agent_id: int, symbol: str, quantity: float, price: Optional[float],
     strategy_id: Optional[int], chain: str,
@@ -514,12 +548,15 @@ async def _enforce_risk_limits(
         max_position_usd = _FALLBACK_MAX_POSITION_USD
         max_concurrent = _FALLBACK_MAX_CONCURRENT
 
+    await _enforce_price_sanity(symbol, price)
+
     if max_position_usd > 0:
         notional = await _resolve_order_notional_usd(db, symbol, quantity, price)
         if notional is None:
             raise RiskLimitExceeded(
-                "cannot verify order notional against risk limit (no price/quote available) -- "
-                "provide a limit price or try again once a live quote is available"
+                f"cannot verify order notional for {symbol} against risk limit "
+                "(no price/quote available) -- provide a limit price or try again "
+                "once a live quote is available"
             )
         if notional > max_position_usd:
             raise RiskLimitExceeded(
@@ -760,23 +797,13 @@ async def add_journal(order_id: int, data: JournalCreate, agent: dict = Depends(
 # ── Strategies ──────────────────────────────────────────────
 
 
-# ── Live Wallet Feed ─────────────────────────────────────────
-
-async def create_strategy(data: StrategyCreate, agent: dict = Depends(get_agent)):
-    async with get_db() as db:
-        cur = await db.execute(
-            """INSERT INTO trading_strategies 
-               (agent_id, name, description, strategy_type, config, target_chain, target_symbols,
-                max_position_size_usd, max_concurrent_trades, risk_per_trade_pct,
-                stop_loss_pct, take_profit_pct)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (agent["id"], data.name, data.description, data.strategy_type,
-             json.dumps(data.config), data.target_chain, data.target_symbols,
-             data.max_position_size_usd, data.max_concurrent_trades, data.risk_per_trade_pct,
-             data.stop_loss_pct, data.take_profit_pct)
-        )
-        await db.commit()
-        return {"id": cur.lastrowid, "name": data.name}
+# A second, undecorated `async def create_strategy` used to sit here, under a
+# "Live Wallet Feed" header it had nothing to do with. It was dead three times
+# over: no @router decorator so it served no route; it shadowed the real
+# handler's module-level name (line ~198), so `trading.create_strategy` resolved
+# to this one; and its INSERT had 12 columns, 13 placeholders and 12 values, so
+# calling it would have raised. Removed rather than repaired -- the decorated
+# handler above is the real one, and it requires the wallet_id link this lacked.
 
 @router.get("/strategies")
 async def list_strategies(agent: dict = Depends(get_agent)):
@@ -1696,26 +1723,48 @@ async def get_performance(agent: dict = Depends(get_agent)):
             (agent["id"],)
         )).fetchone()
         
-        # Win rate from orders
         total = await (await db.execute(
             "SELECT COUNT(*) as c FROM trading_orders WHERE agent_id=? AND status IN ('filled','submitted')", (agent["id"],)
         )).fetchone()
-        
-        winning = await (await db.execute(
-            "SELECT COUNT(*) as c FROM trading_orders o JOIN trading_trade_journal j ON j.order_id=o.id WHERE o.agent_id=? AND j.conviction_score > 0.6",
+
+        # What "winning_trades" used to be: a COUNT over trading_orders JOIN
+        # trading_trade_journal WHERE conviction_score > 0.6. Two things wrong
+        # with that, and the second is why the dashboard read 100%:
+        #
+        #   1. conviction_score is the *pre-trade* confidence written when the
+        #      order was reasoned about. It says nothing about whether the trade
+        #      made money, so a confident loser counted as a win.
+        #   2. It counted journal ROWS, not orders. An order with five journal
+        #      entries counted five times, which is how winning_trades (69)
+        #      exceeded total_trades (28). A min(100.0, ...) cap then clamped
+        #      the impossible ratio to exactly 100% -- hiding the bug behind a
+        #      plausible-looking number rather than surfacing it.
+        #
+        # A real win rate needs realized PnL per trade, and no such column
+        # exists: trading_orders has no pnl field, trading_trade_journal has no
+        # pnl field, and trading_pnl_snapshots is portfolio-level daily totals
+        # that cannot be attributed back to an individual order. So this reports
+        # null rather than a number it cannot compute. (backtest/metrics.py
+        # does this properly, because a backtest has per-trade PnL to work from.)
+        high_conviction = await (await db.execute(
+            "SELECT COUNT(DISTINCT o.id) as c FROM trading_orders o "
+            "JOIN trading_trade_journal j ON j.order_id=o.id "
+            "WHERE o.agent_id=? AND o.status IN ('filled','submitted') AND j.conviction_score > 0.6",
             (agent["id"],)
         )).fetchone()
-        
-        # Calculate win rate and cap at 100% (can't exceed 100% win rate)
-        win_rate = 0.0
-        if total and total[0]:
-            win_rate = min(100.0, round(winning[0] / total[0] * 100, 1))
 
         return {
             "portfolio_value": dict(latest) if latest else None,
             "total_trades": total[0] if total else 0,
-            "winning_trades": winning[0] if winning else 0,
-            "win_rate": win_rate,
+            # Named for what it actually measures. Deliberately not
+            # "winning_trades" -- that name is what made a conviction score
+            # readable as a profit result.
+            "high_conviction_trades": high_conviction[0] if high_conviction else 0,
+            "win_rate": None,
+            "win_rate_unavailable": (
+                "realized PnL is not recorded per trade, so a win rate cannot be "
+                "computed; trading_pnl_snapshots is portfolio-level only"
+            ),
         }
 
 @router.get("/performance/daily")
