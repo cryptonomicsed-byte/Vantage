@@ -51,6 +51,17 @@ EXCLUDED_TAGS = {"admin", "telegram"}
 DESTRUCTIVE_METHODS = {"DELETE"}
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
+# Routes whose damage potential is not visible from the HTTP method. Workspace
+# exec is the clearest case: it is a POST, but `rm -rf` through it is every bit
+# as destructive as a DELETE, so keying the gate purely on method would let the
+# single most powerful tool in the catalog past the confirmation the weakest
+# ones need. Matched as path globs.
+DESTRUCTIVE_PATHS = (
+    "/api/workspace/exec",
+    "/api/workspace/write",
+    "/api/workspace/remove",
+)
+
 # Gemini function names must be [a-zA-Z0-9_.-]; Vantage operation ids are not.
 _NAME_SAFE = re.compile(r"[^a-zA-Z0-9_.-]")
 
@@ -129,6 +140,13 @@ def select_tools(app, allowlist: Optional[list[str]]) -> list[dict]:
     if _matches(COMPOSIO_TOOL, "/api/composio/execute", ["composio"], allowlist):
         tools.append(_composio_declaration())
     return tools
+
+
+def is_destructive(tool: dict) -> bool:
+    """Whether a tool needs the session's explicit destructive opt-in."""
+    if tool["method"] in DESTRUCTIVE_METHODS:
+        return True
+    return any(fnmatch.fnmatch(tool["path"], pattern) for pattern in DESTRUCTIVE_PATHS)
 
 
 def _composio_declaration() -> dict:
@@ -216,13 +234,13 @@ class ToolDispatcher:
                 "available": self.tool_names[:25],
             }
 
-        if tool["method"] in DESTRUCTIVE_METHODS and not self.allow_destructive:
+        if is_destructive(tool) and not self.allow_destructive:
             return {
                 "status": "confirmation_required",
                 "error": (
-                    f"{name} deletes data and this session did not enable destructive "
-                    "tools. Ask the user to confirm and start a session with "
-                    "destructive tools enabled."
+                    f"{name} can destroy data and this session did not enable "
+                    "destructive tools. Ask the user to confirm and start a session "
+                    "with destructive tools enabled."
                 ),
             }
 

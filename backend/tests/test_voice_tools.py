@@ -121,6 +121,29 @@ async def test_destructive_tools_need_the_session_to_opt_in(app, client, fresh_a
     assert result["status"] == "confirmation_required"
 
 
+async def test_workspace_exec_counts_as_destructive_despite_being_a_post(app, client, fresh_agent):
+    """`rm -rf` through exec is as destructive as any DELETE, so a method-only
+    gate would let the most powerful tool in the catalog past."""
+    agent = await fresh_agent()
+    dispatcher, _ = await _dispatcher(app, client, agent, ["tag:workspace"])
+
+    name = next(n for n, t in dispatcher._by_name.items() if t["path"] == "/api/workspace/exec")
+    result = await dispatcher.execute(name, {"command": "rm -rf /"})
+    assert result["status"] == "confirmation_required"
+
+
+async def test_reading_the_workspace_is_not_gated(app, client, fresh_agent):
+    """Only the damaging half needs opt-in; listing files should just work."""
+    agent = await fresh_agent()
+    dispatcher, _ = await _dispatcher(app, client, agent, ["tag:workspace"])
+
+    name = next(n for n, t in dispatcher._by_name.items() if t["path"] == "/api/workspace/list")
+    result = await dispatcher.execute(name, {})
+    # 503 (no sandbox configured in tests) rather than a confirmation refusal.
+    assert result["status"] == "error"
+    assert result.get("http_status") == 503
+
+
 async def test_a_missing_path_parameter_is_reported_not_guessed(app, client, fresh_agent):
     agent = await fresh_agent()
     dispatcher, _ = await _dispatcher(app, client, agent, ["*"])

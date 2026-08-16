@@ -33,6 +33,12 @@ const TOOL_PRESETS: { id: string; label: string; patterns: string[] | undefined;
     patterns: ['tag:memory_vault', 'tag:copilot', 'composio_execute', 'tag:composio'],
     note: 'Adds connected third-party apps (Gmail, GitHub, Slack…).',
   },
+  {
+    id: 'engineering',
+    label: 'Engineering (runs code)',
+    patterns: ['tag:workspace', 'tag:code', 'tag:memory_vault', 'tag:copilot'],
+    note: 'Clone repos, run commands and edit files in a sandbox container.',
+  },
   { id: 'all', label: 'Everything', patterns: ['*'], note: 'All non-admin Vantage tools.' },
 ]
 
