@@ -14,6 +14,7 @@ else -- same shape as the vault_connectors token, and the replacement for the
 voice app's shared owner PIN.
 """
 import hashlib
+import hmac
 import json
 import logging
 import secrets
@@ -41,6 +42,22 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def derive_exec_token(ws_token: str) -> str:
+    """The credential the relay uses to call tools as the agent.
+
+    Derived from the ws token rather than stored or handed out, so it never
+    leaves the server: the relay can recompute it because it holds the raw ws
+    token for the life of the connection, but a leaked ws URL (query params end
+    up in browser history and access logs) does not confer tool execution.
+
+    Keyed on SEED_MASTER_KEY with its own info label, so this can't collide
+    with anything else derived from that key.
+    """
+    from .config import settings
+    secret = (getattr(settings, "SEED_MASTER_KEY", "") or "vantage-voice-exec").encode()
+    return "vexec_" + hmac.new(secret, b"voice-exec|" + ws_token.encode(), hashlib.sha256).hexdigest()
+
+
 def _mint_token() -> tuple[str, str]:
     raw = TOKEN_PREFIX + secrets.token_hex(24)
     return raw, _hash_token(raw)
@@ -54,6 +71,7 @@ def _public(row: aiosqlite.Row | dict) -> dict:
     """Session row minus its secret. ws_token_hash never leaves this module."""
     d = dict(row)
     d.pop("ws_token_hash", None)
+    d.pop("exec_token_hash", None)
     for key in ("tools_allowlist_json", "metadata_json"):
         if key in d:
             try:
@@ -89,18 +107,19 @@ async def create_session(
 
     session_id = f"vsess_{uuid.uuid4().hex}"
     raw_token, token_hash = _mint_token()
+    exec_hash = _hash_token(derive_exec_token(raw_token))
 
     async with get_db() as db:
         await db.execute(
             """INSERT INTO voice_sessions
                (id, agent_id, engine, framework, persona, voice, tools_allowlist_json,
-                status, ttl_seconds, ws_token_hash, metadata_json)
-               VALUES (?,?,?,?,?,?,?,'active',?,?,?)""",
+                status, ttl_seconds, ws_token_hash, exec_token_hash, metadata_json)
+               VALUES (?,?,?,?,?,?,?,'active',?,?,?,?)""",
             (
                 session_id, agent_id, engine, framework or "native",
                 _clip(persona, 100), _clip(voice, 100),
                 json.dumps(tools) if tools else None,
-                ttl_seconds, token_hash,
+                ttl_seconds, token_hash, exec_hash,
                 json.dumps(metadata or {}),
             ),
         )
@@ -155,7 +174,7 @@ async def stop_session(session_id: str, agent_id: Optional[int] = None, reason: 
         await db.execute(
             """UPDATE voice_sessions
                SET status='stopped', stopped_at=datetime('now'), stop_reason=?,
-                   ws_token_hash=NULL, last_activity_at=datetime('now')
+                   ws_token_hash=NULL, exec_token_hash=NULL, last_activity_at=datetime('now')
                WHERE id=?""",
             (_clip(reason, 200), session_id),
         )
@@ -183,6 +202,26 @@ async def resolve_ws_token(token: str) -> Optional[dict]:
     return _public(row) if row else None
 
 
+async def resolve_exec_token(token: str) -> Optional[dict]:
+    """Map a server-side exec token back to its session, or None.
+
+    Same liveness rules as the ws token: unknown, burned, stopped or
+    idle-expired all resolve to None, so a session that has ended cannot keep
+    running tools.
+    """
+    if not token or not token.startswith("vexec_"):
+        return None
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        row = await (await db.execute(
+            """SELECT * FROM voice_sessions
+               WHERE exec_token_hash=? AND status='active'
+                 AND datetime(last_activity_at, '+' || ttl_seconds || ' seconds') > datetime('now')""",
+            (_hash_token(token),),
+        )).fetchone()
+    return _public(row) if row else None
+
+
 async def touch(session_id: str) -> None:
     """Push the idle deadline out. Called on every accepted write so an
     actively used session doesn't expire mid-conversation."""
@@ -201,7 +240,7 @@ async def expire_idle_sessions() -> int:
         cur = await db.execute(
             """UPDATE voice_sessions
                SET status='stopped', stopped_at=datetime('now'), stop_reason='idle_timeout',
-                   ws_token_hash=NULL
+                   ws_token_hash=NULL, exec_token_hash=NULL
                WHERE status='active'
                  AND datetime(last_activity_at, '+' || ttl_seconds || ' seconds') <= datetime('now')"""
         )

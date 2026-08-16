@@ -23,6 +23,7 @@ export type VoiceClientEvents = {
   onTranscript?: (entry: TranscriptEntry) => void
   onAudio?: (base64Pcm: string) => void
   onToolCall?: (toolName: string, args: unknown) => void
+  onToolResult?: (toolName: string, status: string, durationMs: number) => void
   onInterrupted?: () => void
 }
 
@@ -45,6 +46,12 @@ export type OpenOptions = {
   voice?: string
   persona?: string
   ttlSeconds?: number
+  /**
+   * Tool patterns the model may call, e.g. ["tag:memory_vault"] or
+   * ["/api/agents/*\/vault/*"]. Omitted means no tools at all — the safe
+   * default, matching the backend.
+   */
+  tools?: string[]
 }
 
 export class VoiceSessionClient {
@@ -90,6 +97,7 @@ export class VoiceSessionClient {
           voice: options.voice ?? '',
           persona: options.persona ?? '',
           ttl_seconds: options.ttlSeconds ?? 1800,
+          tools: options.tools ?? null,
         }),
       })
       if (!res.ok) {
@@ -155,6 +163,9 @@ export class VoiceSessionClient {
         break
       case 'tool_call':
         this.events.onToolCall?.(msg.toolName, msg.toolArgs)
+        break
+      case 'tool_result':
+        this.events.onToolResult?.(msg.toolName, msg.status, msg.durationMs)
         break
       case 'interrupted':
         this.events.onInterrupted?.()

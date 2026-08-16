@@ -10,6 +10,32 @@ import {
 // connection all live on this origin, so there is no second deployment to keep
 // in sync and no cross-origin hop for the audio.
 
+// Presets rather than a free-text pattern box: the allowlist decides how much
+// of the agent's authority a spoken sentence can reach, so it should be a
+// deliberate choice from a short list, not something typed in a hurry.
+const TOOL_PRESETS: { id: string; label: string; patterns: string[] | undefined; note: string }[] = [
+  { id: 'none', label: 'No tools', patterns: undefined, note: 'Conversation only.' },
+  {
+    id: 'memory',
+    label: 'Memory & copilot',
+    patterns: ['tag:memory_vault', 'tag:copilot'],
+    note: 'Read and write the vault, ask the copilot.',
+  },
+  {
+    id: 'readonly',
+    label: 'Read-only platform',
+    patterns: ['tag:agents', 'tag:analytics', 'tag:memory_vault', 'tag:copilot'],
+    note: 'Look things up across the platform.',
+  },
+  {
+    id: 'composio',
+    label: 'Memory + Composio',
+    patterns: ['tag:memory_vault', 'tag:copilot', 'composio_execute', 'tag:composio'],
+    note: 'Adds connected third-party apps (Gmail, GitHub, Slack…).',
+  },
+  { id: 'all', label: 'Everything', patterns: ['*'], note: 'All non-admin Vantage tools.' },
+]
+
 const STATUS_LABEL: Record<VoiceStatus, string> = {
   idle: 'Not connected',
   opening: 'Connecting…',
@@ -30,10 +56,13 @@ export default function VoiceSession() {
   const [status, setStatus] = useState<VoiceStatus>('idle')
   const [detail, setDetail] = useState('')
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([])
-  const [toolCalls, setToolCalls] = useState<{ name: string; at: number }[]>([])
+  const [toolCalls, setToolCalls] = useState<
+    { name: string; at: number; status?: string; durationMs?: number }[]
+  >([])
   const [level, setLevel] = useState(0)
   const [typed, setTyped] = useState('')
   const [sessionId, setSessionId] = useState<string | null>(null)
+  const [presetId, setPresetId] = useState('none')
 
   const clientRef = useRef<VoiceSessionClient | null>(null)
   const recorderRef = useRef<MicRecorder | null>(null)
@@ -75,11 +104,23 @@ export default function VoiceSession() {
       onAudio: (chunk) => player.play(chunk),
       onInterrupted: () => player.interrupt(),
       onToolCall: (name) => setToolCalls((prev) => [...prev, { name, at: Date.now() }]),
+      onToolResult: (name, toolStatus, durationMs) =>
+        setToolCalls((prev) => {
+          // Attach the outcome to the most recent unresolved call of that name.
+          const next = [...prev]
+          for (let i = next.length - 1; i >= 0; i--) {
+            if (next[i].name === name && !next[i].status) {
+              next[i] = { ...next[i], status: toolStatus, durationMs }
+              break
+            }
+          }
+          return next
+        }),
     })
     clientRef.current = client
 
     try {
-      await client.open()
+      await client.open({ tools: TOOL_PRESETS.find((p) => p.id === presetId)?.patterns })
       setSessionId(client.getSessionId())
     } catch (err) {
       setDetail(err instanceof Error ? err.message : String(err))
@@ -105,7 +146,7 @@ export default function VoiceSession() {
       )
       teardown()
     }
-  }, [teardown])
+  }, [teardown, presetId])
 
   const stop = useCallback(() => {
     teardown()
@@ -172,6 +213,27 @@ export default function VoiceSession() {
           {detail}
         </div>
       )}
+
+      <div style={{ marginBottom: 12 }}>
+        <label style={{ fontSize: 12, color: '#374151', display: 'block', marginBottom: 4 }}>
+          Tool access
+        </label>
+        <select
+          value={presetId}
+          onChange={(e) => setPresetId(e.target.value)}
+          disabled={live}
+          style={{ padding: '6px 8px', borderRadius: 8, border: '1px solid #d1d5db', fontSize: 13 }}
+        >
+          {TOOL_PRESETS.map((preset) => (
+            <option key={preset.id} value={preset.id}>
+              {preset.label}
+            </option>
+          ))}
+        </select>
+        <span style={{ fontSize: 12, color: '#6b7280', marginLeft: 8 }}>
+          {TOOL_PRESETS.find((p) => p.id === presetId)?.note}
+        </span>
+      </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
         {!live ? (
@@ -251,11 +313,14 @@ export default function VoiceSession() {
 
       {toolCalls.length > 0 && (
         <div style={{ marginTop: 16, fontSize: 12, color: '#6b7280' }}>
-          <strong style={{ color: '#374151' }}>Tools requested</strong>
+          <strong style={{ color: '#374151' }}>Tool calls</strong>
           <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
             {toolCalls.map((call, i) => (
               <li key={`${call.name}-${i}`}>
-                <code>{call.name}</code> — recorded, not executed
+                <code>{call.name}</code>
+                {call.status
+                  ? ` — ${call.status}${call.durationMs != null ? ` (${call.durationMs}ms)` : ''}`
+                  : ' — running…'}
               </li>
             ))}
           </ul>

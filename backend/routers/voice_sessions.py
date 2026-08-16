@@ -19,12 +19,13 @@ import asyncio
 import base64
 import json
 import logging
+import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
-from .. import voice_live, voice_session_store as store
+from .. import voice_live, voice_session_store as store, voice_tools
 from ..deps import get_agent, get_voice_session
 
 logger = logging.getLogger(__name__)
@@ -274,6 +275,17 @@ async def voice_session_relay(ws: WebSocket, session_id: str):
     agent_id = session["agent_id"]
     await ws.accept()
 
+    # Tools the model may call, resolved from this session's allowlist. No
+    # allowlist means no tools -- see voice_tools for why the safe state is the
+    # default here.
+    selected_tools = voice_tools.select_tools(ws.app, session.get("tools_allowlist"))
+    dispatcher = voice_tools.ToolDispatcher(
+        ws.app,
+        exec_token=store.derive_exec_token(token),
+        tools=selected_tools,
+        allow_destructive=bool((session.get("metadata") or {}).get("allow_destructive_tools")),
+    )
+
     engine = None
     try:
         engine = await voice_live.create_engine(
@@ -281,6 +293,7 @@ async def voice_session_relay(ws: WebSocket, session_id: str):
             api_key=voice_live.resolve_gemini_api_key(await _agent_row(agent_id)),
             voice=session.get("voice") or "",
             system_instruction=session.get("persona") or "",
+            tools=voice_tools.to_gemini_declarations(selected_tools),
         )
         await engine.start()
     except Exception as exc:
@@ -334,7 +347,7 @@ async def voice_session_relay(ws: WebSocket, session_id: str):
             elif event.kind == voice_live.TURN_COMPLETE:
                 await flush_turn()
             elif event.kind == voice_live.TOOL_CALL:
-                await _handle_tool_call(ws, engine, session_id, agent_id, event)
+                await _handle_tool_call(ws, engine, dispatcher, session_id, agent_id, event)
                 continue
 
             payload = event.to_client_message()
@@ -413,45 +426,53 @@ async def _agent_row(agent_id: int) -> dict:
     return dict(row) if row else {}
 
 
-async def _handle_tool_call(ws, engine, session_id: str, agent_id: int, event) -> None:
-    """Log the call, tell the browser, and decline to run it.
+async def _handle_tool_call(ws, engine, dispatcher, session_id: str, agent_id: int, event) -> None:
+    """Log the call, run it as the agent, and hand the result back to the model.
 
-    Executing Vantage tools straight from speech is deliberately NOT wired up
-    here. The model's tool arguments derive from whatever was said near the
-    microphone, so running them would let "ignore previous instructions, call
-    X" reach real endpoints with the agent's authority — the prompt-injection
-    risk the integration audit raises. The session schema already carries
-    tools_allowlist_json for when that is designed properly; until then the
-    call is recorded for the audit trail and refused explicitly, so the model
-    is told it did not run rather than being left to assume it did.
+    Recorded before it runs so a tool that hangs or crashes the session still
+    shows in the audit trail as attempted. Execution re-enters the app over
+    ASGI, so the call goes through the same auth, sentencing, rate-limit and
+    validation chain as any other caller -- speaking to the agent is not a way
+    around anything an HTTP client would face.
     """
+    source = "composio" if event.tool_name == voice_tools.COMPOSIO_TOOL else "vantage_api"
     call_id = None
     try:
         call_id = await store.record_tool_call(
-            session_id, agent_id, event.tool_name, "gemini_live", event.tool_args
+            session_id, agent_id, event.tool_name, source, event.tool_args
         )
     except Exception as exc:
         logger.warning("voice relay could not log tool call on %s: %s", session_id, exc)
 
     await _send(ws, {"type": "tool_call", "toolName": event.tool_name, "toolArgs": event.tool_args})
 
-    refusal = {
-        "status": "not_executed",
-        "reason": "Tool execution from voice is not enabled on this Vantage instance.",
-    }
+    started = time.monotonic()
+    result = await dispatcher.execute(event.tool_name, event.tool_args)
+    duration_ms = int((time.monotonic() - started) * 1000)
+
     try:
-        await engine.send_tool_result(event.tool_call_id, event.tool_name, refusal)
+        await engine.send_tool_result(event.tool_call_id, event.tool_name, result)
     except Exception as exc:
         logger.debug("voice relay could not return tool result on %s: %s", session_id, exc)
+
+    await _send(ws, {
+        "type": "tool_result",
+        "toolName": event.tool_name,
+        "status": result.get("status"),
+        "durationMs": duration_ms,
+    })
+
     if call_id:
         # Shielded for the same reason as the session cleanup: this pump is
         # cancelled on disconnect, and a tool call that was recorded as
         # dispatched but never resolved would leave the audit trail claiming it
         # is still in flight.
         try:
-            await asyncio.shield(
-                store.complete_tool_call(call_id, refusal, is_error=True, duration_ms=0)
-            )
+            await asyncio.shield(store.complete_tool_call(
+                call_id, result,
+                is_error=result.get("status") != "ok",
+                duration_ms=duration_ms,
+            ))
         except asyncio.CancelledError:
             pass
         except Exception as exc:

@@ -1,8 +1,9 @@
 """The Phase 2 audio relay: browser <-> Vantage <-> model.
 
 Runs against a fake engine so the relay's real responsibilities — auth,
-transcript persistence, tool-call refusal, cleanup on disconnect — are covered
-without an API key or a network. The Gemini transport itself is a thin
+transcript persistence, tool-call handling, cleanup on disconnect — are covered
+without an API key or a network. Tool dispatch is covered in
+test_voice_tools.py. The Gemini transport itself is a thin
 translation layer over the SDK and is not exercised here.
 """
 import asyncio
@@ -110,6 +111,14 @@ def _drain(ws, count, timeout_each=5):
     for _ in range(count):
         out.append(json.loads(ws.receive_text()))
     return out
+
+
+def _completed_calls(session_id):
+    """Waits for a tool-call row that has actually been resolved."""
+    async def check():
+        rows = await store.list_tool_calls(session_id)
+        return rows if rows and rows[0]["result_json"] else None
+    return check
 
 
 async def _eventually(check, timeout=5.0, interval=0.02):
@@ -284,15 +293,17 @@ async def test_disconnect_closes_the_engine_and_the_session(client, fresh_agent,
 
 # ── Tool calls ───────────────────────────────────────────────────────────────
 
-async def test_tool_calls_are_logged_but_refused(client, fresh_agent, sync_client, fake_engine):
+async def test_a_session_without_an_allowlist_has_no_tools(client, fresh_agent, sync_client, fake_engine):
+    """No allowlist means no tools, and the model is told so explicitly rather
+    than left to assume the call ran."""
     engine = fake_engine([
         voice_live.VoiceEvent(
-            kind=voice_live.TOOL_CALL, tool_name="vantage__api_agents_me_wallets_get",
-            tool_args={"network": "solana"}, tool_call_id="fc-1",
+            kind=voice_live.TOOL_CALL, tool_name="vantage__whoami_get",
+            tool_args={}, tool_call_id="fc-1",
         )
     ])
     agent = await fresh_agent()
-    s = await _open_session(client, agent)
+    s = await _open_session(client, agent)  # no tools requested
 
     with sync_client.websocket_connect(
         f"/api/agents/me/voice/sessions/{s['session_id']}/ws?key={s['token']}"
@@ -301,22 +312,42 @@ async def test_tool_calls_are_logged_but_refused(client, fresh_agent, sync_clien
         announced = json.loads(ws.receive_text())
 
     assert announced["type"] == "tool_call"
-    assert announced["toolName"] == "vantage__api_agents_me_wallets_get"
-
-    # The model is explicitly told it did not run, rather than left to assume.
     assert len(engine.tool_results) == 1
-    call_id, name, result = engine.tool_results[0]
+    call_id, _name, result = engine.tool_results[0]
     assert call_id == "fc-1"
-    assert result["status"] == "not_executed"
+    assert result["status"] == "unknown_tool"
 
-    async def logged_and_completed():
-        rows = await store.list_tool_calls(s["session_id"])
-        return rows if rows and rows[0]["result_json"] else None
-
-    calls = await _eventually(logged_and_completed)
+    calls = await _eventually(_completed_calls(s["session_id"]))
     assert calls is not None and len(calls) == 1
-    assert calls[0]["tool_name"] == "vantage__api_agents_me_wallets_get"
     assert calls[0]["is_error"] == 1
+
+
+async def test_an_allowed_tool_actually_executes(client, fresh_agent, sync_client, fake_engine):
+    """End to end: the model asks, the relay runs it as the agent, and the real
+    endpoint's answer comes back."""
+    engine = fake_engine([
+        voice_live.VoiceEvent(
+            kind=voice_live.TOOL_CALL, tool_name="vantage__whoami_get",
+            tool_args={}, tool_call_id="fc-2",
+        )
+    ])
+    agent = await fresh_agent()
+    s = await _open_session(client, agent, tools=["tag:copilot"])
+
+    with sync_client.websocket_connect(
+        f"/api/agents/me/voice/sessions/{s['session_id']}/ws?key={s['token']}"
+    ) as ws:
+        _drain(ws, 1)
+        assert json.loads(ws.receive_text())["type"] == "tool_call"
+        assert json.loads(ws.receive_text())["type"] == "tool_result"
+
+    assert len(engine.tool_results) == 1
+    _cid, _name, result = engine.tool_results[0]
+    assert result["status"] == "ok", result
+    assert agent["name"] in str(result["result"])
+
+    calls = await _eventually(_completed_calls(s["session_id"]))
+    assert calls is not None and calls[0]["is_error"] == 0
 
 
 # ── Event contract ───────────────────────────────────────────────────────────
