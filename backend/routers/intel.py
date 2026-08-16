@@ -382,7 +382,25 @@ async def get_wallet_trace(request: Request, chain: str, address: str, limit: in
 # keys. ──────────────────────────────────────────────────────────────────
 import sys as _sys
 _sys.path.insert(0, "/opt/ares")
-import api_key_pool as _akp
+try:
+    import api_key_pool as _akp
+except ImportError:  # pragma: no cover - depends on the deploy box, not the repo
+    # api_key_pool lives at /opt/ares on the VPS and is not part of this repo,
+    # so a fresh clone (and CI) has no such module. It used to be a hard
+    # module-level import, which meant `import backend.main` raised anywhere
+    # /opt/ares was absent -- taking down the whole app and collecting zero
+    # tests. Degrade to the no-key path the endpoint below already handles
+    # instead of failing at import time.
+    class _AbsentKeyPool:
+        @staticmethod
+        def get_key(*_args, **_kwargs):
+            return None
+
+        @staticmethod
+        def report_error(*_args, **_kwargs):
+            return None
+
+    _akp = _AbsentKeyPool()
 from backend import wallet_naming as _wn
 
 _SOL_MINT = "So1111111111111111111" "1111111111111111111112"  # wrapped SOL mint, split to avoid secret-scanner false positive

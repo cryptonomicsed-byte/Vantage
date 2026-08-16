@@ -14,6 +14,10 @@ os.environ.setdefault("VANTAGE_MEDIA_DIR", os.path.join(_TEST_ROOT, "media"))
 # (the intended behaviour the tests assert) rather than the 503 the app returns
 # when no admin key is configured at all. Must be >=32 chars (settings validator).
 os.environ.setdefault("VANTAGE_ADMIN_KEY", "test-admin-key-for-ci-0123456789abcdef")
+# Wallet seed encryption refuses to run without a master key (by design — it is
+# never allowed to fall back to a default), so anything touching agent
+# registration 500s without one. Also >=32 chars per the settings validator.
+os.environ.setdefault("VANTAGE_SEED_MASTER_KEY", "test-seed-master-key-for-ci-0123456789abcdef")
 
 import asyncio
 import pytest

@@ -1,14 +1,28 @@
 """Validates backend/nip44.py against the official nip44.vectors.json test
-vectors (the same file rust-nostr's own NIP-44 test suite uses) -- run
-manually, not part of CI (vectors file isn't vendored into the repo)."""
-import base64
-import json
-import sys
+vectors (the same file rust-nostr's own NIP-44 test suite uses).
 
+The vectors file isn't vendored into the repo, so under pytest this skips
+unless you point NIP44_VECTORS at a copy. Fetch it from
+https://github.com/paulmillr/nip44/blob/main/nip44.vectors.json and run:
+
+    NIP44_VECTORS=/path/to/nip44.vectors.json python -m pytest \\
+        backend/tests/test_nip44_vectors.py
+
+It used to `sys.path.insert("/tmp/Vantage/backend")` and `import nip44`,
+which resolved on exactly one long-gone machine; everywhere else it raised
+at import and, because pytest collects this file by name, took the entire
+suite's collection down with it.
+"""
+import json
+import os
+from pathlib import Path
+
+import pytest
 from coincurve import PrivateKey
 
-sys.path.insert(0, "/tmp/Vantage/backend")
-import nip44
+from backend import nip44
+
+_VECTORS_PATH = os.environ.get("NIP44_VECTORS", "")
 
 
 def pub_xonly(privkey_hex: str) -> str:
@@ -16,9 +30,45 @@ def pub_xonly(privkey_hex: str) -> str:
     return pk.public_key.format(compressed=True)[1:].hex()
 
 
+def _load_vectors() -> dict:
+    if not _VECTORS_PATH or not Path(_VECTORS_PATH).is_file():
+        pytest.skip("set NIP44_VECTORS to the nip44.vectors.json path to run these")
+    with open(_VECTORS_PATH) as f:
+        return json.load(f)["v2"]
+
+
+def test_conversation_keys_match_vectors():
+    vectors = _load_vectors()
+    for v in vectors["valid"]["get_conversation_key"]:
+        priv = PrivateKey(bytes.fromhex(v["sec1"]))
+        assert nip44.get_conversation_key(priv, v["pub2"]).hex() == v["conversation_key"], v.get("note", "")
+
+
+def test_padded_lengths_match_vectors():
+    vectors = _load_vectors()
+    for length, pad in vectors["valid"]["calc_padded_len"]:
+        assert nip44._calc_padded_len(length) == pad, f"calc_padded_len({length})"
+
+
+def test_encrypt_decrypt_round_trips_vectors():
+    vectors = _load_vectors()
+    for i, v in enumerate(vectors["valid"]["encrypt_decrypt"]):
+        priv1 = PrivateKey(bytes.fromhex(v["sec1"]))
+        conv_key = bytes.fromhex(v["conversation_key"])
+        assert nip44.get_conversation_key(priv1, pub_xonly(v["sec2"])) == conv_key, f"#{i} conversation key"
+        assert nip44.encrypt(v["plaintext"], conv_key, bytes.fromhex(v["nonce"])) == v["ciphertext"], f"#{i} encrypt"
+        assert nip44.decrypt(v["ciphertext"], conv_key) == v["plaintext"], f"#{i} decrypt"
+
+
+def test_invalid_ciphertexts_are_rejected():
+    vectors = _load_vectors()
+    for i, v in enumerate(vectors["invalid"]["decrypt"]):
+        with pytest.raises(nip44.Nip44Error):
+            nip44.decrypt(v["ciphertext"], bytes.fromhex(v["conversation_key"]))
+
+
 def main():
-    with open("/private/tmp/claude-501/-Users-bino/bd4320ab-4ed2-45e1-a48e-8c37302f7f3d/scratchpad/nip44.vectors.json") as f:
-        vectors = json.load(f)["v2"]
+    vectors = json.load(open(_VECTORS_PATH))["v2"]
 
     failures = 0
 

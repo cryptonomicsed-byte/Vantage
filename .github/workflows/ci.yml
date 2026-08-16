@@ -17,7 +17,12 @@ jobs:
         python-version: '3.11'
     - name: Install dependencies
       run: |
-        pip install .[dev]
+        # [trading] is included because backend/routers/wallets.py imports
+        # base58/solders at module scope, so `import backend.main` -- and
+        # therefore the whole suite -- needs them present even though live
+        # trading itself stays off. (trading.py imports base58 lazily; wallets.py
+        # is the outlier. Making it lazy too would let this drop back to [dev].)
+        pip install .[dev,trading]
     - name: Run tests
       run: |
         python3 -m pytest

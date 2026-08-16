@@ -24,7 +24,6 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 
 sys.path.insert(0, "/opt/ares")
-import social_tracker  # noqa: E402  (reuses _extract_mentions/post_signal/init_db)
 
 router = APIRouter(prefix="/api/telegram", tags=["telegram"])
 DB = Path("/opt/ares/Vantage/data/vantage.db")
@@ -133,6 +132,12 @@ def ingest_watchlist_group_message(text, chat_username, chat_title, post_url):
     """If this message came from one of our tracked Telegram GROUPS, run it
     through the same mention-extraction + PnL-backtracking pipeline the
     channel scanner uses, so group alpha lands in the money-flow graph."""
+    # social_tracker.py lives at /opt/ares on the deployment host and is not
+    # part of this repo, so it is imported here rather than at module scope --
+    # the same lazy pattern orchestrator.py and pumpfun.py already use. As a
+    # module-level import it made `import backend.main` fail on any box without
+    # /opt/ares, which took down the entire app instead of just this route.
+    import social_tracker
     db = social_tracker.init_db()
     hit = _find_group_account(db, chat_username, chat_title)
     if not hit:

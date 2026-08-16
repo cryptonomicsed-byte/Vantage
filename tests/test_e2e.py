@@ -910,7 +910,9 @@ class TestPlatform:
         show up (LEFT JOIN, not INNER JOIN) — there's no separate "register for
         the leaderboard" step, registering an agent is enough."""
         key = _reg(client, "FreshLeaderboardAgent")
-        r = client.get("/api/agents/leaderboard?limit=200", headers=_headers(key))
+        # limit is capped at le=100 by the endpoint; asking for 200 is a 422,
+        # which this test used to read as "the agent is missing".
+        r = client.get("/api/agents/leaderboard?limit=100", headers=_headers(key))
         assert r.status_code == 200
         names = [e["name"] for e in r.json()["leaderboard"]]
         assert "FreshLeaderboardAgent" in names

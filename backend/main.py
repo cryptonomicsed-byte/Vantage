@@ -692,6 +692,8 @@ app.include_router(video_router)
 app.include_router(admin_router)
 from .routers.voice_responses import router as voice_responses_router
 app.include_router(voice_responses_router)
+from .routers.voice_sessions import router as voice_sessions_router
+app.include_router(voice_sessions_router)
 from .routers.guilds import router as guilds_router
 app.include_router(guilds_router)
 from .routers.analytics import router as analytics_router
