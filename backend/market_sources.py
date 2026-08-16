@@ -142,6 +142,10 @@ async def _coingecko_price(symbol: str) -> Optional[float]:
 # stablecoins are worth ~$1, so "SOL-USDC" prices as "SOL".
 _QUOTE_SUFFIXES = ("USDC", "USDT", "USD", "BUSD", "DAI")
 
+# Distinguishes "we looked and there is no price" from "not in the cache", since
+# _cache_get returns None for both.
+_PRICE_MISS = object()
+
 # Raw contract addresses that reach this function as a "symbol" -- the trading
 # path passes a Solana mint for anything without a ticker. Only the ones we can
 # name are priceable; the rest have no entry in either map by construction.
@@ -198,15 +202,21 @@ async def resolve_price(symbol: str) -> Optional[float]:
     key = f"price:{symbol}"
     cached = _cache_get(key, 30)
     if cached is not None:
-        return cached
+        # A miss is cached too (see below), and reads back as the sentinel.
+        return None if cached is _PRICE_MISS else cached
     price: Optional[float] = None
     pyth = await _pyth_prices([symbol])
     if symbol in pyth:
         price = pyth[symbol]
     if price is None:
         price = await _coingecko_price(symbol)
-    if price is not None:
-        _cache_put(key, price)
+    # Failures are cached as well as successes. Each lookup can cost ~24s when
+    # upstream is down -- _get_json retries twice at a 6s timeout, across Pyth
+    # then CoinGecko -- and callers on the order path run this per order. Caching
+    # only successes meant a dead upstream was paid for again on every single
+    # call, turning an outage into a pile-up rather than one cheap failure per
+    # symbol per 30s.
+    _cache_put(key, price if price is not None else _PRICE_MISS)
     return price
 
 

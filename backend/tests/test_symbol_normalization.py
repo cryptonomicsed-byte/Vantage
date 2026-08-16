@@ -85,3 +85,45 @@ def test_the_mint_table_has_not_drifted_from_the_execution_engine():
             f"{ticker} ({mint}) is in execution_engine.SOLANA_TOKENS but not in "
             "market_sources._MINT_SYMBOLS -- an order on it would fail to price"
         )
+
+
+# ── negative caching ────────────────────────────────────────────────────
+
+
+async def test_a_failed_lookup_is_cached_so_an_outage_costs_one_attempt(monkeypatch):
+    """resolve_price used to cache only successes. Each miss can cost ~24s
+    (_get_json retries twice at a 6s timeout, across Pyth then CoinGecko), and
+    the order path calls this per order -- so a dead upstream was re-paid on
+    every call instead of once per symbol per cache window."""
+    ms._cache.clear()
+    calls = {"n": 0}
+
+    async def dead_pyth(symbols):
+        calls["n"] += 1
+        return {}
+
+    async def dead_cg(symbol):
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(ms, "_pyth_prices", dead_pyth)
+    monkeypatch.setattr(ms, "_coingecko_price", dead_cg)
+
+    assert await ms.resolve_price("SOL") is None
+    first = calls["n"]
+    assert first > 0
+
+    for _ in range(5):
+        assert await ms.resolve_price("SOL") is None
+    assert calls["n"] == first, "repeat lookups should be served from the negative cache"
+
+
+async def test_a_cached_price_is_still_returned(monkeypatch):
+    ms._cache.clear()
+
+    async def good_pyth(symbols):
+        return {"SOL": 74.22}
+
+    monkeypatch.setattr(ms, "_pyth_prices", good_pyth)
+    assert await ms.resolve_price("SOL") == 74.22
+    assert await ms.resolve_price("SOL-USDC") == 74.22, "the pair shares the base's cache entry"
