@@ -23,12 +23,50 @@ sandbox at all.
 | Layer | What it stops |
 |---|---|
 | Non-root user, `cap_drop: ALL`, `no-new-privileges` | Privilege escalation inside the container |
+| `read_only: true` + tmpfs `/tmp` | Anything persisting outside the workspace |
 | `mem_limit: 2g`, `cpus: 2.0`, `pids_limit: 512` | A runaway build or fork bomb taking the host down with it |
-| Workspace volume as the only writable path | Anything persisting outside the workspace |
 | Path confinement in `server.js` | `../` traversal reaching the rest of the container |
 | Per-command timeout, killed by process group | A hung command, or a child backgrounded to outlive its parent |
 | Output cap (256KB) | A process exhausting memory through the response |
 | Per-agent directory, assigned by Vantage | One agent reading or clobbering another's checkout |
+| Env allowlist (`INHERITED_ENV`) | Container credentials reaching agent-run commands |
+
+Each row above was verified against the running container, not just reasoned
+about — see "Smoke test" below.
+
+## Environment
+
+Commands get a minimal environment rather than the container's, so nothing
+configured at the container level leaks into agent-run code. Network
+reachability and TLS trust are the exception, inherited via `INHERITED_ENV`:
+`HTTP(S)_PROXY`, `NO_PROXY`, `GIT_SSL_CAINFO`, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
+`NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`.
+
+Without those, `git clone` fails behind a corporate proxy or a private CA with
+a TLS error and nothing pointing at the cause. Credentials are deliberately not
+inherited — pass them per call via `exec`'s `env`, which overrides the
+inherited values.
+
+## Smoke test
+
+Worth re-running after any change to `server.js`:
+
+```bash
+docker build -t vantage-code-sandbox ops/code-sandbox
+docker run -d --name sbx -p 127.0.0.1:9880:9880 -v sbx_ws:/workspace \
+  --user 1000:1000 --read-only --tmpfs /tmp:size=512m \
+  --memory 2g --cpus 2 --pids-limit 512 \
+  --security-opt no-new-privileges:true --cap-drop ALL vantage-code-sandbox
+
+C="curl -s -X POST http://127.0.0.1:9880"
+curl -s http://127.0.0.1:9880/health                                              # {"ok":true,...}
+$C/read  -d '{"path":"../../etc/passwd"}'   -H 'Content-Type: application/json'   # path escapes
+$C/clone -d '{"repo_url":"file:///etc"}'    -H 'Content-Type: application/json'   # https only
+$C/remove -d '{"path":"."}'                 -H 'Content-Type: application/json'   # refuses root
+$C/exec  -d '{"command":"(sleep 120 &); sleep 60","timeout_ms":3000}' -H 'Content-Type: application/json'
+docker exec sbx sh -c "ps -o args | grep -c '[s]leep 120'"                        # 0 — no orphans
+$C/exec  -d '{"command":"echo x > /etc/pwned || echo BLOCKED"}' -H 'Content-Type: application/json'
+```
 
 ## What it does not bound
 

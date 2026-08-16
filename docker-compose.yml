@@ -68,6 +68,12 @@ services:
     volumes:
       - code_workspace:/workspace
     user: "1000:1000"
+    # Root filesystem is read-only: the workspace volume and a tmpfs /tmp are
+    # the only writable paths. Verified against a real `npm install` — HOME is
+    # set to the command's cwd, so package caches land in the workspace rather
+    # than needing a writable home.
+    read_only: true
+    tmpfs: ['/tmp:size=512m']
     mem_limit: 2g
     cpus: 2.0
     pids_limit: 512

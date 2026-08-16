@@ -48,6 +48,32 @@ function confine(relative = '.') {
   return target;
 }
 
+// Environment variables inherited from the container.
+//
+// Commands get a deliberately minimal environment rather than the container's,
+// so nothing configured at the container level leaks into agent-run code. But
+// a blanket strip breaks the deployments that need it most: behind a corporate
+// proxy or a private CA, `git clone` fails with a TLS or connectivity error and
+// nothing pointing at the cause. Found by smoke-testing the real container —
+// the clone worked only when these were passed explicitly through the API.
+//
+// Only network reachability and TLS trust are inherited. Credentials are not:
+// anything resembling a token or key still has to be passed per-call.
+const INHERITED_ENV = [
+  'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY',
+  'http_proxy', 'https_proxy', 'no_proxy',
+  'GIT_SSL_CAINFO', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
+  'NODE_EXTRA_CA_CERTS', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE',
+];
+
+function inheritedEnv() {
+  const out = {};
+  for (const key of INHERITED_ENV) {
+    if (process.env[key]) out[key] = process.env[key];
+  }
+  return out;
+}
+
 function runCommand({ command, args, cwd, timeoutMs, env }) {
   return new Promise((resolve) => {
     const started = Date.now();
@@ -69,6 +95,8 @@ function runCommand({ command, args, cwd, timeoutMs, env }) {
         GIT_ASKPASS: '/bin/true',
         CI: '1',
         DEBIAN_FRONTEND: 'noninteractive',
+        ...inheritedEnv(),
+        // Caller-supplied last, so a per-call override wins over the container.
         ...(env || {}),
       },
     });
