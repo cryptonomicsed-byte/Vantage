@@ -18,6 +18,18 @@ os.environ.setdefault("VANTAGE_ADMIN_KEY", "test-admin-key-for-ci-0123456789abcd
 # never allowed to fall back to a default), so anything touching agent
 # registration 500s without one. Also >=32 chars per the settings validator.
 os.environ.setdefault("VANTAGE_SEED_MASTER_KEY", "test-seed-master-key-for-ci-0123456789abcdef")
+# System-tool auth for the signal ingest endpoints. Without these, get_system_tool
+# returns 503 "not configured" to every caller, so ingest tests assert against a
+# response the endpoint would give no matter what it did.
+#
+# These have to live HERE, not only in backend/tests/conftest.py, because
+# pyproject sets testpaths = ["tests", "backend/tests"] -- this file is imported
+# first, and it imports backend.main below, which instantiates the `settings`
+# singleton. Anything set after that point is read too late. Must be >=32 chars
+# per the settings validator.
+os.environ.setdefault("VANTAGE_TOOL_INTEL", "test-tool-key-intel-not-a-real-secret")
+os.environ.setdefault("VANTAGE_TOOL_TRADING", "test-tool-key-trading-not-a-real-secret")
+os.environ.setdefault("VANTAGE_TOOL_SECURITY", "test-tool-key-security-not-a-real-secret")
 
 import asyncio
 import pytest
