@@ -20,6 +20,7 @@ import Settings from './components/Settings'
 import NeuralVault from './components/NeuralVault'
 import AgentWorkspace from './components/AgentWorkspace'
 import IntentHeatmap from './components/IntentHeatmap'
+import VoiceSession from './components/VoiceSession'
 import CopilotChat from './components/CopilotChat'
 import ObserverMode from './components/ObserverMode'
 import GuildProfile from './components/GuildProfile'
@@ -172,6 +173,7 @@ function AppLayout() {
             <Route path="/workspace" element={<ErrorBoundary><AgentWorkspace /></ErrorBoundary>} />
             <Route path="/workspace/:roomId" element={<ErrorBoundary><AgentWorkspace /></ErrorBoundary>} />
             <Route path="/heatmap" element={<ErrorBoundary><IntentHeatmap /></ErrorBoundary>} />
+            <Route path="/voice" element={<ErrorBoundary><VoiceSession /></ErrorBoundary>} />
             <Route path="/copilot" element={<ErrorBoundary><CopilotChat /></ErrorBoundary>} />
             <Route path="/welcome" element={<ErrorBoundary><Landing /></ErrorBoundary>} />
             <Route path="/buzz" element={<ErrorBoundary><BuzzHome /></ErrorBoundary>} />

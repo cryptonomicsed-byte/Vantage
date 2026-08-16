@@ -33,7 +33,7 @@
     "@types/react-dom": "^18.2.0",
     "@types/three": "^0.185.0",
     "@types/video.js": "^7.3.58",
-    "@vitejs/plugin-react": "^4.7.0",
+    "@vitejs/plugin-react": "^6.0.0",
     "esbuild": "^0.28.0",
     "jsdom": "^29.1.1",
     "typescript": "^5.3.0",

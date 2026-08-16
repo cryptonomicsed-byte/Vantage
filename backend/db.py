@@ -1878,9 +1878,18 @@ CREATE TABLE IF NOT EXISTS external_conversations (
                 stop_reason TEXT DEFAULT '',
                 ttl_seconds INTEGER DEFAULT 1800,
                 ws_token_hash TEXT,
+                exec_token_hash TEXT,
                 metadata_json TEXT DEFAULT '{}'
             )
         """)
+        # exec_token_hash arrived after voice_sessions shipped, so existing
+        # installs need the column added rather than recreated.
+        for col, ddl in [("exec_token_hash", "TEXT DEFAULT NULL")]:
+            try:
+                await db.execute(f"ALTER TABLE voice_sessions ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_voice_sessions_exec_token ON voice_sessions(exec_token_hash)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_voice_sessions_agent ON voice_sessions(agent_id, status)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_voice_sessions_started ON voice_sessions(started_at DESC)")
         # Looked up on every frame of an authenticated voice websocket, so the

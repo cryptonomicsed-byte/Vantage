@@ -44,6 +44,42 @@ services:
     security_opt: ['no-new-privileges:true']
     cap_drop: ['ALL']
 
+  # Runs agent-authored code: clones repos, executes commands, edits files.
+  # Unlike pine-runtime and parrot-security this one HAS network egress — it
+  # cannot clone a repository or install dependencies without it — so the
+  # isolation is the container plus the workspace volume rather than the
+  # network. Non-root, dropped caps, no-new-privileges, and pid/memory/cpu caps
+  # bound what a runaway or hostile task can do; /workspace is the only path it
+  # can write. Reached by the backend on loopback (CODE_SANDBOX_URL).
+  #
+  # Left out of the default `docker compose up` via a profile: this is the one
+  # service that executes arbitrary code, so turning it on should be a
+  # deliberate act. Start it with `docker compose --profile code up -d`.
+  code-sandbox:
+    build: ./ops/code-sandbox
+    image: vantage-code-sandbox
+    container_name: ares-code-sandbox
+    profiles: ['code']
+    restart: unless-stopped
+    environment:
+      - SANDBOX_PORT=9880
+      - WORKSPACE_ROOT=/workspace
+    ports: ['127.0.0.1:9880:9880']
+    volumes:
+      - code_workspace:/workspace
+    user: "1000:1000"
+    # Root filesystem is read-only: the workspace volume and a tmpfs /tmp are
+    # the only writable paths. Verified against a real `npm install` — HOME is
+    # set to the command's cwd, so package caches land in the workspace rather
+    # than needing a writable home.
+    read_only: true
+    tmpfs: ['/tmp:size=512m']
+    mem_limit: 2g
+    cpus: 2.0
+    pids_limit: 512
+    security_opt: ['no-new-privileges:true']
+    cap_drop: ['ALL']
+
   mongodb:
     image: mongo:7
     container_name: ares-mongodb
@@ -113,3 +149,4 @@ volumes:
   mongodb_data:
   postgres_data:
   gitea_data:
+  code_workspace:

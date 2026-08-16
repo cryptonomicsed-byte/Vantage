@@ -17,6 +17,9 @@ _TEST_DIR = Path(tempfile.mkdtemp(prefix="vantage_test_"))
 os.environ.setdefault("VANTAGE_DATA_DIR", str(_TEST_DIR))
 os.environ.setdefault("VANTAGE_MEDIA_DIR", str(_TEST_DIR / "media"))
 os.environ.setdefault("VANTAGE_ADMIN_KEY", "a" * 32)
+# Needed by anything that runs the app lifespan (the buzz inbound listener
+# reaches seed encryption, which refuses to fall back to a default).
+os.environ.setdefault("VANTAGE_SEED_MASTER_KEY", "test-seed-master-key-for-ci-0123456789abcdef")
 
 # Ensure repo root is importable
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))

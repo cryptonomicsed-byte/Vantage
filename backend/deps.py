@@ -65,18 +65,44 @@ async def _log_agent_activity(agent_id: int) -> None:
         logger.debug("silenced _log_agent_activity: %s", _exc)
 
 
-async def get_agent(request: Request, x_agent_key: Optional[str] = Header(None)) -> dict:
-    if not x_agent_key:
-        raise HTTPException(status_code=401, detail="X-Agent-Key header required")
-    hashed_key = _hlib.sha256(x_agent_key.encode()).hexdigest()
-    async with get_db() as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM agents WHERE api_key = ?", (hashed_key,)
-        ) as cur:
-            row = await cur.fetchone()
-    if not row:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+async def get_agent(
+    request: Request,
+    x_agent_key: Optional[str] = Header(None),
+    x_voice_exec: Optional[str] = Header(None),
+) -> dict:
+    # A live voice session can act as its agent, so the model can actually use
+    # the agent's tools. The credential is NOT the ws token the browser holds:
+    # it is derived server-side (voice_session_store.derive_exec_token) and
+    # never sent to a client, so a leaked ws URL cannot execute tools. It stops
+    # working the moment the session is stopped or idles out, and every call
+    # made with it is recorded against that session's tool-call log.
+    if x_voice_exec and not x_agent_key:
+        from .voice_session_store import resolve_exec_token
+        session = await resolve_exec_token(x_voice_exec)
+        if not session:
+            raise HTTPException(status_code=401, detail="Invalid or expired voice execution token")
+        async with get_db() as db:
+            db.row_factory = aiosqlite.Row
+            row = await (await db.execute(
+                "SELECT * FROM agents WHERE id = ?", (session["agent_id"],)
+            )).fetchone()
+        if not row:
+            raise HTTPException(status_code=401, detail="Voice session's agent no longer exists")
+        # Falls through to the same sentencing / rate-limit checks below. A
+        # revoked or jailed agent must not regain access just by speaking.
+        request.state.voice_session_id = session["id"]
+    else:
+        if not x_agent_key:
+            raise HTTPException(status_code=401, detail="X-Agent-Key header required")
+        hashed_key = _hlib.sha256(x_agent_key.encode()).hexdigest()
+        async with get_db() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM agents WHERE api_key = ?", (hashed_key,)
+            ) as cur:
+                row = await cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=401, detail="Invalid API key")
     agent = dict(row)
     # Sentencing tiers (AIO citizenship): active -> notice -> probation (jail_mode)
     # -> suspended -> revoked. Notice warns without blocking; revoked is a
