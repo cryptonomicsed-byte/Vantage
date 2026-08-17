@@ -117,6 +117,32 @@ describe('VoiceSessionClient', () => {
     expect(client.getStatus()).toBe('connected')
   })
 
+  it('omits metadata by default, and sends allow_destructive_tools only when asked', async () => {
+    const fetchImpl = okFetch({ session_id: 'vsess_abc', token: 'vvoice_tok' })
+    const socket = fakeSocket()
+    const client = new VoiceSessionClient(
+      {},
+      {
+        fetchImpl,
+        connect: (url: string) => {
+          ;(socket as any).url = url
+          queueMicrotask(() => socket.onopen?.())
+          return socket
+        },
+      }
+    )
+
+    await client.open({ allowDestructive: true })
+    const body = JSON.parse((fetchImpl as any).mock.calls[0][1].body)
+    expect(body.metadata).toEqual({ allow_destructive_tools: true })
+
+    await client.open()
+    const secondBody = JSON.parse((fetchImpl as any).mock.calls[1][1].body)
+    // Not merely false/absent-flag -- the key itself must be gone, since the
+    // backend's "safe default" is "no metadata", not "metadata saying no".
+    expect(secondBody.metadata).toBeUndefined()
+  })
+
   it('fails loudly when the session cannot be created', async () => {
     const client = new VoiceSessionClient(
       {},

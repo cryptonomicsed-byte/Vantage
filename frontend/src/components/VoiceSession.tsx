@@ -68,7 +68,13 @@ export default function VoiceSession() {
   const [level, setLevel] = useState(0)
   const [typed, setTyped] = useState('')
   const [sessionId, setSessionId] = useState<string | null>(null)
-  const [presetId, setPresetId] = useState('none')
+  // 'all': now that a large scope is reached via vantage_find_tools /
+  // vantage_call_tool instead of being silently capped, defaulting to the
+  // narrowest preset would just recreate the old under-delivery by a
+  // different route. Destructive actions stay opt-in regardless — see
+  // allowDestructive below.
+  const [presetId, setPresetId] = useState('all')
+  const [allowDestructive, setAllowDestructive] = useState(false)
 
   const clientRef = useRef<VoiceSessionClient | null>(null)
   const recorderRef = useRef<MicRecorder | null>(null)
@@ -126,7 +132,10 @@ export default function VoiceSession() {
     clientRef.current = client
 
     try {
-      await client.open({ tools: TOOL_PRESETS.find((p) => p.id === presetId)?.patterns })
+      await client.open({
+        tools: TOOL_PRESETS.find((p) => p.id === presetId)?.patterns,
+        allowDestructive,
+      })
       setSessionId(client.getSessionId())
     } catch (err) {
       setDetail(err instanceof Error ? err.message : String(err))
@@ -238,6 +247,23 @@ export default function VoiceSession() {
         </select>
         <span style={{ fontSize: 12, color: '#6b7280', marginLeft: 8 }}>
           {TOOL_PRESETS.find((p) => p.id === presetId)?.note}
+        </span>
+      </div>
+
+      <div style={{ marginBottom: 16 }}>
+        <label style={{ fontSize: 13, color: '#374151', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input
+            type="checkbox"
+            checked={allowDestructive}
+            onChange={(e) => setAllowDestructive(e.target.checked)}
+            disabled={live}
+          />
+          Allow destructive actions this session
+        </label>
+        <span style={{ fontSize: 12, color: '#6b7280', marginLeft: 24 }}>
+          Off by default: orders, deletions and wallet operations get refused with a
+          confirmation-needed message instead of running. Turn this on before starting if you
+          intend to ask for one of those out loud.
         </span>
       </div>
 

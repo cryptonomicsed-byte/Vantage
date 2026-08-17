@@ -17,6 +17,17 @@ authorization checks any other caller faces. A voice caller gets no shortcut
 that an HTTP caller wouldn't get, which is the property that makes handing the
 model this much reach defensible.
 
+**The declaration count and the execution scope are two different limits.**
+select_tools() resolves a session's allowlist to everything it may execute --
+uncapped; a "*" allowlist matches the whole ~700-route catalog. Gemini's Live
+API cannot take a declaration list anywhere near that size, so
+to_gemini_declarations() decides separately what the model sees up front:
+every tool directly, below DIRECT_DECLARE_LIMIT, or just vantage_find_tools
+and vantage_call_tool above it -- two declarations that reach the same full
+scope through search-then-call instead of truncating it. The alternative,
+slicing the sorted list at some fixed count, silently favours whichever tool
+names sort first alphabetically and calls that "access"; it isn't.
+
 Safety, given the model's arguments derive from whatever was said near a live
 microphone:
 
@@ -76,8 +87,17 @@ _NAME_SAFE = re.compile(r"[^a-zA-Z0-9_.-]")
 
 TOOL_PREFIX = "vantage__"
 COMPOSIO_TOOL = "composio_execute"
+FIND_TOOLS_TOOL = "vantage_find_tools"
+CALL_TOOL_TOOL = "vantage_call_tool"
 
-MAX_TOOLS = 128  # Gemini rejects oversized tool lists; see select_tools().
+# Below this, every matched tool gets its own direct declaration -- no
+# indirection needed for a small preset like "memory + copilot". At or above
+# it, declaring each one individually would either blow past what the Live API
+# accepts or silently favour whichever names sort first alphabetically, so the
+# full set is instead reached through vantage_find_tools + vantage_call_tool:
+# two declarations, constant regardless of how many routes an allowlist like
+# "*" matches.
+DIRECT_DECLARE_LIMIT = 40
 
 
 def _safe_name(operation_id: str) -> str:
@@ -127,9 +147,13 @@ def _matches(name: str, path: str, tags: list[str], patterns: list[str]) -> bool
 def select_tools(app, allowlist: Optional[list[str]]) -> list[dict]:
     """Resolve a session's allowlist to the tools it may call.
 
-    No allowlist means no tools. Beyond the safety argument, handing a model
-    ~700 declarations is also self-defeating: the list blows past what the Live
-    API accepts and buries the useful ones.
+    No allowlist means no tools -- the safe default. Otherwise this is the
+    session's full execution scope: everything the allowlist matches, with no
+    cap. A "*" allowlist can match all ~700 routes, and that is fine here --
+    this list feeds the ToolDispatcher, not the model's context. What the
+    model actually sees is decided separately, in to_gemini_declarations(),
+    because Gemini's declaration limit is a presentation problem, not a reason
+    to narrow what the session is allowed to touch.
     """
     if not allowlist:
         return []
@@ -139,16 +163,39 @@ def select_tools(app, allowlist: Optional[list[str]]) -> list[dict]:
     ]
     # Deterministic order so a session's tool list doesn't shuffle between runs.
     tools.sort(key=lambda t: t["name"])
-    if len(tools) > MAX_TOOLS:
-        logger.warning(
-            "voice session allowlist matched %d tools; truncating to %d. "
-            "Narrow the allowlist to choose which survive.", len(tools), MAX_TOOLS
-        )
-        tools = tools[:MAX_TOOLS]
 
     if _matches(COMPOSIO_TOOL, "/api/composio/execute", ["composio"], allowlist):
         tools.append(_composio_declaration())
     return tools
+
+
+def search_tools(tools: list[dict], query: str, limit: int = 15) -> list[dict]:
+    """Keyword search over a tool list's name, path, description and tags.
+
+    Backs vantage_find_tools: the mechanism that makes "full access" navigable
+    instead of a wall of declarations. Terms are ANDed against a haystack of
+    all four fields per tool, ranked by how many terms hit -- not a full-text
+    engine, just enough to turn "what can move SOL" into a short, relevant
+    list instead of nothing (single-source substring match) or everything
+    (no ranking at all).
+    """
+    query = (query or "").strip().lower()
+    if not query:
+        return tools[:limit]
+    terms = query.split()
+
+    def score(tool: dict) -> int:
+        haystack = " ".join([
+            tool["name"], tool["path"], tool.get("description", ""),
+            " ".join(tool.get("tags", [])),
+        ]).lower()
+        return sum(1 for term in terms if term in haystack)
+
+    ranked = sorted(
+        (t for t in tools if score(t) > 0),
+        key=lambda t: (-score(t), t["name"]),
+    )
+    return ranked[:limit]
 
 
 def is_destructive(tool: dict) -> bool:
@@ -190,8 +237,8 @@ def _composio_declaration() -> dict:
     }
 
 
-def to_gemini_declarations(tools: list[dict]) -> list[dict]:
-    """Render tool descriptors as Gemini function declarations.
+def _render_declaration(tool: dict) -> dict:
+    """One tool descriptor as a Gemini function declaration.
 
     Parameters are intentionally loose: a faithful JSON Schema per route would
     mean walking every Pydantic model in the app. Path parameters are declared
@@ -199,28 +246,147 @@ def to_gemini_declarations(tools: list[dict]) -> list[dict]:
     a free-form body the endpoint itself validates -- and rejects with its real
     422 if the model gets it wrong, which is a better error than a guess.
     """
-    declarations = []
-    for tool in tools:
-        properties: dict[str, Any] = {}
-        required: list[str] = []
-        for param in tool.get("path_params", []):
-            properties[param] = {"type": "string", "description": f"Path parameter '{param}'"}
-            required.append(param)
-        if tool.get("body_shape"):
-            for key, kind in tool["body_shape"].items():
-                properties[key] = {"type": "string" if kind == "string" else "object"}
-            required.extend(tool["body_shape"].keys())
-        elif tool["method"] in MUTATING_METHODS:
-            properties["body"] = {"type": "object", "description": "Request body"}
-        else:
-            properties["query"] = {"type": "object", "description": "Query parameters"}
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for param in tool.get("path_params", []):
+        properties[param] = {"type": "string", "description": f"Path parameter '{param}'"}
+        required.append(param)
+    if tool.get("body_shape"):
+        for key, kind in tool["body_shape"].items():
+            properties[key] = {"type": "string" if kind == "string" else "object"}
+        required.extend(tool["body_shape"].keys())
+    elif tool["method"] in MUTATING_METHODS:
+        properties["body"] = {"type": "object", "description": "Request body"}
+    else:
+        properties["query"] = {"type": "object", "description": "Query parameters"}
 
-        declarations.append({
-            "name": tool["name"],
-            "description": f"{tool['method']} {tool['path']} — {tool['description']}",
-            "parameters": {"type": "object", "properties": properties, "required": required},
-        })
-    return declarations
+    return {
+        "name": tool["name"],
+        "description": f"{tool['method']} {tool['path']} — {tool['description']}",
+        "parameters": {"type": "object", "properties": properties, "required": required},
+    }
+
+
+def _find_tools_declaration() -> dict:
+    return {
+        "name": FIND_TOOLS_TOOL,
+        "description": (
+            "Search this session's full set of available Vantage tools by keyword "
+            "(e.g. 'wallet balance', 'create order', 'pump.fun watchlist'). Returns "
+            "matching tool names with their method, path and description. Call this "
+            "before vantage_call_tool whenever you don't already know the exact tool "
+            "name -- most of this session's tools are reachable this way rather than "
+            "declared individually."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "keywords for what you want to do"},
+            },
+            "required": ["query"],
+        },
+    }
+
+
+def _call_tool_declaration() -> dict:
+    return {
+        "name": CALL_TOOL_TOOL,
+        "description": (
+            "Call any Vantage tool from this session's allowed set by its exact name "
+            "(as returned by vantage_find_tools). Arguments are that tool's own "
+            "parameters -- path parameters plus either a body or query object, "
+            "matching what vantage_find_tools described for it."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "exact tool name from vantage_find_tools"},
+                "arguments": {"type": "object", "description": "that tool's own arguments"},
+            },
+            "required": ["name", "arguments"],
+        },
+    }
+
+
+def to_gemini_declarations(tools: list[dict]) -> list[dict]:
+    """Render a session's tool scope as Gemini function declarations.
+
+    Below DIRECT_DECLARE_LIMIT, every tool gets its own declaration -- the
+    common case (a small preset like memory+copilot) needs no indirection.
+    At or above it, only vantage_find_tools and vantage_call_tool are
+    declared; the full set stays reachable through them because
+    ToolDispatcher is built from the same, uncapped list this function
+    receives. This is what replaced truncating the list to the Live API's
+    limit and silently keeping whichever ~128 tool names happened to sort
+    first alphabetically.
+    """
+    if len(tools) > DIRECT_DECLARE_LIMIT:
+        logger.info(
+            "voice session has %d tools -- declaring vantage_find_tools/"
+            "vantage_call_tool instead of one declaration per tool", len(tools),
+        )
+        return [_find_tools_declaration(), _call_tool_declaration()]
+    return [_render_declaration(tool) for tool in tools]
+
+
+_DEFAULT_IDENTITY = (
+    "You are Vantage's voice assistant: a spoken interface to the Vantage "
+    "platform, talking to the person live rather than exchanging text. Speak "
+    "naturally and concisely -- prefer a sentence or two over a list, and say "
+    "numbers and symbols the way you'd say them aloud rather than as markdown."
+)
+
+
+def system_instruction_for(persona: str, tools: list[dict], allow_destructive: bool) -> str:
+    """Build the instruction a voice session actually needs.
+
+    An empty system instruction is not a neutral default -- it's a model that
+    doesn't know Vantage exists, doesn't know it has vantage_find_tools for a
+    large scope, and has no way to explain a confirmation_required refusal
+    rather than silently retrying or claiming success. The mechanical
+    guidance below is appended even when a caller supplies their own persona,
+    because a custom persona has no way to know about vantage_find_tools
+    either -- only the identity/tone half is something a caller should own.
+    """
+    identity = persona.strip() or _DEFAULT_IDENTITY
+
+    guidance = []
+    if not tools:
+        guidance.append(
+            "This session has no tools enabled -- you can talk, but you cannot "
+            "look anything up or take any action. If asked to do something that "
+            "needs a tool, say so plainly rather than guessing or improvising."
+        )
+    elif len(tools) > DIRECT_DECLARE_LIMIT:
+        guidance.append(
+            f"You have a large set of Vantage tools available in this session "
+            f"({len(tools)} total), reached through vantage_find_tools (search "
+            "by keyword, e.g. 'wallet balance' or 'create order') and "
+            "vantage_call_tool (call the exact name it returns, with that "
+            "tool's own arguments). Search first whenever you don't already "
+            "know the exact tool name -- most of your tools are not declared "
+            "individually and are only reachable this way."
+        )
+    else:
+        guidance.append(f"You have {len(tools)} Vantage tools declared directly in this session; call them by name.")
+
+    if allow_destructive:
+        guidance.append(
+            "Destructive and money-moving actions (orders, deletions, wallet "
+            "operations) are enabled for this session. Say out loud what "
+            "you're about to do before anything irreversible or costly, since "
+            "the person is listening rather than watching a screen to review it."
+        )
+    else:
+        guidance.append(
+            "Destructive and money-moving actions are NOT enabled for this "
+            "session. If a tool call comes back with status "
+            "'confirmation_required', tell the person it needs a session with "
+            "destructive actions turned on -- do not retry it and do not "
+            "describe it as having succeeded."
+        )
+
+    return identity + "\n\n" + " ".join(guidance)
 
 
 class ToolDispatcher:
@@ -233,15 +399,63 @@ class ToolDispatcher:
         self._by_name = {t["name"]: t for t in tools}
 
     def known(self, name: str) -> bool:
-        return name in self._by_name
+        return name in self._by_name or name in (FIND_TOOLS_TOOL, CALL_TOOL_TOOL)
 
     @property
     def tool_names(self) -> list[str]:
         return sorted(self._by_name)
 
+    def _find_tools(self, args: dict) -> dict:
+        """vantage_find_tools: keyword search over this session's full scope,
+        not just whatever got a direct declaration. What makes a large
+        allowlist ("*", a broad tag) actually reachable instead of silently
+        capped."""
+        query = str((args or {}).get("query") or "").strip()
+        if not query:
+            return {"status": "error", "error": "query is required"}
+        matches = search_tools(list(self._by_name.values()), query)
+        return {
+            "status": "ok",
+            "result": {
+                "matches": [
+                    {"name": t["name"], "method": t["method"], "path": t["path"],
+                     "description": t["description"]}
+                    for t in matches
+                ],
+                "count": len(matches),
+                "hint": ("Call vantage_call_tool with one of these names."
+                         if matches else "No matches -- try different keywords."),
+            },
+        }
+
+    async def _call_tool(self, args: dict) -> dict:
+        """vantage_call_tool: resolve the named tool and re-enter execute() so
+        it gets the exact same destructive gate, path substitution, ASGI
+        dispatch and rendering as a directly-declared call -- indirection
+        changes how the model reaches a tool, not what running it means."""
+        args = args or {}
+        name = str(args.get("name") or "").strip()
+        if not name:
+            return {"status": "error", "error": "name is required"}
+        if name in (FIND_TOOLS_TOOL, CALL_TOOL_TOOL):
+            # Not a security boundary -- there's nothing to escalate to here --
+            # but unguarded this recurses into itself on a nested call and
+            # eventually raises RecursionError, which breaks execute()'s
+            # "never raises" contract instead of just answering the model.
+            return {"status": "error", "error": f"'{name}' cannot be called via vantage_call_tool; call it directly."}
+        inner_args = args.get("arguments")
+        if not isinstance(inner_args, dict):
+            inner_args = {}
+        return await self.execute(name, inner_args)
+
     async def execute(self, name: str, args: dict) -> dict:
         """Run one tool. Never raises -- a failure is a result the model can
         react to, and an exception here would kill the whole voice session."""
+        if name == FIND_TOOLS_TOOL:
+            return self._find_tools(args)
+        if name == CALL_TOOL_TOOL:
+            return await self._call_tool(args)
+
         tool = self._by_name.get(name)
         if tool is None:
             # Being explicit beats a generic failure: the model can pick again.
