@@ -279,11 +279,12 @@ async def voice_session_relay(ws: WebSocket, session_id: str):
     # allowlist means no tools -- see voice_tools for why the safe state is the
     # default here.
     selected_tools = voice_tools.select_tools(ws.app, session.get("tools_allowlist"))
+    allow_destructive = bool((session.get("metadata") or {}).get("allow_destructive_tools"))
     dispatcher = voice_tools.ToolDispatcher(
         ws.app,
         exec_token=store.derive_exec_token(token),
         tools=selected_tools,
-        allow_destructive=bool((session.get("metadata") or {}).get("allow_destructive_tools")),
+        allow_destructive=allow_destructive,
     )
 
     engine = None
@@ -292,7 +293,9 @@ async def voice_session_relay(ws: WebSocket, session_id: str):
             session.get("engine") or "gemini_live",
             api_key=voice_live.resolve_gemini_api_key(await _agent_row(agent_id)),
             voice=session.get("voice") or "",
-            system_instruction=session.get("persona") or "",
+            system_instruction=voice_tools.system_instruction_for(
+                session.get("persona") or "", selected_tools, allow_destructive,
+            ),
             tools=voice_tools.to_gemini_declarations(selected_tools),
         )
         await engine.start()
@@ -338,6 +341,15 @@ async def voice_session_relay(ws: WebSocket, session_id: str):
             elif kind == "ping":
                 await _send(ws, {"type": "pong"})
 
+    # Work spawned off the event pump. Tracked so cleanup can await it rather
+    # than let the loop garbage-collect a pending write mid-flight.
+    background: set[asyncio.Task] = set()
+
+    def spawn(coro) -> None:
+        task = asyncio.ensure_future(coro)
+        background.add(task)
+        task.add_done_callback(background.discard)
+
     async def model_to_browser() -> None:
         async for event in engine.events():
             if event.kind == voice_live.INPUT_TRANSCRIPT:
@@ -345,9 +357,21 @@ async def voice_session_relay(ws: WebSocket, session_id: str):
             elif event.kind == voice_live.OUTPUT_TRANSCRIPT:
                 pending["model"] += event.text
             elif event.kind == voice_live.TURN_COMPLETE:
-                await flush_turn()
+                # Off the pump: this is one or two SQLite writes with a
+                # lock-retry backoff, and it fires exactly when the model has
+                # stopped speaking and the user is waiting for what comes next.
+                # Awaiting it here put disk latency in the conversational gap.
+                spawn(flush_turn())
             elif event.kind == voice_live.TOOL_CALL:
-                await _handle_tool_call(ws, engine, dispatcher, session_id, agent_id, event)
+                # Off the pump, and this is the big one. Awaiting the tool call
+                # here stopped the `async for` consuming events for its whole
+                # duration -- up to the dispatcher's 30s HTTP timeout -- so no
+                # audio, no transcript and no interruption reached the browser
+                # while a tool ran. It also serialised the calls in a turn, so
+                # three tools cost three round trips end to end. Running them
+                # concurrently keeps audio flowing and lets a turn's calls
+                # overlap.
+                spawn(_handle_tool_call(ws, engine, dispatcher, session_id, agent_id, event))
                 continue
 
             payload = event.to_client_message()
@@ -376,14 +400,42 @@ async def voice_session_relay(ws: WebSocket, session_id: str):
         # up mid-sentence loses that turn, and the session stays "active" with
         # a live token until the idle TTL eventually reaps it.
         try:
-            await asyncio.shield(_cleanup(ws, engine, flush_turn, session_id, agent_id))
+            await asyncio.shield(
+                _cleanup(ws, engine, flush_turn, session_id, agent_id, background)
+            )
         except asyncio.CancelledError:
             # Expected: the shielded work carries on to completion on its own.
             pass
 
 
-async def _cleanup(ws, engine, flush_turn, session_id: str, agent_id: int) -> None:
+# How long close waits for work spawned off the event pump. Bounded because a
+# wedged tool call must not hold the session open indefinitely; the audit row
+# for an unfinished call stays as recorded-but-incomplete, which is the honest
+# state.
+_DRAIN_TIMEOUT_SECONDS = 10
+
+
+async def _cleanup(ws, engine, flush_turn, session_id: str, agent_id: int,
+                   background: Optional[set] = None) -> None:
     """Persist the open turn, drop the model connection, close the session."""
+    # Tool calls and transcript writes now run off the pump, so they can still
+    # be in flight when the client hangs up. Awaiting them first means a call
+    # that completed is recorded as completed rather than left looking in-flight
+    # forever, and a final turn is not lost to a task nobody awaited.
+    if background:
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*list(background), return_exceptions=True),
+                timeout=_DRAIN_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "voice relay: %d background task(s) still running after %ds on %s",
+                len(background), _DRAIN_TIMEOUT_SECONDS, session_id,
+            )
+        except Exception as exc:
+            logger.warning("voice relay drain failed for %s: %s", session_id, exc)
+
     try:
         await flush_turn()
     except Exception as exc:

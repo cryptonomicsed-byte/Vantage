@@ -229,7 +229,17 @@ async def test_a_completed_turn_is_persisted_as_transcript(client, fresh_agent, 
     ) as ws:
         _drain(ws, 5)  # connected + 2 user transcripts + model transcript + turn end
 
-    turns = await store.get_transcript(s["session_id"])
+    # The persistence write runs off the event pump (see voice_sessions.py) so
+    # that a DB write never delays the audio/transcript stream reaching the
+    # browser -- so "turn_complete was sent" no longer implies "already
+    # written". Nothing downstream relies on that ordering: the WS client
+    # renders transcript text straight from the message itself, and the
+    # dashboard's SSE feed already polls rather than waiting on this signal.
+    async def _persisted():
+        turns = await store.get_transcript(s["session_id"])
+        return turns if len(turns) >= 2 else None
+
+    turns = await _eventually(_persisted)
     assert [t["role"] for t in turns] == ["user", "assistant"]
     # Streamed fragments are joined into one utterance, not one row per chunk.
     assert turns[0]["content_audio_transcript"] == "what is my balance"
@@ -249,9 +259,16 @@ async def test_transcripts_are_searchable_after_the_call(client, fresh_agent, sy
     ) as ws:
         _drain(ws, 3)
 
-    r = await client.get("/api/agents/me/voice/sessions/search",
-                         headers={"X-Agent-Key": agent["api_key"]}, params={"q": "treasury"})
-    assert [hit["session_id"] for hit in r.json()["results"]] == [s["session_id"]]
+    # Persistence runs off the event pump (see the transcript test above for
+    # why); the FTS row lands asynchronously relative to the WS messages.
+    async def _indexed():
+        r = await client.get("/api/agents/me/voice/sessions/search",
+                             headers={"X-Agent-Key": agent["api_key"]}, params={"q": "treasury"})
+        hits = r.json()["results"]
+        return hits if hits else None
+
+    hits = await _eventually(_indexed)
+    assert [hit["session_id"] for hit in hits] == [s["session_id"]]
 
 
 async def test_an_unfinished_turn_is_still_persisted_on_disconnect(client, fresh_agent, sync_client, fake_engine):
@@ -384,3 +401,86 @@ async def test_engine_factory_requires_a_key():
 
 def test_agent_byok_key_wins_over_the_instance_key():
     assert voice_live.resolve_gemini_api_key({"gemini_api_key": "agent-key"}) == "agent-key"
+
+
+def _receive_within(ws, seconds: float):
+    """ws.receive_text() with a real deadline.
+
+    TestClient's WS wrapper blocks with no timeout of its own. If the relay
+    ever regresses to awaiting a tool call inline on the event pump, the
+    server would stop sending anything until that call resolves -- and a bare
+    ws.receive_text() would hang the whole test run rather than fail it. This
+    turns that hang into a clear assertion failure.
+    """
+    import concurrent.futures
+    # Not a `with` block deliberately: ThreadPoolExecutor.__exit__ calls
+    # shutdown(wait=True), which would re-block on the very thread we just gave
+    # up waiting on -- turning a clean timeout into the same hang this helper
+    # exists to avoid. On timeout the thread is abandoned; it dies on its own
+    # once the WS closes in the test's own teardown.
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(ws.receive_text)
+    try:
+        return future.result(timeout=seconds)
+    except concurrent.futures.TimeoutError:
+        pytest.fail(
+            f"no message within {seconds}s -- the event pump looks blocked "
+            "(e.g. a tool call being awaited inline instead of concurrently)"
+        )
+    finally:
+        pool.shutdown(wait=False)
+
+
+async def test_audio_keeps_flowing_while_a_tool_call_is_in_flight(
+    client, fresh_agent, sync_client, fake_engine, monkeypatch
+):
+    """The latency bug this module exists to prevent: a tool call used to be
+    awaited inline in the event pump, so the `async for event in
+    engine.events()` loop stopped consuming anything -- audio, transcripts,
+    interruption -- for the call's whole duration (up to the dispatcher's 30s
+    HTTP timeout). The script below queues an audio frame right behind a tool
+    call the test can hold open indefinitely; if the pump were still
+    serialized, that audio frame would never reach the client until the tool
+    call is released, and this test would time out rather than merely
+    disagree with an assertion."""
+    from backend import voice_tools
+
+    tool_release = asyncio.Event()
+
+    async def slow_execute(self, name, args):
+        await tool_release.wait()
+        return {"status": "ok", "result": {}}
+
+    monkeypatch.setattr(voice_tools.ToolDispatcher, "execute", slow_execute)
+
+    fake_engine([
+        voice_live.VoiceEvent(
+            kind=voice_live.TOOL_CALL, tool_name="vantage__whoami_get",
+            tool_args={}, tool_call_id="fc-slow",
+        ),
+        voice_live.VoiceEvent(kind=voice_live.AUDIO, audio=b"\x01\x02\x03"),
+    ])
+    agent = await fresh_agent()
+    s = await _open_session(client, agent, tools=["tag:copilot"])
+
+    with sync_client.websocket_connect(
+        f"/api/agents/me/voice/sessions/{s['session_id']}/ws?key={s['token']}"
+    ) as ws:
+        _drain(ws, 1)  # connected
+
+        # The dispatcher is still blocked on tool_release -- nobody has set it
+        # yet. Both the tool_call announcement and the audio frame scripted
+        # right behind it must still reach the client: proof the pump kept
+        # consuming engine.events() instead of sitting inside `await
+        # dispatcher.execute(...)`. Their relative order isn't guaranteed --
+        # the announcement is sent from the spawned task, the audio frame from
+        # the pump itself, and which gets scheduled first is not a contract
+        # worth asserting on -- so collect both by type rather than assume one.
+        first = json.loads(_receive_within(ws, 3.0))
+        second = json.loads(_receive_within(ws, 3.0))
+        assert {first["type"], second["type"]} == {"tool_call", "audio"}
+        audio_msg = first if first["type"] == "audio" else second
+        assert audio_msg["audio"] == base64.b64encode(b"\x01\x02\x03").decode()
+
+        tool_release.set()
+        assert json.loads(_receive_within(ws, 3.0))["type"] == "tool_result"

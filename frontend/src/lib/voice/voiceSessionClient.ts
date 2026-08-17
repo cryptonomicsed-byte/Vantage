@@ -52,6 +52,16 @@ export type OpenOptions = {
    * default, matching the backend.
    */
   tools?: string[]
+  /**
+   * Lets this session's tool calls actually run destructive/money-moving
+   * actions (orders, deletes, wallet operations) instead of getting
+   * `confirmation_required` back. Omitted or false — the safe default,
+   * matching the backend. There is no separate live confirm-and-run step:
+   * this is the confirmation, decided before the call starts rather than
+   * mid-conversation, since a spoken "yes" from whoever is in the room isn't
+   * something the backend can verify came from the account owner.
+   */
+  allowDestructive?: boolean
 }
 
 export class VoiceSessionClient {
@@ -98,6 +108,7 @@ export class VoiceSessionClient {
           persona: options.persona ?? '',
           ttl_seconds: options.ttlSeconds ?? 1800,
           tools: options.tools ?? null,
+          metadata: options.allowDestructive ? { allow_destructive_tools: true } : undefined,
         }),
       })
       if (!res.ok) {

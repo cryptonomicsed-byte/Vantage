@@ -32,8 +32,36 @@ def test_star_selects_a_broad_catalog(app):
                for t in tools)
 
 
-def test_catalog_is_capped_so_the_live_api_accepts_it(app):
-    assert len(voice_tools.select_tools(app, ["*"])) <= voice_tools.MAX_TOOLS + 1
+def test_select_tools_is_uncapped(app):
+    """select_tools is the session's execution scope, not what gets sent to
+    Gemini -- a "*" allowlist should match everything the catalog has, not be
+    silently narrowed to whichever names sort first alphabetically."""
+    matched = voice_tools.select_tools(app, ["*"])
+    assert len(matched) == len(voice_tools._route_tools(app)) + 1  # +1 for composio
+
+
+def test_declarations_are_capped_so_the_live_api_accepts_them(app):
+    """The cap belongs to to_gemini_declarations, not select_tools: it is a
+    presentation limit on what goes to the model, not a reason to narrow what
+    a session may execute."""
+    matched = voice_tools.select_tools(app, ["*"])
+    declared = voice_tools.to_gemini_declarations(matched)
+    assert len(declared) <= voice_tools.DIRECT_DECLARE_LIMIT
+
+
+def test_a_large_scope_declares_search_and_call_instead_of_everything(app):
+    matched = voice_tools.select_tools(app, ["*"])
+    declared = voice_tools.to_gemini_declarations(matched)
+    names = {d["name"] for d in declared}
+    assert names == {voice_tools.FIND_TOOLS_TOOL, voice_tools.CALL_TOOL_TOOL}
+
+
+def test_a_small_scope_declares_every_tool_directly(app):
+    """No indirection tax for a small, deliberate preset -- the common case."""
+    matched = voice_tools.select_tools(app, ["tag:memory_vault"])
+    assert 0 < len(matched) <= voice_tools.DIRECT_DECLARE_LIMIT
+    declared = voice_tools.to_gemini_declarations(matched)
+    assert {d["name"] for d in declared} == {t["name"] for t in matched}
 
 
 def test_admin_surfaces_are_never_callable(app):
@@ -87,9 +115,6 @@ async def _dispatcher(app, client, agent, patterns, allow_destructive=False):
 
 async def test_a_tool_call_really_hits_the_endpoint(app, client, fresh_agent):
     agent = await fresh_agent()
-    # Narrow on purpose: a "*" allowlist matches ~690 routes and is truncated to
-    # MAX_TOOLS alphabetically, which is exactly what a real session should
-    # avoid doing.
     dispatcher, _ = await _dispatcher(app, client, agent, ["tag:copilot"])
 
     # whoami is the cleanest proof the call ran as the right agent.
@@ -168,6 +193,116 @@ async def test_endpoint_errors_come_back_as_errors_not_fake_success(app, client,
     assert result["status"] in ("error", "ok")
     if result["status"] == "error":
         assert "http_status" in result
+
+
+# ── Search-based routing (vantage_find_tools / vantage_call_tool) ────────────
+#
+# What replaces the alphabetical 128-tool truncation: a "*" allowlist gives the
+# dispatcher the FULL matched catalog (~690 tools), declared to Gemini as just
+# these two meta-tools. These cover the mechanism the model actually uses to
+# reach that catalog.
+
+async def test_find_tools_searches_the_full_scope_not_a_declared_subset(app, client, fresh_agent):
+    agent = await fresh_agent()
+    dispatcher, _ = await _dispatcher(app, client, agent, ["*"])
+    assert len(dispatcher._by_name) > voice_tools.DIRECT_DECLARE_LIMIT
+
+    result = await dispatcher.execute(voice_tools.FIND_TOOLS_TOOL, {"query": "whoami"})
+    assert result["status"] == "ok"
+    names = [m["name"] for m in result["result"]["matches"]]
+    assert any("whoami" in n for n in names)
+
+
+async def test_find_tools_requires_a_query(app, client, fresh_agent):
+    agent = await fresh_agent()
+    dispatcher, _ = await _dispatcher(app, client, agent, ["*"])
+    result = await dispatcher.execute(voice_tools.FIND_TOOLS_TOOL, {"query": ""})
+    assert result["status"] == "error"
+
+
+async def test_find_tools_returns_a_hint_when_nothing_matches(app, client, fresh_agent):
+    agent = await fresh_agent()
+    dispatcher, _ = await _dispatcher(app, client, agent, ["*"])
+    result = await dispatcher.execute(
+        voice_tools.FIND_TOOLS_TOOL, {"query": "zzz_no_such_capability_zzz"}
+    )
+    assert result["status"] == "ok"
+    assert result["result"]["matches"] == []
+    assert "hint" in result["result"]
+
+
+async def test_call_tool_actually_runs_the_named_tool(app, client, fresh_agent):
+    """The point of the whole mechanism: a tool never directly declared is
+    still callable, with the same real result a direct call would give."""
+    agent = await fresh_agent()
+    dispatcher, _ = await _dispatcher(app, client, agent, ["*"])
+
+    name = next(n for n in dispatcher._by_name if "whoami" in n)
+    found = await dispatcher.execute(voice_tools.FIND_TOOLS_TOOL, {"query": "whoami"})
+    assert name in [m["name"] for m in found["result"]["matches"]]
+
+    result = await dispatcher.execute(voice_tools.CALL_TOOL_TOOL, {"name": name, "arguments": {}})
+    assert result["status"] == "ok", result
+    assert agent["name"] in str(result["result"])
+
+
+async def test_call_tool_still_gates_destructive_tools(app, client, fresh_agent):
+    """Indirection must not be a way around the confirmation gate -- the
+    dangerous case is a model discovering a destructive tool via search and
+    routing around the opt-in check by calling it through vantage_call_tool
+    instead of directly."""
+    agent = await fresh_agent()
+    dispatcher, _ = await _dispatcher(app, client, agent, ["*"])
+    delete_tool = next(n for n, t in dispatcher._by_name.items() if t["method"] == "DELETE")
+
+    result = await dispatcher.execute(voice_tools.CALL_TOOL_TOOL, {"name": delete_tool, "arguments": {}})
+    assert result["status"] == "confirmation_required"
+
+
+async def test_call_tool_requires_a_name(app, client, fresh_agent):
+    agent = await fresh_agent()
+    dispatcher, _ = await _dispatcher(app, client, agent, ["*"])
+    result = await dispatcher.execute(voice_tools.CALL_TOOL_TOOL, {"arguments": {}})
+    assert result["status"] == "error"
+
+
+async def test_call_tool_refuses_to_recurse_into_the_meta_tools(app, client, fresh_agent):
+    """Not a privilege escalation -- there's nothing to escalate to -- but
+    unguarded this would recurse into itself until Python's stack gives out,
+    breaking execute()'s never-raises contract instead of just answering."""
+    agent = await fresh_agent()
+    dispatcher, _ = await _dispatcher(app, client, agent, ["*"])
+
+    result = await dispatcher.execute(
+        voice_tools.CALL_TOOL_TOOL,
+        {"name": voice_tools.CALL_TOOL_TOOL, "arguments": {"name": "x", "arguments": {}}},
+    )
+    assert result["status"] == "error"
+    assert "cannot be called via vantage_call_tool" in result["error"]
+
+
+async def test_call_tool_reports_an_unknown_name_like_a_direct_call_would(app, client, fresh_agent):
+    agent = await fresh_agent()
+    dispatcher, _ = await _dispatcher(app, client, agent, ["*"])
+    result = await dispatcher.execute(
+        voice_tools.CALL_TOOL_TOOL, {"name": "vantage__not_a_real_tool", "arguments": {}}
+    )
+    assert result["status"] == "unknown_tool"
+
+
+def test_search_tools_ranks_more_term_matches_higher():
+    tools = [
+        {"name": "vantage__a", "path": "/api/a", "description": "wallet lookup", "tags": []},
+        {"name": "vantage__b", "path": "/api/b", "description": "get wallet SOL balance", "tags": ["wallets"]},
+        {"name": "vantage__c", "path": "/api/c", "description": "unrelated thing", "tags": []},
+    ]
+    results = voice_tools.search_tools(tools, "wallet balance")
+    assert [t["name"] for t in results] == ["vantage__b", "vantage__a"]
+
+
+def test_search_tools_with_an_empty_query_returns_the_head_of_the_list():
+    tools = [{"name": f"vantage__{i}", "path": "/api/x", "description": "", "tags": []} for i in range(5)]
+    assert voice_tools.search_tools(tools, "", limit=3) == tools[:3]
 
 
 # ── The execution credential ─────────────────────────────────────────────────
@@ -249,3 +384,52 @@ async def test_exec_token_does_not_bypass_sentencing(client, fresh_agent):
 
     r = await client.get("/api/copilot/whoami", headers={"X-Voice-Exec": exec_token})
     assert r.status_code == 403, r.text
+
+
+# ── Default system instruction ────────────────────────────────────────────
+
+def test_a_custom_persona_still_gets_the_mechanical_guidance():
+    """A caller's own persona knows nothing about vantage_find_tools; the
+    functional half must be appended, not skipped just because a persona
+    was supplied."""
+    instruction = voice_tools.system_instruction_for(
+        "You are Ares, a trading copilot.", [{"name": "x"}] * 50, False
+    )
+    assert instruction.startswith("You are Ares, a trading copilot.")
+    assert "vantage_find_tools" in instruction
+
+
+def test_no_persona_gets_the_default_identity():
+    instruction = voice_tools.system_instruction_for("", [], False)
+    assert "Vantage's voice assistant" in instruction
+
+
+def test_no_tools_is_stated_plainly_rather_than_left_implicit():
+    instruction = voice_tools.system_instruction_for("", [], False)
+    assert "no tools enabled" in instruction
+
+
+def test_a_small_scope_is_described_as_direct_tools():
+    tools = [{"name": f"vantage__{i}"} for i in range(5)]
+    instruction = voice_tools.system_instruction_for("", tools, False)
+    assert "5 Vantage tools declared directly" in instruction
+    assert "vantage_find_tools" not in instruction
+
+
+def test_a_large_scope_explains_search_then_call():
+    tools = [{"name": f"vantage__{i}"} for i in range(voice_tools.DIRECT_DECLARE_LIMIT + 1)]
+    instruction = voice_tools.system_instruction_for("", tools, False)
+    assert "vantage_find_tools" in instruction
+    assert "vantage_call_tool" in instruction
+
+
+def test_destructive_off_tells_the_model_not_to_pretend_it_ran():
+    instruction = voice_tools.system_instruction_for("", [], False)
+    assert "NOT enabled" in instruction
+    assert "confirmation_required" in instruction
+
+
+def test_destructive_on_asks_for_a_spoken_confirmation_first():
+    instruction = voice_tools.system_instruction_for("", [], True)
+    assert "enabled for this session" in instruction
+    assert "before anything irreversible" in instruction
