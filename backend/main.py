@@ -519,6 +519,15 @@ async def lifespan(app: FastAPI):
     weather_task = asyncio.create_task(_weather_alert_loop())
     rate_limit_prune_task = asyncio.create_task(_rate_limit_prune_loop())
 
+    # Execution engine was built + tested but never actually started anywhere
+    # (an audit on 2026-08-17 found it dead code, unimported outside tests).
+    # Gated on its own settings flag so a fresh deploy with the flag unset
+    # stays inert, matching the module's own docstring contract.
+    execution_engine_task = None
+    if settings.TRADING_ENGINE_ENABLED:
+        from .execution_engine import execution_loop
+        execution_engine_task = asyncio.create_task(execution_loop())
+
     from .agenttv_channel import start_all_channels as _start_all_agenttv_channels
     await _start_all_agenttv_channels()
 
@@ -528,7 +537,10 @@ async def lifespan(app: FastAPI):
     last30days_task = asyncio.create_task(_last30days_watch_loop())
 
     yield
-    for t in (task, gossip_task, watch_task, weather_task, rate_limit_prune_task, buzz_inbound_task, last30days_task):
+    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, buzz_inbound_task, last30days_task]
+    if execution_engine_task is not None:
+        shutdown_tasks.append(execution_engine_task)
+    for t in shutdown_tasks:
         t.cancel()
         try:
             await t
