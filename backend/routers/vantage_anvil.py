@@ -132,7 +132,16 @@ async def _call_skillforge(url: str, approve: bool = False, store: bool = True) 
 
     try:
         import httpx
-        async with httpx.AsyncClient(timeout=2000) as client:
+        # Short *connect* timeout specifically -- this is a probe, not the
+        # main path. The firewall gap this works around (see module
+        # docstring) drops packets silently rather than refusing the
+        # connection, so an unbounded/2000s-wide timeout here hangs for
+        # the OS-level TCP connect timeout before ever falling back to the
+        # SSH bridge (confirmed live: a bare `timeout=2000` on the client
+        # applies to connect too, and the call never returned). The read
+        # timeout still gets the full budget for once a connection lands.
+        timeout = httpx.Timeout(connect=5.0, read=2000.0, write=30.0, pool=5.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(f"{KERNEL_DIRECT_URL}/v1/act",
                                       content=body, headers={"Content-Type": "application/json"})
             resp.raise_for_status()
@@ -151,7 +160,16 @@ async def _call_skillforge(url: str, approve: bool = False, store: bool = True) 
         *cmd, stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate(body.encode())
+    try:
+        # Defense in depth on top of `ssh -o ConnectTimeout=10` (which only
+        # bounds establishing the SSH session, not the remote curl -m 2000)
+        # -- belt-and-suspenders so a wedged SSH session can't hang this
+        # call forever the same way the direct-connect probe just did.
+        stdout, stderr = await asyncio.wait_for(proc.communicate(body.encode()), timeout=2100)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError("skillforge SSH bridge timed out after 2100s")
     if proc.returncode != 0:
         raise RuntimeError(f"skillforge SSH bridge failed (exit {proc.returncode}): {stderr.decode()[:500]}")
     try:
