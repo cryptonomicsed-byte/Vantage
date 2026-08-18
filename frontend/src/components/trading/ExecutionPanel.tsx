@@ -103,6 +103,8 @@ export default function ExecutionPanel() {
     { key: 'sui_trader_trading_enabled', label: 'Sui Trader', hint: 'Real signing via pysui + multi-protocol swaps via Cetus\'s official SDK (Node bridge), needs SUI for gas' },
     { key: 'polymarket_trader_trading_enabled', label: 'Polymarket Trader', hint: 'Real EIP-712 CLOB orders via py-clob-client, needs USDC.e on Polygon' },
     { key: 'solana_engine_trading_enabled', label: 'Solana Engine', hint: 'General Solana order executor — routes through the same real execute-live signer as Pumpfun Trader' },
+    { key: 'autotrade_trading_enabled', label: 'Autotrade (Phantom/A14)', hint: 'Social/copy-trade/stop-loss signal pipeline — single execution chokepoint for ares_copy_trader.py and ares_stop_loss.py, which only ever queue into it' },
+    { key: 'freqtrade_trading_enabled', label: 'Freqtrade (Kraken)', hint: 'Spot strategy on Kraken — runs its own separate dry_run regardless, wired here for control-plane consistency' },
   ]
   const [daemonSettings, setDaemonSettings] = useState<Record<string, { value: string | null }>>({})
   const [daemonBusy, setDaemonBusy] = useState<Record<string, boolean>>({})

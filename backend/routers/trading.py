@@ -1627,6 +1627,15 @@ DAEMON_SETTING_KEYS = {
     "hyperliquid_trader_trading_enabled", "base_trader_trading_enabled",
     "sui_trader_trading_enabled", "polymarket_trader_trading_enabled",
     "solana_engine_trading_enabled",
+    # Audit (2026-08-17) found two more standalone execution paths that had
+    # no off switch at all -- not even a broken one. ares_autotrade.py is
+    # the one real execution chokepoint (execute_on_phantom) that
+    # ares_copy_trader.py and ares_stop_loss.py both feed into rather than
+    # executing directly, so gating it here covers all three. Freqtrade
+    # (VantageSignalStrategy.confirm_trade_entry) runs its own dry_run,
+    # independent of TRADING_LIVE_ENABLED, but is wired to the same toggle
+    # for control-plane consistency.
+    "autotrade_trading_enabled", "freqtrade_trading_enabled",
 }
 
 @router.get("/pumpfun/premigration")
