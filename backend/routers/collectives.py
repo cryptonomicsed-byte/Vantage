@@ -230,15 +230,28 @@ async def create_task(workspace_id: int, data: dict, agent: dict = Depends(get_a
 async def register_skill(data: dict, agent: dict = Depends(get_agent)):
     async with get_db() as db:
         try:
-            await db.execute(
+            cur = await db.execute(
                 "INSERT INTO agent_skills (agent_id, name, description, input_schema, runtime) VALUES (?,?,?,?,?)",
                 (agent["id"], data["name"], data.get("description", ""),
                  json.dumps(data.get("input_schema", {})), data.get("runtime", "python"))
             )
             await db.commit()
-            return {"status": "registered", "skill": data["name"]}
+            skill_id = cur.lastrowid
         except aiosqlite.IntegrityError:
             raise HTTPException(409, f"Skill '{data['name']}' already registered")
+    # Project every forged skill into vantage-anvil's project-combination
+    # graph (Prime Node edge + inter-project compatibility edges). This is
+    # the wiring point for the SkillForge -> agent_skills -> graph pipeline
+    # -- fires for any caller of this endpoint, not just SkillForge, but in
+    # practice SkillForge's register_in_vantage() is the only real caller
+    # today. Best-effort: a graph-projection failure must never fail skill
+    # registration itself.
+    try:
+        from .vantage_anvil import project_forged_skill
+        await project_forged_skill(skill_id)
+    except Exception as e:
+        logger.warning(f"vantage-anvil projection failed for skill {skill_id}: {e}")
+    return {"status": "registered", "skill": data["name"]}
 
 @router.get("/skills")
 async def list_skills(agent: dict = Depends(get_agent), skill: Optional[str] = Query(None)):

@@ -804,6 +804,9 @@ app.include_router(daemons_router)
 from .routers.omokoda_cognition_proxy import router as omokoda_cognition_proxy_router
 app.include_router(omokoda_cognition_proxy_router)
 
+from .routers.vantage_anvil import router as vantage_anvil_router
+app.include_router(vantage_anvil_router)
+
 # MCP server — exposes all Vantage routes as MCP tools for Claude/GPT/OpenCode agents.
 # Mount the modern streamable-HTTP transport at /mcp (what current MCP clients expect),
 # and keep SSE mounted at a distinct path for older clients — mount_http()'s default

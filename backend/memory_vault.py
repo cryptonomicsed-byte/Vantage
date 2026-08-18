@@ -280,6 +280,70 @@ class MemoryVault:
         self._write_note(self.vault_path / relative, frontmatter, body)
         await self._update_fts(relative, frontmatter["title"], body, [trace_type])
 
+    # ── Generic graph nodes ──────────────────────────────────────────────
+    # Unlike export_broadcast/export_knowledge/export_trace above, these two
+    # don't mirror a specific DB table -- they're the write path for anything
+    # that wants to add an arbitrary star/edge to this vault's galaxy graph
+    # (e.g. vantage_anvil.py's project-combination graph). Caller supplies
+    # coordinates so related nodes can share a spatial seed (e.g. a star and
+    # the edges touching it both hashed from the same star_id) and stay
+    # visually adjacent in the 3D renderer.
+
+    def add_star(self, star_id: str, title: str, description: str, node_type: str,
+                 tags: list, constellation: str, coords: tuple,
+                 size: float = 10, color: str = "#ffffff", extra: Optional[dict] = None) -> str:
+        """Write a star node. Returns the vault-relative path."""
+        frontmatter = {
+            "id": star_id,
+            "type": node_type,
+            "title": title,
+            **({"description": description} if description else {}),
+            "tags": tags,
+            "timestamp": datetime.utcnow().isoformat(),
+            "node_kind": "star",
+            "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
+            "galaxy_size": size,
+            "galaxy_color": color,
+            "constellation": constellation,
+            **(extra or {}),
+        }
+        body = f"# {title}\n\n{description or ''}"
+        safe = re.sub(r"[^\w-]", "_", star_id)[:80]
+        path = self.vault_path / "projects" / f"{safe}.md"
+        self._write_note(path, frontmatter, body)
+        return str(path.relative_to(self.vault_path))
+
+    def add_edge(self, subject: str, predicate: str, object: str,
+                 weight: float = 1.0, trust: float = 0.5, extra: Optional[dict] = None) -> str:
+        """Write a subject/predicate/object edge between two nodes (matched
+        by their `id`, not free text — callers that want edges to visually
+        land on their endpoint stars should pass the same id strings used
+        as those stars' spatial-hash seed). Returns the vault-relative path."""
+        src = self._spatial_hash(subject, "project")
+        tgt = self._spatial_hash(object, "project")
+        edge_id = f"edge_{hashlib.sha256(f'{subject}|{predicate}|{object}'.encode()).hexdigest()[:16]}"
+        frontmatter = {
+            "id": edge_id,
+            "type": "Relationship",
+            "title": f"{subject} → {predicate} → {object}",
+            "subject": subject,
+            "predicate": predicate,
+            "object": object,
+            "timestamp": datetime.utcnow().isoformat(),
+            "node_kind": "edge",
+            "galaxy_source_x": src[0], "galaxy_source_y": src[1], "galaxy_source_z": src[2],
+            "galaxy_target_x": tgt[0], "galaxy_target_y": tgt[1], "galaxy_target_z": tgt[2],
+            "galaxy_weight": weight,
+            "last_accessed_at": datetime.utcnow().isoformat(),
+            "trust": trust,
+            **(extra or {}),
+        }
+        body = f"# {subject} → {predicate} → {object}\n\nWeight: {weight}, Trust: {trust}"
+        safe = re.sub(r"[^\w-]", "_", edge_id)
+        path = self.vault_path / "knowledge" / f"{safe}.md"
+        self._write_note(path, frontmatter, body)
+        return str(path.relative_to(self.vault_path))
+
     # ── Conversations: DM threads + workspace rooms ─────────────────────────
     async def export_conversations(self):
         async with get_db() as db:
