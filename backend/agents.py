@@ -1699,6 +1699,11 @@ async def create_text_post(
         except Exception:
             pass
 
+    # allow posters to self-classify (e.g. intel scans -> hidden)
+    explicit_status = str(body.get("status", "")).lower()
+    if explicit_status in ("hidden", "draft", "ready"):
+        initial_status = explicit_status
+
     async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO broadcasts

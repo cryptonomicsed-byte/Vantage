@@ -213,6 +213,10 @@ def run():
             print(f"[{stamp}] {len(wallets)} wallet(s), {total} new trade(s)", flush=True)
         except Exception as e:
             print(f"Error: {e}", flush=True)
+            try:
+                db.rollback()
+            except Exception:
+                pass
         time.sleep(INTERVAL)
 
 

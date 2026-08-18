@@ -90,36 +90,47 @@ def snapshot_networth(db):
 
 
 def update_balances():
-    """Refresh SOL balances, write trading_balances, sync equity snapshots."""
+    """Refresh SOL balances, write trading_balances, sync equity snapshots.
+
+    The DB handle is opened once per cycle and MUST be closed even if a
+    per-wallet API call raises -- an earlier version left it unguarded,
+    which leaked a connection (and its open WAL read snapshot) on any
+    exception mid-loop. Enough of those piled up over time to permanently
+    pin the WAL checkpoint boundary, growing vantage.db-wal to ~4x the main
+    DB file with checkpoints never able to truncate past the oldest leaked
+    snapshot.
+    """
     db = sqlite3.connect(DB_PATH)
-    price = get_sol_price()
-    wallets = db.execute(
-        "SELECT id, address FROM trading_wallets WHERE chain = 'solana'").fetchall()
+    try:
+        price = get_sol_price()
+        wallets = db.execute(
+            "SELECT id, address FROM trading_wallets WHERE chain = 'solana'").fetchall()
 
-    updated = 0
-    for wid, addr in wallets:
-        if not addr:
-            continue
-        balance = get_sol_balance(addr)
-        if balance is None:
-            continue
-        value_usd = round(balance * price, 2) if price else None
-        db.execute(
-            "UPDATE trading_wallets SET balance_hint=?, last_synced_at=? WHERE id=?",
-            (f"{balance} SOL", datetime.now(timezone.utc).isoformat(), wid))
-        db.execute(
-            """INSERT INTO trading_balances (wallet_id, token, balance, value_usd)
-               VALUES (?,?,?,?)
-               ON CONFLICT(wallet_id, token) DO UPDATE SET
-                 balance=excluded.balance, value_usd=excluded.value_usd, updated_at=datetime('now')""",
-            (wid, "SOL", balance, value_usd))
-        updated += 1
-        print(f"  {addr[:12]}... = {balance} SOL"
-              + (f" (${value_usd})" if value_usd is not None else ""), flush=True)
+        updated = 0
+        for wid, addr in wallets:
+            if not addr:
+                continue
+            balance = get_sol_balance(addr)
+            if balance is None:
+                continue
+            value_usd = round(balance * price, 2) if price else None
+            db.execute(
+                "UPDATE trading_wallets SET balance_hint=?, last_synced_at=? WHERE id=?",
+                (f"{balance} SOL", datetime.now(timezone.utc).isoformat(), wid))
+            db.execute(
+                """INSERT INTO trading_balances (wallet_id, token, balance, value_usd)
+                   VALUES (?,?,?,?)
+                   ON CONFLICT(wallet_id, token) DO UPDATE SET
+                     balance=excluded.balance, value_usd=excluded.value_usd, updated_at=datetime('now')""",
+                (wid, "SOL", balance, value_usd))
+            updated += 1
+            print(f"  {addr[:12]}... = {balance} SOL"
+                  + (f" (${value_usd})" if value_usd is not None else ""), flush=True)
 
-    snapshot_networth(db)
-    db.commit()
-    db.close()
+        snapshot_networth(db)
+        db.commit()
+    finally:
+        db.close()
     print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] "
           f"Updated {updated} SOL wallets; equity snapshots synced", flush=True)
 

@@ -13,6 +13,7 @@ import SeriesView from './components/SeriesView'
 import Leaderboard from './components/Leaderboard'
 import AresSOC from './components/AresSOC'
 import TradingSection from './components/TradingSection'
+import CouncilSection from './components/CouncilSection'
 import SwarmMap from './components/SwarmMap'
 import MarketVelocity from './components/MarketVelocity'
 import KnowledgeExplorer from './components/KnowledgeExplorer'
@@ -168,6 +169,7 @@ function AppLayout() {
             <Route path="/swarm" element={<ErrorBoundary><SwarmMap /></ErrorBoundary>} />
             <Route path="/market" element={<ErrorBoundary><MarketPage /></ErrorBoundary>} />
             <Route path="/trading" element={<ErrorBoundary><TradingSection /></ErrorBoundary>} />
+<Route path="/council" element={<ErrorBoundary><CouncilSection /></ErrorBoundary>} />
             <Route path="/knowledge" element={<ErrorBoundary><KnowledgeExplorer /></ErrorBoundary>} />
             <Route path="/settings" element={<ErrorBoundary><Settings /></ErrorBoundary>} />
             <Route path="/workspace" element={<ErrorBoundary><AgentWorkspace /></ErrorBoundary>} />

@@ -27,3 +27,8 @@ hermes_soul_seed.json
 frontend/playwright-report/
 frontend/test-results/
 backend/data/*.db*
+
+# local mirror db (206MB)
+ops/dashboards/mirror/
+# backup suffixes
+*.bak-*

@@ -33,6 +33,7 @@ const TABS: Array<{ section: string; label: string; to: string }> = [
   { section: 'create',   label: 'Create',   to: '/create' },
   { section: 'me',       label: 'Me',       to: '/dashboard' },
   { section: 'settings', label: 'Settings', to: '/settings' },
+  { section: 'council', label: 'Council', to: '/council' },
 ]
 
 export default function TopNav({ searchQuery, onSearchChange }: TopNavProps) {

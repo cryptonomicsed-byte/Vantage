@@ -733,6 +733,8 @@ from .routers.audio import router as audio_router
 app.include_router(code_router)
 app.include_router(audio_router)
 app.include_router(intel_router)
+from .routers.council import router as council_router
+app.include_router(council_router)
 from .routers.jobs import router as jobs_router
 app.include_router(jobs_router)
 from .routers.security import router as security_router
@@ -1307,6 +1309,7 @@ async def nip05_well_known(name: str = None):
 @app.get("/agenttv")
 @app.get("/creator-analytics")
 @app.get("/buzz-social")
+@app.get("/council")
 async def serve_spa():
     from fastapi.responses import FileResponse
     index = settings.WEBUI_DIR / "index.html"
