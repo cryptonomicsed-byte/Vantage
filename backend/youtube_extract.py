@@ -25,7 +25,9 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -91,13 +93,26 @@ def extract_github_urls(text: str) -> list[str]:
     return out
 
 
+def _find_yt_dlp() -> Optional[str]:
+    """`shutil.which` alone misses a pip-installed yt-dlp when the caller's
+    PATH doesn't include the venv's bin dir (true of this app's systemd
+    unit, which sets PATH to a bare system default) -- check next to the
+    running interpreter first, since pip installs the console-script entry
+    point there regardless of PATH."""
+    candidate = Path(sys.executable).parent / "yt-dlp"
+    if candidate.exists():
+        return str(candidate)
+    return shutil.which("yt-dlp")
+
+
 def _try_yt_dlp(video_id: str) -> Optional[tuple[str, str]]:
     """Returns (title, description) via yt-dlp, or None if unavailable/failed."""
-    if not shutil.which("yt-dlp"):
+    binary = _find_yt_dlp()
+    if not binary:
         return None
     try:
         proc = subprocess.run(
-            ["yt-dlp", "--dump-json", "--skip-download", "--no-warnings",
+            [binary, "--dump-json", "--skip-download", "--no-warnings",
              f"https://www.youtube.com/watch?v={video_id}"],
             capture_output=True, text=True, timeout=30,
         )
