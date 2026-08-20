@@ -5,10 +5,19 @@ other Vantage agent is — see `_ensure_anvil_agent` below, which mirrors
 `POST /api/agents/register` in routers/identity.py) whose memory vault
 holds the project-combination graph: Vantage itself as the Prime Node
 star, every SkillForge-forged project as a "project" star, and typed
-relationship edges between them (`combines_with` / `depends_on` /
-`complements` / `produces_input_for` / `extends`), decided by comparing
-each project's *discovered* route I/O shapes — not by copying source code
-into a shared folder (the naive `modules/` approach this replaces).
+relationship edges between them, decided by comparing each project's
+*discovered* route I/O shapes — not by copying source code into a shared
+folder (the naive `modules/` approach this replaces). Actual predicates
+_decide_relationship can produce: `produces_input_for` (directional —
+one project's GET/produce routes match the other's POST/consume routes),
+`combines_with` (mutual produce/consume match, or high token overlap),
+`complements` (moderate token overlap, no I/O match). `extends` is not a
+compatibility verdict — project_forged_skill writes it unconditionally
+for every project's edge to the Prime star, separate from this heuristic.
+`depends_on` is not currently produced by any code path; if a future
+version of the heuristic adds directional hard-dependency detection
+(distinct from produces_input_for's softer "could feed into"), it
+belongs here — documented as aspirational, not implemented, until it is.
 
 Storage is Vantage's existing memory-vault galaxy graph
 (backend/memory_vault.py) — real subject/predicate/object triples, no new
@@ -54,10 +63,11 @@ import secrets
 from typing import Optional
 
 import aiosqlite
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ..db import get_db
+from ..deps import get_agent
 from ..memory_vault import MemoryVault
 from ..youtube_extract import fetch_video_description
 
@@ -425,12 +435,21 @@ class IngestVideoRequest(BaseModel):
 
 
 @router.post("/ingest-video")
-async def ingest_video(req: IngestVideoRequest):
+async def ingest_video(req: IngestVideoRequest, agent: dict = Depends(get_agent)):
     """Paste a YouTube video (or channel-upload) link. Fetches its public
     description with no API key, extracts github.com repo links, forges
     each one through the real SkillForge pipeline, and (on success) the
     forge's own Vantage registration triggers graph projection via
     project_forged_skill above -- no separate projection call needed here.
+
+    Requires a real X-Agent-Key (any registered Vantage agent, same as
+    every other write endpoint in this app) -- unauthenticated because
+    it triggers real kernel work (a SkillForge forge burns the kernel's
+    synapse budget) and outbound requests to a caller-supplied URL, an
+    open unauthenticated write surface a security-hardening pass on
+    2026-08-19 caught missing here. Read-only /status and /tiers stay
+    open, matching this app's convention for non-sensitive diagnostic
+    reads (no secrets, just project names/counts).
     """
     extraction = await asyncio.to_thread(fetch_video_description, req.url)
     if extraction.error:
