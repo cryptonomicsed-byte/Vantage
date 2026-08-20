@@ -94,9 +94,12 @@ def test_ignores_non_github_urls():
     assert extract_github_urls(text) == []
 
 
-def test_http_scheme_accepted_alongside_https():
+def test_http_scheme_input_is_matched_but_normalized_to_https():
+    """The regex matches an http:// link too (real descriptions have old
+    links), but the output is always normalized to https:// -- documented
+    module behavior, not scheme-preserving."""
     text = "Old link: http://github.com/owner/repo"
-    assert extract_github_urls(text) == ["http://github.com/owner/repo"]
+    assert extract_github_urls(text) == ["https://github.com/owner/repo"]
 
 
 def test_handles_real_video_description_shape():

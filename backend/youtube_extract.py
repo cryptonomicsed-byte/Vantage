@@ -35,6 +35,12 @@ import httpx
 _VIDEO_ID_RE = re.compile(
     r"(?:youtube\.com/(?:watch\?v=|shorts/|embed/)|youtu\.be/)([A-Za-z0-9_-]{11})"
 )
+# youtube.com/watch?list=PLAYLIST&v=ID -- the `v=` param isn't always first
+# in the query string (a link copied from inside a playlist puts `list=`
+# before it). The pattern above requires `watch?v=` literally at the start
+# of the query, so it never matched this real, common URL shape; this is a
+# fallback for `v=` appearing anywhere in a watch-page query string.
+_VIDEO_ID_QUERY_RE = re.compile(r"youtube\.com/watch\?(?:[^#\s]*&)?v=([A-Za-z0-9_-]{11})")
 
 # github.com/{owner}/{repo} — owner/repo segments are the GitHub-legal
 # charset (alnum, hyphen, underscore, dot for repo names). Trailing
@@ -64,6 +70,9 @@ def extract_video_id(url_or_id: str) -> Optional[str]:
     11-char video ID and returns the video ID, or None if unrecognized."""
     s = url_or_id.strip()
     m = _VIDEO_ID_RE.search(s)
+    if m:
+        return m.group(1)
+    m = _VIDEO_ID_QUERY_RE.search(s)
     if m:
         return m.group(1)
     if re.fullmatch(r"[A-Za-z0-9_-]{11}", s):

@@ -144,8 +144,11 @@ def test_combines_with_on_high_token_overlap_without_produce_consume_match():
 
 
 def test_complements_on_moderate_overlap():
-    a_tokens = {"wallet", "tracker", "balance", "solana", "chain", "data"}
-    b_tokens = {"wallet", "explorer", "block", "gas", "fee", "node"}
+    # 1 shared token / 6 union = 0.167 jaccard -- inside [0.15, 0.35), the
+    # actual "complements" band (verified against _decide_relationship's
+    # thresholds, not assumed).
+    a_tokens = {"wallet", "tracker", "balance", "solana"}
+    b_tokens = {"wallet", "explorer", "node"}
     predicate, direction, weight = _decide_relationship(
         a_tokens, set(), set(), b_tokens, set(), set()
     )
