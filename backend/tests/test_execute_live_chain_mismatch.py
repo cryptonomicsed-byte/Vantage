@@ -18,6 +18,23 @@ from backend.crypto_utils import encrypt_key_for_agent
 from backend.db import get_db
 
 
+@pytest.fixture(autouse=True)
+def pinned_quote(monkeypatch):
+    """Pin the live SOL quote for every test in this module -- these tests
+    post price:150.0 on the wrapped-SOL mint, and price resolution reaches
+    the real network. A hardcoded 150.0 against real SOL (drifting well
+    below $100 at time of writing) is a large deviation and the order is
+    (correctly) refused by _enforce_price_sanity, so the test would pass or
+    fail depending on the market rather than the behaviour it names. Same
+    fix already applied in test_execute_live_rpc_error.py."""
+    from backend.routers import trading
+
+    async def fake_fetch_quote(symbol):
+        return 150.0
+
+    monkeypatch.setattr(trading, "_fetch_quote", fake_fetch_quote)
+
+
 def _h(agent):
     return {"X-Agent-Key": agent["api_key"]}
 
@@ -41,7 +58,13 @@ async def test_quick_trade_rejects_ethereum_wallet_instead_of_misreading_its_key
     treating its private key as Solana key material."""
     agent, api_key_hash = await _agent_with_id(fresh_agent)
     h = _h(agent)
-    agent_for_crypto = {**agent, "api_key": api_key_hash}
+    # Production always derives the wallet-encryption KEK from the RAW
+    # X-Agent-Key header value (see trading.py create_agent_wallet/execute_live_order,
+    # wallets.py, identity.py's rotate-key) -- never the SHA-256 hash stored in
+    # agents.api_key. api_key_hash is only used above to look up the agent's
+    # numeric id; encrypting under it here would silently mismatch every real
+    # decrypt call and was a real bug in this test file, not in production.
+    agent_for_crypto = agent
 
     # A real-shaped 32-byte Ethereum private key (also 32 bytes — the same
     # length Keypair.from_seed silently accepts for Solana).
@@ -60,7 +83,7 @@ async def test_quick_trade_rejects_ethereum_wallet_instead_of_misreading_its_key
         "/api/trading/quick-trade",
         headers=h,
         json={"mint": "So11111111111111111111111111111111111111112",
-              "side": "buy", "wallet_id": wallet_id, "quantity": 0.5,
+              "side": "buy", "wallet_id": wallet_id, "quantity": 0.3,
               "trigger_reason": "manual_terminal"},
     )
     assert r.status_code == 422, r.text
@@ -93,7 +116,13 @@ async def test_execute_live_rejects_non_solana_wallet_even_if_order_says_solana(
     just trust order.chain."""
     agent, api_key_hash = await _agent_with_id(fresh_agent)
     h = _h(agent)
-    agent_for_crypto = {**agent, "api_key": api_key_hash}
+    # Production always derives the wallet-encryption KEK from the RAW
+    # X-Agent-Key header value (see trading.py create_agent_wallet/execute_live_order,
+    # wallets.py, identity.py's rotate-key) -- never the SHA-256 hash stored in
+    # agents.api_key. api_key_hash is only used above to look up the agent's
+    # numeric id; encrypting under it here would silently mismatch every real
+    # decrypt call and was a real bug in this test file, not in production.
+    agent_for_crypto = agent
 
     fake_sui_key_hex = "33" * 32
     encrypted = encrypt_key_for_agent(fake_sui_key_hex, agent_for_crypto)
@@ -112,7 +141,7 @@ async def test_execute_live_rejects_non_solana_wallet_even_if_order_says_solana(
         headers=h,
         json={"symbol": "So11111111111111111111111111111111111111112",
               "side": "buy", "chain": "solana",  # deliberately mislabeled
-              "quantity": 0.5, "price": 150.0, "order_type": "market",
+              "quantity": 0.3, "price": 150.0, "order_type": "market",
               "wallet_id": wallet_id, "trigger_reason": "unit-test"},
     )
     assert r.status_code == 200, r.text

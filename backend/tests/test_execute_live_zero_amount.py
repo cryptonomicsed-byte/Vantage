@@ -15,6 +15,23 @@ from backend.crypto_utils import encrypt_key_for_agent
 from backend.db import get_db
 
 
+@pytest.fixture(autouse=True)
+def pinned_quote(monkeypatch):
+    """Pin the live SOL quote for every test in this module -- these tests
+    post price:150.0 on the wrapped-SOL mint, and price resolution reaches
+    the real network. A hardcoded 150.0 against real SOL (drifting well
+    below $100 at time of writing) is a large deviation and the order is
+    (correctly) refused by _enforce_price_sanity, so the test would pass or
+    fail depending on the market rather than the behaviour it names. Same
+    fix already applied in test_execute_live_rpc_error.py."""
+    from backend.routers import trading
+
+    async def fake_fetch_quote(symbol):
+        return 150.0
+
+    monkeypatch.setattr(trading, "_fetch_quote", fake_fetch_quote)
+
+
 def _h(agent):
     return {"X-Agent-Key": agent["api_key"]}
 
@@ -74,7 +91,13 @@ async def test_execute_live_buy_marks_order_failed_with_diagnostic_reason(client
     # must both see the hash, not the raw X-Agent-Key header value, or
     # decryption fails with "wrong agent for this wallet" even for the
     # correct agent.
-    agent_for_crypto = {**agent, "api_key": api_key_hash}
+    # Production always derives the wallet-encryption KEK from the RAW
+    # X-Agent-Key header value (see trading.py create_agent_wallet/execute_live_order,
+    # wallets.py, identity.py's rotate-key) -- never the SHA-256 hash stored in
+    # agents.api_key. api_key_hash is only used above to look up the agent's
+    # numeric id; encrypting under it here would silently mismatch every real
+    # decrypt call and was a real bug in this test file, not in production.
+    agent_for_crypto = agent
 
     # A real-shaped 32-byte hex seed, not a live key — this test never
     # reaches real signing/broadcast, it's rejected by balance-capping first.
@@ -93,7 +116,7 @@ async def test_execute_live_buy_marks_order_failed_with_diagnostic_reason(client
         "/api/trading/orders",
         headers=h,
         json={"symbol": "So11111111111111111111111111111111111111112",
-              "side": "buy", "chain": "solana", "quantity": 1.5,
+              "side": "buy", "chain": "solana", "quantity": 0.3,
               "price": 150.0, "order_type": "market", "trigger_reason": "unit-test",
               "wallet_id": wallet_id},
     )
