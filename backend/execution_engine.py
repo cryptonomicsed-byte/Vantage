@@ -12,10 +12,27 @@ Two gates, independent by design:
     When false, the Solana adapter builds the full Jupiter swap (proving the
     path works) but stops before submission and marks the order 'ready'.
 
+A third, independent kill switch (pattern from ai-market-maker's
+AIMM_KILL_SWITCH, see _kill_switch_active()): TRADING_KILL_SWITCH. Unlike the
+two gates above, this is re-read from the live .env file every poll cycle
+(never the process-start-cached `settings` singleton), so flipping it takes
+effect on the next 5s tick with no restart -- the entire point of a kill
+switch is not being gated behind a redeploy. Checked first, before any order
+processing, at both the loop level (skips the tick entirely) and inside
+process_order() itself (defense-in-depth for any out-of-band caller).
+
 Safety guards (Solana), all configurable in settings:
-  • max SOL per order and a rolling 24h SOL spend cap
-  • max concurrent pending orders (checked before executing)
-  • liquidity floor + mint-authority (rug) rejection for token buys
+  • max SOL per order and a rolling 24h SOL spend cap (BUY only -- these are
+    exposure-increasing-only checks; SELL/close orders were never subject to
+    them, by design, since closing a position reduces risk rather than adding
+    it)
+  • max concurrent pending orders (checked before executing) -- but
+    exposure-REDUCING orders (SELL: closes a spot position; Hyperliquid
+    market_close) bypass this pause. Blocking an exit because too many other
+    orders are in flight is itself a risk-increasing bug, not a safety
+    feature -- see _is_exposure_reducing().
+  • liquidity floor + mint-authority (rug) rejection for token buys (BUY
+    only, same exposure-increasing-only rationale as the SOL caps above)
   • cooldown between two on-chain trades
 """
 import asyncio
@@ -27,6 +44,7 @@ from datetime import datetime
 import aiosqlite
 
 from backend.config import settings
+from backend.config import _ENV_FILE as _SETTINGS_ENV_FILE
 from backend.crypto_utils import decrypt_private_key
 from backend.db import DB_PATH
 
@@ -59,6 +77,53 @@ def register_adapter(chain: str, fn):
 def _helius_rpc_url() -> str:
     key = settings.HELIUS_API_KEY
     return f"https://mainnet.helius-rpc.com/?api-key={key}" if key else ""
+
+
+def _kill_switch_active(env_file: str | None = None) -> bool:
+    """Live kill-switch check: re-reads VANTAGE_TRADING_KILL_SWITCH straight
+    from the .env file (not the cached `settings` singleton every other flag
+    in this module uses, which is baked in once at process start) so an
+    operator can halt a running engine by editing one line, no restart.
+
+    No .env file at all is NOT an error: many deployments (this dev checkout
+    included) run on real process env vars / pydantic defaults with no .env
+    override file, same as every other setting in this module -- that case
+    falls back to the cached `settings.TRADING_KILL_SWITCH` value, same
+    source everything else in the process uses. A file that EXISTS but
+    becomes unreadable (permissions, corruption) fails CLOSED instead
+    (returns True/halted): that specific case means a config source that was
+    previously working has broken, and a kill switch that quietly keeps
+    trading when it can't reconfirm its own state defeats the purpose --
+    'suddenly unknown' must mean 'stopped', not 'assume the last known-good
+    value and keep going'. A file that IS readable but simply doesn't
+    mention the key means the switch is off (matches the pydantic default)
+    -- that's the normal, expected case, not an error.
+
+    `env_file` is only for tests; production always reads the same file
+    backend.config already resolved (backend/.env, else project-root .env)."""
+    path = env_file if env_file is not None else _SETTINGS_ENV_FILE
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("VANTAGE_TRADING_KILL_SWITCH="):
+                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    return val.lower() in ("1", "true", "yes", "on")
+    except FileNotFoundError:
+        return settings.TRADING_KILL_SWITCH
+    except OSError:
+        return True
+    return False
+
+
+def _is_exposure_reducing(order: dict) -> bool:
+    """True for orders that close/reduce a position rather than open/add to
+    one. SELL is the closing side on every adapter this file registers: spot
+    Solana SELL swaps the held token back to SOL, and Hyperliquid SELL calls
+    market_close (vs. BUY's market_open). Exposure-reducing orders are
+    exempted from the concurrency-pause gate in execution_loop -- see the
+    module docstring for why blocking an exit is a risk-increasing bug."""
+    return (order.get("side") or "").upper() == "SELL"
 
 
 # ── DB helpers ──────────────────────────────────────────────────────────────
@@ -370,6 +435,13 @@ async def process_order(order: dict):
     chain = (order.get("chain") or "solana").lower()
     wallet_id = order.get("wallet_id")
 
+    # Kill switch first, before any other check -- defense-in-depth for any
+    # caller that reaches process_order() directly instead of through
+    # execution_loop (which already skips this order's tick entirely).
+    if _kill_switch_active():
+        logger.warning(f"Order #{order_id}: TRADING_KILL_SWITCH active, leaving pending")
+        return
+
     if not wallet_id:
         await _update_order(order_id, "failed", error="No wallet assigned")
         return
@@ -425,21 +497,29 @@ async def execution_loop(interval: int | None = None):
 
     while True:
         try:
-            active = await _count_active_pending()
-            if active > settings.TRADING_MAX_CONCURRENT_PENDING:
-                logger.warning(f"{active} active orders exceed concurrency cap "
-                               f"{settings.TRADING_MAX_CONCURRENT_PENDING}; pausing intake")
+            if _kill_switch_active():
+                logger.warning("TRADING_KILL_SWITCH active — skipping this poll cycle entirely")
             else:
-                orders = await _get_pending_orders()
-                if orders:
-                    logger.info(f"Found {len(orders)} pending orders")
-                    for order in orders:
-                        try:
-                            await process_order(order)
-                            await asyncio.sleep(1)
-                        except Exception as e:
-                            logger.error(f"Order #{order.get('id')}: {e}")
-                            await _update_order(order.get("id"), "failed", error=str(e))
+                active = await _count_active_pending()
+                if active > settings.TRADING_MAX_CONCURRENT_PENDING:
+                    orders = await _get_pending_orders()
+                    exits = [o for o in orders if _is_exposure_reducing(o)]
+                    logger.warning(
+                        f"{active} active orders exceed concurrency cap "
+                        f"{settings.TRADING_MAX_CONCURRENT_PENDING}; pausing new-exposure intake"
+                        + (f", still processing {len(exits)} exposure-reducing order(s)" if exits else ""))
+                    orders = exits
+                else:
+                    orders = await _get_pending_orders()
+                    if orders:
+                        logger.info(f"Found {len(orders)} pending orders")
+                for order in orders:
+                    try:
+                        await process_order(order)
+                        await asyncio.sleep(1)
+                    except Exception as e:
+                        logger.error(f"Order #{order.get('id')}: {e}")
+                        await _update_order(order.get("id"), "failed", error=str(e))
         except asyncio.CancelledError:
             logger.info("Execution engine stopping")
             raise

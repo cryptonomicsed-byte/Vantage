@@ -179,3 +179,107 @@ def test_symbol_mint_resolution():
     mint = "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm"
     assert ee._resolve_solana_mint(mint) == mint
     assert ee._resolve_solana_mint("!!!") is None
+
+
+# ── kill switch ──────────────────────────────────────────────────────────────
+
+def test_kill_switch_reads_true_from_env_file(tmp_path):
+    f = tmp_path / ".env"
+    f.write_text("SOME_OTHER_VAR=1\nVANTAGE_TRADING_KILL_SWITCH=true\n")
+    assert ee._kill_switch_active(str(f)) is True
+
+
+def test_kill_switch_reads_false_from_env_file(tmp_path):
+    f = tmp_path / ".env"
+    f.write_text("VANTAGE_TRADING_KILL_SWITCH=false\n")
+    assert ee._kill_switch_active(str(f)) is False
+
+
+def test_kill_switch_key_absent_from_readable_file_is_off(tmp_path):
+    f = tmp_path / ".env"
+    f.write_text("SOME_OTHER_VAR=1\n")
+    assert ee._kill_switch_active(str(f)) is False
+
+
+def test_kill_switch_missing_file_falls_back_to_cached_settings(monkeypatch):
+    monkeypatch.setattr(settings, "TRADING_KILL_SWITCH", True)
+    assert ee._kill_switch_active("/definitely/does/not/exist.env") is True
+    monkeypatch.setattr(settings, "TRADING_KILL_SWITCH", False)
+    assert ee._kill_switch_active("/definitely/does/not/exist.env") is False
+
+
+def test_kill_switch_unreadable_existing_file_fails_closed(tmp_path, monkeypatch):
+    f = tmp_path / ".env"
+    f.write_text("VANTAGE_TRADING_KILL_SWITCH=false\n")
+    f.chmod(0o000)
+    try:
+        # Root/CI runners sometimes ignore chmod 000 for the owning user --
+        # only assert fail-closed if the permission actually took effect.
+        if not __import__("os").access(str(f), __import__("os").R_OK):
+            assert ee._kill_switch_active(str(f)) is True
+    finally:
+        f.chmod(0o644)
+
+
+def test_kill_switch_blocks_process_order(temp_db, monkeypatch):
+    monkeypatch.setattr(ee, "_kill_switch_active", lambda: True)
+    oid = _add_order(temp_db, symbol="BONK/SOL", side="BUY", quantity=0.005)
+
+    asyncio.run(ee.process_order(_order(temp_db, oid)))
+
+    row = _order(temp_db, oid)
+    assert row["status"] == "pending"  # untouched, not failed -- kill switch pauses, doesn't cancel
+
+
+def test_kill_switch_off_lets_order_through(temp_db, monkeypatch):
+    monkeypatch.setattr(ee, "_kill_switch_active", lambda: False)
+    monkeypatch.setattr(settings, "TRADING_LIVE_ENABLED", False)
+    monkeypatch.setattr(settings, "HELIUS_API_KEY", "fake")
+    oid = _add_order(temp_db, symbol="BONK/SOL", side="BUY", quantity=0.005)
+
+    with mock.patch("httpx.AsyncClient", return_value=_mock_jupiter_client()):
+        asyncio.run(ee.process_order(_order(temp_db, oid)))
+
+    assert _order(temp_db, oid)["status"] == "ready"
+
+
+# ── exposure-reducing (SELL/close) orders ───────────────────────────────────
+
+def test_is_exposure_reducing():
+    assert ee._is_exposure_reducing({"side": "SELL"}) is True
+    assert ee._is_exposure_reducing({"side": "sell"}) is True
+    assert ee._is_exposure_reducing({"side": "BUY"}) is False
+    assert ee._is_exposure_reducing({"side": ""}) is False
+    assert ee._is_exposure_reducing({}) is False
+
+
+def test_concurrency_cap_exempts_exposure_reducing_orders(temp_db, monkeypatch):
+    """Over the concurrency cap: a pending SELL (closes/reduces exposure)
+    must still be processed while a pending BUY (adds exposure) is withheld."""
+    monkeypatch.setattr(ee, "_kill_switch_active", lambda: False)
+    monkeypatch.setattr(settings, "TRADING_LIVE_ENABLED", False)
+    monkeypatch.setattr(settings, "HELIUS_API_KEY", "fake")
+    monkeypatch.setattr(settings, "TRADING_MAX_CONCURRENT_PENDING", 0)  # force the cap path
+
+    buy_id = _add_order(temp_db, symbol="BONK/SOL", side="BUY", quantity=0.005)
+    sell_id = _add_order(temp_db, symbol="BONK/SOL", side="SELL", quantity=0.005)
+
+    async def _one_tick():
+        # Same body as execution_loop's while-True, run exactly once instead
+        # of looping forever -- exercises the real concurrency-cap branch.
+        if ee._kill_switch_active():
+            return
+        active = await ee._count_active_pending()
+        if active > settings.TRADING_MAX_CONCURRENT_PENDING:
+            orders = await ee._get_pending_orders()
+            orders = [o for o in orders if ee._is_exposure_reducing(o)]
+        else:
+            orders = await ee._get_pending_orders()
+        for order in orders:
+            await ee.process_order(order)
+
+    with mock.patch("httpx.AsyncClient", return_value=_mock_jupiter_client()):
+        asyncio.run(_one_tick())
+
+    assert _order(temp_db, sell_id)["status"] == "ready"    # processed despite the cap
+    assert _order(temp_db, buy_id)["status"] == "pending"   # withheld by the cap, untouched

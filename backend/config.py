@@ -85,6 +85,17 @@ class Settings(BaseSettings):
     TRADING_LIVE_ENABLED: bool = False
     TRADING_ENGINE_INTERVAL: int = 5  # seconds between pending-order polls
 
+    # Global kill switch, independent of the two gates above (pattern from
+    # ai-market-maker's AIMM_KILL_SWITCH). Checked live every poll cycle, not
+    # just at process startup, so an operator can halt a running engine
+    # without a restart. When set, the loop stops taking new orders but does
+    # NOT touch orders already 'submitted' (a live on-chain tx already sent
+    # cannot be un-sent — the switch prevents new exposure, it doesn't try to
+    # rewrite history). Independent of TRADING_ENGINE_ENABLED/LIVE_ENABLED:
+    # flipping this off is the fastest possible stop, no config-file edit,
+    # no redeploy, works even if someone left the other two gates on.
+    TRADING_KILL_SWITCH: bool = False
+
     # Solana / Jupiter execution
     HELIUS_API_KEY: str = ""  # Helius RPC key for quotes/submit/confirm
 
