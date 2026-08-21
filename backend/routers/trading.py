@@ -956,9 +956,14 @@ async def generate_strategy_from_description(data: StrategyGenerateRequest, agen
     except ImportError:
         raise HTTPException(500, "instructor/openai not installed")
 
-    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    # Routed through OmniRoute (real gateway on :8300) with a key scoped to
+    # only this service's own DeepSeek connection + the free Pollinations
+    # fallback -- see 2026-08-21 key-rotation cleanup. Replaces a raw
+    # DEEPSEEK_API_KEY read directly from the environment.
+    omniroute_url = os.environ.get("OMNIROUTE_URL", "http://localhost:8300")
+    api_key = os.environ.get("OMNIROUTE_API_KEY", "")
     if not api_key:
-        raise HTTPException(422, "DEEPSEEK_API_KEY not configured — AI strategy generation unavailable")
+        raise HTTPException(422, "OMNIROUTE_API_KEY not configured — AI strategy generation unavailable")
 
     class GeneratedStrategy(BaseModel):
         strategy_type: str = Field(description="MUST be exactly one of: scalper_5020, bighit_40_800, accumulator_tiered, doubler_flip — pick whichever real engine best matches the description")
@@ -971,12 +976,12 @@ async def generate_strategy_from_description(data: StrategyGenerateRequest, agen
         target_tiers: str = Field("just_launch,pumpfun_10k_20k,pre_migration", description="Comma-separated token lifecycle tiers this strategy should target")
 
     client = instructor.from_openai(
-        OpenAI(api_key=api_key, base_url="https://api.deepseek.com"),
+        OpenAI(api_key=api_key, base_url=f"{omniroute_url}/v1"),
         mode=instructor.Mode.MD_JSON,
     )
     try:
         result = client.chat.completions.create(
-            model="deepseek-chat",
+            model="deepseek/deepseek-v4-flash",
             max_tokens=400,
             response_model=GeneratedStrategy,
             messages=[{

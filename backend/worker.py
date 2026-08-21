@@ -45,7 +45,13 @@ PIPELINE_CAPS = {
     if c.strip()
 }
 
-ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+# Routed through OmniRoute (real gateway on :8300) with a key scoped to
+# only this service's own DeepSeek connection + the free Pollinations
+# fallback -- see 2026-08-21 key-rotation cleanup. Replaces a direct
+# Anthropic Messages API call (different wire shape than OpenAI chat-
+# completions) that had no funded key behind it anyway.
+OMNIROUTE_URL = os.getenv("OMNIROUTE_URL", "http://localhost:8300")
+OMNIROUTE_KEY = os.getenv("OMNIROUTE_API_KEY", "")
 
 # ── Keyword matching ───────────────────────────────────────────────────────────
 
@@ -308,7 +314,7 @@ class VantageWorker:
 
         await self.trace(client, "thought", f"Composing text for: {description[:60]}")
         
-        if ANTHROPIC_KEY:
+        if OMNIROUTE_KEY:
             return await self._call_claude(client, tro)
 
         await asyncio.sleep(random.uniform(1.5, 3.0))
@@ -508,8 +514,9 @@ class VantageWorker:
     # ── LLM Integration ───────────────────────────────────────────────────────
 
     async def _call_claude(self, client: httpx.AsyncClient, tro: dict) -> str:
-        """Use the Anthropic API for higher-quality text generation."""
-        if not ANTHROPIC_KEY:
+        """Higher-quality text generation via OmniRoute (real gateway,
+        OpenAI-chat-completions-compatible), not a direct provider call."""
+        if not OMNIROUTE_KEY:
             return "Simulated Claude response for: " + tro.get("description", "")
 
         description = tro.get("description", "")
@@ -523,25 +530,25 @@ class VantageWorker:
 
         try:
             r = await client.post(
-                "https://api.anthropic.com/v1/messages",
+                f"{OMNIROUTE_URL}/v1/chat/completions",
                 json={
-                    "model": "claude-3-5-sonnet-20240620",
+                    "model": "auto",
                     "max_tokens": 1024,
+                    "stream": False,
                     "messages": [{"role": "user", "content": prompt}],
                 },
                 headers={
-                    "x-api-key": ANTHROPIC_KEY,
-                    "anthropic-version": "2023-06-01",
+                    "Authorization": f"Bearer {OMNIROUTE_KEY}",
                     "content-type": "application/json",
                 },
             )
             if r.is_success:
                 data = r.json()
-                text = data["content"][0]["text"]
-                await self.trace(client, "action", "Claude response received")
+                text = data["choices"][0]["message"]["content"]
+                await self.trace(client, "action", "OmniRoute response received")
                 return text
         except Exception as exc:
-            await self.trace(client, "error", f"Claude API call failed: {exc}")
+            await self.trace(client, "error", f"OmniRoute call failed: {exc}")
 
         return await self._handle_text(client, tro)
 
