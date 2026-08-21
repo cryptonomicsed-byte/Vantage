@@ -47,45 +47,47 @@ FFMPEG_AVAILABLE = False
 
 RATE_LIMIT_REQUESTS_PER_MINUTE = 100
 
-async def _check_api_key_rate_limit(api_key: str) -> bool:
-    """Check if API key has exceeded rate limit (100 req/min). Returns True if OK.
+# In-process fixed-window counters: {key_hash: (window_start, count)}. One
+# dict entry per distinct API key, one write per request straight to a
+# dict -- no lock needed since uvicorn runs this app as a single worker
+# (no --workers flag; confirmed against the running systemd unit).
+#
+# This DB-backed version (a per-request SQLite UPSERT into
+# rate_limit_counters) was tried to fix an earlier in-memory version's
+# reset-on-restart + unbounded growth, but traded that for real production
+# impact: with dozens of internal Ares/mesh daemons polling constantly,
+# concurrent writers collided past SQLite's 20s busy_timeout -- 109
+# "database is locked" errors/minute measured live on 2026-08-21, with
+# zero actual end users yet. Reverted to in-memory, but as fixed-window
+# buckets (not the old per-request timestamp lists) with periodic
+# eviction, so it doesn't reintroduce the unbounded-growth problem either.
+_rate_limit_counters: dict[str, tuple[int, int]] = {}
 
-    Was a plain in-memory dict of timestamp lists -- reset on every restart
-    (a real burst window every deploy), and grew forever per distinct key
-    ever seen with no eviction. Replaced with a DB-backed fixed-window
-    counter (rate_limit_counters, PK on key_hash+window_start) instead of
-    Redis: Vantage already runs SQLite in WAL mode with busy_timeout for
-    everything else, and per-minute UPSERT buckets (not one row per
-    request) keep this cheap rather than turning every API call into its
-    own write, which would undermine the concurrency work just done
-    elsewhere this session."""
+async def _check_api_key_rate_limit(api_key: str) -> bool:
+    """Check if API key has exceeded rate limit (100 req/min). Returns True if OK."""
     if not api_key:
         return True  # No key means no per-key rate limiting
 
     key_hash = hashlib.sha256(api_key.encode()).hexdigest()
     window_start = int(time.time() // 60) * 60
 
-    async with get_db() as db:
-        cur = await db.execute(
-            """INSERT INTO rate_limit_counters (key_hash, window_start, count)
-               VALUES (?, ?, 1)
-               ON CONFLICT(key_hash, window_start) DO UPDATE SET count = count + 1
-               RETURNING count""",
-            (key_hash, window_start),
-        )
-        row = await cur.fetchone()
-        await db.commit()
+    bucket = _rate_limit_counters.get(key_hash)
+    if bucket is not None and bucket[0] == window_start:
+        count = bucket[1] + 1
+    else:
+        count = 1
+    _rate_limit_counters[key_hash] = (window_start, count)
 
-    return (row[0] if row else 1) <= RATE_LIMIT_REQUESTS_PER_MINUTE
+    return count <= RATE_LIMIT_REQUESTS_PER_MINUTE
 
 
 async def _prune_rate_limit_counters():
-    """Drop counter rows for windows more than a few minutes old -- keeps
-    the table small; nothing needs history beyond the current window."""
+    """Drop counter entries for windows more than a few minutes old -- keeps
+    the dict from growing forever with one entry per distinct key ever seen."""
     cutoff = int(time.time() // 60) * 60 - 300
-    async with get_db() as db:
-        await db.execute("DELETE FROM rate_limit_counters WHERE window_start < ?", (cutoff,))
-        await db.commit()
+    stale = [k for k, (window_start, _count) in _rate_limit_counters.items() if window_start < cutoff]
+    for k in stale:
+        del _rate_limit_counters[k]
 
 
 async def _rate_limit_prune_loop():
