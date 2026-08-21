@@ -21,6 +21,14 @@ MIRROR_DIR=/opt/ares/Vantage/ops/dashboards/mirror
 DEST="$MIRROR_DIR/vantage_mirror.db"
 
 mkdir -p "$MIRROR_DIR"
+# A leftover .tmp from an interrupted prior run (crash, disk-full, kill)
+# makes sqlite3's `.backup` fail outright with "file is not a database" --
+# it opens the destination path first, and a truncated/corrupt leftover
+# fails that check before any real write is attempted. Confirmed live
+# 2026-08-21: a 15.5MB truncated .tmp (vs the real ~230MB db) from a stale
+# run broke every subsequent refresh until removed by hand. Always start
+# from a clean destination.
+rm -f "$DEST.tmp"
 sqlite3 "$SRC" ".backup '$DEST.tmp'"
 mv -f "$DEST.tmp" "$DEST"
 rm -f "$DEST-journal" "$DEST-wal" "$DEST-shm"
