@@ -455,15 +455,17 @@ async def ingest_video(req: IngestVideoRequest, agent: dict = Depends(get_agent)
     if extraction.error:
         raise HTTPException(422, extraction.error)
 
-    if not extraction.github_urls:
+    repo_urls = extraction.repo_urls or extraction.github_urls
+    if not repo_urls:
         return {
             "video_id": extraction.video_id, "title": extraction.title,
-            "fetch_method": extraction.method, "github_urls": [], "forged": [],
-            "note": "no github.com links found in the video description",
+            "fetch_method": extraction.method, "github_urls": [],
+            "repo_urls": [], "forged": [],
+            "note": "no repo links found in the video description",
         }
 
     forged = []
-    for repo_url in extraction.github_urls:
+    for repo_url in repo_urls:
         try:
             receipt = await _call_skillforge(repo_url, approve=req.approve, store=req.store)
             forged.append({
@@ -482,5 +484,6 @@ async def ingest_video(req: IngestVideoRequest, agent: dict = Depends(get_agent)
         "video_id": extraction.video_id, "title": extraction.title,
         "fetch_method": extraction.method,
         "github_urls": extraction.github_urls,
+        "repo_urls": repo_urls,
         "forged": forged,
     }

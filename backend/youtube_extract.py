@@ -51,7 +51,22 @@ _GITHUB_URL_RE = re.compile(
     r"https?://github\.com/([A-Za-z0-9][A-Za-z0-9_.-]*)/([A-Za-z0-9][A-Za-z0-9_.-]*)"
 )
 
-_TRAILING_PUNCT_RE = re.compile(r"[.,;:!?)\]}'\"]+$")
+# Any repo host (github/gitlab/gitea/bitbucket/self-hosted) — used by the
+# frankenstein harvester so descriptions pointing at non-GitHub repos are
+# not lost. Host must look like a real hostname (dots allowed, no scheme
+# artifacts); owner/repo use the same legal charset as GitHub's.
+_REPO_URL_RE = re.compile(
+    r"https?://([a-z0-9.-]+\.(?:com|org|io|dev|net|cloud|app))/([A-Za-z0-9][A-Za-z0-9_.-]*)/([A-Za-z0-9][A-Za-z0-9_.-]*?)(?:\.git)?(?:/|$|\s|[.,;:!?)\]}>\"'])",
+    re.IGNORECASE,
+)
+
+# Hosts that look like repo hosts but never point at a forgeable repo.
+_REPO_SKIP_HOSTS = {
+    "www.youtube.com", "youtu.be", "youtube.com", "m.youtube.com",
+    "www.google.com", "raw.githubusercontent.com",
+}
+
+_TRAILING_PUNCT_RE = re.compile(r"[.,;:!?)\]}'\"`]+$")
 
 
 @dataclass
@@ -62,6 +77,7 @@ class VideoExtraction:
     description: str = ""
     method: str = ""  # "yt-dlp" | "http" — which path actually produced the description
     github_urls: list[str] = field(default_factory=list)
+    repo_urls: list[str] = field(default_factory=list)
     error: Optional[str] = None
 
 
@@ -96,6 +112,29 @@ def extract_github_urls(text: str) -> list[str]:
         # regex above (trailing sentence punctuation), never the literal
         # ".git" suffix itself.
         url = f"https://github.com/{owner}/{repo}"
+        if url not in seen:
+            seen.add(url)
+            out.append(url)
+    return out
+
+
+def extract_repo_urls(text: str) -> list[str]:
+    """Pull owner/repo links from ANY host (github/gitlab/gitea/bitbucket/
+    self-hosted) out of free text — the frankenstein-harvest view. Same
+    normalization as extract_github_urls, plus host filtering so youtube/
+    google/raw links never count as repos. Order-preserving."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in _REPO_URL_RE.finditer(text):
+        host = m.group(1).lower()
+        if host in _REPO_SKIP_HOSTS:
+            continue
+        owner, repo = m.group(2), m.group(3)
+        repo = _TRAILING_PUNCT_RE.sub("", repo)
+        if not repo or not owner:
+            continue
+        repo = repo.removesuffix(".git")
+        url = f"https://{host}/{owner}/{repo}"
         if url not in seen:
             seen.add(url)
             out.append(url)
@@ -195,4 +234,5 @@ def fetch_video_description(url_or_id: str) -> VideoExtraction:
         video_id=video_id, source_url=url_or_id,
         title=title, description=description, method=method,
         github_urls=extract_github_urls(description),
+        repo_urls=extract_repo_urls(description),
     )
