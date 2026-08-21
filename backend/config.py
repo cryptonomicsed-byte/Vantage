@@ -238,12 +238,24 @@ class Settings(BaseSettings):
     OMOKODA_COGNITION_TOKEN: str = ""
 
     # OmniRoute -- free OpenAI-compatible AI gateway Omo-Koda2's kernel
-    # already uses (default localhost:8300, same host, no auth needed
-    # locally -- confirmed live). Copilot's default LLM fallback for any
-    # agent with no cognition_url of its own, so chat is never JUST the
-    # regex parser unless OmniRoute itself is unreachable.
+    # already uses (default localhost:8300, same host). Copilot's default
+    # LLM fallback for any agent with no cognition_url of its own, so chat
+    # is never JUST the regex parser unless OmniRoute itself is unreachable.
+    # REQUIRE_API_KEY was enabled on OmniRoute 2026-08-21 (was previously
+    # allowing anonymous calls) -- every real caller now needs
+    # OMNIROUTE_API_KEY, scoped in OmniRoute to only this service's own
+    # DeepSeek connection + the free Pollinations fallback.
     OMNIROUTE_URL: str = "http://localhost:8300"
     OMNIROUTE_MODEL: str = "auto"
+    OMNIROUTE_API_KEY: str = ""
+
+    # Instance-level Gemini fallback for voice_live.py's Gemini Live engine,
+    # used only when an agent hasn't set its own BYOK Gemini key. This is a
+    # real Gemini API key (Google AI Studio), NOT routed through OmniRoute --
+    # Gemini Live is a realtime multimodal WebSocket API, a different wire
+    # protocol than OpenAI chat-completions, and OmniRoute's provider
+    # catalog has no Gemini Live entry.
+    GEMINI_API_KEY: str = ""
 
     # OSOVM (Proof-of-Simulation VM, Sui/Move settlement) -- when set,
     # Vantage can ask OSOVM to attest a completed job_task with a real

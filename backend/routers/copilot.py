@@ -230,13 +230,17 @@ async def whoami(agent: dict = Depends(get_agent)):
 
 async def _try_omniroute(agent_row: dict, text: str) -> Optional[str]:
     """Default Copilot LLM fallback: OpenAI-compatible OmniRoute gateway,
-    same host Omo-Koda2's kernel already uses (confirmed live, no auth
-    needed locally). Only reached when the agent has no cognition_url of
-    its own (or it just failed) -- this is what keeps Copilot 'a real LLM'
-    for every agent by default, not just ones with a Mind connected.
-    Returns None (never raises) on any failure so the caller falls through
-    to the regex parser."""
-    if not settings.OMNIROUTE_URL:
+    same host Omo-Koda2's kernel already uses. Only reached when the agent
+    has no cognition_url of its own (or it just failed) -- this is what
+    keeps Copilot 'a real LLM' for every agent by default, not just ones
+    with a Mind connected. Returns None (never raises) on any failure so
+    the caller falls through to the regex parser.
+
+    REQUIRE_API_KEY was enabled on OmniRoute 2026-08-21 (previously allowed
+    anonymous calls) -- OMNIROUTE_API_KEY is scoped in OmniRoute to only
+    this service's own DeepSeek connection + the free Pollinations
+    fallback."""
+    if not settings.OMNIROUTE_URL or not settings.OMNIROUTE_API_KEY:
         return None
     model = agent_row.get("copilot_fallback_model") or settings.OMNIROUTE_MODEL
     try:
@@ -251,6 +255,7 @@ async def _try_omniroute(agent_row: dict, text: str) -> Optional[str]:
                     ],
                     "stream": False,
                 },
+                headers={"Authorization": f"Bearer {settings.OMNIROUTE_API_KEY}"},
             )
         if r.status_code == 200:
             content = r.json().get("choices", [{}])[0].get("message", {}).get("content")

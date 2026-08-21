@@ -1183,7 +1183,10 @@ async def list_omniroute_models(_agent: dict = Depends(get_agent)):
         return {"models": _omniroute_models_cache["models"], "cached": True}
     try:
         async with httpx.AsyncClient(timeout=8) as client:
-            r = await client.get(f"{settings.OMNIROUTE_URL.rstrip('/')}/v1/models")
+            r = await client.get(
+                f"{settings.OMNIROUTE_URL.rstrip('/')}/v1/models",
+                headers={"Authorization": f"Bearer {settings.OMNIROUTE_API_KEY}"},
+            )
             r.raise_for_status()
             data = r.json()
         models = sorted(m["id"] for m in data.get("data", []) if m.get("id"))

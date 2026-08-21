@@ -57,6 +57,7 @@ async def _omniroute_complete(prompt: str) -> str:
                 "messages": [{"role": "user", "content": prompt}],
                 "stream": False,
             },
+            headers={"Authorization": f"Bearer {settings.OMNIROUTE_API_KEY}"},
         )
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"]
