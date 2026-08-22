@@ -548,6 +548,20 @@ async def lifespan(app: FastAPI):
             await t
         except asyncio.CancelledError:
             pass
+        except Exception as e:
+            # A background task can fail with a plain (non-cancellation)
+            # exception in the same instant it's being cancelled during
+            # shutdown -- e.g. buzz_inbound's relay-membership call racing
+            # a pool timeout. `await t` then re-raises THAT exception, not
+            # CancelledError, so it was falling straight through this
+            # handler and out of the whole lifespan context manager,
+            # which uvicorn logs as "Application shutdown failed. Exiting."
+            # and kills the entire process -- turning one background
+            # task's unrelated, non-fatal failure into a hard crash on
+            # every routine restart. Every task here is independent
+            # background work; none of them failing should ever block
+            # process shutdown.
+            logger.warning("shutdown: background task %s failed (non-fatal): %s", t.get_name(), e)
 
 
 app = FastAPI(

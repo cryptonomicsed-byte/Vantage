@@ -357,10 +357,24 @@ async def run_inbound_listener() -> None:
     processed event's created_at in buzz_config and resumes from there;
     first-ever run starts from "now" (no historical backfill), not the
     dawn of the channel."""
-    await _ensure_instance_relay_membership()
     backoff = RECONNECT_BACKOFF_SECONDS
     while True:
         try:
+            # Was called once, outside this loop, unguarded -- a single
+            # transient failure here (e.g. the relay's own DB pool timing
+            # out under load, seen live) killed this whole listener
+            # permanently for the process's life, and racing this
+            # exception against a concurrent app-shutdown cancellation
+            # could crash the entire app (see main.py's shutdown-task
+            # handling). Membership registration is idempotent
+            # ("already"/"exists" already treated as success below), so
+            # retrying it every reconnect attempt is safe and self-heals.
+            try:
+                await asyncio.wait_for(_ensure_instance_relay_membership(), timeout=10)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("buzz_inbound: relay-membership check failed (non-fatal, retrying next backoff): %s", e)
             channel = await get_main_feed_channel()
             since = await _get_last_ts()
             pk = await derive_instance_keypair()
