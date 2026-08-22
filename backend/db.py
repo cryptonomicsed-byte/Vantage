@@ -717,6 +717,34 @@ CREATE TABLE IF NOT EXISTS external_conversations (
 )
 """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_external_conv_agent ON external_conversations(agent_id)")
+        # Iranti bridge: Iranti (~/Iranti) is a separate, standalone agent-memory
+        # system (BM25 recall, A2A grants, dream digests) — this table is NOT a
+        # merge of the two systems, just a connector-scoped mirror of whichever
+        # (ns, slug) memories an agent's Iranti grant chooses to surface here.
+        # `iranti_pubkey` ties a row back to the exact Iranti agent identity that
+        # wrote it; `prov` carries Iranti's own free-text provenance string
+        # forward unchanged so the reference chain survives the bridge.
+        await db.execute("""
+CREATE TABLE IF NOT EXISTS external_iranti_memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id INTEGER NOT NULL,
+    connector_id INTEGER NOT NULL,
+    iranti_pubkey TEXT NOT NULL,
+    ns TEXT NOT NULL DEFAULT 'general',
+    slug TEXT NOT NULL,
+    value TEXT NOT NULL,
+    salience INTEGER NOT NULL DEFAULT 50,
+    pin INTEGER NOT NULL DEFAULT 0,
+    prov TEXT,
+    iranti_updated_at INTEGER NOT NULL DEFAULT 0,
+    first_at TEXT DEFAULT (datetime('now')),
+    last_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(connector_id, iranti_pubkey, ns, slug),
+    FOREIGN KEY (agent_id) REFERENCES agents(id),
+    FOREIGN KEY (connector_id) REFERENCES vault_connectors(id)
+)
+""")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_external_iranti_agent ON external_iranti_memories(agent_id)")
         # Guild / Collective system
         await db.execute("""
             CREATE TABLE IF NOT EXISTS guilds (

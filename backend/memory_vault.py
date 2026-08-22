@@ -522,6 +522,55 @@ class MemoryVault:
                 continue  # connector revoked/deleted — leave its existing notes as-is
             await self.render_external_conversation(conv, connector)
 
+    # ── Iranti bridge ────────────────────────────────────────────────────────
+    # Iranti (~/Iranti) is a separate, standalone agent-memory system — real
+    # SQLite store, BM25 recall, A2A grants, its own `nsec`-holding identity.
+    # This is deliberately NOT an absorption: a connector (source='iranti')
+    # ingests whichever (ns, slug) memories the agent's Iranti-side A2A grant
+    # chooses to push here (see routers/memory_vault.py's iranti ingest
+    # endpoint), and each rendered note's `resource` field carries an
+    # `iranti://<pubkey>/<ns>/<slug>` URI back to the authoritative Iranti
+    # entry. Nothing here is Iranti's canonical value — this is a mirror.
+    def render_iranti_memory(self, row: dict) -> str:
+        ns, slug = row["ns"], row["slug"]
+        coords = self._spatial_hash(f"iranti:{row['iranti_pubkey']}:{ns}:{slug}", "external")
+        title = f"Iranti · {ns}/{slug}"
+        fm = {
+            "id": f"iranti_{row['iranti_pubkey'][:16]}_{ns}_{slug}",
+            "type": f"Iranti Memory · {ns.title()}",
+            "title": title,
+            "resource": f"iranti://{row['iranti_pubkey']}/{ns}/{slug}",
+            **({"description": row["value"][:200]} if row.get("value") else {}),
+            "salience": row.get("salience", 50),
+            "pin": bool(row.get("pin")),
+            **({"prov": row["prov"]} if row.get("prov") else {}),
+            "tags": ["iranti", ns],
+            "timestamp": row.get("last_at", ""),
+            "node_kind": "star",
+            "galaxy_x": coords[0], "galaxy_y": coords[1], "galaxy_z": coords[2],
+            "galaxy_size": 6 + (row.get("salience", 50) / 10),
+            "galaxy_color": "#c084fc", "constellation": "external-memory",
+        }
+        body = f"# {title}\n\n{row.get('value', '')}"
+        safe = re.sub(r"[^\w-]", "_", f"{ns}_{slug}"[:80])
+        path = self.vault_path / "external" / "iranti" / f"{safe}.md"
+        self._write_note(path, fm, body)
+        rel = str(path.relative_to(self.vault_path))
+        return rel
+
+    async def export_iranti_memories(self):
+        """Batch re-render of every bridged Iranti memory from the DB (source
+        of truth for the mirror — Iranti itself stays the source of truth for
+        the underlying value), same recovery pattern as export_external()."""
+        async with get_db() as db:
+            db.row_factory = aiosqlite.Row
+            rows = await (await db.execute(
+                "SELECT * FROM external_iranti_memories WHERE agent_id=?", (self.agent_id,)
+            )).fetchall()
+        for row in rows:
+            path = self.render_iranti_memory(dict(row))
+            await self._update_fts(path, f"Iranti · {row['ns']}/{row['slug']}", row["value"], ["iranti", row["ns"]])
+
     # ── Skills: badges + soul_manifest capabilities ─────────────────────────
     async def export_skills(self):
         async with get_db() as db:
@@ -675,7 +724,8 @@ class MemoryVault:
         # content. Each family is best-effort — a missing subsystem (e.g. no DMs
         # yet, no trading tables on a minimal deploy) must not break the sync.
         for exporter in (self.export_conversations, self.export_skills,
-                         self.export_projects, self.export_trades, self.export_external):
+                         self.export_projects, self.export_trades, self.export_external,
+                         self.export_iranti_memories):
             try:
                 await exporter()
             except Exception:
