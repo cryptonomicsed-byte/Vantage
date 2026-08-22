@@ -530,8 +530,11 @@ async def lifespan(app: FastAPI):
         from .execution_engine import execution_loop
         execution_engine_task = asyncio.create_task(execution_loop())
 
-    from .agenttv_channel import start_all_channels as _start_all_agenttv_channels
-    await _start_all_agenttv_channels()
+    if settings.AGENTTV_ENABLED:
+        from .agenttv_channel import start_all_channels as _start_all_agenttv_channels
+        await _start_all_agenttv_channels()
+    else:
+        logger.warning("AGENTTV_ENABLED=False — Agent.TV podcast/video generation disabled (owner kill switch)")
 
     from .buzz_inbound import run_inbound_listener
     buzz_inbound_task = asyncio.create_task(run_inbound_listener())

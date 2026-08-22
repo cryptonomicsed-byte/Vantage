@@ -85,6 +85,14 @@ class Settings(BaseSettings):
     TRADING_LIVE_ENABLED: bool = False
     TRADING_ENGINE_INTERVAL: int = 5  # seconds between pending-order polls
 
+    # Agent.TV's 4 persona channels each render a fresh podcast episode via
+    # ffmpeg roughly every few minutes, forever, with no concurrency cap
+    # across channels -- confirmed live (2026-08-22) contributing to CPU
+    # pressure during a resource crisis (3 concurrent ffmpeg encodes seen
+    # in one snapshot, each pinning 28-48% CPU on a 2-vCPU box). Owner
+    # kill switch: default OFF until deliberately re-enabled.
+    AGENTTV_ENABLED: bool = False
+
     # Global kill switch, independent of the two gates above (pattern from
     # ai-market-maker's AIMM_KILL_SWITCH). Checked live every poll cycle, not
     # just at process startup, so an operator can halt a running engine
