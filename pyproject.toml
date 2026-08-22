@@ -46,6 +46,9 @@ dependencies = [
     "ccxt>=4.0.0",
     "defusedxml>=0.7.1",
     "coincurve>=20.0.0",
+    # Real BIP-39 mnemonic generation + BIP-32/BIP-44/SLIP-0010 multi-chain
+    # derivation for backend/hd_wallet.py (agent wallet creation).
+    "bip-utils>=2.9.3",
     # Pinned <8.0 deliberately: 8.x requires starlette>=1.0.0, which
     # directly conflicts with this project's fastapi>=0.104.0 pin (fastapi
     # 0.128.8, installed live, requires starlette<1.0.0) -- confirmed via a
