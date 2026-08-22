@@ -1,7 +1,7 @@
 """Pump.fun Degen Trenches — Solana meme coin alpha.
 Data: GeckoTerminal (real-time Solana pools), Birdeye (prices), Jupiter (quotes)
 """
-import json, os, urllib.request, hashlib
+import asyncio, json, os, urllib.request, hashlib
 from pathlib import Path
 from fastapi import APIRouter, Query, HTTPException, Header
 import aiosqlite
@@ -37,12 +37,18 @@ async def get_agent(key):
     finally:
         await db.close()
 
-def _fetch(url, headers=None, timeout=10):
+def _fetch_sync(url, headers=None, timeout=10):
     h = headers or {}
     h['User-Agent'] = 'curl/8.0'
     req = urllib.request.Request(url, headers=h)
     resp = urllib.request.urlopen(req, timeout=timeout)
     return json.loads(resp.read().decode())
+
+async def _fetch(url, headers=None, timeout=10):
+    """Off the event loop -- calling urlopen directly from an async handler
+    used to freeze every other in-flight request (DB ops included) for the
+    full duration of each upstream call."""
+    return await asyncio.to_thread(_fetch_sync, url, headers, timeout)
 
 # ════════════════════════════════════════════════════════════════
 # NEW LAUNCHES — GeckoTerminal Solana new pools
@@ -61,7 +67,7 @@ def _mint_from_pool(p: dict) -> str:
 async def new_launches(limit: int=20, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
     try:
-        d = _fetch(f"https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=1", {"accept":"application/json"})
+        d = await _fetch(f"https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=1", {"accept":"application/json"})
         pools = d.get("data",[])
         r = []
         for p in pools[:limit]:
@@ -82,7 +88,7 @@ async def new_launches(limit: int=20, x_agent_key: str=Header(...)):
 async def trending(limit: int=20, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
     try:
-        d = _fetch("https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1", {"accept":"application/json"})
+        d = await _fetch("https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1", {"accept":"application/json"})
         pools = d.get("data",[])
         r = []
         for p in pools[:limit]:
@@ -106,7 +112,7 @@ async def trending(limit: int=20, x_agent_key: str=Header(...)):
 async def bonding_curve(mint: str=Query(...), x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
     try:
-        d = _fetch(f"https://public-api.birdeye.so/defi/price?address={mint}", {"X-API-KEY": BIRDEYE, "accept":"application/json"})
+        d = await _fetch(f"https://public-api.birdeye.so/defi/price?address={mint}", {"X-API-KEY": BIRDEYE, "accept":"application/json"})
         price = float(d.get("data",{}).get("value",0))
         curve_target = 69000
         progress = min(100, round((price * 1_000_000 / curve_target) * 100, 2)) if price else 0
@@ -129,7 +135,7 @@ async def bonding_curve(mint: str=Query(...), x_agent_key: str=Header(...)):
 async def graduations(limit: int=20, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
     try:
-        d = _fetch("https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1", {"accept":"application/json"})
+        d = await _fetch("https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1", {"accept":"application/json"})
         pools = d.get("data",[])
         r = []
         for p in pools:
@@ -153,7 +159,7 @@ async def graduations(limit: int=20, x_agent_key: str=Header(...)):
 async def trades(mint: str, limit: int=20, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
     try:
-        d = _fetch(f"https://quote-api.jup.ag/v6/quote?inputMint={mint}&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=1000000&slippageBps=50")
+        d = await _fetch(f"https://quote-api.jup.ag/v6/quote?inputMint={mint}&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=1000000&slippageBps=50")
         return {"mint":mint,"in_amount":d.get("inAmount",0),"out_amount":d.get("outAmount",0),"price_impact_pct":float(d.get("priceImpactPct",0)),"routes":len(d.get("routePlan",[])),"source":"Jupiter"}
     except:
         return {"mint":mint,"source":"Jupiter:offline"}
@@ -162,7 +168,7 @@ async def trades(mint: str, limit: int=20, x_agent_key: str=Header(...)):
 async def risk(mint: str, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
     try:
-        d = _fetch(f"https://public-api.birdeye.so/defi/price?address={mint}", {"X-API-KEY": BIRDEYE})
+        d = await _fetch(f"https://public-api.birdeye.so/defi/price?address={mint}", {"X-API-KEY": BIRDEYE})
         price = float(d.get("data",{}).get("value",0))
         risks = []
         if price < 0.000001: risks.append({"type":"MICRO_CAP","severity":"HIGH","detail":"Price < $0.000001"})
@@ -233,7 +239,7 @@ async def detect(address: str = Query(...), x_agent_key: str = Header(...)):
     try:
         payload = json.dumps({"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":[address,{"encoding":"jsonParsed"}]}).encode()
         req = urllib.request.Request(f"https://mainnet.helius-rpc.com/?api-key={HELIUS}",data=payload,headers={"Content-Type":"application/json"})
-        resp = json.loads(urllib.request.urlopen(req,timeout=10).read().decode())
+        resp = await asyncio.to_thread(lambda: json.loads(urllib.request.urlopen(req,timeout=10).read().decode()))
         info = resp.get("result",{}).get("value",{})
         if not info: return {"address":address,"type":"not_found","label":"Account not found","action":"none"}
         owner = info.get("owner","")
@@ -259,7 +265,7 @@ async def token_holders(mint: str = Query(...), limit: int = Query(20), x_agent_
     """Top token holders via Birdeye."""
     if not await get_agent(x_agent_key): raise HTTPException(401)
     try:
-        d = _fetch(f"https://public-api.birdeye.so/defi/v3/token/holder?address={mint}&limit={limit}", {"X-API-KEY":BIRDEYE,"accept":"application/json"})
+        d = await _fetch(f"https://public-api.birdeye.so/defi/v3/token/holder?address={mint}&limit={limit}", {"X-API-KEY":BIRDEYE,"accept":"application/json"})
         items = d.get("data",{}).get("items",d.get("data",[]))
         if not isinstance(items,list): items=[]
         holders = []
@@ -277,30 +283,38 @@ async def token_creator(mint: str = Query(...), x_agent_key: str = Header(...)):
     """Token creator from Pump.fun frontend API."""
     if not await get_agent(x_agent_key): raise HTTPException(401)
     try:
-        d = _fetch(f"https://frontend-api.pump.fun/coins/{mint}",{"accept":"application/json"})
+        d = await _fetch(f"https://frontend-api.pump.fun/coins/{mint}",{"accept":"application/json"})
         return {"mint":mint,"creator":d.get("creator",d.get("creatorAddress","")),"name":d.get("name",""),"symbol":d.get("symbol",""),"description":d.get("description","")[:200],"twitter":d.get("twitter",""),"website":d.get("website",""),"created_at":d.get("created_timestamp","")}
     except:
         return {"mint":mint,"creator":"","error":"Pump.fun API unavailable"}
 
+def _token_traders_sync(mint: str, helius_key: str) -> dict:
+    import urllib.request as ur
+    payload = json.dumps({"jsonrpc":"2.0","id":1,"method":"getSignaturesForAddress","params":[mint,{"limit":30}]}).encode()
+    req = ur.Request(f"https://mainnet.helius-rpc.com/?api-key={helius_key}",data=payload,headers={"Content-Type":"application/json"})
+    sigs = json.loads(ur.urlopen(req,timeout=10).read().decode()).get("result",[])
+    trader_vol={}
+    for s in sigs[:30]:
+        txn_payload = json.dumps({"jsonrpc":"2.0","id":2,"method":"getTransaction","params":[s["signature"],{"encoding":"jsonParsed","maxSupportedTransactionVersion":0}]}).encode()
+        txn_req = ur.Request(f"https://mainnet.helius-rpc.com/?api-key={helius_key}",data=txn_payload,headers={"Content-Type":"application/json"})
+        try:
+            txn = json.loads(ur.urlopen(txn_req,timeout=5).read().decode()).get("result",{})
+            accts = txn.get("transaction",{}).get("message",{}).get("accountKeys",[])
+            signer = accts[0]["pubkey"] if isinstance(accts[0],dict) else accts[0]
+            trader_vol[signer] = trader_vol.get(signer,0)+1
+        except: pass
+    return trader_vol
+
 @router.get("/token/traders")
 async def token_traders(mint: str = Query(...), x_agent_key: str = Header(...)):
-    """Top traders for a token via Helius RPC."""
+    """Top traders for a token via Helius RPC. Up to 31 sequential RPC calls
+    (1 signature lookup + up to 30 transaction fetches) -- was running all
+    of them synchronously inside the async handler, freezing the entire
+    event loop (every other in-flight request) for the whole chain, up to
+    ~150s worst case. Runs off the event loop in one thread instead."""
     if not await get_agent(x_agent_key): raise HTTPException(401)
     try:
-        import urllib.request as ur
-        payload = json.dumps({"jsonrpc":"2.0","id":1,"method":"getSignaturesForAddress","params":[mint,{"limit":30}]}).encode()
-        req = ur.Request(f"https://mainnet.helius-rpc.com/?api-key={HELIUS}",data=payload,headers={"Content-Type":"application/json"})
-        sigs = json.loads(ur.urlopen(req,timeout=10).read().decode()).get("result",[])
-        trader_vol={}
-        for s in sigs[:30]:
-            txn_payload = json.dumps({"jsonrpc":"2.0","id":2,"method":"getTransaction","params":[s["signature"],{"encoding":"jsonParsed","maxSupportedTransactionVersion":0}]}).encode()
-            txn_req = ur.Request(f"https://mainnet.helius-rpc.com/?api-key={HELIUS}",data=txn_payload,headers={"Content-Type":"application/json"})
-            try:
-                txn = json.loads(ur.urlopen(txn_req,timeout=5).read().decode()).get("result",{})
-                accts = txn.get("transaction",{}).get("message",{}).get("accountKeys",[])
-                signer = accts[0]["pubkey"] if isinstance(accts[0],dict) else accts[0]
-                trader_vol[signer] = trader_vol.get(signer,0)+1
-            except: pass
+        trader_vol = await asyncio.to_thread(_token_traders_sync, mint, HELIUS)
         top = sorted(trader_vol.items(),key=lambda x:-x[1])[:10]
         return {"mint":mint,"traders":[{"wallet":w,"txn_count":c} for w,c in top],"unique_traders":len(trader_vol)}
     except:

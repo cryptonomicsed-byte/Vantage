@@ -1,7 +1,7 @@
 """Degen Alpha Router — Ultra-degen signals: early calls, smart wallets, volume surges, rug checks.
 Uses existing keys: Helius RPC, Birdeye, GeckoTerminal.
 """
-import json, os, urllib.request, hashlib, time
+import asyncio, json, os, urllib.request, hashlib, time
 from pathlib import Path
 from fastapi import APIRouter, Query, HTTPException, Header
 from backend.wallet_blacklist import sql_label_exclusions
@@ -42,10 +42,18 @@ def _cache_put(key: str, val: dict):
     _CACHE[key] = (time.time(), val)
     return val
 
-def _fetch(url, headers=None, timeout=10):
+def _fetch_sync(url, headers=None, timeout=10):
     h = headers or {}; h['User-Agent'] = 'curl/8.0'
     req = urllib.request.Request(url, headers=h)
     return json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode())
+
+async def _fetch(url, headers=None, timeout=10):
+    """Runs the blocking urlopen off the event loop -- calling it directly
+    from an async handler used to freeze every other in-flight request
+    (DB ops included) for the full duration of each upstream call, since
+    GeckoTerminal/Birdeye are noted above as rate-limited/flaky and this
+    ran synchronously inside the single asyncio event loop."""
+    return await asyncio.to_thread(_fetch_sync, url, headers, timeout)
 
 async def _db():
     """Real async connection with busy_timeout -- every endpoint in this
@@ -93,7 +101,7 @@ async def ensure_degen_indexes():
     except Exception as e:
         print(f"degen index init skipped (table may not exist yet): {e}")
 
-def _trending_pools_cached():
+async def _trending_pools_cached():
     """The one upstream call every endpoint here shares — fetch once, cache,
     reuse. Cuts GeckoTerminal call volume ~5x and is the actual fix for the
     rate-limit-triggered empty flashes."""
@@ -101,7 +109,7 @@ def _trending_pools_cached():
     if fresh is not None:
         return fresh, True
     try:
-        d = _fetch("https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1", {"accept": "application/json"})
+        d = await _fetch("https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1", {"accept": "application/json"})
         pools = d.get("data", [])
         _cache_put("trending_pools", pools)
         return pools, False
@@ -126,7 +134,7 @@ def _mint_from_pool(p: dict) -> str:
 @router.get("/early-calls")
 async def early_calls(limit: int=20, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
-    pools, from_cache = _trending_pools_cached()
+    pools, from_cache = await _trending_pools_cached()
     try:
         now = time.time()
         results = []
@@ -211,7 +219,7 @@ async def smart_wallets(limit: int=20, x_agent_key: str=Header(...)):
 @router.get("/volume-surge")
 async def volume_surge(limit: int=20, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
-    pools, from_cache = _trending_pools_cached()
+    pools, from_cache = await _trending_pools_cached()
     try:
         results = []
         for p in pools[:limit]:
@@ -241,7 +249,7 @@ async def volume_surge(limit: int=20, x_agent_key: str=Header(...)):
 @router.get("/top5")
 async def top5_degen(limit: int=5, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
-    pools, from_cache = _trending_pools_cached()
+    pools, from_cache = await _trending_pools_cached()
     try:
         graduated = []
         for p in pools[:25]:
@@ -280,7 +288,7 @@ async def rug_check(mint: str=Query(...), x_agent_key: str=Header(...)):
     try:
         payload = json.dumps({"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":[mint,{"encoding":"jsonParsed"}]}).encode()
         req = urllib.request.Request(f"https://mainnet.helius-rpc.com/?api-key={HELIUS}",data=payload,headers={"Content-Type":"application/json"})
-        info = json.loads(urllib.request.urlopen(req,timeout=10).read().decode()).get("result",{}).get("value",{})
+        info = (await asyncio.to_thread(lambda: json.loads(urllib.request.urlopen(req,timeout=10).read().decode()))).get("result",{}).get("value",{})
         if not info:
             return {"mint":mint,"found":False,"detail":"Account not found — may not exist"}
         data = info.get("data",{}).get("parsed",{}).get("info",{}) if info else {}
@@ -289,7 +297,7 @@ async def rug_check(mint: str=Query(...), x_agent_key: str=Header(...)):
         supply = int(data.get("supply","0")) / (10**int(data.get("decimals","0") or "1"))
         # Get price from Birdeye
         try:
-            pd = _fetch(f"https://public-api.birdeye.so/defi/price?address={mint}",{"X-API-KEY":BIRDEYE},timeout=5)
+            pd = await _fetch(f"https://public-api.birdeye.so/defi/price?address={mint}",{"X-API-KEY":BIRDEYE},timeout=5)
             price = float(pd.get("data",{}).get("value",0))
         except:
             price = 0
@@ -321,7 +329,7 @@ async def rug_check(mint: str=Query(...), x_agent_key: str=Header(...)):
 @router.get('/sell-rotations')
 async def sell_rotations(limit: int=5, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
-    pools, from_cache = _trending_pools_cached()
+    pools, from_cache = await _trending_pools_cached()
     try:
         rotations = []
         for p in pools[:25]:
@@ -357,7 +365,7 @@ async def sell_rotations(limit: int=5, x_agent_key: str=Header(...)):
 @router.get("/must-buy-20")
 async def must_buy_20(limit: int=20, hours: int=24, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
-    pools, _ = _trending_pools_cached()
+    pools, _ = await _trending_pools_cached()
 
     candidates: dict[str, dict] = {}  # key: symbol.upper()
 

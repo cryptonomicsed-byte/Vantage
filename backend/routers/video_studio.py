@@ -17,7 +17,7 @@ Collaboration:
   - Gitea repo for video project files
   - OpenCode can edit video scripts/components
 """
-import json, os, subprocess, time, logging
+import asyncio, json, os, subprocess, time, logging
 from typing import Optional
 from datetime import datetime
 
@@ -488,7 +488,10 @@ Use dark background, glowing cyan text (#00ffcc), cinematic pacing."""
     )
 
     try:
-        resp = json.loads(_urlreq.urlopen(req, timeout=30).read())
+        # Off the event loop -- an up-to-30s blocking urlopen call here used
+        # to freeze every other in-flight request (across the whole app)
+        # for the entire LLM round trip.
+        resp = await asyncio.to_thread(lambda: json.loads(_urlreq.urlopen(req, timeout=30).read()))
         raw = resp["choices"][0]["message"]["content"]
     except Exception as e:
         raise RuntimeError(f"ViMax LLM failed: {e}")

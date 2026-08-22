@@ -1,6 +1,6 @@
 import os
 """Trading API router — wallets, orders, strategies, PnL, and journal."""
-import json, hashlib, hmac, logging, time
+import asyncio, json, hashlib, hmac, logging, time
 from typing import Optional, List
 from datetime import datetime, timezone, date
 
@@ -150,11 +150,25 @@ async def create_wallet(data: WalletCreate, agent: dict = Depends(get_agent)):
         except aiosqlite.IntegrityError:
             raise HTTPException(409, f"Wallet '{data.label}' already exists for this agent")
 
+def _fetch_solana_balance_sync(address: str, helius_key: str) -> float | None:
+    import urllib.request, json as _json
+    payload = _json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "getBalance",
+        "params": [address]
+    }).encode()
+    req = urllib.request.Request(
+        f"https://mainnet.helius-rpc.com/?api-key={helius_key}",
+        data=payload,
+        headers={"Content-Type": "application/json"}
+    )
+    resp = urllib.request.urlopen(req, timeout=5)
+    data = _json.loads(resp.read().decode())
+    return data.get("result", {}).get("value", 0) / 1e9
+
+
 @router.get("/wallets/live")
 async def wallets_live(agent: dict = Depends(get_agent)):
     """Return all wallets with live on-chain balances via Helius RPC."""
-    import urllib.request, json as _json
-    
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         wallets = await db.execute(
@@ -162,31 +176,23 @@ async def wallets_live(agent: dict = Depends(get_agent)):
             (agent["id"],)
         )
         wallets = [dict(w) for w in await wallets.fetchall()]
-    
+
     # Try live Helius refresh for Solana wallets
     helius_key = os.environ.get("HELIUS_API_KEY", "")
-    
+
     for w in wallets:
         if w.get("chain") == "solana" and w.get("address"):
             try:
-                payload = _json.dumps({
-                    "jsonrpc": "2.0", "id": 1, "method": "getBalance",
-                    "params": [w["address"]]
-                }).encode()
-                req = urllib.request.Request(
-                    f"https://mainnet.helius-rpc.com/?api-key={helius_key}",
-                    data=payload,
-                    headers={"Content-Type": "application/json"}
-                )
-                resp = urllib.request.urlopen(req, timeout=5)
-                data = _json.loads(resp.read().decode())
-                sol = data.get("result", {}).get("value", 0) / 1e9
+                # Off the event loop -- this used to run urllib.request.urlopen
+                # synchronously per wallet inside the async handler, freezing
+                # every other in-flight request for the duration of each call.
+                sol = await asyncio.to_thread(_fetch_solana_balance_sync, w["address"], helius_key)
                 w["balance_live"] = f"{sol} SOL"
                 w["balance_value_usd"] = round(sol * 81, 2)  # approximate
             except:
                 w["balance_live"] = w.get("balance_hint", "unknown")
                 w["balance_value_usd"] = 0
-    
+
     return {
         "wallets": wallets,
         "count": len(wallets),
