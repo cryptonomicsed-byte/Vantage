@@ -696,7 +696,8 @@ async def suggest_block_neighbors(block_id: str, for_agent: str = "", limit: int
 
 @router.get("/trust/{agent_id}/signals")
 async def get_agent_trust_signals(
-    agent_id: str, neighbor_id: str, block_id: str = "default"
+    agent_id: str, neighbor_id: str, block_id: str = "default",
+    agent: dict = Depends(get_agent),
 ):
     """Get trust signals between agent_id and neighbor_id (for Julia score computation)."""
     signals = await get_trust_signals(block_id, agent_id, neighbor_id)
