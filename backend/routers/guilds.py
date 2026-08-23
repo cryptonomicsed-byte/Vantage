@@ -608,4 +608,3 @@ async def resolve_guild_report(slug: str, report_id: int, request: Request, agen
         await db.commit()
 
     return {"ok": True, "status": new_status, "action": action}
-    return {"path": relative, "id": note_id, "guild_slug": slug}
