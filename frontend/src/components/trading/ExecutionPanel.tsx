@@ -96,7 +96,7 @@ export default function ExecutionPanel() {
   // pickers below already use), value "1" enabled / anything else disabled.
   const AUTO_TRADE_DAEMONS = [
     { key: 'degen_alpha_fusion_trading_enabled', label: 'Degen Alpha Fusion', hint: 'Moonshot sniping on trending pools' },
-    { key: 'pumpfun_trader_trading_enabled', label: 'Pumpfun Trader', hint: 'Buys pumpfun signals from degen_alpha_fusion/ogun_degen' },
+    { key: 'pumpfun_trader_trading_enabled', label: 'Pumpfun Trader', hint: 'Buys pumpfun signals from degen_alpha_fusion/the Forge scanner' },
     { key: 'jupiter_signer_trading_enabled', label: 'Jupiter Signer', hint: 'Signs + submits queued moonshot swaps' },
     { key: 'hyperliquid_trader_trading_enabled', label: 'Hyperliquid Trader', hint: 'Perp market_open/market_close via the HL SDK — real signing, wallet currently unfunded' },
     { key: 'base_trader_trading_enabled', label: 'Base Trader', hint: '1inch swaps on Base — real EIP-1559 signing + broadcast, needs ETH for gas' },

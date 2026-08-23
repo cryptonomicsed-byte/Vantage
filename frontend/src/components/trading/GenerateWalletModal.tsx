@@ -65,7 +65,7 @@ export default function GenerateWalletModal({
               </button>
               <button onClick={() => setSystem('bipon39')}
                 style={{ flex: 1, padding: '8px 0', borderRadius: 6, border: '1px solid ' + (system === 'bipon39' ? 'rgba(138,75,255,0.5)' : 'rgba(255,255,255,.1)'), background: system === 'bipon39' ? 'rgba(138,75,255,0.15)' : 'transparent', color: system === 'bipon39' ? '#c4b5fd' : '#9ca3af', fontSize: 12, cursor: 'pointer' }}>
-                BIPỌ̀N39 (Ifá)
+                BIPỌ̀N39 (Archetype)
               </button>
             </div>
             <input value={label} onChange={e => setLabel(e.target.value)} placeholder="Label (optional)"
@@ -85,9 +85,9 @@ export default function GenerateWalletModal({
             <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#ffaa00', wordBreak: 'break-word', marginBottom: 10, padding: '8px 10px', background: 'rgba(255,170,0,0.08)', border: '1px solid rgba(255,170,0,0.25)', borderRadius: 6, lineHeight: 1.6 }}>
               {result.mnemonic}
             </div>
-            {result.dominant_macro && (
+            {result.dominant_archetype && (
               <div style={{ fontSize: 10, color: 'rgba(255,255,255,.4)', marginBottom: 10 }}>
-                Ifá: dominant macro {result.dominant_macro}, odù index {result.odu_primary_index}
+                Archetype: {result.dominant_archetype}, index {result.archetype_index}
               </div>
             )}
             <div style={{ fontSize: 10, color: 'rgba(255,255,255,.4)', marginBottom: 12 }}>

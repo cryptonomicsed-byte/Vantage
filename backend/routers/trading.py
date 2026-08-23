@@ -340,6 +340,28 @@ async def sync_wallet(wallet_id: int, agent: dict = Depends(get_agent)):
 
 # ── Wallet Generation ────────────────────────────────────
 
+# Universal-face translation for the bipon39 CLI's Ifá/Yoruba archetype
+# names (OSOVM_CODEX.md §9/§27b: Ifá/Yoruba stays the internal canonical
+# skeleton, user-facing and agent-facing surfaces use the universal name).
+# Diacritic-tolerant: bipon39 emits uppercase accented forms (e.g. "ṢÀNGÓ",
+# "Ọ̀ṢUN") that all normalize to the same bare-letter key here.
+_UNIVERSAL_ARCHETYPE_NAMES = {
+    "SANGO": "Divine Justice",
+    "OGUN": "The Forge",
+    "ESU": "The Messenger",
+    "OBATALA": "Wisdom",
+    "OSUN": "Memory",
+    "YEMOJA": "Creation",
+    "OYA": "Flow",
+}
+
+
+def _universal_archetype_name(macro: str) -> str:
+    import unicodedata
+    key = "".join(c for c in unicodedata.normalize("NFD", macro or "") if unicodedata.category(c) != "Mn").upper()
+    return _UNIVERSAL_ARCHETYPE_NAMES.get(key, macro)
+
+
 @router.post("/wallets/generate")
 async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent), x_agent_key: str = Header(...)):
     """Generate a new wallet (BIP-39 or BIPON39) and store encrypted."""
@@ -434,7 +456,23 @@ async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent)
         "warning": "Private key encrypted at rest, decryptable only with your own API key. No separate mnemonic backup is issued.",
     }
     if "ifascript" in result:
-        response.update(result["ifascript"])
+        # The bipon39 CLI's ifascript block names the result with literal
+        # deity names (dominant_macro="ṢÀNGÓ"/"ÈṢÙ"/etc, and every entry in
+        # macro_distribution) -- internal Ifá/Yoruba cosmology terms that
+        # must not reach a user-facing or agent-facing API response
+        # verbatim (see universal-face design: OSOVM_CODEX.md §9/§27b).
+        # Translate to the universal archetypal names before returning;
+        # the raw deity names stay internal to the bipon39 CLI itself.
+        ifascript = result["ifascript"]
+        response["dominant_archetype"] = _universal_archetype_name(ifascript.get("dominant_macro", ""))
+        response["archetype_index"] = ifascript.get("odu_primary_index")
+        if isinstance(ifascript.get("macro_distribution"), list):
+            response["archetype_distribution"] = [
+                {"archetype": _universal_archetype_name(m.get("macro", "")), "count": m.get("count")}
+                for m in ifascript["macro_distribution"]
+            ]
+        if isinstance(ifascript.get("elemental_signature"), dict):
+            response["elemental_signature"] = ifascript["elemental_signature"]
     return response
 
 
