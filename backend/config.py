@@ -296,12 +296,29 @@ class Settings(BaseSettings):
     # called in-process (genoffice_client.py), which itself needs a local
     # genspark-ai/genoffice clone (GENOFFICE_REPO) to run the real
     # @genoffice/docx-engine via npx/tsx. Both empty = disabled, same
-    # contract as every other pluggable hook here. Not wired:
-    # de_deliver_client_artifact (writes an engram via NIPAE_NSEC/
-    # NIPAE_RELAY -- the cross-relay dependency above, out of scope until
-    # that's resolved).
+    # contract as every other pluggable hook here.
     GENOFFICE_SKILLS_PATH: str = ""
     GENOFFICE_REPO: str = ""
+
+    # 2026-08-23, owner-authorized: wires de_deliver_client_artifact, the
+    # half of the GenOffice adapter held back above. NIPAE_NSEC is a real
+    # Nostr secret key dedicated to this identity (Vantage's own agent/
+    # federation key is NOT reused here -- a leaked NIPAE_NSEC should only
+    # cost this one identity, not Vantage's whole federation trust).
+    # NIPAE_OWNER intentionally defaults empty: minipae's build_event()
+    # NIP-44-encrypts every engram to a single owner_pubkey via ECDH, with
+    # no discrete tiering (private/followers/federated/public) the way
+    # Vantage's own memory_vault.py has -- confirmed by reading minipae.py
+    # directly (build_event/conversation_key), not assumed. Leaving
+    # NIPAE_OWNER unset makes deliver() encrypt to its own pubkey, so a
+    # delivery receipt is readable only by whoever holds NIPAE_NSEC -- the
+    # most restrictive option available in that model, matching the
+    # "default most-restrictive" posture used everywhere else in this file.
+    # The relay only ever sees ciphertext + routing metadata (kind, HMAC'd
+    # d-tag, pubkey, timestamp), never client name/parts/artifact content.
+    NIPAE_NSEC: str = ""
+    NIPAE_OWNER: str = ""
+    NIPAE_RELAY: str = "wss://relay.damus.io"
 
 
 settings = Settings()
