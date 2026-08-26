@@ -2,6 +2,7 @@
 Database adapter: unified interface for SQLite and PostgreSQL backends.
 Maintains backward compatibility while enabling production-grade PostgreSQL support.
 """
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import Optional, Any
@@ -14,6 +15,9 @@ logger = logging.getLogger(__name__)
 
 # Global connection pool (PostgreSQL only)
 _PG_POOL: Optional[asyncpg.Pool] = None
+
+# Bound concurrent SQLite connections (single-writer WAL; see db.py).
+_SQLITE_CONN_LIMIT = asyncio.Semaphore(8)
 
 
 async def init_pg_pool() -> None:
@@ -65,11 +69,12 @@ async def get_db_connection():
         async with _PG_POOL.acquire() as conn:
             yield PostgresConnection(conn)
     else:
-        # SQLite: create new connection
+        # SQLite: create new connection (bounded — single writer under WAL)
         from .db import DB_PATH
-        async with aiosqlite.connect(DB_PATH) as sqlite_conn:
-            await sqlite_conn.execute("PRAGMA busy_timeout=20000")
-            yield SqliteConnection(sqlite_conn)
+        async with _SQLITE_CONN_LIMIT:
+            async with aiosqlite.connect(DB_PATH) as sqlite_conn:
+                await sqlite_conn.execute("PRAGMA busy_timeout=30000")
+                yield SqliteConnection(sqlite_conn)
 
 
 class DbConnection:

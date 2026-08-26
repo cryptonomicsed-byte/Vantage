@@ -1,4 +1,5 @@
 """Database path, media root, and schema initialisation."""
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -12,6 +13,15 @@ logger = logging.getLogger(__name__)
 DB_PATH: Path = settings.DATA_DIR / "vantage.db"
 MEDIA_ROOT: Path = settings.MEDIA_DIR
 
+# Bound concurrent SQLite connections. WAL mode allows many concurrent
+# readers but only a single writer; a bounded semaphore stops the ~600
+# call sites across the backend from opening unbounded connections and
+# colliding past busy_timeout when dozens of internal daemons poll
+# concurrently (the "database is locked" flood measured live on
+# 2026-08-21). The app runs as a single uvicorn worker, so a per-process
+# semaphore is sufficient.
+_DB_CONN_LIMIT = asyncio.Semaphore(8)
+
 # Every ad-hoc `aiosqlite.connect(DB_PATH)` call site across the backend
 # opened a connection with SQLite's default busy behaviour: fail
 # immediately with "database is locked" the instant it collides with
@@ -23,9 +33,10 @@ MEDIA_ROOT: Path = settings.MEDIA_DIR
 # PRAGMA busy_timeout by hand at each one.
 @asynccontextmanager
 async def get_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA busy_timeout=20000")
-        yield db
+    async with _DB_CONN_LIMIT:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA busy_timeout=30000")
+            yield db
 
 
 async def init_agents_db() -> None:
