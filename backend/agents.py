@@ -4532,43 +4532,17 @@ async def federated_ask(
 # agent_name -- stronger than the old flow, which trusted whatever name
 # string was presented as long as *some* origin instance vouched for it.
 
-@router.get("/federation/nostr-challenge", tags=["federation"])
-async def federation_nostr_challenge():
-    """Issue a short-lived nonce. A remote agent signs it with their own
-    Nostr keypair (BIP340 schnorr) and submits the signed event to
-    POST /federation/nostr-auth -- verified locally, no network round trip
-    to any other instance."""
-    now = datetime.utcnow()
-    expired = [n for n, exp in list(_federation_nonces.items())
-               if datetime.fromisoformat(exp) < now]
-    for n in expired:
-        _federation_nonces.pop(n, None)
-
-    nonce = secrets.token_hex(32)
-    expires_at = (now + timedelta(minutes=5)).isoformat() + "Z"
-    _federation_nonces[nonce] = expires_at
-    return {"nonce": nonce, "expires_at": expires_at, "algorithm": "BIP340-schnorr"}
-
-
-@router.post("/federation/nostr-auth", tags=["federation"])
-async def federation_nostr_auth(request: Request):
-    """
-    Verify a remote agent's Nostr-signed proof of identity, entirely
-    locally -- no callback to any other instance.
-
-    Body: { agent_name (display only), peer_instance_url (informational),
-            event: {id, pubkey, created_at, kind, tags, content, sig} }
-    The event must be tagged ["challenge", <nonce>] with a nonce from
-    GET /federation/nostr-challenge, kind 22242 (NIP-42-style auth event,
-    same convention already used for Buzz relay auth).
-    """
+def _verify_nostr_challenge_event(event: dict) -> str:
+    """Shared core of the BIP340-schnorr challenge/response flow: validate
+    shape, recompute the NIP-01 event id, consume the one-time nonce, and
+    verify the signature. Returns the verified pubkey hex on success, raises
+    HTTPException on any failure. Used by /federation/nostr-auth,
+    /me/bind-nostr, and /me/recover-via-nostr -- one verification path for
+    every consumer of GET /federation/nostr-challenge's nonces, so a fix or
+    a hardening here (e.g. tightening kind/timestamp checks later) covers
+    all three at once instead of drifting between copies."""
     import hashlib as _hl, json as _js
     from coincurve import PublicKeyXOnly
-
-    body = await _parse_body(request)
-    agent_name = str(body.get("agent_name", ""))[:100].strip()
-    peer_url = str(body.get("peer_instance_url", "")).strip().rstrip("/")
-    event = body.get("event") or {}
 
     required = ["id", "pubkey", "created_at", "kind", "tags", "content", "sig"]
     if not all(k in event for k in required):
@@ -4603,20 +4577,85 @@ async def federation_nostr_auth(request: Request):
     if not sig_ok:
         raise HTTPException(401, "Schnorr signature does not verify against the claimed pubkey")
 
-    pubkey = event["pubkey"]
+    return event["pubkey"]
+
+
+@router.get("/federation/nostr-challenge", tags=["federation"])
+async def federation_nostr_challenge():
+    """Issue a short-lived nonce. Sign it with a Nostr keypair (BIP340
+    schnorr) and submit the signed event to POST /federation/nostr-auth
+    (remote federated identity), POST /me/bind-nostr (link this Nostr
+    identity to your existing Vantage agent), or POST /me/recover-via-nostr
+    (mint a new Vantage API key for the agent bound to this pubkey, if the
+    old one is lost) -- all three verify identically, entirely locally, no
+    network round trip to any other instance."""
+    now = datetime.utcnow()
+    # Pre-existing bug, hit immediately by this endpoint now having three
+    # real consumers instead of one dormant one: expires_at is stored as
+    # naive-isoformat + "Z" appended, but datetime.fromisoformat() on
+    # Python 3.11+ parses a trailing "Z" as UTC and returns a
+    # timezone-AWARE datetime -- comparing that against the naive `now`
+    # above raises TypeError the moment two nonces exist at once (i.e.
+    # immediately under any real concurrent use). Strip "Z" before
+    # parsing, matching the already-correct pattern in
+    # _verify_nostr_challenge_event's own expiry check just below.
+    expired = [n for n, exp in list(_federation_nonces.items())
+               if datetime.fromisoformat(exp.rstrip("Z")) < now]
+    for n in expired:
+        _federation_nonces.pop(n, None)
+
+    nonce = secrets.token_hex(32)
+    expires_at = (now + timedelta(minutes=5)).isoformat() + "Z"
+    _federation_nonces[nonce] = expires_at
+    return {"nonce": nonce, "expires_at": expires_at, "algorithm": "BIP340-schnorr"}
+
+
+@router.post("/federation/nostr-auth", tags=["federation"])
+async def federation_nostr_auth(request: Request):
+    """
+    Verify a remote agent's Nostr-signed proof of identity, entirely
+    locally -- no callback to any other instance.
+
+    Body: { agent_name (display only), peer_instance_url (informational),
+            event: {id, pubkey, created_at, kind, tags, content, sig} }
+    The event must be tagged ["challenge", <nonce>] with a nonce from
+    GET /federation/nostr-challenge, kind 22242 (NIP-42-style auth event,
+    same convention already used for Buzz relay auth).
+    """
+    body = await _parse_body(request)
+    agent_name = str(body.get("agent_name", ""))[:100].strip()
+    peer_url = str(body.get("peer_instance_url", "")).strip().rstrip("/")
+    event = body.get("event") or {}
+
+    pubkey = _verify_nostr_challenge_event(event)
+
     # Shadow agent keyed by pubkey, not the claimed name -- the pubkey IS
     # the identity; agent_name is display-only.
     shadow_name = f"fed:{pubkey[:16]}"
     if peer_url:
         shadow_name += f"@{peer_url.replace('https://','').replace('http://','')[:30]}"
-    local_key = secrets.token_hex(24)
+    local_key = "vantage_" + secrets.token_hex(24)
+    local_key_hash = _hashlib.sha256(local_key.encode()).hexdigest()
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT id, api_key FROM agents WHERE name=?", (shadow_name,)) as cur:
+        async with db.execute("SELECT id FROM agents WHERE name=?", (shadow_name,)) as cur:
             existing = await cur.fetchone()
         if existing:
+            # Was returning the SAME raw key stored plaintext in api_key on
+            # every repeat call -- besides storing a secret at rest in
+            # plaintext, get_agent() only ever matches api_key against
+            # sha256(presented key), so that plaintext value could never
+            # actually authenticate anything; the "local_api_key" this
+            # endpoint promised was silently non-functional. Fixed by
+            # hashing on write (below) like every other agent, which means
+            # a repeat call can no longer return the same key -- so it
+            # mints and stores a fresh one instead, i.e. every successful
+            # Nostr auth issues a new working Vantage key for this shadow
+            # identity, same rotate-on-verify shape as /me/recover-via-nostr.
+            await db.execute("UPDATE agents SET api_key=? WHERE id=?", (local_key_hash, existing["id"]))
+            await db.commit()
             return {
-                "ok": True, "local_agent_name": shadow_name, "local_api_key": existing["api_key"],
+                "ok": True, "local_agent_name": shadow_name, "local_api_key": local_key,
                 "federated": True, "nostr_pubkey": pubkey, "peer_instance": peer_url or None,
             }
         bio = f"Federated identity, Nostr pubkey {pubkey}"
@@ -4626,12 +4665,103 @@ async def federation_nostr_auth(request: Request):
             bio += f", from {peer_url}"
         await db.execute(
             "INSERT INTO agents (name, api_key, bio, nostr_pubkey_hex) VALUES (?,?,?,?)",
-            (shadow_name, local_key, bio, pubkey),
+            (shadow_name, local_key_hash, bio, pubkey),
         )
         await db.commit()
     return {
         "ok": True, "local_agent_name": shadow_name, "local_api_key": local_key,
         "federated": True, "nostr_pubkey": pubkey, "peer_instance": peer_url or None,
+    }
+
+
+@router.post("/me/bind-nostr", tags=["federation"])
+async def bind_nostr_identity(request: Request, agent: dict = Depends(get_agent)):
+    """Link a Nostr identity (any BIP340/NIP-06 keypair you control) to your
+    EXISTING, authenticated Vantage agent, so it can later be used with
+    POST /me/recover-via-nostr to mint a fresh API key if this one is ever
+    lost -- get a nonce from GET /federation/nostr-challenge, sign it with
+    your Nostr key, and submit the event here.
+
+    Body: { event: {id, pubkey, created_at, kind, tags, content, sig} }
+    Rebinding (a different pubkey than currently bound) is allowed -- you're
+    already authenticated, so this is just changing your own recovery
+    identity. Binding a pubkey already bound to a DIFFERENT agent is
+    rejected: recovery looks an agent up BY pubkey, so a shared pubkey would
+    make recovery ambiguous, and letting anyone bind an already-claimed
+    pubkey to a new agent would let them hijack that agent's recovery path.
+    """
+    body = await _parse_body(request)
+    event = body.get("event") or {}
+    pubkey = _verify_nostr_challenge_event(event)
+
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, name FROM agents WHERE nostr_pubkey_hex=?", (pubkey,)
+        ) as cur:
+            owner = await cur.fetchone()
+        if owner and owner["id"] != agent["id"]:
+            raise HTTPException(409, f"This Nostr identity is already bound to a different agent ({owner['name']!r})")
+
+        await db.execute("UPDATE agents SET nostr_pubkey_hex=? WHERE id=?", (pubkey, agent["id"]))
+        await db.commit()
+
+    return {"ok": True, "agent_name": agent["name"], "nostr_pubkey": pubkey}
+
+
+@router.post("/me/recover-via-nostr", tags=["federation"])
+@limiter.limit("5/minute")
+async def recover_via_nostr(request: Request):
+    """Recover access to your Vantage agent by proving control of the Nostr
+    identity you bound via POST /me/bind-nostr -- no existing API key
+    needed, which is the point: this exists for the case where the raw key
+    itself is gone (never persisted anywhere recoverable, or the one place
+    it existed is gone) but you still hold the Nostr keypair. Get a nonce
+    from GET /federation/nostr-challenge, sign it, submit the event here;
+    on a valid signature from a BOUND pubkey, mints and stores (hashed,
+    like every other agent) a brand-new API key for that agent and returns
+    it once -- the old key, wherever it is, keeps working too (this does
+    not revoke it) until whoever holds it rotates or it's otherwise retired.
+
+    Body: { event: {id, pubkey, created_at, kind, tags, content, sig} }
+
+    IMPORTANT, not a full recovery: wallet private keys
+    (agent_wallets.private_key_encrypted, trading_wallets.encrypted_private_key)
+    are encrypted with a key derived from the agent's RAW API key
+    (crypto_utils.py), not from anything Nostr-related. This endpoint
+    recovers ACCOUNT ACCESS -- the ability to authenticate as this agent
+    again -- but cannot decrypt any wallet that was encrypted under a key
+    you no longer have; there is no master key and by design nothing here
+    can derive the old one back. See POST /me/rotate-key's docstring for
+    the same constraint on ordinary rotation.
+    """
+    body = await _parse_body(request)
+    event = body.get("event") or {}
+    pubkey = _verify_nostr_challenge_event(event)
+
+    new_key = "vantage_" + secrets.token_hex(24)
+    new_key_hash = _hashlib.sha256(new_key.encode()).hexdigest()
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, name FROM agents WHERE nostr_pubkey_hex=?", (pubkey,)
+        ) as cur:
+            owner = await cur.fetchone()
+        if not owner:
+            raise HTTPException(404, "No agent is bound to this Nostr identity — bind one first with POST /me/bind-nostr while you still have a working key")
+
+        await db.execute("UPDATE agents SET api_key=? WHERE id=?", (new_key_hash, owner["id"]))
+        await db.commit()
+
+    return {
+        "ok": True,
+        "agent_name": owner["name"],
+        "api_key": new_key,
+        "warning": (
+            "Save this key now — it is not shown again and not recoverable from the server. "
+            "This restores account access only: any wallet encrypted under your PREVIOUS API key "
+            "cannot be decrypted with this new one (see this endpoint's docstring)."
+        ),
     }
 
 

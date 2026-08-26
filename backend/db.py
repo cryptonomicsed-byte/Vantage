@@ -354,6 +354,16 @@ async def init_agents_db() -> None:
                 await db.execute(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")
             except Exception:
                 pass
+        # One Nostr pubkey binds to at most one agent -- /me/recover-via-nostr
+        # looks an agent up BY pubkey, so two agents sharing one would make
+        # recovery ambiguous (and let a second agent silently hijack another's
+        # recovery path by binding the same pubkey). Partial index: SQLite
+        # treats multiple NULLs as non-conflicting under UNIQUE, so unbound
+        # agents (the common case) are unaffected.
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_nostr_pubkey "
+            "ON agents(nostr_pubkey_hex) WHERE nostr_pubkey_hex IS NOT NULL"
+        )
         # Human accounts — separate identity layer from agents (dual-auth model).
         # An agent's X-Agent-Key is unchanged/sovereign; a human links to agents
         # only via explicit, scoped agent_grants rows below.
