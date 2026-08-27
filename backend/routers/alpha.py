@@ -242,9 +242,53 @@ def _classify_tier(market_cap: Optional[float], first_seen_ts: int, now: int) ->
     return "billion_club"
 
 
+def _pair_recent_volume(p: dict) -> float:
+    """Most recent meaningful trading volume for a DexScreener pair.
+
+    DexScreener freezes a stale pair's marketCap once it stops updating, but
+    its volume/txns decay toward zero. A pair that is still the active venue
+    has real volume in one of the recent windows; an abandoned pair does not.
+    Raw liquidity is NOT a liveness signal — a dead pair can keep reporting a
+    large historical liquidity long after trading has moved elsewhere."""
+    v = p.get("volume") or {}
+    return max(v.get("h24") or 0.0, v.get("h6") or 0.0,
+               v.get("h1") or 0.0, v.get("m5") or 0.0)
+
+
+def _select_best_pair(pairs: list) -> Optional[dict]:
+    """Choose the pair whose marketCap should represent the token.
+
+    Recent trading activity first (so a stale pair with frozen historical
+    liquidity never shadows the live pair), then liquidity as a tie-break.
+    Returns None on an empty list."""
+    if not pairs:
+        return None
+    return max(pairs, key=lambda p: (
+        _pair_recent_volume(p),
+        (p.get("liquidity") or {}).get("usd") or 0.0,
+    ))
+
+
+def _market_cap_from_pair(pair: dict) -> Optional[float]:
+    """marketCap with explicit None/zero handling — NOT truthy `or`.
+
+    marketCap is the real circulating cap. fdv (fully-diluted valuation) is
+    only used when marketCap is genuinely ABSENT (None). A literal 0 means
+    "no data yet" (common on fresh pre-bonding pump.fun mints) and must NOT
+    silently fall through to fdv — the old `marketCap or fdv` did exactly
+    that, substituting an often much larger fdv for a zero circulating cap."""
+    mcap = pair.get("marketCap")
+    if mcap is None:
+        fdv = pair.get("fdv")
+        return float(fdv) if fdv is not None else None
+    if mcap == 0:
+        return None
+    return float(mcap)
+
+
 async def _dexscreener_mcap(mint: str) -> Optional[float]:
     """Best-effort market cap for a single mint via DexScreener's token
-    endpoint (fdv/marketCap on the highest-liquidity pair). None on any
+    endpoint (fdv/marketCap on the most-recently-active pair). None on any
     failure — never blocks the graph on a flaky/missing listing."""
     try:
         async with httpx.AsyncClient(timeout=6.0) as client:
@@ -253,10 +297,10 @@ async def _dexscreener_mcap(mint: str) -> Optional[float]:
             if r.status_code != 200:
                 return None
             pairs = (r.json() or {}).get("pairs") or []
-            if not pairs:
+            best = _select_best_pair(pairs)
+            if best is None:
                 return None
-            best = max(pairs, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0)
-            return best.get("marketCap") or best.get("fdv")
+            return _market_cap_from_pair(best)
     except Exception:
         return None
 

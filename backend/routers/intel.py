@@ -405,6 +405,25 @@ from backend import wallet_naming as _wn
 
 _SOL_MINT = "So1111111111111111111" "1111111111111111111112"  # wrapped SOL mint, split to avoid secret-scanner false positive
 
+
+def _dexscreener_best_pair(pairs: list) -> Optional[dict]:
+    """Volume-first pair selection (mirrors routers/alpha.py:_select_best_pair).
+
+    A stale/abandoned DexScreener pair keeps a frozen priceUsd and marketCap
+    but its volume/txns decay to ~0. Raw liquidity is NOT a liveness signal —
+    a dead pair can keep reporting large historical liquidity long after
+    trading moved elsewhere, so we select by recent volume first and use
+    liquidity only as a tie-break."""
+    if not pairs:
+        return None
+    def _vol(p):
+        v = p.get("volume") or {}
+        return max(v.get("h24") or 0.0, v.get("h6") or 0.0,
+                   v.get("h1") or 0.0, v.get("m5") or 0.0)
+    return max(pairs, key=lambda p: (
+        _vol(p), (p.get("liquidity") or {}).get("usd") or 0.0))
+
+
 async def _dexscreener_token_info(mint: str) -> dict:
     try:
         async with httpx.AsyncClient(timeout=6.0) as client:
@@ -413,9 +432,9 @@ async def _dexscreener_token_info(mint: str) -> dict:
             if r.status_code != 200:
                 return {}
             pairs = (r.json() or {}).get("pairs") or []
-            if not pairs:
+            best = _dexscreener_best_pair(pairs)
+            if best is None:
                 return {}
-            best = max(pairs, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0)
             return {
                 "symbol": (best.get("baseToken") or {}).get("symbol", ""),
                 "price_usd": float(best["priceUsd"]) if best.get("priceUsd") else None,
