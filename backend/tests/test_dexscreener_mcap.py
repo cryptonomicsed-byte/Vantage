@@ -121,3 +121,22 @@ def test_intel_best_pair_prefers_live_over_stale():
     live = _pair(liq=500_000, h24=3_000_000, dex="live")
     assert _dexscreener_best_pair([stale, live]) is live
     assert _dexscreener_best_pair([]) is None
+
+
+# ── Tier-naming fix: below-$1M band must not claim "migrated" ────────────────
+
+def test_tier_below_1m_is_sub_1m_not_migrated():
+    """A $100k token (below the $1M band) must classify as 'sub_1m', never the
+    old mislabeled 'migrated_1m' — a $100k token has not necessarily migrated."""
+    from backend.routers.alpha import _classify_tier
+    now = 1_800_000_000
+    first_seen = now - 3 * 3600  # 3 hours old (past just_launch)
+    assert _classify_tier(100_000.0, first_seen, now) == "sub_1m"
+    assert _classify_tier(2_000_000.0, first_seen, now) == "migrated_10m"
+
+
+def test_tier_boundaries_contain_no_migrated_1m_label():
+    from backend.routers.alpha import _TIER_BOUNDARIES
+    labels = [name for _, name in _TIER_BOUNDARIES]
+    assert "migrated_1m" not in labels
+    assert "sub_1m" in labels

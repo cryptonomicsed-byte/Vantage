@@ -874,7 +874,7 @@ STRATEGY_TEMPLATES = {
                          "separate profit wallet (set profit_wallet_id in config)."),
         "config": {"position_size_usd": 20, "profit_split": {"compound_pct": 50, "extract_pct": 50}, "profit_wallet_id": None},
         "stop_loss_pct": -30.0, "take_profit_pct": 50.0,
-        "target_tiers": "migrated_1m,migrated_10m,migrated_20m",
+        "target_tiers": "sub_1m,migrated_10m,migrated_20m",
         "max_position_size_usd": 20, "risk_per_trade_pct": 2.0,
     },
     "bighit_40_800": {
@@ -904,7 +904,7 @@ STRATEGY_TEMPLATES = {
             "tier2_dca": {"start_gain_pct": 150, "step_gain_pct": 50, "sell_pct_per_step": 5, "max_steps": 5},
             "moonbag_pct": 25,
         },
-        "target_tiers": "migrated_1m,migrated_10m,migrated_20m,migrated_100m",
+        "target_tiers": "sub_1m,migrated_10m,migrated_20m,migrated_100m",
         "max_position_size_usd": 20, "risk_per_trade_pct": 2.0,
     },
     "doubler_flip": {
@@ -914,7 +914,7 @@ STRATEGY_TEMPLATES = {
                          "the full proceeds into the next qualifying target — a compounding "
                          "flip loop rather than a hold."),
         "config": {"position_size_usd": 20, "flip_at_gain_pct": 100, "reinvest_pct": 100},
-        "target_tiers": "pumpfun_10k_20k,migrated_1m,migrated_10m",
+        "target_tiers": "pumpfun_10k_20k,sub_1m,migrated_10m",
         "max_position_size_usd": 20, "risk_per_trade_pct": 2.0,
     },
     # The following 4 are config definitions migrated from the now-retired
@@ -930,7 +930,7 @@ STRATEGY_TEMPLATES = {
         "description": "Momentum swing trades with a trailing-stop activation once up 5%.",
         "config": {"position_size_usd": 20, "trailing_stop_activation_pct": 5.0},
         "stop_loss_pct": -3.0, "take_profit_pct": 10.0,
-        "target_tiers": "migrated_1m,migrated_10m,migrated_20m",
+        "target_tiers": "sub_1m,migrated_10m,migrated_20m",
         "max_position_size_usd": 20, "risk_per_trade_pct": 2.0,
     },
     "moonbag_tiered": {

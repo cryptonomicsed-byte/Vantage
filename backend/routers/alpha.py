@@ -224,7 +224,11 @@ async def score_token_from_intel(
 # pump.fun mint, pre-liquidity) just has no market_cap/tier and the frontend
 # treats it as "just_launch" from age alone. ──────────────────────────────────
 _TIER_BOUNDARIES = [
-    (1_000_000, "migrated_1m"), (10_000_000, "migrated_10m"),
+    # "sub_1m" is the below-$1M band (NOT "migrated_1m") — this band spans the
+    # ~$69k pump.fun graduation floor, so a token here may not have migrated at
+    # all. "migrated_1m" mislabeled it as migrated and the frontend rendered it
+    # as "$1M+" when a $100k token is clearly not.
+    (1_000_000, "sub_1m"), (10_000_000, "migrated_10m"),
     (20_000_000, "migrated_20m"), (100_000_000, "migrated_100m"),
     (500_000_000, "migrated_500m"), (1_000_000_000, "migrated_1b"),
 ]

@@ -67,11 +67,11 @@ const LIVE_WINDOW_SECONDS = 180
 
 const TIER_LABEL: Record<string, string> = {
   just_launch: 'Just Launched', pumpfun_10k_20k: 'Pump 10-20k', pre_migration: 'Pre-Migration',
-  just_migrated: 'Just Migrated', migrated_1m: '$1M+', migrated_10m: '$10M+', migrated_20m: '$20M+',
+  just_migrated: 'Just Migrated', sub_1m: '< $1M', migrated_10m: '$10M+', migrated_20m: '$20M+',
   migrated_100m: '$100M+', migrated_500m: '$500M+', migrated_1b: '$1B+', billion_club: 'Billion Club',
 }
 const TIER_ORDER = ['just_launch', 'pumpfun_10k_20k', 'pre_migration', 'just_migrated',
-  'migrated_1m', 'migrated_10m', 'migrated_20m', 'migrated_100m', 'migrated_500m', 'migrated_1b', 'billion_club']
+  'sub_1m', 'migrated_10m', 'migrated_20m', 'migrated_100m', 'migrated_500m', 'migrated_1b', 'billion_club']
 
 const TYPE_COLOR: Record<string, string> = { wallet: '#3b82f6', token: '#ff2d4a', social: '#39ff14', exchange: '#f5a623' }
 
