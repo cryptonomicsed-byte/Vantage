@@ -11,6 +11,7 @@ from unittest import mock
 import pytest
 
 from backend import execution_engine as ee
+import backend.db as _db_module
 from backend.config import settings
 from backend.crypto_utils import encrypt_private_key
 
@@ -49,7 +50,9 @@ def _make_db(path):
 def temp_db(tmp_path, monkeypatch):
     path = str(tmp_path / "vantage.db")
     _make_db(path)
-    monkeypatch.setattr(ee, "DB_PATH", path)
+    # The engine now opens connections via db.get_db(), which reads
+    # backend.db.DB_PATH (not ee.DB_PATH) — patch the module get_db() reads.
+    monkeypatch.setattr(_db_module, "DB_PATH", path)
     yield path
 
 
