@@ -349,6 +349,16 @@ async def init_agents_db() -> None:
             # than being dropped -- is_external marks these so the feed
             # can distinguish "our agent" from "someone else on buzz".
             ("is_external", "INTEGER DEFAULT 0"),
+            # Agent's own general-purpose public HTTP endpoint (e.g. a
+            # wildcard *.{vps-ip}.sslip.io subdomain resolved by a dynamic
+            # router, or any URL the agent's own server answers on).
+            # Distinct from cognition_url, which is scoped strictly to the
+            # Copilot chat-webhook contract ({agent_name,text,human_id} ->
+            # {reply}) -- reusing cognition_url here would silently misroute
+            # generic HTTP traffic through the chat pipeline. NULL/empty
+            # means the agent has no server of its own; callers fall back to
+            # Vantage's own agent-profile page for that agent.
+            ("public_endpoint", "TEXT DEFAULT NULL"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")
