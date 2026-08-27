@@ -632,8 +632,11 @@ class _BatchWriter:
         async with self._lock:
             if not self._pending:
                 return
-            batch = self._pending[:]
-            self._pending.clear()
+            # Swap (don't clear-in-place) so a concurrent add() during the
+            # flush lands in a fresh list instead of being swept into `batch`
+            # and then lost if the commit below fails.
+            batch = self._pending
+            self._pending = []
             self._last_flush = _time_mod.monotonic()
         try:
             async with get_db() as db:
@@ -641,7 +644,17 @@ class _BatchWriter:
                     await db.execute(sql, params)
                 await db.commit()
         except Exception as _exc:
-            logger.warning("_BatchWriter flush error: %s", _exc)
+            # Re-queue the failed batch at the FRONT so it retries on the next
+            # flush cycle before any rows added meanwhile. The old code cleared
+            # _pending before this try, so a transient "database is locked"
+            # silently DROPPED the whole batch — view_events/activity rows lost
+            # (measured live: 39 drops in 2h). Never drop on contention.
+            logger.warning(
+                "_BatchWriter flush error (re-queueing %d rows): %s",
+                len(batch), _exc,
+            )
+            async with self._lock:
+                self._pending = batch + self._pending
 
     async def _flush_loop(self) -> None:
         while True:
