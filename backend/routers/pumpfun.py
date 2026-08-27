@@ -5,6 +5,8 @@ import asyncio, json, os, urllib.request, hashlib
 from pathlib import Path
 from fastapi import APIRouter, Query, HTTPException, Header
 import aiosqlite
+from backend.db import get_db
+from contextlib import asynccontextmanager
 
 router = APIRouter(prefix="/api/intel/pumpfun", tags=["pumpfun"])
 DB = Path("/opt/ares/Vantage/data/vantage.db")
@@ -12,30 +14,23 @@ BIRDEYE = os.environ.get("BIRDEYE_KEY", "")
 HELIUS = os.environ.get("HELIUS_API_KEY", "")
 
 
+@asynccontextmanager
 async def _db():
-    """Real async connection with busy_timeout -- this router used to open
-    a blocking sqlite3.connect() (no busy_timeout at all) on every single
-    request, inside an `async def` handler, stalling the whole event loop
-    for every other in-flight request while it ran, and failing outright
-    with "database is locked" under any real write concurrency."""
-    conn = await aiosqlite.connect(str(DB))
-    await conn.execute("PRAGMA busy_timeout=20000")
-    # dict rows (not aiosqlite.Row) -- matches the original hand-rolled
-    # row_factory exactly, since downstream code calls .get() on rows,
-    # which sqlite3.Row/aiosqlite.Row doesn't support.
-    conn.row_factory = lambda cur, row: dict(zip([c[0] for c in cur.description], row))
-    return conn
+    """Pooled connection via get_db() -- bounded by the shared semaphore
+    with busy_timeout=30000, and carrying the dict row_factory every
+    endpoint here expects (downstream code calls .get() on rows, which
+    sqlite3.Row/aiosqlite.Row doesn't support)."""
+    async with get_db() as conn:
+        conn.row_factory = lambda cur, row: dict(zip([c[0] for c in cur.description], row))
+        yield conn
 
 
 async def get_agent(key):
     h = hashlib.sha256(key.encode()).hexdigest()
-    db = await _db()
-    try:
+    async with _db() as db:
         cur = await db.execute("SELECT id, name FROM agents WHERE api_key=?", (h,))
         r = await cur.fetchone()
         return dict(r) if r else None
-    finally:
-        await db.close()
 
 def _fetch_sync(url, headers=None, timeout=10):
     h = headers or {}
@@ -181,12 +176,9 @@ async def risk(mint: str, x_agent_key: str=Header(...)):
 @router.get("/watchlist")
 async def watchlist(x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
-    db = await _db()
-    try:
+    async with _db() as db:
         cur = await db.execute("SELECT * FROM tracked_wallets WHERE chain='pumpfun' ORDER BY created_at DESC LIMIT 50")
         rows = await cur.fetchall()
-    finally:
-        await db.close()
     return {"watchlist":[dict(r) for r in rows],"count":len(rows)}
 
 @router.post("/watchlist")
@@ -198,15 +190,12 @@ async def add_watchlist(mint: str=Query(...), label: str=Query(""), x_agent_key:
     # the 401 entirely, and then crashed on agent["id"]. Fixed by awaiting.
     agent = await get_agent(x_agent_key)
     if not agent: raise HTTPException(401)
-    db = await _db()
-    try:
+    async with _db() as db:
         await db.execute(
             "INSERT OR IGNORE INTO tracked_wallets (chain,address,label,added_by_agent_id) VALUES (?,?,?,?)",
             ("pumpfun", mint, label or f"Pumpfun-{mint[:8]}", agent["id"]),
         )
         await db.commit()
-    finally:
-        await db.close()
     return {"status":"added","mint":mint}
 
 @router.get("/signals")
@@ -221,15 +210,12 @@ async def signals(limit: int=20, x_agent_key: str=Header(...)):
     # tags itself, and correctly returns an honest empty list today rather
     # than fabricating rows.
     if not await get_agent(x_agent_key): raise HTTPException(401)
-    db = await _db()
-    try:
+    async with _db() as db:
         cur = await db.execute(
             "SELECT * FROM trading_signals WHERE source LIKE '%pumpfun%' ORDER BY created_at DESC LIMIT ?",
             (limit,),
         )
         rows = await cur.fetchall()
-    finally:
-        await db.close()
     return {"signals":[dict(r) for r in rows],"count":len(rows),"source":"pumpfun"}
 
 @router.get("/detect")

@@ -652,7 +652,7 @@ async def add_blacklisted_wallet(req: BlacklistAddRequest, agent: dict = Depends
     """Explicitly exclude a wallet from the money-flow graph and smart-
     wallet rankings — for anything the known-exchange pattern list misses
     (a router contract, a known bot, another provider's hot wallet, etc.)."""
-    wb.add_to_blacklist(req.address.strip(), req.chain.strip().lower(), req.reason.strip()[:500], agent["id"])
+    await asyncio.to_thread(wb.add_to_blacklist, req.address.strip(), req.chain.strip().lower(), req.reason.strip()[:500], agent["id"])
     return {"status": "blacklisted", "address": req.address, "chain": req.chain}
 
 @router.get("/blacklist")
@@ -1385,10 +1385,8 @@ async def memory_graph(agent_name: str = None, limit: int = Query(80, ge=1, le=3
     
     Usage: /api/intel/memory/graph?agent_name=Hermes
     """
-    import aiosqlite, os as _os, time as _time, json as _json
-    
-    db = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))), "data", "vantage.db")
-    
+    import time as _time, json as _json
+
     P = {
         "post": "#a855f7", "video": "#3b82f6", "message": "#f59e0b",
         "signal": "#ef4444", "code": "#22c55e", "agent": "#ffffff",
@@ -1399,8 +1397,7 @@ async def memory_graph(agent_name: str = None, limit: int = Query(80, ge=1, le=3
     agent_id = None
     agent_display = agent_name or "Unknown"
     
-    async with aiosqlite.connect(db) as conn:
-        await conn.execute("PRAGMA busy_timeout=20000")
+    async with get_db() as conn:
         conn.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
         
         # Find target agent
@@ -1603,7 +1600,7 @@ async def daily_intel(limit: int = Query(10, ge=1, le=50), agent: dict = Depends
     silently wiped on a prior redeploy; recovered from git stash@{3} and
     committed for real this time."""
     import aiosqlite
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, title, post_content, created_at FROM broadcasts WHERE content_type='intel' ORDER BY created_at DESC LIMIT ?",

@@ -6001,10 +6001,7 @@ async def get_activity_heatmap(agent: dict = Depends(get_agent)):
         "active_jobs": [{"stage": r["status"], "count": r["cnt"]} for r in job_rows],
         "tro_activity": [{"service_type": r["service_type"], "count": r["cnt"]} for r in tro_rows],
         "active_agents": active_row[0] if active_row else 0,
-        "snapshot_time": _json.loads(
-            (await aiosqlite.connect(DB_PATH).__aenter__()
-            ).__class__.Row.__doc__ or ""
-        ) if False else _datetime.utcnow().isoformat(),
+        "snapshot_time": _datetime.utcnow().isoformat(),
     }
 
 

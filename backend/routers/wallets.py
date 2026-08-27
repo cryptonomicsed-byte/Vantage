@@ -24,6 +24,7 @@ from solders.pubkey import Pubkey
 from solders.signature import Signature
 
 from ..config import settings
+from ..db import connect_bounded
 from ..crypto_utils import encrypt_key_for_agent, decrypt_key_for_agent
 from ..hd_wallet import derive_multichain_wallet, generate_mnemonic
 
@@ -52,14 +53,12 @@ class SignTransactionRequest(BaseModel):
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 async def _db():
-    """Real async connection with busy_timeout -- every endpoint in this
-    router used to open a blocking sqlite3.connect() (no busy_timeout at
-    all) inside an `async def` handler, stalling the whole event loop for
-    every other in-flight request while it ran, and failing outright with
-    "database is locked" under any real write concurrency."""
-    conn = await aiosqlite.connect(DB_PATH)
-    await conn.execute("PRAGMA busy_timeout=20000")
-    return conn
+    """Pooled connection via db.connect_bounded() -- bounded by the shared
+    semaphore with busy_timeout=30000 (was a raw aiosqlite.connect with
+    busy_timeout=20000 and no concurrency bound). Callers keep their
+    existing try/finally + await db.close() shape; close() releases the
+    pool slot."""
+    return await connect_bounded()
 
 
 async def get_agent_id(x_agent_key: str) -> Optional[int]:

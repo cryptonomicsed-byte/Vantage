@@ -39,6 +39,38 @@ async def get_db():
             yield db
 
 
+async def connect_bounded():
+    """Return an open aiosqlite connection on DB_PATH whose close() releases
+    its _DB_CONN_LIMIT slot.
+
+    For the legacy call sites that manage connection lifecycle with an
+    explicit `db = await _db(); try: ... finally: await db.close()` pattern
+    (pre-context-manager code, e.g. routers/wallets.py's endpoints whose
+    try/except HTTPException/finally shape doesn't cleanly map onto
+    `async with get_db()`). Prefer get_db() for all new code; this exists
+    so those call sites still get semaphore bounding + busy_timeout=30000
+    without a mechanical rewrite of their exception handling. The returned
+    connection MUST be closed exactly once (the slot is released in close).
+    """
+    await _DB_CONN_LIMIT.acquire()
+    try:
+        conn = await aiosqlite.connect(DB_PATH)
+        await conn.execute("PRAGMA busy_timeout=30000")
+    except BaseException:
+        _DB_CONN_LIMIT.release()
+        raise
+    _orig_close = conn.close
+
+    async def _close_release():
+        try:
+            await _orig_close()
+        finally:
+            _DB_CONN_LIMIT.release()
+
+    conn.close = _close_release
+    return conn
+
+
 async def init_agents_db() -> None:
     settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
     async with get_db() as db:

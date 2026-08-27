@@ -5,6 +5,8 @@ import asyncio, json, os, urllib.request, hashlib, time
 from pathlib import Path
 from fastapi import APIRouter, Query, HTTPException, Header
 from backend.wallet_blacklist import sql_label_exclusions
+from backend.db import get_db
+from contextlib import asynccontextmanager
 import aiosqlite
 
 router = APIRouter(prefix="/api/intel/degen", tags=["degen"])
@@ -55,30 +57,23 @@ async def _fetch(url, headers=None, timeout=10):
     ran synchronously inside the single asyncio event loop."""
     return await asyncio.to_thread(_fetch_sync, url, headers, timeout)
 
+@asynccontextmanager
 async def _db():
-    """Real async connection with busy_timeout -- every endpoint in this
-    router used to open a blocking sqlite3.connect() (no busy_timeout) on
-    the shared DB from inside an `async def` handler, stalling the whole
-    event loop for every other in-flight request and failing outright with
-    "database is locked" under any real write concurrency."""
-    conn = await aiosqlite.connect(str(DB))
-    await conn.execute("PRAGMA busy_timeout=20000")
-    # dict rows (not aiosqlite.Row) -- matches the original hand-rolled
-    # row_factory exactly, since downstream code calls .get() on rows,
-    # which sqlite3.Row/aiosqlite.Row doesn't support.
-    conn.row_factory = lambda cur, row: dict(zip([c[0] for c in cur.description], row))
-    return conn
+    """Pooled connection via get_db() -- bounded by the shared semaphore
+    with busy_timeout=30000, and carrying the dict row_factory every
+    endpoint here expects (downstream code calls .get() on rows, which
+    sqlite3.Row/aiosqlite.Row doesn't support)."""
+    async with get_db() as conn:
+        conn.row_factory = lambda cur, row: dict(zip([c[0] for c in cur.description], row))
+        yield conn
 
 
 async def get_agent(key):
     h = hashlib.sha256(key.encode()).hexdigest()
-    db = await _db()
-    try:
+    async with _db() as db:
         cur = await db.execute("SELECT id, name FROM agents WHERE api_key=?", (h,))
         r = await cur.fetchone()
         return dict(r) if r else None
-    finally:
-        await db.close()
 
 
 async def ensure_degen_indexes():
@@ -91,13 +86,10 @@ async def ensure_degen_indexes():
     SCAN, not SEARCH; fixed query dropped from timeout to 8ms after adding
     these). Idempotent, safe to call on every startup."""
     try:
-        db = await _db()
-        try:
+        async with _db() as db:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_twr_wallet_role ON token_wallet_roles(wallet_address, role)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_twr_role_discovered ON token_wallet_roles(role, discovered_at DESC)")
             await db.commit()
-        finally:
-            await db.close()
     except Exception as e:
         print(f"degen index init skipped (table may not exist yet): {e}")
 
@@ -174,8 +166,7 @@ async def early_calls(limit: int=20, x_agent_key: str=Header(...)):
 @router.get("/smart-wallets")
 async def smart_wallets(limit: int=20, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
-    db = await _db()
-    try:
+    async with _db() as db:
         # address_type='exchange' is the authoritative tag, but daemons that add
         # wallets don't always set it correctly (found 15 mistagged Binance/
         # Coinbase/Alameda/etc wallets live — fixed in the DB, but new ones can
@@ -194,8 +185,6 @@ async def smart_wallets(limit: int=20, x_agent_key: str=Header(...)):
             ORDER BY edge_count DESC LIMIT ?
         """, (limit,))
         rows = await cur.fetchall()
-    finally:
-        await db.close()
     now = time.time()
     results = []
     for r in rows:
@@ -398,8 +387,7 @@ async def must_buy_20(limit: int=20, hours: int=24, x_agent_key: str=Header(...)
         c["sources"].append("trending")
         c["score"] += min(30, vol_24h / 10000) + (10 if pc_24h > 10 else 0)
 
-    db = await _db()
-    try:
+    async with _db() as db:
         # 2. Persisted trading signals — direction-aware, conviction-weighted.
         try:
             cur = await db.execute(
@@ -433,8 +421,6 @@ async def must_buy_20(limit: int=20, hours: int=24, x_agent_key: str=Header(...)
                 c["score"] += 15 * float(r.get("confidence") or 0.5)
         except Exception:
             pass
-    finally:
-        await db.close()
 
     # 4. In-memory signal pool (predictor/degen fusion/telegram alpha ingest).
     try:
@@ -475,8 +461,7 @@ async def must_buy_20(limit: int=20, hours: int=24, x_agent_key: str=Header(...)
 @router.get("/fresh-deployers")
 async def fresh_deployers(limit: int=20, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
-    db = await _db()
-    try:
+    async with _db() as db:
         label_exclusions = sql_label_exclusions("tw.label")
         cur = await db.execute(f"""
             SELECT r.mint, r.symbol, r.wallet_address, r.discovered_at,
@@ -487,8 +472,6 @@ async def fresh_deployers(limit: int=20, x_agent_key: str=Header(...)):
             ORDER BY r.discovered_at DESC LIMIT ?
         """, (limit,))
         rows = await cur.fetchall()
-    finally:
-        await db.close()
     return {"deployers": rows, "count": len(rows)}
 
 # ════════════════════════════════════════════════════════════════
@@ -501,16 +484,13 @@ async def fresh_deployers(limit: int=20, x_agent_key: str=Header(...)):
 @router.get("/top-wallets-to-copy")
 async def top_wallets_to_copy(limit: int=20, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
-    db = await _db()
-    try:
+    async with _db() as db:
         cur = await db.execute("""
             SELECT * FROM wallet_reputation
             WHERE copy_trade_score > 0
             ORDER BY copy_trade_score DESC LIMIT ?
         """, (limit,))
         rows = await cur.fetchall()
-    finally:
-        await db.close()
     return {"wallets": rows, "count": len(rows)}
 
 # ════════════════════════════════════════════════════════════════
@@ -544,11 +524,8 @@ async def _token_conviction(db, mint: str) -> dict:
 @router.get("/conviction/{mint}")
 async def token_conviction(mint: str, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
-    db = await _db()
-    try:
+    async with _db() as db:
         result = await _token_conviction(db, mint)
-    finally:
-        await db.close()
     return {"mint": mint, **result}
 
 @router.get("/high-conviction")
@@ -566,8 +543,7 @@ async def high_conviction_tokens(limit: int=20, x_agent_key: str=Header(...)):
     as broken). Rewritten to rank with ONE aggregate query, then only call
     _token_conviction() for the `limit` tokens actually being returned."""
     if not await get_agent(x_agent_key): raise HTTPException(401)
-    db = await _db()
-    try:
+    async with _db() as db:
         cur = await db.execute("""
             WITH per_wallet AS (
                 SELECT DISTINCT twr.mint, twr.symbol, twr.wallet_address, wr.copy_trade_score
@@ -587,7 +563,5 @@ async def high_conviction_tokens(limit: int=20, x_agent_key: str=Header(...)):
         for t in top:
             conv = await _token_conviction(db, t["mint"])
             ranked.append({"mint": t["mint"], "symbol": t["symbol"], **conv})
-    finally:
-        await db.close()
     ranked.sort(key=lambda t: -t["conviction_score"])
     return {"tokens": ranked[:limit], "count": len(ranked[:limit])}

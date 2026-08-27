@@ -387,7 +387,7 @@ async def money_flow(
         # connected to every other wallet and drowns out real signal.
         blacklisted: set = set()
         if exclude_exchanges:
-            blacklisted = wb.get_blacklisted_addresses("solana")
+            blacklisted = await asyncio.to_thread(wb.get_blacklisted_addresses, "solana")
             for addr, meta in wallet_meta.items():
                 if meta.get("address_type") == "exchange" or wb.is_exchange_label(meta.get("label", "")):
                     blacklisted.add(addr)
