@@ -140,10 +140,14 @@ def apply_trade(conn, mint: str, tx_type: str, trader: str,
     # Empirical RUNNING_GRACE_SECONDS tuning (temporary instrumentation, see
     # backend/db.py's pumpfun_trade_gaps comment): this new trade proves the
     # token was still alive despite the gap since its previous trade -- log
-    # that gap, tagged with the mcap it was at when it went quiet, only for
-    # tokens that had already cleared the 10k tier (below that, FRESH_GRACE
-    # already covers it generously and it's not the tier under tuning).
-    if prev_last_trade_at and (prev_mcap_usd or 0) >= FRESH_TIER_CEILING_USD:
+    # that gap, tagged with the mcap it was at when it went quiet. Originally
+    # scoped to >=10k mcap only (the tier under tuning), but real crossings
+    # are rare (historical eviction data: ~1 token/3hrs ever reaches 10k+
+    # before dying) -- too slow to build a sample in one session. Logging
+    # every tier now for a larger real sample fast; analysis still slices
+    # for the 10k-35k band specifically, this doesn't change what's real,
+    # only how much of it gets captured.
+    if prev_last_trade_at:
         try:
             prev_ts = time.mktime(time.strptime(prev_last_trade_at, "%Y-%m-%d %H:%M:%S"))
             gap = time.time() - prev_ts
