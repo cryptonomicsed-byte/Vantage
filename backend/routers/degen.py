@@ -424,9 +424,10 @@ async def sell_rotations(limit: int=5, x_agent_key: str=Header(...)):
 # raw volume — a token mentioned bullishly on social AND trending AND with a
 # real trading signal ranks above one that's only trending.
 # ════════════════════════════════════════════════════════════════
-@router.get("/must-buy-20")
-async def must_buy_20(limit: int=20, hours: int=24, x_agent_key: str=Header(...)):
-    if not await get_agent(x_agent_key): raise HTTPException(401)
+async def _must_buy_20_core(limit: int = 20, hours: int = 24) -> dict:
+    """The real fusion logic, callable without an agent-key header --
+    shared by the /must-buy-20 endpoint and the aggregate-score candidate
+    assembler, which needs this same cross-source list internally."""
     pools, _ = await _trending_pools_cached()
 
     candidates: dict[str, dict] = {}  # key: symbol.upper()
@@ -541,6 +542,12 @@ async def must_buy_20(limit: int=20, hours: int=24, x_agent_key: str=Header(...)
 
     resp = {"must_buy": out, "count": len(out), "candidates_scanned": len(candidates), "window_hours": hours}
     return _cache_put("must_buy_20", resp) if out else (_cache_get_stale("must_buy_20") or resp)
+
+
+@router.get("/must-buy-20")
+async def must_buy_20(limit: int=20, hours: int=24, x_agent_key: str=Header(...)):
+    if not await get_agent(x_agent_key): raise HTTPException(401)
+    return await _must_buy_20_core(limit, hours)
 
 # ════════════════════════════════════════════════════════════════
 # FRESH DEPLOYERS — recently-discovered token deployers, from
@@ -831,17 +838,10 @@ async def _moonshot_leader() -> Optional[dict]:
     }
 
 
-@router.get("/platform-leaders")
-async def platform_leaders(x_agent_key: str = Header(...)):
-    """The #1 top-ranked token from each of the 6 real platforms Vantage
-    gathers token intel from -- one row per platform, each platform's own
-    native ranking metric (not a Vantage cross-platform score; see
-    /aggregate-score for that). A platform showing null/`available: false`
-    means that source was genuinely unreachable or had no data at request
-    time -- never a fabricated placeholder row."""
-    if not await get_agent(x_agent_key):
-        raise HTTPException(401)
-
+async def _gather_platform_leaders() -> list[dict]:
+    """The real gather logic shared by /platform-leaders and the aggregate
+    scorer's candidate-pool assembly (task (b) reuses task (a)'s output
+    directly rather than re-deriving it)."""
     leaders = await asyncio.gather(
         _geckoterminal_leader(), _dexscreener_leader(), _coingecko_leader(),
         _pumpfun_leader(), _vantage_conviction_leader(), _moonshot_leader(),
@@ -854,6 +854,21 @@ async def platform_leaders(x_agent_key: str = Header(...)):
             results.append(leader)
         elif isinstance(leader, Exception):
             logger.debug("platform-leaders: a source raised: %s", leader)
+    return results
+
+
+@router.get("/platform-leaders")
+async def platform_leaders(x_agent_key: str = Header(...)):
+    """The #1 top-ranked token from each of the 6 real platforms Vantage
+    gathers token intel from -- one row per platform, each platform's own
+    native ranking metric (not a Vantage cross-platform score; see
+    /aggregate-score for that). A platform showing null/`available: false`
+    means that source was genuinely unreachable or had no data at request
+    time -- never a fabricated placeholder row."""
+    if not await get_agent(x_agent_key):
+        raise HTTPException(401)
+
+    results = await _gather_platform_leaders()
     # Sources that returned None (genuinely no data, not an error) get an
     # explicit unavailable row instead of silently vanishing from the list
     # -- the frontend needs to show all 6 platforms, including misses.
@@ -866,3 +881,91 @@ async def platform_leaders(x_agent_key: str = Header(...)):
     order = {name: i for i, name in enumerate(platform_names)}
     results.sort(key=lambda r: order.get(r["platform"], 99))
     return {"leaders": results, "count": len(results), "generated_at": int(time.time())}
+
+
+# ════════════════════════════════════════════════════════════════
+# AGGREGATE SCORE — task (b): a genuinely whole-app score per token,
+# distinct from platform_leaders above. Full methodology documented in
+# backend/aggregate_score.py's module docstring (weights, normalization,
+# disqualification rules) -- this endpoint only assembles the candidate
+# pool and calls that module's compute_aggregate_scores().
+# ════════════════════════════════════════════════════════════════
+
+async def _assemble_aggregate_candidates() -> list[dict]:
+    """Union of addresses from platform-leaders (task a) + must-buy-20 +
+    high-conviction, deduped by address, with a real platform_breadth
+    count per candidate (how many independent sources/signal-types
+    surfaced this exact address) -- the raw input to aggregate_score.py's
+    'platform breadth' component."""
+    breadth: dict[str, int] = {}
+    symbol_by_addr: dict[str, Optional[str]] = {}
+
+    def touch(addr: Optional[str], symbol: Optional[str] = None):
+        if not addr:
+            return
+        breadth[addr] = breadth.get(addr, 0) + 1
+        if symbol and not symbol_by_addr.get(addr):
+            symbol_by_addr[addr] = symbol
+
+    leaders = await _gather_platform_leaders()
+    for leader in leaders:
+        if leader.get("available"):
+            touch(leader.get("address"), leader.get("symbol"))
+
+    async with _db() as db:
+        try:
+            cur = await db.execute(
+                """WITH per_wallet AS (
+                    SELECT DISTINCT twr.mint, twr.symbol, twr.wallet_address, wr.copy_trade_score
+                    FROM token_wallet_roles twr
+                    JOIN wallet_reputation wr ON wr.wallet_address = twr.wallet_address
+                    WHERE wr.copy_trade_score > 0
+                )
+                SELECT mint, MAX(symbol) as symbol, SUM(copy_trade_score) as conviction_score
+                FROM per_wallet GROUP BY mint ORDER BY conviction_score DESC LIMIT 20"""
+            )
+            for row in await cur.fetchall():
+                touch(row.get("mint"), row.get("symbol"))
+        except Exception as e:
+            logger.debug("aggregate candidates: high-conviction source failed: %s", e)
+
+    # must-buy-20 candidates carry a symbol + ca, not always both real --
+    # only usable here when a real contract address is present (an
+    # aggregate score needs an address to check manipulation flags/whale
+    # overlap against; a symbol-only entry can't be scored on those axes).
+    try:
+        mb20 = await _must_buy_20_core(limit=20, hours=24)
+    except Exception as e:
+        mb20 = {"must_buy": []}
+        logger.debug("aggregate candidates: must-buy-20 source failed: %s", e)
+    for c in mb20.get("must_buy", []):
+        if c.get("ca"):
+            touch(c["ca"], c.get("symbol"))
+
+    return [
+        {"address": addr, "symbol": symbol_by_addr.get(addr), "platform_breadth": count}
+        for addr, count in breadth.items()
+    ]
+
+
+@router.get("/aggregate-score")
+async def aggregate_score(x_agent_key: str = Header(...)):
+    """Task (b): a genuinely whole-app aggregate score per token, pulling
+    from every real signal source in the backend (not just each
+    platform's own top pick -- see /platform-leaders for that). Full
+    weighting/scoring methodology documented in
+    backend/aggregate_score.py's module docstring -- every number here is
+    traceable to a real upstream source, weights are fixed and disclosed
+    in the response, and any manipulation/rug-flagged token is
+    disqualified regardless of score. ranked[0] (if present) is the
+    'ultimate winner' this response's caller should flash app-wide."""
+    if not await get_agent(x_agent_key):
+        raise HTTPException(401)
+
+    from backend.aggregate_score import compute_aggregate_scores
+
+    candidates = await _assemble_aggregate_candidates()
+    result = await compute_aggregate_scores(candidates, helius_key=HELIUS)
+    result["candidates_considered"] = len(candidates)
+    result["generated_at"] = int(time.time())
+    return result

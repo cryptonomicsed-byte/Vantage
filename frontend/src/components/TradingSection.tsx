@@ -8,6 +8,7 @@ import DegenTrenches from './trading/DegenTrenches'
 import Portfolio from './trading/Portfolio'
 import TradingViewChart from './trading/TradingViewChart'
 import { ProfileCardProvider } from './trading/EntityProfileCard'
+import AggregateWinnerBanner from './trading/AggregateWinnerBanner'
 
 const GROUPS = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -23,6 +24,7 @@ export default function TradingSection() {
   return (
     <ProfileCardProvider>
       <div>
+        <AggregateWinnerBanner />
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, marginBottom: 20 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <h1 className="page-title" style={{ marginBottom: 0 }}>Trading</h1>
