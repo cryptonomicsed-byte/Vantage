@@ -218,28 +218,40 @@ async def _market_snapshot(mint: str, pumpfun_row: Optional[dict]) -> dict:
     volume: DexScreener liquidity_usd (real pair depth) if available,
     else pump.fun's own persisted volume_sol_total (a comparable relative
     magnitude within this pool, never shown as an interchangeable dollar
-    figure). market_cap/liquidity_usd: DexScreener's real numbers if
-    available, else pump.fun's own persisted market_cap_usd for
-    pre-migration tokens DexScreener hasn't indexed yet.
+    figure).
+
+    market_cap: pump.fun's own persisted market_cap_usd takes priority
+    whenever the mint is actively tracked in pumpfun_premigration_tokens
+    (pumpfun_row is not None) -- NOT "DexScreener if present, else
+    pump.fun." Found live 2026-08-28: a real pre-migration pump.fun token
+    ($richness, pump.fun's own tracked mcap $3,043) also had one thin,
+    unreliable DexScreener pair reporting marketCap=$10.75 -- a ~300x
+    discrepancy. A still-migrating token's real price discovery happens
+    on pump.fun's bonding curve; an incidental external DEX pair (a stray
+    seed LP, a copy-listing, etc) is not more authoritative just because
+    it's a different data source. Only falls back to DexScreener's figure
+    when the mint isn't in pumpfun_premigration_tokens at all (already
+    migrated, or never a pump.fun token to begin with).
 
     `from_pumpfun_only` flags when market_cap came from pump.fun's own
-    persisted column rather than a real DexScreener listing -- callers use
-    this to pick the right dust-floor threshold (see
-    degen_filters.PUMPFUN_MIN_MARKET_CAP_USD's docstring: pump.fun's own
-    pre-migration tokens legitimately sit far below the general $7k floor,
-    which is calibrated for "graduated then collapsed," not "hasn't
-    graduated yet")."""
+    persisted column -- callers use this to pick the right dust-floor
+    threshold (see degen_filters.PUMPFUN_MIN_MARKET_CAP_USD's docstring:
+    pump.fun's own pre-migration tokens legitimately sit far below the
+    general $7k floor, which is calibrated for "graduated then
+    collapsed," not "hasn't graduated yet")."""
     snap = await _dexscreener_mcap(mint)
     snap = snap if isinstance(snap, dict) else {}
     pf_volume = float((pumpfun_row or {}).get("volume_sol_total") or 0.0)
     pf_mcap = (pumpfun_row or {}).get("market_cap_usd")
     volume = float(snap["liquidity_usd"]) if snap.get("liquidity_usd") else pf_volume
     dex_mcap = snap.get("market_cap")
+    is_tracked_pumpfun = pumpfun_row is not None
+    market_cap = pf_mcap if (is_tracked_pumpfun and pf_mcap is not None) else dex_mcap
     return {
         "volume": volume,
-        "market_cap": dex_mcap if dex_mcap is not None else pf_mcap,
+        "market_cap": market_cap,
         "liquidity_usd": snap.get("liquidity_usd"),
-        "from_pumpfun_only": dex_mcap is None and pf_mcap is not None,
+        "from_pumpfun_only": is_tracked_pumpfun and pf_mcap is not None,
     }
 
 

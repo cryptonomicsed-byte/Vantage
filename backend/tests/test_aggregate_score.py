@@ -249,3 +249,39 @@ async def test_ten_dollar_mcap_dust_disqualified(monkeypatch):
     assert result["ranked"] == []
     assert len(result["disqualified"]) == 1
     assert "dust" in result["disqualified"][0]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_pumpfun_own_mcap_wins_over_unreliable_thin_dexscreener_pair(monkeypatch):
+    """Real bug regression: a live pre-migration pump.fun token
+    ($richness) had pump.fun's own real tracked mcap ($3,043) but ALSO
+    one thin/unreliable DexScreener pair reporting marketCap=$10.75 (a
+    ~300x discrepancy -- likely a stray seed LP, not real price
+    discovery). The old logic trusted whichever source returned
+    "something," incorrectly disqualifying a real active token as dust.
+    A mint actively tracked in pumpfun_premigration_tokens must use
+    pump.fun's own mcap, not an incidental thin external pair."""
+    import backend.aggregate_score as agg_module
+
+    async def fake_mcap_thin_pair(mint):
+        # Simulates the real observed discrepancy: a technically-present
+        # but unreliable DexScreener listing for a pre-migration token.
+        return {"market_cap": 10.75, "liquidity_usd": None}
+
+    monkeypatch.setattr(agg_module, "_dexscreener_mcap", fake_mcap_thin_pair)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO pumpfun_premigration_tokens (mint, symbol, market_cap_usd, volume_sol_total, score, manipulation_flags, evicted, migrated) "
+            "VALUES (?,?,?,?,?,?,0,0)",
+            ("RichnessMint1111111111111111111111111111", "richness", 3043.18, 100.0, 18.93, "[]"),
+        )
+        await db.commit()
+
+    result = await compute_aggregate_scores(
+        [{"address": "RichnessMint1111111111111111111111111111", "symbol": "richness", "platform_breadth": 1}],
+        helius_key="",
+    )
+
+    assert len(result["ranked"]) == 1
+    assert result["ranked"][0]["symbol"] == "richness"
