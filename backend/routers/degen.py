@@ -275,7 +275,7 @@ async def top5_degen(limit: int=5, x_agent_key: str=Header(...)):
             *[_dexscreener_mcap(t["address"]) for t in top], return_exceptions=True
         )
         for t, mc in zip(top, mcaps):
-            mc = mc if isinstance(mc, (int, float)) else None
+            mc = mc.get("market_cap") if isinstance(mc, dict) else None
             t["market_cap"] = mc
             buy_sell = f"{t['buys_24h']}/{t['sells_24h']}" if (t['buys_24h'] or t['sells_24h']) else "0/0"
             mc_part = f"MC ${mc:,.0f}" if mc else "MC n/a"
@@ -370,7 +370,7 @@ async def sell_rotations(limit: int=5, x_agent_key: str=Header(...)):
             return_exceptions=True,
         )
         for t, mc in zip(top, mcaps):
-            mc = mc if isinstance(mc, (int, float)) else None
+            mc = mc.get("market_cap") if isinstance(mc, dict) else None
             t["market_cap"] = mc
             mc_part = f"MC ${mc:,.0f}" if mc else "MC n/a"
             t["reason"] = (
@@ -500,7 +500,7 @@ async def must_buy_20(limit: int=20, hours: int=24, x_agent_key: str=Header(...)
         return_exceptions=True,
     )
     for c, mc in zip(out, mcaps):
-        mc = mc if isinstance(mc, (int, float)) else None
+        mc = mc.get("market_cap") if isinstance(mc, dict) else None
         c["market_cap"] = mc
         mc_part = f"MC ${mc:,.0f}" if mc else "MC n/a"
         c["summary"] = (
@@ -634,6 +634,6 @@ async def high_conviction_tokens(limit: int=20, x_agent_key: str=Header(...)):
         *[_dexscreener_mcap(t["mint"]) for t in out], return_exceptions=True
     )
     for t, mc in zip(out, mcaps):
-        t["market_cap"] = mc if isinstance(mc, (int, float)) else None
+        t["market_cap"] = mc.get("market_cap") if isinstance(mc, dict) else None
 
     return {"tokens": out, "count": len(out)}
