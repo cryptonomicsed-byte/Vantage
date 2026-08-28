@@ -235,11 +235,25 @@ _TIER_BOUNDARIES = [
 
 
 def _classify_tier(market_cap: Optional[float], first_seen_ts: int, now: int) -> str:
+    """`first_seen_ts` is when THIS graph first observed the token (a wallet
+    traded it, a social post mentioned it, etc) -- not the token's real
+    on-chain launch time. That makes it a legitimate signal for "just
+    launched" (age < 1h really does mean brand new to everyone) but NOT a
+    legitimate proxy for market-cap stage: a token that's been trading
+    elsewhere for months but only just entered this graph's tracking would
+    wrongly read as a fresh pumpfun-stage token. Previously this function
+    filled in "pumpfun_10k_20k"/"pre_migration" from that age heuristic
+    whenever market_cap was unknown (no real DexScreener lookup, or beyond
+    tier_lookups) -- a confident-looking $ range with zero real evidence
+    behind it, while the frontend's market_cap field correctly showed
+    "unlisted" right next to it. Now both signals agree: no real market cap
+    data means "unlisted", full stop.
+    """
     age_h = (now - first_seen_ts) / 3600 if first_seen_ts else 999
     if age_h < 1:
         return "just_launch"
     if not market_cap or market_cap <= 0:
-        return "pumpfun_10k_20k" if age_h < 24 else "pre_migration"
+        return "unlisted"
     for cap, tier in _TIER_BOUNDARIES:
         if market_cap < cap:
             return tier
@@ -290,10 +304,16 @@ def _market_cap_from_pair(pair: dict) -> Optional[float]:
     return float(mcap)
 
 
-async def _dexscreener_mcap(mint: str) -> Optional[float]:
-    """Best-effort market cap for a single mint via DexScreener's token
-    endpoint (fdv/marketCap on the most-recently-active pair). None on any
-    failure — never blocks the graph on a flaky/missing listing."""
+async def _dexscreener_mcap(mint: str) -> Optional[dict]:
+    """Best-effort market snapshot for a single mint via DexScreener's token
+    endpoint, from the most-recently-active pair (see _select_best_pair --
+    NOT raw highest-liquidity, which can shadow a live pair with a stale
+    frozen one). None on any failure — never blocks the graph on a flaky/
+    missing listing. Returns the fields already present in the response
+    we're fetching anyway (no extra API calls) -- market_cap for tier
+    classification (via _market_cap_from_pair's explicit None/zero
+    handling), plus price/change/liquidity/url so the frontend can show
+    real numbers and link out instead of just a tier bucket."""
     try:
         async with httpx.AsyncClient(timeout=6.0) as client:
             r = await client.get(f"https://api.dexscreener.com/latest/dex/tokens/{mint}",
@@ -304,7 +324,13 @@ async def _dexscreener_mcap(mint: str) -> Optional[float]:
             best = _select_best_pair(pairs)
             if best is None:
                 return None
-            return _market_cap_from_pair(best)
+            return {
+                "market_cap": _market_cap_from_pair(best),
+                "price_usd": best.get("priceUsd"),
+                "price_change_24h": (best.get("priceChange") or {}).get("h24"),
+                "liquidity_usd": (best.get("liquidity") or {}).get("usd"),
+                "dexscreener_url": best.get("url"),
+            }
     except Exception:
         return None
 
@@ -643,11 +669,17 @@ async def money_flow(
                          key=lambda n: -n["volume_sol"])
     lookup_targets = token_nodes[:tier_lookups]
     if lookup_targets:
-        mcaps = await asyncio.gather(*[_dexscreener_mcap(n["ca"]) for n in lookup_targets],
-                                      return_exceptions=True)
-        for n, mcap in zip(lookup_targets, mcaps):
-            mc = mcap if isinstance(mcap, (int, float)) else None
+        snapshots = await asyncio.gather(*[_dexscreener_mcap(n["ca"]) for n in lookup_targets],
+                                          return_exceptions=True)
+        for n, snap in zip(lookup_targets, snapshots):
+            s = snap if isinstance(snap, dict) else {}
+            mc = s.get("market_cap")
+            mc = mc if isinstance(mc, (int, float)) else None
             n["market_cap"] = mc
+            n["price_usd"] = s.get("price_usd")
+            n["price_change_24h"] = s.get("price_change_24h")
+            n["liquidity_usd"] = s.get("liquidity_usd")
+            n["dexscreener_url"] = s.get("dexscreener_url")
             n["tier"] = _classify_tier(mc, first_seen.get(n["id"], now), now)
     for n in token_nodes[tier_lookups:]:
         n["tier"] = _classify_tier(None, first_seen.get(n["id"], now), now)
@@ -676,8 +708,13 @@ async def money_flow(
     # distinct from a token that simply hasn't migrated yet.
     MIGRATION_MCAP_FLOOR = 69_000.0   # pump.fun's real graduation threshold
     RUG_MCAP_FLOOR = 7_000.0          # user-specified "fell back under this = dead"
+    # "pumpfun_10k_20k"/"pre_migration" tiers were retired (_classify_tier
+    # now returns "unlisted" for any token with no real market_cap) -- their
+    # old distances live on as the "unlisted" fallback below via .get()'s
+    # default, which lands in the same middle-of-the-pre-migration-range
+    # spot (0.6) rather than guessing which of the two stages it's in.
     PRE_MIGRATION_DISTANCE_BY_TIER = {
-        "just_launch": 1.0, "pumpfun_10k_20k": 0.8, "pre_migration": 0.55,
+        "just_launch": 1.0,
     }
     RAYDIUM_ANCHOR_ADDRESS = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"  # Raydium AMM V4 program
 
