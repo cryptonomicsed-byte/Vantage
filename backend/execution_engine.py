@@ -38,6 +38,7 @@ Safety guards (Solana), all configurable in settings:
 import asyncio
 import json
 import logging
+import os
 import time
 from datetime import datetime
 
@@ -227,11 +228,27 @@ def _resolve_solana_mint(symbol: str) -> str | None:
     return None
 
 
+def _jupiter_headers() -> dict:
+    """x-api-key header for api.jup.ag, if configured. Verified empirically
+    2026-08-28 against a real quote call: x-ratelimit-remaining went from
+    4 (keyless) to 9 (with this key) on the same endpoint/window --
+    genuinely recognized, not silently ignored. Read directly via
+    os.environ (not backend.config.settings) because JUPITER_API_KEY is
+    deployed unprefixed
+    (/etc/systemd/system/vantage.service.d/jupiter-api-key.conf), same
+    convention as HELIUS_API_KEY in routers/degen.py -- settings.* would
+    require the VANTAGE_ prefix this class's env_prefix enforces, which
+    doesn't match how this key was actually provisioned. Empty dict
+    (keyless, 0.5 RPS) when unset -- a real, working fallback."""
+    key = os.environ.get("JUPITER_API_KEY", "")
+    return {"x-api-key": key} if key else {}
+
+
 async def _jupiter_quote(client, input_mint: str, output_mint: str,
                          amount: int, slippage_bps: int) -> dict:
     url = (f"{settings.JUPITER_BASE_URL}/quote?inputMint={input_mint}"
            f"&outputMint={output_mint}&amount={amount}&slippageBps={slippage_bps}")
-    resp = await client.get(url, timeout=15)
+    resp = await client.get(url, timeout=15, headers=_jupiter_headers())
     resp.raise_for_status()
     return resp.json()
 
@@ -332,7 +349,7 @@ async def _process_solana_order(order: dict, wallet_key: str):
                 f"{settings.JUPITER_BASE_URL}/swap",
                 json={"quoteResponse": quote, "userPublicKey": str(kp.pubkey()),
                       "wrapAndUnwrapSol": True, "dynamicComputeUnitLimit": True},
-                timeout=20)
+                timeout=20, headers=_jupiter_headers())
             swap_resp.raise_for_status()
             swap_tx_b64 = swap_resp.json()["swapTransaction"]
         except Exception as e:

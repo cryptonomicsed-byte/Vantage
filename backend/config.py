@@ -112,6 +112,12 @@ class Settings(BaseSettings):
     # (not hosted-MCP passthrough), see backend/routers/composio.py
     COMPOSIO_API_KEY: str = ""
     JUPITER_BASE_URL: str = "https://api.jup.ag/swap/v1"
+    # NOT read via this Settings class -- JUPITER_API_KEY is deployed
+    # unprefixed (/etc/systemd/system/vantage.service.d/jupiter-api-key.conf),
+    # same convention as HELIUS_API_KEY in degen.py (bare os.environ.get,
+    # not the VANTAGE_ prefix this class's env_prefix would require).
+    # execution_engine.py reads it directly via os.environ for that reason
+    # -- see _jupiter_headers() there.
 
     # Per-order and per-day safety caps (SOL). Deliberately conservative.
     TRADING_MAX_SOL_PER_ORDER: float = 0.01
