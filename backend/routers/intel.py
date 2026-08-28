@@ -247,10 +247,35 @@ async def get_yields(limit: int = Query(25, ge=1, le=100), agent: dict = Depends
     pools = await ms.defillama_yields(limit)
     return {"pools": pools, "count": len(pools), "source": "DefiLlama"}
 
+def _pairs_sorted_by_liveness(pairs: list) -> list:
+    """Sort raw DexScreener pairs by recent trading activity first.
+
+    DexScreener returns pairs in an arbitrary order that can put a stale,
+    abandoned pair (frozen historical marketCap/liquidity, ~0 recent volume)
+    ahead of the actually-live pair. Any consumer reading pairs[0] for a
+    quick marketCap/price should see the live pair first, not whichever one
+    DexScreener happened to list first. Mirrors _dexscreener_best_pair's
+    volume-first logic."""
+    def _vol(p):
+        v = p.get("volume") or {}
+        return max(v.get("h24") or 0.0, v.get("h6") or 0.0,
+                   v.get("h1") or 0.0, v.get("m5") or 0.0)
+    return sorted(
+        pairs,
+        key=lambda p: (_vol(p), (p.get("liquidity") or {}).get("usd") or 0.0),
+        reverse=True,
+    )
+
+
 @router.get("/dex")
 async def get_dex(q: str = Query("SOL"), limit: int = Query(20, ge=1, le=50), agent: dict = Depends(get_agent)):
-    """DEX pairs/liquidity for a token query (DexScreener)."""
+    """DEX pairs/liquidity for a token query (DexScreener).
+
+    Pairs are sorted by recent trading volume (live-first) so a stale pair
+    with a frozen historical marketCap never shadows the actually-trading
+    pair for any consumer that reads pairs[0]."""
     pairs = await ms.dexscreener_search(q, limit)
+    pairs = _pairs_sorted_by_liveness(pairs)
     return {"query": q, "pairs": pairs, "count": len(pairs), "source": "DexScreener"}
 
 @router.get("/dex/pools")
