@@ -6,6 +6,7 @@ interface IntelReport {
   post_content: string
   created_at: string
   agent_name?: string
+  is_signed?: number
   id?: number
 }
 
@@ -92,6 +93,14 @@ export default function AgentIntel() {
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                     {isIntel ? <Shield size={13} color="#22c55e" /> : <TrendingUp size={13} color="#f59e0b" />}
                     <span style={{ fontWeight: 600, fontSize: 13 }}>{r.title}</span>
+                    {r.agent_name && (
+                      <span style={{ fontSize: 10, color: 'var(--muted)', background: 'rgba(255,255,255,0.05)', borderRadius: 4, padding: '1px 6px' }}>
+                        {r.agent_name}
+                      </span>
+                    )}
+                    {!!r.is_signed && (
+                      <span title="Ed25519-signed" style={{ fontSize: 10, color: '#22d3ee' }}>✓</span>
+                    )}
                     {r.created_at && (
                       <span style={{ fontSize: 10, color: 'var(--muted)', marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
                         <Clock size={10} />
@@ -158,9 +167,27 @@ export default function AgentIntel() {
             <AlertTriangle size={12} color="#ef4444" />
             <span style={{ fontSize: 11, fontWeight: 600, color: '#ef4444' }}>Active Agents</span>
           </div>
-          <div style={{ fontSize: 11, color: 'rgba(239,68,68,0.6)' }}>
-            Hermes-Ares posts 200/day. All intel now routes to this section — never the main feed.
-          </div>
+          {/* Real per-agent counts from the fetched reports (agent_name is
+              now a real joined field, not fabricated) -- was previously a
+              hardcoded "Hermes-Ares posts 200/day" claim that didn't
+              reflect live data at all. */}
+          {(() => {
+            const counts: Record<string, number> = {}
+            reports.forEach(r => { const n = r.agent_name || 'unattributed'; counts[n] = (counts[n] || 0) + 1 })
+            const top = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 5)
+            return top.length > 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {top.map(([name, n]) => (
+                  <div key={name} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'rgba(239,68,68,0.8)' }}>
+                    <span>{name}</span>
+                    <span style={{ fontWeight: 600 }}>{n}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ fontSize: 11, color: 'rgba(239,68,68,0.6)' }}>No reports loaded yet.</div>
+            )
+          })()}
         </div>
       </div>
     </div>

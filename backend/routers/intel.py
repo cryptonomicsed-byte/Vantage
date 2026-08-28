@@ -227,10 +227,32 @@ async def get_intel(agent: dict = Depends(get_agent)):
     arb = await ms.real_arbitrage()
     breadth = await ms.market_breadth()
 
+    # Real anomaly detection, not a hardcoded []: Pyth's own `conf` field is
+    # its published uncertainty band on that price, in the same units as
+    # `price` -- a wide confidence interval relative to price is Pyth
+    # itself signaling reduced certainty (thin liquidity, feed disagreement,
+    # etc.), not something invented here. Flagging conf/price > 2% surfaces
+    # exactly the tokens where "the price shown" is least trustworthy right
+    # now, using data already fetched for `prices` above -- no extra calls.
+    anomalies = []
+    for t in market.get("tokens", []):
+        price = t.get("price") or 0
+        conf = t.get("confidence") or 0
+        if price > 0 and (conf / price) > 0.02:
+            anomalies.append({
+                "symbol": t.get("symbol"),
+                "type": "low_price_confidence",
+                "price": price,
+                "confidence": conf,
+                "confidence_pct": round(conf / price * 100, 2),
+                "detail": f"Pyth confidence band is {round(conf / price * 100, 1)}% of price -- wider than usual",
+            })
+    anomalies.sort(key=lambda a: -a["confidence_pct"])
+
     return {
         "health": {"chains": chains},
         "arbitrage": {"opportunities": arb},
-        "anomalies": {"anomalies": [], "fusion": {"btc_consensus": btc, "eth": eth, "sol": sol, "sources": 3}},
+        "anomalies": {"anomalies": anomalies[:10], "fusion": {"btc_consensus": btc, "eth": eth, "sol": sol, "sources": 3}},
         "sentiment": {
             "sentiment": breadth or {"overall": "neutral", "fear_greed": 50},
             "indicators": breadth.get("indicators", []) if breadth else [],
@@ -778,9 +800,21 @@ async def get_wallet_network(
     return {"chain": canon, "nodes": nodes, "links": links, "node_count": len(nodes), "link_count": len(links)}
 
 @router.get("/backtest")
-async def get_backtest(symbol: str = Query("BTC"), days: int = Query(90, ge=14, le=365), agent: dict = Depends(get_agent)):
-    """Backtest an SMA-crossover strategy vs buy-and-hold over real history."""
-    result = await ms.backtest(symbol, days)
+async def get_backtest(
+    symbol: str = Query("BTC"),
+    days: int = Query(90, ge=14, le=365),
+    fast: int = Query(10, ge=2, le=100, description="fast SMA window (days)"),
+    slow: int = Query(30, ge=3, le=200, description="slow SMA window (days)"),
+    agent: dict = Depends(get_agent),
+):
+    """Backtest an SMA-crossover strategy vs buy-and-hold over real history.
+
+    fast/slow were already real parameters on ms.backtest() but this route
+    never exposed them -- every call silently ran the same fixed 10/30
+    window regardless of what a caller might want to test."""
+    if fast >= slow:
+        return {"error": "fast window must be < slow window", "fast": fast, "slow": slow}
+    result = await ms.backtest(symbol, days, fast=fast, slow=slow)
     if result is None:
         return {"error": "insufficient data", "symbol": symbol.upper()}
     return result
@@ -1640,15 +1674,26 @@ async def memory_graph(agent_name: str = None, limit: int = Query(80, ge=1, le=3
 @router.get("/daily")
 async def daily_intel(limit: int = Query(10, ge=1, le=50), agent: dict = Depends(get_agent)):
     """Daily intel digest — recent posted intel-type broadcasts, newest first.
-    Backs the Trading -> Daily Intel tab (frontend/src/components/trading/
-    DailyIntel.tsx). Was a manual, never-committed server edit that got
+    Backs the Trading -> Agent Intel tab (frontend/src/components/trading/
+    AgentIntel.tsx). Was a manual, never-committed server edit that got
     silently wiped on a prior redeploy; recovered from git stash@{3} and
-    committed for real this time."""
+    committed for real this time.
+
+    agent_name is a real column on `agents`, joined here -- the frontend's
+    IntelReport type already declared agent_name as a field, but this query
+    never selected it (nor did anything render it) so the byline was
+    always blank. is_signed surfaces whether the report carries the
+    existing Ed25519 signature this table already supports."""
     import aiosqlite
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT id, title, post_content, created_at FROM broadcasts WHERE content_type='intel' ORDER BY created_at DESC LIMIT ?",
+            """SELECT b.id, b.title, b.post_content, b.created_at, b.is_signed,
+                      a.name AS agent_name
+               FROM broadcasts b
+               LEFT JOIN agents a ON a.id = b.agent_id
+               WHERE b.content_type='intel'
+               ORDER BY b.created_at DESC LIMIT ?""",
             (limit,)
         ) as cur:
             rows = [dict(r) for r in await cur.fetchall()]

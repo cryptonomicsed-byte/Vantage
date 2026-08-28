@@ -226,7 +226,16 @@ function AresSentiment() {
 
 function AresSources() {
   const { data, loading } = useAresApi('/api/intel/sources', 60000)
+  // /sources-registry is the richer, self-contained source of truth (real
+  // category + integration status per source, 15 named entries) -- /sources
+  // itself is just a thin proxy to the ares-bridge RPC endpoint list and
+  // has neither field. Cross-referenced by name below rather than switching
+  // the primary endpoint outright, so a bridge outage still shows whatever
+  // /sources itself returns.
+  const { data: registryData } = useAresApi('/api/intel/sources-registry', 300000)
   const endpoints = data?.endpoints || {}
+  const registry: { name: string; category: string; integrated: boolean }[] = registryData?.sources || []
+  const registryByKey = new Map(registry.map(s => [s.name.toLowerCase().replace(/[^a-z0-9]/g, ''), s]))
   if (loading && !data) return <div style={{ color: 'var(--muted)', padding: 20 }}>Loading…</div>
   const groups: Record<string, [string, any][]> = {
     'Chain RPC': [], 'Exchanges': [], 'DEX/DeFi': [], 'Finance/FX': [], 'Other': [],
@@ -240,16 +249,38 @@ function AresSources() {
   })
   return (
     <div>
-      <div className="ares-section-title">{Object.keys(endpoints).length} Data Sources</div>
+      <div className="ares-section-title" style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+        <span>{Object.keys(endpoints).length} Data Sources</span>
+        {registry.length > 0 && (
+          <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+            {registry.filter(s => s.integrated).length}/{registry.length} confirmed integrated (sources-registry)
+          </span>
+        )}
+      </div>
       {Object.entries(groups).map(([group, sources]) => sources.length > 0 && (
         <div key={group} style={{ marginBottom: 16 }}>
           <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>{group} ({sources.length})</div>
           <table className="ares-table">
-            <thead><tr><th>Name</th><th>Chain</th></tr></thead>
+            <thead><tr><th>Name</th><th>Chain</th><th>Status</th></tr></thead>
             <tbody>
-              {sources.map(([k, v]) => (
-                <tr key={k}><td style={{ fontFamily: 'monospace', fontSize: 11 }}>{k}</td><td>{v.chain}</td></tr>
-              ))}
+              {sources.map(([k, v]) => {
+                const reg = registryByKey.get(k.toLowerCase().replace(/[^a-z0-9]/g, ''))
+                return (
+                  <tr key={k}>
+                    <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{k}</td>
+                    <td>{v.chain}</td>
+                    <td>
+                      {reg ? (
+                        <span style={{ fontSize: 10, color: reg.integrated ? 'var(--green)' : 'var(--muted)' }}>
+                          {reg.integrated ? '✓ integrated' : 'listed, not integrated'}
+                        </span>
+                      ) : (
+                        <span style={{ fontSize: 10, color: 'var(--muted)' }}>—</span>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>
@@ -297,15 +328,23 @@ function AresYields() {
     <div>
       <div className="ares-section-title">{pools.length} DeFi Yield Pools <span style={{ fontSize: 11, color: 'var(--muted)' }}>(DefiLlama · TVL ≥ $1M)</span></div>
       <table className="ares-table">
-        <thead><tr><th>Pool</th><th>Project</th><th>Chain</th><th>APY</th><th>TVL</th></tr></thead>
+        <thead><tr><th>Pool</th><th>Project</th><th>Chain</th><th>APY</th><th>Yield Source</th><th>IL Risk</th><th>TVL</th></tr></thead>
         <tbody>
-          {pools.length === 0 && <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No pools loaded.</td></tr>}
+          {pools.length === 0 && <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No pools loaded.</td></tr>}
           {pools.map((p: any, i: number) => (
             <tr key={i}>
               <td style={{ fontWeight: 600 }}><TokenLink symbol={p.pool} chain={p.chain} />{p.stablecoin && <span style={{ fontSize: 9, color: 'var(--cyan)', marginLeft: 4 }}>STABLE</span>}</td>
               <td style={{ fontSize: 11 }}>{p.project}</td>
               <td style={{ fontSize: 11, color: 'var(--muted)' }}>{p.chain}</td>
               <td style={{ color: 'var(--green)', fontWeight: 700 }}>{p.apy?.toFixed(1)}%</td>
+              <td style={{ fontSize: 10, color: 'var(--muted)' }} title="organic yield vs. reward-token emissions -- emissions can stop">
+                {p.apy_base != null ? `${p.apy_base.toFixed(1)}% base` : ''}
+                {p.apy_reward ? ` + ${p.apy_reward.toFixed(1)}% reward` : ''}
+                {p.apy_base == null && !p.apy_reward ? '—' : ''}
+              </td>
+              <td style={{ fontSize: 10, color: p.il_risk === 'yes' ? 'var(--warning)' : 'var(--muted)' }}>
+                {p.il_risk === 'yes' ? '⚠️ IL risk' : p.il_risk === 'no' ? 'no IL' : '—'}
+              </td>
               <td style={{ fontFamily: 'monospace' }}>${(p.tvl_usd / 1e6).toFixed(1)}M</td>
             </tr>
           ))}
@@ -473,34 +512,42 @@ function AresFx() {
 function AresBacktest() {
   const [symbol, setSymbol] = useState('BTC')
   const [days, setDays] = useState(90)
+  const [fast, setFast] = useState(10)
+  const [slow, setSlow] = useState(30)
   const [data, setData] = useState<any>(null)
   const [loading, setLoading] = useState(false)
   const run = useCallback(async () => {
     setLoading(true)
     try {
-      const r = await fetch(`/api/intel/backtest?symbol=${encodeURIComponent(symbol)}&days=${days}`)
+      const r = await fetch(`/api/intel/backtest?symbol=${encodeURIComponent(symbol)}&days=${days}&fast=${fast}&slow=${slow}`)
       if (r.ok) setData(await r.json())
     } catch {}
     setLoading(false)
-  }, [symbol, days])
+  }, [symbol, days, fast, slow])
   useEffect(() => { run() }, []) // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
         <input className="ares-input" placeholder="Symbol (e.g. BTC)" value={symbol} onChange={e => setSymbol(e.target.value.toUpperCase())} style={{ maxWidth: 140 }} />
-        <input className="ares-input" type="number" min={30} max={365} value={days} onChange={e => setDays(Number(e.target.value))} style={{ maxWidth: 100 }} />
+        <input className="ares-input" type="number" min={30} max={365} value={days} onChange={e => setDays(Number(e.target.value))} style={{ maxWidth: 100 }} title="days of history" />
+        <input className="ares-input" type="number" min={2} max={100} value={fast} onChange={e => setFast(Number(e.target.value))} style={{ maxWidth: 70 }} title="fast SMA window" />
+        <span style={{ color: 'var(--muted)', fontSize: 11 }}>/</span>
+        <input className="ares-input" type="number" min={3} max={200} value={slow} onChange={e => setSlow(Number(e.target.value))} style={{ maxWidth: 70 }} title="slow SMA window" />
         <button className="btn btn-primary btn-sm" onClick={run} disabled={loading}>{loading ? 'Running…' : 'Run Backtest'}</button>
       </div>
       {data?.error ? (
-        <div style={{ color: 'var(--muted)', padding: 20 }}>Not enough history for {data.symbol} over {days} days.</div>
+        <div style={{ color: 'var(--muted)', padding: 20 }}>{data.error === 'insufficient data' ? `Not enough history for ${data.symbol} over ${days} days.` : data.error}</div>
       ) : data ? (
         <div>
-          <div className="ares-section-title">{data.strategy} vs Buy &amp; Hold — {data.symbol} ({data.days}d)</div>
+          <div className="ares-section-title">{data.strategy} vs Buy &amp; Hold — {data.symbol} ({data.days}d, {data.data_points} closes)</div>
           <div className="ares-stat-grid">
             <div className="ares-stat-tile"><div className="ares-stat-label">Strategy Return</div><div className="ares-stat-value" style={{ color: data.strategy_return_pct >= 0 ? 'var(--green)' : 'var(--danger)' }}>{data.strategy_return_pct}%</div></div>
             <div className="ares-stat-tile"><div className="ares-stat-label">Buy &amp; Hold Return</div><div className="ares-stat-value">{data.buy_hold_return_pct}%</div></div>
             <div className="ares-stat-tile"><div className="ares-stat-label">Trades</div><div className="ares-stat-value">{data.trades}</div></div>
             <div className="ares-stat-tile"><div className="ares-stat-label">Win Rate</div><div className="ares-stat-value">{data.win_rate_pct}%</div></div>
+            <div className="ares-stat-tile" title="worst peak-to-trough decline of the strategy's own equity curve -- can be deep even when total return beats buy-and-hold">
+              <div className="ares-stat-label">Max Drawdown</div><div className="ares-stat-value" style={{ color: 'var(--danger)' }}>{data.max_drawdown_pct}%</div>
+            </div>
           </div>
           <div style={{ marginTop: 12, fontSize: 12, color: data.beat_buy_hold ? 'var(--green)' : 'var(--muted)' }}>
             {data.beat_buy_hold ? 'Strategy beat buy-and-hold over this period.' : 'Buy-and-hold beat the strategy over this period.'}

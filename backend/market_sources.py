@@ -1438,14 +1438,17 @@ async def backtest(symbol: str, days: int = 90, fast: int = 10, slow: int = 30) 
     # through a much deeper trough along the way than buy-and-hold ever did,
     # and total-return-only figures hide that entirely.
     equity = [1.0]
+    equity_base = 1.0  # equity value as of the last position open/close
     for i in range(slow, len(prices)):
         f, s = sma(prices, fast, i), sma(prices, slow, i)
         if f > s and position == 0:
             position, entry = 1, prices[i]
+            equity_base = equity[-1]
         elif f < s and position == 1:
             rets.append(prices[i] / entry - 1)
             position = 0
-        equity.append(equity[-1] * (prices[i] / entry) if position == 1 and i > slow and prices[i - 1] else equity[-1])
+            equity_base = equity[-1] * (prices[i] / entry)
+        equity.append(equity_base * (prices[i] / entry) if position == 1 else equity_base)
     if position == 1:
         rets.append(prices[-1] / entry - 1)
 
