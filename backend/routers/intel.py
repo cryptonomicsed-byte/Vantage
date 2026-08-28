@@ -141,21 +141,41 @@ async def full_market(limit: int = Query(100, ge=1, le=500), agent: dict = Depen
                     "confidence": pdata.get("conf", 0),
                 })
 
-    # Sort by price (desc) — rough market cap proxy
-    tokens.sort(key=lambda x: -x["price"])
+    # Merge real market cap/rank/24h-change from CoinGecko (Pyth gives price
+    # only, no supply/cap data) -- sorting by raw unit price as a "market cap
+    # proxy" was wrong: a $65k BTC would always outrank a legitimately larger
+    # token trading at $0.001. Join by symbol on the already-cached, real
+    # market-cap-ranked CoinGecko feed.
+    cg_by_symbol = {r["symbol"]: r for r in (await ms.coingecko_markets(250) or []) if r.get("symbol")}
+    ranked, unranked = [], []
+    for t in tokens:
+        cg = cg_by_symbol.get(t["symbol"])
+        if cg and cg.get("market_cap"):
+            t["market_cap"] = cg["market_cap"]
+            t["market_cap_rank"] = cg.get("rank")
+            t["change_24h"] = cg.get("change_24h")
+            t["volume_24h"] = cg.get("volume_24h")
+            ranked.append(t)
+        else:
+            unranked.append(t)
+    ranked.sort(key=lambda x: -(x.get("market_cap") or 0))
+    unranked.sort(key=lambda x: -x["price"])  # no cap data -- price is the only signal left
+    tokens = ranked + unranked
 
-    # Compute stats
-    gainers_24h = len([t for t in tokens if t.get("change_24h", 0) > 0]) if any(t.get("change_24h") for t in tokens) else 0
-    total_mcap = sum(t["price"] for t in tokens[:50])  # rough
+    gainers_24h = len([t for t in tokens if (t.get("change_24h") or 0) > 0])
+    total_mcap = sum(t.get("market_cap") or 0 for t in ranked)
 
     return {
         "total_tokens": len(tokens),
         "displayed": min(len(tokens), limit),
         "total_feeds_available": len(feeds),
+        "ranked_by_market_cap": len(ranked),
         "market_snapshot": {
             "tokens_tracked": len(tokens),
             "pyth_feeds": len(feeds),
-            "data_source": "Pyth Network (3,000+ institutional feeds)",
+            "gainers_24h": gainers_24h,
+            "total_market_cap_top_ranked": total_mcap,
+            "data_source": "Pyth Network (price) + CoinGecko (market cap/rank)",
         },
         "tokens": tokens[:limit],
     }
