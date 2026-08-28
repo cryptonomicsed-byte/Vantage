@@ -735,7 +735,17 @@ async def defillama_yields(limit: int = 25, min_tvl: float = 1_000_000) -> list[
 
 # ── DEX pairs / liquidity (DexScreener) ─────────────────────────────────────────────
 async def dexscreener_search(query: str, limit: int = 20) -> list[dict]:
-    """Search DEX pairs by token/symbol; returns price, liquidity, 24h volume. Cached 60s."""
+    """Search DEX pairs by token/symbol; returns price, liquidity, 24h volume. Cached 60s.
+
+    Sorted by recent trading volume first, liquidity as tie-break -- mirrors
+    alpha.py's _select_best_pair exactly. This used to sort by liquidity_usd
+    alone and truncate to `limit` BEFORE returning, which meant a genuinely
+    live, high-volume/lower-liquidity pair could already be discarded here,
+    upstream of intel.py's later `_pairs_sorted_by_liveness` re-sort (added
+    2026-08-28) -- that fix only reorders whatever survived this function's
+    own truncation, it can't recover a pair this function already dropped.
+    Also affects copilot.py's dex_liquidity tool call, which reads this
+    function directly with no re-sort downstream at all."""
     q = (query or "").strip()
     if not q:
         return []
@@ -746,18 +756,27 @@ async def dexscreener_search(query: str, limit: int = 20) -> list[dict]:
     data = await _get_json(f"https://api.dexscreener.com/latest/dex/search?q={q}", timeout=10)
     pairs = (data or {}).get("pairs") or []
     rows = []
-    for p in pairs[: limit * 2]:
+    for p in pairs:
+        vol = p.get("volume") or {}
         rows.append({
             "pair": f"{(p.get('baseToken') or {}).get('symbol','?')}/{(p.get('quoteToken') or {}).get('symbol','?')}",
             "dex": p.get("dexId"),
             "chain": p.get("chainId"),
+            # base_address was never set here -- every consumer's TokenLink
+            # ca prop (trade panel + external links) read undefined for
+            # every single row in this endpoint, always. Real field, always
+            # present on DexScreener's baseToken object.
+            "base_address": (p.get("baseToken") or {}).get("address"),
             "price_usd": float(p["priceUsd"]) if p.get("priceUsd") else None,
             "liquidity_usd": (p.get("liquidity") or {}).get("usd"),
-            "volume_24h": (p.get("volume") or {}).get("h24"),
+            "volume_24h": vol.get("h24"),
             "change_24h": (p.get("priceChange") or {}).get("h24"),
+            "_recent_vol": max(vol.get("h24") or 0.0, vol.get("h6") or 0.0, vol.get("h1") or 0.0, vol.get("m5") or 0.0),
         })
-    rows.sort(key=lambda r: -((r.get("liquidity_usd") or 0)))
+    rows.sort(key=lambda r: (-(r["_recent_vol"]), -((r.get("liquidity_usd") or 0))))
     rows = rows[:limit]
+    for r in rows:
+        del r["_recent_vol"]
     if rows:
         _cache_put(key, rows)
     return rows
@@ -793,9 +812,19 @@ async def dex_new_pools(network: str = "solana", kind: str = "trending", limit: 
             price_usd = float(a["base_token_price_usd"]) if a.get("base_token_price_usd") else None
         except (TypeError, ValueError):
             price_usd = None
+        # p['id']/a['address'] is the POOL address, not the token mint --
+        # same bug class already fixed in degen.py/pumpfun.py/ogun_multiscan.py
+        # (_mint_from_pool there). Without the real mint, base_address was
+        # never set at all here, so every consumer's TokenLink ca prop (the
+        # trade panel + external links) was undefined for every row this
+        # endpoint has ever returned. Real mint lives at
+        # relationships.base_token.data.id ("solana_<mint>").
+        base_token_id = (p.get("relationships") or {}).get("base_token", {}).get("data", {}).get("id", "")
+        base_address = base_token_id.split("_", 1)[-1] if "_" in base_token_id else ""
         rows.append({
             "pair": f"{base_sym.strip()}/{quote_sym.strip() or '?'}",
             "pool_address": a.get("address"),
+            "base_address": base_address,
             "network": network,
             "price_usd": price_usd,
             "liquidity_usd": float(a["reserve_in_usd"]) if a.get("reserve_in_usd") else None,
