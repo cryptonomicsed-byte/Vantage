@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, Query, HTTPException, Header
 from backend.wallet_blacklist import sql_label_exclusions
 from backend.db import get_db
+from backend.routers.alpha import _dexscreener_mcap
 from contextlib import asynccontextmanager
 import aiosqlite
 
@@ -263,7 +264,27 @@ async def top5_degen(limit: int=5, x_agent_key: str=Header(...)):
             graduated.append(dict(symbol=symbol,name=name,address=addr,volume_24h=vol_24h,price_change_24h=pc_24h,buys_24h=buys_24h,sells_24h=sells_24h,graduated=graduated_bool,score=score,reason=f"{'🎓 ' if graduated_bool else ''}Vol ${vol_24h:,.0f}"))
 
         graduated.sort(key=lambda x:-x["score"])
-        resp = {"top_5":graduated[:limit],"total_scanned":len(pools),"source":"GeckoTerminal","cached":from_cache}
+        top = graduated[:limit]
+
+        # Real market cap + a fuller reason string -- bounded to just the
+        # final top N shown (not all 25 scanned) so this stays cheap. Vol
+        # alone was getting misread as marketCap (a real token showed $51M
+        # vol / $26M actual mcap and looked like a $50M market cap at a
+        # glance) -- showing both, explicitly labeled, removes that.
+        mcaps = await asyncio.gather(
+            *[_dexscreener_mcap(t["address"]) for t in top], return_exceptions=True
+        )
+        for t, mc in zip(top, mcaps):
+            mc = mc if isinstance(mc, (int, float)) else None
+            t["market_cap"] = mc
+            buy_sell = f"{t['buys_24h']}/{t['sells_24h']}" if (t['buys_24h'] or t['sells_24h']) else "0/0"
+            mc_part = f"MC ${mc:,.0f}" if mc else "MC n/a"
+            t["reason"] = (
+                f"{'🎓 ' if t['graduated'] else ''}{mc_part} · Vol ${t['volume_24h']:,.0f} "
+                f"· {t['price_change_24h']:+.1f}% · {buy_sell} buys/sells"
+            )
+
+        resp = {"top_5":top,"total_scanned":len(pools),"source":"GeckoTerminal","cached":from_cache}
         return _cache_put("top5", resp) if graduated else (_cache_get_stale("top5") or resp)
     except Exception:
         return _cache_get_stale("top5") or {"top_5":[],"total_scanned":0,"source":"offline"}
