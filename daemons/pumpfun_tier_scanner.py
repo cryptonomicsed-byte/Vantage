@@ -126,7 +126,8 @@ def upsert_new_token(conn, mint: str, symbol: str, name: str, deployer: str,
 def apply_trade(conn, mint: str, tx_type: str, trader: str,
                  v_tokens: float, v_sol: float, market_cap_sol: float, sol_price: float) -> None:
     row = conn.execute(
-        "SELECT unique_buyers, unique_sellers, buy_count, sell_count FROM pumpfun_premigration_tokens WHERE mint=?",
+        "SELECT unique_buyers, unique_sellers, buy_count, sell_count, market_cap_usd, last_trade_at "
+        "FROM pumpfun_premigration_tokens WHERE mint=?",
         (mint,),
     ).fetchone()
     if row is None:
@@ -134,6 +135,25 @@ def apply_trade(conn, mint: str, tx_type: str, trader: str,
     buyers = json.loads(row[0] or "[]")
     sellers = json.loads(row[1] or "[]")
     buy_count, sell_count = row[2] or 0, row[3] or 0
+    prev_mcap_usd, prev_last_trade_at = row[4], row[5]
+
+    # Empirical RUNNING_GRACE_SECONDS tuning (temporary instrumentation, see
+    # backend/db.py's pumpfun_trade_gaps comment): this new trade proves the
+    # token was still alive despite the gap since its previous trade -- log
+    # that gap, tagged with the mcap it was at when it went quiet, only for
+    # tokens that had already cleared the 10k tier (below that, FRESH_GRACE
+    # already covers it generously and it's not the tier under tuning).
+    if prev_last_trade_at and (prev_mcap_usd or 0) >= FRESH_TIER_CEILING_USD:
+        try:
+            prev_ts = time.mktime(time.strptime(prev_last_trade_at, "%Y-%m-%d %H:%M:%S"))
+            gap = time.time() - prev_ts
+            if gap > 0:
+                conn.execute(
+                    "INSERT INTO pumpfun_trade_gaps (mint, market_cap_usd, gap_seconds) VALUES (?,?,?)",
+                    (mint, prev_mcap_usd, gap),
+                )
+        except Exception:
+            pass  # instrumentation only -- never let a parse hiccup break the real trade update below
 
     if tx_type == "buy":
         buy_count += 1

@@ -1873,6 +1873,28 @@ CREATE TABLE IF NOT EXISTS external_iranti_memories (
         await db.execute("CREATE INDEX IF NOT EXISTS idx_pumpfun_last_trade ON pumpfun_premigration_tokens(last_trade_at)")
         await db.commit()
 
+    # ── pump.fun inter-trade gap log (empirical RUNNING_GRACE_SECONDS
+    # tuning) — pumpfun_premigration_tokens only ever keeps the single most
+    # recent last_trade_at, overwritten on every trade, so there was no way
+    # to retroactively answer "how long was this token silent right before
+    # its next trade arrived, proving it was still alive." This table
+    # records that gap live, going forward, tagged with the market cap at
+    # the moment the pause started -- real observed "alive but paused"
+    # durations for tokens at/above the 10k mcap tier, not a guess. See
+    # pumpfun_tier_scanner.py::apply_trade. ──────────────────────────
+    async with get_db() as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS pumpfun_trade_gaps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mint TEXT,
+                market_cap_usd REAL,
+                gap_seconds REAL,
+                recorded_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_pumpfun_gaps_mcap ON pumpfun_trade_gaps(market_cap_usd)")
+        await db.commit()
+
     # ── pump.fun scalp exit-strategy positions ───────────────
     async with get_db() as db:
         await db.execute("""
