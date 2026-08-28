@@ -69,6 +69,40 @@ def test_assemble_respects_overrides():
     assert feats["velocity"] == 0.7
 
 
+def test_classify_tier_no_market_cap_is_honestly_unlisted():
+    """A token with no real DexScreener market_cap must classify as
+    'unlisted', never as a guessed cap-range tier -- regardless of how long
+    it's been in this graph's own tracking (first_seen is this system's
+    observation time, not the token's real on-chain age, so it must never
+    imply a market-cap stage on its own)."""
+    from backend.routers.alpha import _classify_tier
+
+    now = 1_000_000
+    # Old behavior would have returned "pumpfun_10k_20k" here (age < 24h).
+    assert _classify_tier(None, now - 3600 * 5, now) == "unlisted"
+    # Old behavior would have returned "pre_migration" here (age >= 24h).
+    assert _classify_tier(None, now - 3600 * 48, now) == "unlisted"
+    assert _classify_tier(0, now - 3600 * 48, now) == "unlisted"
+
+
+def test_classify_tier_just_launch_is_age_not_cap():
+    from backend.routers.alpha import _classify_tier
+
+    now = 1_000_000
+    assert _classify_tier(None, now - 60, now) == "just_launch"
+    assert _classify_tier(5_000_000, now - 60, now) == "just_launch"
+
+
+def test_classify_tier_real_market_cap_buckets():
+    from backend.routers.alpha import _classify_tier
+
+    now = 1_000_000
+    old = now - 3600 * 48
+    assert _classify_tier(500_000, old, now) == "sub_1m"
+    assert _classify_tier(5_000_000, old, now) == "migrated_10m"
+    assert _classify_tier(2_000_000_000, old, now) == "billion_club"
+
+
 # ── End-to-end endpoint ──────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
