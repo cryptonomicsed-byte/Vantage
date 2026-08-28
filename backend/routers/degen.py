@@ -212,7 +212,13 @@ async def volume_surge(limit: int=20, x_agent_key: str=Header(...)):
     pools, from_cache = await _trending_pools_cached()
     try:
         results = []
-        for p in pools[:limit]:
+        # Was `pools[:limit]` here -- slicing to `limit` BEFORE filtering by
+        # surge_ratio, so a caller passing limit=5 only ever scanned the
+        # first 5 raw pools for surges, silently missing real surges further
+        # down GeckoTerminal's list. `limit` is meant to bound the RESULT
+        # count, not the scan -- scan every cached pool, filter, sort, then
+        # slice.
+        for p in pools:
             attrs = p.get("attributes",{})
             vol = attrs.get("volume_usd",{})
             vol_5m = float(str(vol.get("m5",0))) if isinstance(vol,dict) else 0
@@ -228,6 +234,19 @@ async def volume_surge(limit: int=20, x_agent_key: str=Header(...)):
             if surge_ratio > 1.4:
                 results.append({"symbol":sym,"name":name,"address":_mint_from_pool(p),"volume_5m":vol_5m,"volume_1h":vol_1h,"surge_ratio":round(surge_ratio,1),"signal":"🔥 SURGE" if surge_ratio>3 else "⚡ SPIKE"})
         results.sort(key=lambda x:-x.get("surge_ratio",0))
+        results = results[:limit]
+
+        # Real market cap, bounded to just the results actually returned --
+        # same labeled pattern as /top5 (a raw volume figure isn't market
+        # cap, and a "3.2x surge" on a $2K pool reads very differently from
+        # one on a $2M pool).
+        mcaps = await asyncio.gather(
+            *[_dexscreener_mcap(r["address"]) if r["address"] else asyncio.sleep(0, result=None) for r in results],
+            return_exceptions=True,
+        )
+        for r, snap in zip(results, mcaps):
+            r["market_cap"] = snap.get("market_cap") if isinstance(snap, dict) else None
+
         resp = {"volume_surges":results,"count":len(results),"source":"GeckoTerminal","cached":from_cache}
         return _cache_put("volume_surge", resp) if results else (_cache_get_stale("volume_surge") or resp)
     except Exception:
@@ -274,8 +293,13 @@ async def top5_degen(limit: int=5, x_agent_key: str=Header(...)):
         mcaps = await asyncio.gather(
             *[_dexscreener_mcap(t["address"]) for t in top], return_exceptions=True
         )
-        for t, mc in zip(top, mcaps):
-            mc = mc if isinstance(mc, (int, float)) else None
+        for t, snap in zip(top, mcaps):
+            # _dexscreener_mcap returns a dict ({market_cap, price_usd, ...})
+            # or None, never a bare number -- `isinstance(mc, (int, float))`
+            # was always False for the successful case too, so market_cap
+            # silently stayed None on every single row despite this being
+            # the fix meant to surface it. Unpack the dict instead.
+            mc = snap.get("market_cap") if isinstance(snap, dict) else None
             t["market_cap"] = mc
             buy_sell = f"{t['buys_24h']}/{t['sells_24h']}" if (t['buys_24h'] or t['sells_24h']) else "0/0"
             mc_part = f"MC ${mc:,.0f}" if mc else "MC n/a"
@@ -369,8 +393,9 @@ async def sell_rotations(limit: int=5, x_agent_key: str=Header(...)):
             *[_dexscreener_mcap(t["address"]) if t["address"] else asyncio.sleep(0, result=None) for t in top],
             return_exceptions=True,
         )
-        for t, mc in zip(top, mcaps):
-            mc = mc if isinstance(mc, (int, float)) else None
+        for t, snap in zip(top, mcaps):
+            # Same dict-vs-number bug as /top5 -- see comment there.
+            mc = snap.get("market_cap") if isinstance(snap, dict) else None
             t["market_cap"] = mc
             mc_part = f"MC ${mc:,.0f}" if mc else "MC n/a"
             t["reason"] = (
@@ -499,8 +524,9 @@ async def must_buy_20(limit: int=20, hours: int=24, x_agent_key: str=Header(...)
         *[_dexscreener_mcap(c["ca"]) if c["ca"] else asyncio.sleep(0, result=None) for c in out],
         return_exceptions=True,
     )
-    for c, mc in zip(out, mcaps):
-        mc = mc if isinstance(mc, (int, float)) else None
+    for c, snap in zip(out, mcaps):
+        # Same dict-vs-number bug as /top5 -- see comment there.
+        mc = snap.get("market_cap") if isinstance(snap, dict) else None
         c["market_cap"] = mc
         mc_part = f"MC ${mc:,.0f}" if mc else "MC n/a"
         c["summary"] = (
@@ -532,6 +558,20 @@ async def fresh_deployers(limit: int=20, x_agent_key: str=Header(...)):
             ORDER BY r.discovered_at DESC LIMIT ?
         """, (limit,))
         rows = await cur.fetchall()
+    rows = [dict(r) for r in rows]
+
+    # Real market cap of the token each row's `mint` is for, bounded to just
+    # the rows returned. A repeat-launcher flag alone doesn't say whether
+    # their latest launch is a $2K ghost pool or a $2M real token -- this
+    # gives that context without an extra scan (still one lookup per shown
+    # row, not per deployer's full launch history).
+    mcaps = await asyncio.gather(
+        *[_dexscreener_mcap(r["mint"]) if r["mint"] else asyncio.sleep(0, result=None) for r in rows],
+        return_exceptions=True,
+    )
+    for r, snap in zip(rows, mcaps):
+        r["market_cap"] = snap.get("market_cap") if isinstance(snap, dict) else None
+
     return {"deployers": rows, "count": len(rows)}
 
 # ════════════════════════════════════════════════════════════════
@@ -633,7 +673,8 @@ async def high_conviction_tokens(limit: int=20, x_agent_key: str=Header(...)):
     mcaps = await asyncio.gather(
         *[_dexscreener_mcap(t["mint"]) for t in out], return_exceptions=True
     )
-    for t, mc in zip(out, mcaps):
-        t["market_cap"] = mc if isinstance(mc, (int, float)) else None
+    for t, snap in zip(out, mcaps):
+        # Same dict-vs-number bug as /top5 -- see comment there.
+        t["market_cap"] = snap.get("market_cap") if isinstance(snap, dict) else None
 
     return {"tokens": out, "count": len(out)}

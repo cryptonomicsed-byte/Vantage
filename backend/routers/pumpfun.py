@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, Query, HTTPException, Header
 import aiosqlite
 from backend.db import get_db
+from backend.routers.alpha import _dexscreener_mcap
 from contextlib import asynccontextmanager
 
 router = APIRouter(prefix="/api/intel/pumpfun", tags=["pumpfun"])
@@ -72,6 +73,19 @@ async def new_launches(limit: int=20, x_agent_key: str=Header(...)):
             vol = attrs.get("volume_usd",{}).get("h24",0) if isinstance(attrs.get("volume_usd"),dict) else 0
             pc = attrs.get("price_change_percentage",{}).get("h24",0) if isinstance(attrs.get("price_change_percentage"),dict) else 0
             r.append({"symbol":sym,"name":name,"address":_mint_from_pool(p),"price":attrs.get("base_token_price_usd",0),"volume_24h":vol,"price_change_24h":pc,"created_at":attrs.get("pool_created_at","")})
+
+        # Real market cap + liquidity, bounded to just the `limit` rows
+        # returned (never the full scanned pool) -- same labeled pattern as
+        # degen.py's /top5. A raw 24h volume figure isn't market cap, and a
+        # brand-new pool can show real volume on near-zero real liquidity.
+        mcaps = await asyncio.gather(
+            *[_dexscreener_mcap(row["address"]) if row["address"] else asyncio.sleep(0, result=None) for row in r],
+            return_exceptions=True,
+        )
+        for row, snap in zip(r, mcaps):
+            row["market_cap"] = snap.get("market_cap") if isinstance(snap, dict) else None
+            row["liquidity_usd"] = snap.get("liquidity_usd") if isinstance(snap, dict) else None
+
         return {"launches":r,"count":len(r),"source":"GeckoTerminal"}
     except:
         return {"launches":[],"count":0,"source":"GeckoTerminal:offline"}
@@ -96,6 +110,17 @@ async def trending(limit: int=20, x_agent_key: str=Header(...)):
             buys = txns.get("buys",0) if isinstance(txns,dict) else 0
             sells = txns.get("sells",0) if isinstance(txns,dict) else 0
             r.append({"symbol":sym,"name":name,"address":_mint_from_pool(p),"price":attrs.get("base_token_price_usd",0),"volume_24h":vol,"price_change_24h":pc,"buys_24h":buys,"sells_24h":sells})
+
+        # Real market cap + liquidity, bounded to just the `limit` rows
+        # returned. Same pattern as /new-launches above.
+        mcaps = await asyncio.gather(
+            *[_dexscreener_mcap(row["address"]) if row["address"] else asyncio.sleep(0, result=None) for row in r],
+            return_exceptions=True,
+        )
+        for row, snap in zip(r, mcaps):
+            row["market_cap"] = snap.get("market_cap") if isinstance(snap, dict) else None
+            row["liquidity_usd"] = snap.get("liquidity_usd") if isinstance(snap, dict) else None
+
         return {"trending":r,"count":len(r),"source":"GeckoTerminal"}
     except:
         return {"trending":[],"count":0,"source":"GeckoTerminal:offline"}
@@ -146,6 +171,17 @@ async def graduations(limit: int=20, x_agent_key: str=Header(...)):
             if len(r) >= limit:
                 break
         r.sort(key=lambda x: x.get("pool_created_at") or "", reverse=True)
+
+        # Real market cap, bounded to just the rows returned. liquidity_usd
+        # here is already real (GeckoTerminal reserve_in_usd) -- market_cap
+        # fills the other half of "is this graduation actually worth
+        # anything" that volume/liquidity alone doesn't answer.
+        mcaps = await asyncio.gather(
+            *[_dexscreener_mcap(row["address"]) for row in r], return_exceptions=True
+        )
+        for row, snap in zip(r, mcaps):
+            row["market_cap"] = snap.get("market_cap") if isinstance(snap, dict) else None
+
         return {"graduations":r,"count":len(r),"source":"GeckoTerminal"}
     except Exception:
         return {"graduations":[],"count":0,"source":"GeckoTerminal:offline"}

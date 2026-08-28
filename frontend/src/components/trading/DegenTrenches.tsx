@@ -10,6 +10,7 @@ interface Token {
   price_change_24h?: number
   market_cap?: number
   market_cap_rank?: number
+  liquidity_usd?: number
   score?: number
   address?: string
   volume_5m?: number
@@ -24,6 +25,14 @@ interface Deployer {
   wallet_address: string
   discovered_at: string
   launch_count: number
+  market_cap?: number
+}
+
+function fmtMcap(mc?: number): string {
+  if (mc == null) return 'MC n/a'
+  if (mc >= 1e6) return `MC $${(mc / 1e6).toFixed(2)}M`
+  if (mc >= 1e3) return `MC $${(mc / 1e3).toFixed(0)}K`
+  return `MC $${mc.toFixed(0)}`
 }
 
 // ── Persisted-cache fetch — same fix as Top5Degen.tsx: this page used to
@@ -98,11 +107,14 @@ export default function DegenTrenches() {
         <span style={{ fontSize: 11, color: 'var(--muted)' }}>Pump.fun Alpha</span>
       </div>
 
-      {/* Trending */}
+      {/* Trending -- was labeled "(CoinGecko)" but backend/routers/pumpfun.py's
+          /trending endpoint is real GeckoTerminal Solana trending_pools data
+          (source field confirms "GeckoTerminal"), a different provider from
+          CoinGecko. Label corrected to match what's actually being fetched. */}
       <div style={{ marginBottom: 20 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
           <TrendingUp size={14} color="#22c55e" />
-          <span style={{ fontSize: 13, fontWeight: 600 }}>Trending (CoinGecko)</span>
+          <span style={{ fontSize: 13, fontWeight: 600 }}>Trending (GeckoTerminal)</span>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 8 }}>
           {trending.items.length === 0 && <div style={{ fontSize: 11, color: 'var(--muted)' }}>No trending data yet.</div>}
@@ -115,6 +127,10 @@ export default function DegenTrenches() {
                 )}
               </div>
               <div style={{ fontSize: 11, color: 'var(--muted)' }}>{t.name}</div>
+              <div style={{ fontSize: 10, color: 'var(--accent)' }}>{fmtMcap(t.market_cap)}</div>
+              {t.liquidity_usd != null && (
+                <div style={{ fontSize: 10, color: 'var(--muted)' }}>Liq: ${Number(t.liquidity_usd).toLocaleString()}</div>
+              )}
             </div>
           ))}
         </div>
@@ -145,7 +161,9 @@ export default function DegenTrenches() {
                 </div>
                 <div style={{ fontSize: 11, color: 'var(--muted)' }}>{l.name}</div>
                 {l.price && <div style={{ fontSize: 11, color: 'var(--accent)' }}>${Number(l.price).toFixed(8)}</div>}
+                <div style={{ fontSize: 10, color: 'var(--accent)' }}>{fmtMcap(l.market_cap)}</div>
                 {l.volume_24h && <div style={{ fontSize: 10, color: 'var(--muted)' }}>Vol: ${Number(l.volume_24h).toLocaleString()}</div>}
+                {l.liquidity_usd != null && <div style={{ fontSize: 10, color: 'var(--muted)' }}>Liq: ${Number(l.liquidity_usd).toLocaleString()}</div>}
               </div>
             ))}
           </div>
@@ -170,6 +188,7 @@ export default function DegenTrenches() {
                   <span style={{ fontSize: 11, color: '#a855f7', fontWeight: 700 }}>{s.surge_ratio?.toFixed(1)}x</span>
                 </div>
                 <div style={{ fontSize: 10, color: 'var(--muted)' }}>{s.signal}</div>
+                <div style={{ fontSize: 10, color: 'var(--accent)' }}>{fmtMcap(s.market_cap)}</div>
                 <div style={{ fontSize: 10, color: 'var(--muted)' }}>1h vol: ${Number(s.volume_1h || 0).toLocaleString()}</div>
               </div>
             ))}
@@ -190,6 +209,7 @@ export default function DegenTrenches() {
             {graduations.items.map((g: any, i) => (
               <div key={i} style={cardStyle}>
                 <span style={{ fontWeight: 600, fontSize: 13 }}>🎓 <TokenLink symbol={g.symbol || 'token'} ca={g.address} /></span>
+                <div style={{ fontSize: 10, color: 'var(--accent)' }}>{fmtMcap(g.market_cap)}</div>
                 <div style={{ fontSize: 10, color: 'var(--muted)' }}>Vol 24h: ${Number(g.volume_24h || 0).toLocaleString()} · Liq: ${Number(g.liquidity_usd || 0).toLocaleString()}</div>
               </div>
             ))}
@@ -218,6 +238,7 @@ export default function DegenTrenches() {
                     </span>
                   )}
                 </div>
+                <div style={{ fontSize: 10, color: 'var(--accent)' }}>{fmtMcap(d.market_cap)}</div>
                 <div style={{ fontSize: 10, color: 'var(--muted)' }}>
                   Deployer: <WalletLink address={d.wallet_address} />
                 </div>
