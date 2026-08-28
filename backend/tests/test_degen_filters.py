@@ -72,3 +72,20 @@ def test_passes_all_filters_rejects_dust_even_if_not_major():
 
 def test_passes_all_filters_accepts_real_candidate():
     assert passes_all_filters("DEGEN", "RandomMint1111111111111111111111111111", 50_000.0) is True
+
+
+def test_pumpfun_floor_accepts_legitimate_premigration_token():
+    """Real finding 2026-08-28: the general $7k floor emptied pump.fun's
+    entire platform-leader slot -- real top-scored pump.fun tokens
+    legitimately sit at $3,000-4,500 pre-migration (graduation is ~$69k).
+    The lower pump.fun-specific floor must accept these."""
+    from backend.degen_filters import PUMPFUN_MIN_MARKET_CAP_USD
+    assert passes_dust_floor(3_500.0, min_market_cap=PUMPFUN_MIN_MARKET_CAP_USD) is True
+    # But the general floor would have rejected the same real value.
+    assert passes_dust_floor(3_500.0) is False
+
+
+def test_pumpfun_floor_still_rejects_real_dust():
+    from backend.degen_filters import PUMPFUN_MIN_MARKET_CAP_USD
+    # The owner's actual reported bug: a ~$10 mcap token.
+    assert passes_dust_floor(10.0, min_market_cap=PUMPFUN_MIN_MARKET_CAP_USD) is False

@@ -10,7 +10,7 @@ from backend.db import get_db
 from backend.routers.alpha import _dexscreener_mcap
 from backend import market_sources as ms
 from backend import moonshot_client
-from backend.degen_filters import passes_all_filters, is_major_or_stable
+from backend.degen_filters import passes_all_filters, is_major_or_stable, PUMPFUN_MIN_MARKET_CAP_USD
 from contextlib import asynccontextmanager
 import aiosqlite
 
@@ -798,7 +798,14 @@ async def _pumpfun_leader() -> Optional[dict]:
     silently return nothing; major-token exclusion is checked too for
     consistency even though pump.fun mints are never real majors in
     practice (every pump.fun mint has its own dedicated address, never
-    reuses BTC/USDC/etc's real mint)."""
+    reuses BTC/USDC/etc's real mint).
+
+    Uses PUMPFUN_MIN_MARKET_CAP_USD ($500), NOT the general $7k floor --
+    found live 2026-08-28 that the general floor emptied this slot
+    entirely: pump.fun's real top-20-by-activity-score tokens legitimately
+    sit at $3,000-4,500 pre-migration (graduation is ~$69k), so $7k was
+    excluding every normal, live, not-yet-graduated token, not just dust.
+    See degen_filters.py's PUMPFUN_MIN_MARKET_CAP_USD docstring."""
     async with _db() as db:
         cur = await db.execute(
             """SELECT mint, symbol, market_cap_usd, score, manipulation_flags
@@ -808,7 +815,8 @@ async def _pumpfun_leader() -> Optional[dict]:
         )
         rows = await cur.fetchall()
     for row in rows:
-        if not passes_all_filters(row.get("symbol"), row.get("mint"), row.get("market_cap_usd")):
+        if not passes_all_filters(row.get("symbol"), row.get("mint"), row.get("market_cap_usd"),
+                                   min_market_cap=PUMPFUN_MIN_MARKET_CAP_USD):
             continue
         return {
             "platform": "pump.fun", "symbol": row.get("symbol"), "name": None,

@@ -76,8 +76,26 @@ MAJOR_SYMBOLS = {
 
 # Reuses routers/alpha.py's RUG_MCAP_FLOOR exactly -- same real,
 # owner-approved "dead token" threshold, not a new number invented here.
+# Appropriate for anything DexScreener/GeckoTerminal has real liquidity
+# data for (tokens that have already crossed a real DEX): below $7k there
+# almost certainly means genuinely dead, not "just launched."
 MIN_MARKET_CAP_USD = 7_000.0
 MIN_LIQUIDITY_USD_FALLBACK = 2_000.0
+
+# Deliberately lower, separate floor for pump.fun's own PRE-migration
+# tokens specifically. Found live 2026-08-28: applying MIN_MARKET_CAP_USD
+# ($7k) to pump.fun's own tier-scanner candidates emptied the slot
+# entirely -- the real top-20 tokens by pump.fun's own activity score
+# (real volume + trade diversity, wash-trading-penalized) all sat at
+# $3,000-4,500 market cap, which is normal/expected there: pump.fun's
+# real graduation threshold is ~$69k (see routers/alpha.py's
+# MIGRATION_MCAP_FLOOR), so almost every legitimately active, not-yet-
+# graduated token is naturally in the low thousands. $7k there doesn't
+# mean "dead," it means "hasn't graduated yet" -- the WRONG signal to
+# exclude on. This lower floor keeps excluding what the owner actually
+# flagged (a literal ~$10-mcap token -- genuine near-zero dust) without
+# wiping out the entire legitimate pre-migration candidate pool.
+PUMPFUN_MIN_MARKET_CAP_USD = 500.0
 
 
 def is_major_or_stable(symbol: Optional[str], address: Optional[str]) -> bool:
@@ -92,14 +110,19 @@ def is_major_or_stable(symbol: Optional[str], address: Optional[str]) -> bool:
     return False
 
 
-def passes_dust_floor(market_cap: Optional[float], liquidity_usd: Optional[float] = None) -> bool:
+def passes_dust_floor(market_cap: Optional[float], liquidity_usd: Optional[float] = None,
+                       min_market_cap: float = MIN_MARKET_CAP_USD) -> bool:
     """True if this token clears the minimum real-signal bar. Market cap
     is the primary check; when it's genuinely unknown (None, common for
     fresh pre-migration pump.fun tokens with no DexScreener listing yet),
     real liquidity is used as a fallback proof-of-life instead of
-    treating "unknown" the same as "known to be dust."""
+    treating "unknown" the same as "known to be dust." `min_market_cap`
+    defaults to the general MIN_MARKET_CAP_USD but callers scoring
+    pump.fun's own pre-migration tokens should pass
+    PUMPFUN_MIN_MARKET_CAP_USD instead -- see that constant's docstring
+    for why the general floor is the wrong signal there."""
     if market_cap is not None:
-        return market_cap >= MIN_MARKET_CAP_USD
+        return market_cap >= min_market_cap
     if liquidity_usd is not None:
         return liquidity_usd >= MIN_LIQUIDITY_USD_FALLBACK
     # Neither figure available -- can't prove it's not dust, so it
@@ -109,8 +132,9 @@ def passes_dust_floor(market_cap: Optional[float], liquidity_usd: Optional[float
 
 
 def passes_all_filters(symbol: Optional[str], address: Optional[str],
-                        market_cap: Optional[float], liquidity_usd: Optional[float] = None) -> bool:
+                        market_cap: Optional[float], liquidity_usd: Optional[float] = None,
+                        min_market_cap: float = MIN_MARKET_CAP_USD) -> bool:
     """Combined check: not a major/stable AND clears the dust floor."""
     if is_major_or_stable(symbol, address):
         return False
-    return passes_dust_floor(market_cap, liquidity_usd)
+    return passes_dust_floor(market_cap, liquidity_usd, min_market_cap)

@@ -106,7 +106,7 @@ import aiosqlite
 from .db import get_db
 from .routers.alpha import _dexscreener_mcap
 from .wallet_pruning import WHALE_BALANCE_USD
-from .degen_filters import is_major_or_stable, passes_dust_floor
+from .degen_filters import is_major_or_stable, passes_dust_floor, MIN_MARKET_CAP_USD, PUMPFUN_MIN_MARKET_CAP_USD
 
 logger = logging.getLogger(__name__)
 
@@ -220,16 +220,26 @@ async def _market_snapshot(mint: str, pumpfun_row: Optional[dict]) -> dict:
     magnitude within this pool, never shown as an interchangeable dollar
     figure). market_cap/liquidity_usd: DexScreener's real numbers if
     available, else pump.fun's own persisted market_cap_usd for
-    pre-migration tokens DexScreener hasn't indexed yet."""
+    pre-migration tokens DexScreener hasn't indexed yet.
+
+    `from_pumpfun_only` flags when market_cap came from pump.fun's own
+    persisted column rather than a real DexScreener listing -- callers use
+    this to pick the right dust-floor threshold (see
+    degen_filters.PUMPFUN_MIN_MARKET_CAP_USD's docstring: pump.fun's own
+    pre-migration tokens legitimately sit far below the general $7k floor,
+    which is calibrated for "graduated then collapsed," not "hasn't
+    graduated yet")."""
     snap = await _dexscreener_mcap(mint)
     snap = snap if isinstance(snap, dict) else {}
     pf_volume = float((pumpfun_row or {}).get("volume_sol_total") or 0.0)
     pf_mcap = (pumpfun_row or {}).get("market_cap_usd")
     volume = float(snap["liquidity_usd"]) if snap.get("liquidity_usd") else pf_volume
+    dex_mcap = snap.get("market_cap")
     return {
         "volume": volume,
-        "market_cap": snap.get("market_cap") if snap.get("market_cap") is not None else pf_mcap,
+        "market_cap": dex_mcap if dex_mcap is not None else pf_mcap,
         "liquidity_usd": snap.get("liquidity_usd"),
+        "from_pumpfun_only": dex_mcap is None and pf_mcap is not None,
     }
 
 
@@ -315,17 +325,25 @@ async def compute_aggregate_scores(
         *[_market_snapshot(a, pumpfun_by_mint.get(a)) for a in surviving], return_exceptions=True
     )
     for a, snap in zip(surviving, snapshots):
-        snap = snap if isinstance(snap, dict) else {"volume": 0.0, "market_cap": None, "liquidity_usd": None}
+        snap = snap if isinstance(snap, dict) else {"volume": 0.0, "market_cap": None, "liquidity_usd": None, "from_pumpfun_only": False}
         raw[a]["volume_momentum"] = snap["volume"]
         raw[a]["_market_cap"] = snap["market_cap"]
         raw[a]["_liquidity_usd"] = snap["liquidity_usd"]
+        raw[a]["_from_pumpfun_only"] = snap.get("from_pumpfun_only", False)
 
     # Dust floor -- real bug fixed here: pump.fun's platform-leader slot
     # showed a ~$10-mcap dead token; the aggregate scorer had no floor at
     # all before this. Reuses routers/alpha.py's own RUG_MCAP_FLOOR value
-    # (see degen_filters.py's module docstring) rather than a new number.
+    # for candidates with a real DexScreener listing (same "$7k = dead"
+    # signal). Candidates whose only market-cap figure is pump.fun's own
+    # pre-migration column use PUMPFUN_MIN_MARKET_CAP_USD instead -- found
+    # live that the general floor wrongly excluded EVERY legitimate
+    # not-yet-graduated pump.fun token (real top-scored ones sit at
+    # $3,000-4,500, graduation is ~$69k -- $7k there means "hasn't
+    # graduated," not "dead"). See degen_filters.py for the full reasoning.
     for addr in list(raw.keys()):
-        if not passes_dust_floor(raw[addr].pop("_market_cap"), raw[addr].pop("_liquidity_usd")):
+        floor = PUMPFUN_MIN_MARKET_CAP_USD if raw[addr].pop("_from_pumpfun_only") else MIN_MARKET_CAP_USD
+        if not passes_dust_floor(raw[addr].pop("_market_cap"), raw[addr].pop("_liquidity_usd"), min_market_cap=floor):
             disqualified.append({"address": addr, "symbol": raw[addr]["symbol"], "reason": "below minimum market-cap/liquidity floor (dust)"})
             del raw[addr]
 

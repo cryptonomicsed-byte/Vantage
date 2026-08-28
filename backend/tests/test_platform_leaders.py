@@ -221,3 +221,24 @@ async def test_vantage_conviction_leader_skips_major_for_lower_conviction_degen(
     assert leader is not None
     assert leader["address"] == "RealDegenMint111111111111111111111111111"
     assert leader["symbol"] == "DEGEN"
+
+
+@pytest.mark.asyncio
+async def test_pumpfun_leader_accepts_legitimate_low_cap_premigration_token():
+    """Real finding 2026-08-28: applying the general $7k dust floor to
+    pump.fun's own pre-migration tokens emptied this slot entirely --
+    real top-scored pump.fun tokens legitimately sit at $3,000-4,500
+    (graduation is ~$69k). Must use the lower PUMPFUN_MIN_MARKET_CAP_USD
+    floor and still return a real leader, not go empty."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO pumpfun_premigration_tokens (mint, symbol, market_cap_usd, score, manipulation_flags, evicted, migrated) "
+            "VALUES (?,?,?,?,?,0,0)",
+            ("LegitLowCapMint1111111111111111111111111", "LOWCAP", 3500.0, 18.9, "[]"),
+        )
+        await db.commit()
+
+    leader = await _pumpfun_leader()
+
+    assert leader is not None
+    assert leader["symbol"] == "LOWCAP"
