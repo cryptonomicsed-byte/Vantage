@@ -260,7 +260,7 @@ async def top5_degen(limit: int=5, x_agent_key: str=Header(...)):
             if pc_24h > 10: score += 20
             if buys_24h > sells_24h: score += 15
             if graduated_bool: score += 15
-            graduated.append(dict(symbol=symbol,name=name,address=addr,volume_24h=vol_24h,price_change_24h=pc_24h,buys_24h=buys_24h,sells_24h=sells_24h,graduated=graduated_bool,score=score,reason=f"{'🎓 ' if graduated_bool else ''}${vol_24h:,.0f}"))
+            graduated.append(dict(symbol=symbol,name=name,address=addr,volume_24h=vol_24h,price_change_24h=pc_24h,buys_24h=buys_24h,sells_24h=sells_24h,graduated=graduated_bool,score=score,reason=f"{'🎓 ' if graduated_bool else ''}Vol ${vol_24h:,.0f}"))
 
         graduated.sort(key=lambda x:-x["score"])
         resp = {"top_5":graduated[:limit],"total_scanned":len(pools),"source":"GeckoTerminal","cached":from_cache}
