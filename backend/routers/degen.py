@@ -1,16 +1,20 @@
 """Degen Alpha Router — Ultra-degen signals: early calls, smart wallets, volume surges, rug checks.
 Uses existing keys: Helius RPC, Birdeye, GeckoTerminal.
 """
-import asyncio, json, os, urllib.request, hashlib, time
+import asyncio, json, logging, os, urllib.request, hashlib, time
 from pathlib import Path
+from typing import Optional
 from fastapi import APIRouter, Query, HTTPException, Header
 from backend.wallet_blacklist import sql_label_exclusions
 from backend.db import get_db
 from backend.routers.alpha import _dexscreener_mcap
+from backend import market_sources as ms
+from backend import moonshot_client
 from contextlib import asynccontextmanager
 import aiosqlite
 
 router = APIRouter(prefix="/api/intel/degen", tags=["degen"])
+logger = logging.getLogger(__name__)
 DB = Path("/opt/ares/Vantage/data/vantage.db")
 HELIUS = os.environ.get("HELIUS_API_KEY", "")
 BIRDEYE = os.environ.get("BIRDEYE_KEY", "")
@@ -679,3 +683,186 @@ async def high_conviction_tokens(limit: int=20, x_agent_key: str=Header(...)):
         t["market_cap"] = snap.get("market_cap") if isinstance(snap, dict) else None
 
     return {"tokens": out, "count": len(out)}
+
+
+# ════════════════════════════════════════════════════════════════
+# PLATFORM LEADERS — the #1 token by each of the 6 real platforms Vantage
+# gathers token intel from, one row per platform, each using THAT
+# platform's own native ranking (not a Vantage-invented cross-platform
+# score -- that's the separate aggregate-score endpoint below). Every
+# value here is either read directly off that platform's own response, or
+# (for pump.fun / Vantage-conviction) computed from data that platform/
+# Vantage subsystem already owns and persists.
+# ════════════════════════════════════════════════════════════════
+
+async def _geckoterminal_leader() -> Optional[dict]:
+    """GeckoTerminal's own trending-pools order -- pools[0] IS the #1
+    trending pool per GeckoTerminal's own ranking, not re-sorted here."""
+    pools, _ = await _trending_pools_cached()
+    if not pools:
+        return None
+    p = pools[0]
+    attrs = p.get("attributes", {})
+    name = attrs.get("name", "")
+    symbol = name.split(" / ")[0][:12] if " / " in name else name[:12]
+    vol = attrs.get("volume_usd", {})
+    vol_24h = float(str(vol.get("h24", 0))) if isinstance(vol, dict) else 0
+    return {
+        "platform": "GeckoTerminal", "symbol": symbol, "name": name,
+        "address": _mint_from_pool(p),
+        "metric_label": "24h volume", "metric_value": vol_24h,
+        "market_cap": None,  # GeckoTerminal pool payload has no direct mcap field
+    }
+
+
+async def _dexscreener_leader() -> Optional[dict]:
+    """DexScreener's own real native ranking: /token-boosts/top/v1, sorted
+    by totalAmount (boost spend) -- DexScreener's own promotion mechanism,
+    a genuinely DexScreener-native signal distinct from GeckoTerminal or
+    any Vantage-derived score. Enriched with real market cap via the
+    shared _dexscreener_mcap once we have the address."""
+    boosts = await ms._get_json("https://api.dexscreener.com/token-boosts/top/v1", timeout=8.0)
+    if not isinstance(boosts, list) or not boosts:
+        return None
+    top = boosts[0]
+    address = top.get("tokenAddress")
+    snap = await _dexscreener_mcap(address) if address else None
+    snap = snap if isinstance(snap, dict) else {}
+    return {
+        "platform": "DexScreener", "symbol": None, "name": top.get("description"),
+        "address": address,
+        "metric_label": "boost amount", "metric_value": top.get("totalAmount"),
+        "market_cap": snap.get("market_cap"),
+        "price_usd": snap.get("price_usd"),
+        "dexscreener_url": top.get("url") or snap.get("dexscreener_url"),
+    }
+
+
+async def _coingecko_leader() -> Optional[dict]:
+    """CoinGecko's own market-cap ranking -- coingecko_markets() already
+    requests order=market_cap_desc, so [0] IS CoinGecko's #1 by market cap,
+    their own primary ranking metric."""
+    markets = await ms.coingecko_markets(1)
+    if not markets:
+        return None
+    m = markets[0]
+    return {
+        "platform": "CoinGecko", "symbol": m.get("symbol"), "name": m.get("name"),
+        "address": None,  # CoinGecko's markets endpoint is symbol-based, not a Solana mint
+        "metric_label": "market cap rank", "metric_value": m.get("rank"),
+        "market_cap": m.get("market_cap"),
+        "price_usd": m.get("price"),
+    }
+
+
+async def _pumpfun_leader() -> Optional[dict]:
+    """Top of pumpfun_tier_scanner.py's own composite score (real volume +
+    trade count + participant diversity, wash-trading-penalized -- see
+    that daemon's score_tokens() for the exact formula), among currently
+    live (not evicted/migrated) tracked tokens. This score is pump.fun's
+    real activity run through Vantage's own scanner, since pump.fun itself
+    exposes no public ranking API -- the closest thing to "pump.fun's own
+    top pick" available without one."""
+    async with _db() as db:
+        cur = await db.execute(
+            """SELECT mint, symbol, market_cap_usd, score, manipulation_flags
+               FROM pumpfun_premigration_tokens
+               WHERE evicted=0 AND migrated=0
+               ORDER BY score DESC LIMIT 1"""
+        )
+        row = await cur.fetchone()
+    if not row:
+        return None
+    return {
+        "platform": "pump.fun", "symbol": row.get("symbol"), "name": None,
+        "address": row.get("mint"),
+        "metric_label": "activity score", "metric_value": row.get("score"),
+        "market_cap": row.get("market_cap_usd"),
+        "manipulation_flags": json.loads(row.get("manipulation_flags") or "[]"),
+    }
+
+
+async def _vantage_conviction_leader() -> Optional[dict]:
+    """Top of Vantage's own smart-wallet conviction score (real overlap
+    between token_wallet_roles and wallet_reputation.copy_trade_score,
+    see _token_conviction) -- this platform's own signal, not derived from
+    any of the other 5."""
+    async with _db() as db:
+        cur = await db.execute(
+            """WITH per_wallet AS (
+                SELECT DISTINCT twr.mint, twr.symbol, twr.wallet_address, wr.copy_trade_score
+                FROM token_wallet_roles twr
+                JOIN wallet_reputation wr ON wr.wallet_address = twr.wallet_address
+                WHERE wr.copy_trade_score > 0
+            )
+            SELECT mint, MAX(symbol) as symbol, COUNT(*) as smart_wallet_count,
+                   SUM(copy_trade_score) as conviction_score
+            FROM per_wallet GROUP BY mint ORDER BY conviction_score DESC LIMIT 1"""
+        )
+        row = await cur.fetchone()
+    if not row:
+        return None
+    mc = await _dexscreener_mcap(row["mint"])
+    mc = mc if isinstance(mc, dict) else {}
+    return {
+        "platform": "Vantage Conviction", "symbol": row.get("symbol"), "name": None,
+        "address": row.get("mint"),
+        "metric_label": "conviction score", "metric_value": row.get("conviction_score"),
+        "market_cap": mc.get("market_cap"),
+        "smart_wallet_count": row.get("smart_wallet_count"),
+    }
+
+
+async def _moonshot_leader() -> Optional[dict]:
+    """Moonshot's own 'top' view -- see backend/moonshot_client.py for the
+    real endpoint + a documented, currently-unreachable-host caveat
+    (api.moonshot.cc NXDOMAIN as of this build). Returns None (not an
+    error) when unreachable, same as every other platform here on a
+    genuine miss."""
+    t = await moonshot_client.moonshot_top_token("solana")
+    if not t:
+        return None
+    return {
+        "platform": "Moonshot", "symbol": t.get("symbol"), "name": t.get("name"),
+        "address": t.get("address"),
+        "metric_label": "curve progress", "metric_value": t.get("curve_progress_pct"),
+        "market_cap": t.get("market_cap"),
+        "price_usd": t.get("price_usd"),
+    }
+
+
+@router.get("/platform-leaders")
+async def platform_leaders(x_agent_key: str = Header(...)):
+    """The #1 top-ranked token from each of the 6 real platforms Vantage
+    gathers token intel from -- one row per platform, each platform's own
+    native ranking metric (not a Vantage cross-platform score; see
+    /aggregate-score for that). A platform showing null/`available: false`
+    means that source was genuinely unreachable or had no data at request
+    time -- never a fabricated placeholder row."""
+    if not await get_agent(x_agent_key):
+        raise HTTPException(401)
+
+    leaders = await asyncio.gather(
+        _geckoterminal_leader(), _dexscreener_leader(), _coingecko_leader(),
+        _pumpfun_leader(), _vantage_conviction_leader(), _moonshot_leader(),
+        return_exceptions=True,
+    )
+    results = []
+    for leader in leaders:
+        if isinstance(leader, dict):
+            leader["available"] = True
+            results.append(leader)
+        elif isinstance(leader, Exception):
+            logger.debug("platform-leaders: a source raised: %s", leader)
+    # Sources that returned None (genuinely no data, not an error) get an
+    # explicit unavailable row instead of silently vanishing from the list
+    # -- the frontend needs to show all 6 platforms, including misses.
+    seen_platforms = {r["platform"] for r in results}
+    platform_names = ["GeckoTerminal", "DexScreener", "CoinGecko", "pump.fun", "Vantage Conviction", "Moonshot"]
+    for name in platform_names:
+        if name not in seen_platforms:
+            results.append({"platform": name, "available": False})
+    # Stable display order matching the task's platform inventory order.
+    order = {name: i for i, name in enumerate(platform_names)}
+    results.sort(key=lambda r: order.get(r["platform"], 99))
+    return {"leaders": results, "count": len(results), "generated_at": int(time.time())}

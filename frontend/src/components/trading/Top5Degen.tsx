@@ -69,6 +69,20 @@ interface ConvictionToken {
   smart_wallets: { wallet: string; display_name: string; copy_trade_score: number }[]
 }
 
+interface PlatformLeader {
+  platform: string
+  available: boolean
+  symbol?: string | null
+  name?: string | null
+  address?: string | null
+  metric_label?: string
+  metric_value?: number | null
+  market_cap?: number | null
+  price_usd?: number | string | null
+  manipulation_flags?: string[]
+  smart_wallet_count?: number
+}
+
 // ── Persisted-cache fetch — the fix for "info shows, I navigate away, come
 // back and it's gone." Root cause was twofold: (1) this component only ever
 // fetched once on mount with no refresh, and (2) a transient upstream
@@ -127,6 +141,7 @@ export default function Top5Degen() {
   const copyWallets = useCachedList<CopyWallet>('top_wallets_to_copy', '/api/intel/degen/top-wallets-to-copy?limit=10', 'wallets', 120000)
   const convictionTokens = useCachedList<ConvictionToken>('high_conviction', '/api/intel/degen/high-conviction?limit=10', 'tokens', 120000)
   const sellRotations = useCachedList<Token>('sell_rotations', '/api/intel/degen/sell-rotations?limit=5', 'rotations')
+  const platformLeaders = useCachedList<PlatformLeader>('platform_leaders', '/api/intel/degen/platform-leaders', 'leaders', 60000)
   const trending = useCachedList<any>('pumpfun_trending', '/api/intel/pumpfun/trending?limit=5', 'trending')
 
   const [themes, setThemes] = useState<Theme[]>(() => loadCache('themes', []))
@@ -420,6 +435,47 @@ export default function Top5Degen() {
         ) : (
           <div style={{ fontSize: 10, color: 'var(--muted)' }}>No significant sell rotations detected</div>
         )}
+      </div>
+
+      {/* 🏆 PLATFORM LEADERS — #1 top-ranked token from each of the 6 real
+          platforms Vantage gathers token intel from, each platform's OWN
+          native ranking metric (not a Vantage cross-platform score — see
+          the aggregate-score banner elsewhere on this page for that). A
+          platform showing "unavailable" means that source genuinely had no
+          data or was unreachable at request time, not a fabricated row. */}
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+          <Zap size={14} color="#eab308" />
+          <span style={{ fontWeight: 700, fontSize: 13, color: '#eab308' }}>PLATFORM LEADERS</span>
+          <span style={{ fontSize: 9, color: 'var(--muted)' }}>#1 pick per platform, native ranking</span>
+        </div>
+        <div style={{ display: 'grid', gap: 4 }}>
+          {platformLeaders.items.map((p, i) => (
+            <div key={i} style={{
+              display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px',
+              borderRadius: 6, border: '1px solid rgba(234,179,8,0.15)', fontSize: 11,
+              opacity: p.available ? 1 : 0.45,
+            }}>
+              <span style={{ fontWeight: 700, minWidth: 130, color: '#eab308' }}>{p.platform}</span>
+              {p.available ? (
+                <>
+                  <span style={{ fontWeight: 600, minWidth: 70, color: '#fff' }}>
+                    {p.address ? <TokenLink symbol={p.symbol || p.name || '?'} ca={p.address} /> : (p.symbol || p.name || '—')}
+                  </span>
+                  <span style={{ flex: 1, color: 'var(--muted)', fontSize: 10 }}>
+                    {p.metric_label}: <b style={{ color: '#fff' }}>{p.metric_value != null ? p.metric_value : '—'}</b>
+                    {p.market_cap != null && <> · MC ${Number(p.market_cap).toLocaleString(undefined, { maximumFractionDigits: 0 })}</>}
+                  </span>
+                  {p.manipulation_flags && p.manipulation_flags.length > 0 && (
+                    <span title={p.manipulation_flags.join(', ')} style={{ color: '#ef4444', fontSize: 9, fontWeight: 700 }}>⚠ FLAGGED</span>
+                  )}
+                </>
+              ) : (
+                <span style={{ flex: 1, color: 'var(--muted)', fontSize: 10, fontStyle: 'italic' }}>unavailable — source unreachable or no data</span>
+              )}
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   )
