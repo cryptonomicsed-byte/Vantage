@@ -90,7 +90,18 @@ async def test_manipulation_flagged_token_is_disqualified():
 
 
 @pytest.mark.asyncio
-async def test_higher_conviction_candidate_wins():
+async def test_higher_conviction_candidate_wins(monkeypatch):
+    # compute_aggregate_scores now applies a real dust floor (see
+    # degen_filters.py) via a real _dexscreener_mcap network call -- mocked
+    # here (no network in tests) to clear the floor, isolating this test to
+    # the conviction-ranking logic it actually exists to verify.
+    import backend.aggregate_score as agg_module
+
+    async def fake_mcap(mint):
+        return {"market_cap": 50_000.0, "liquidity_usd": 10_000.0}
+
+    monkeypatch.setattr(agg_module, "_dexscreener_mcap", fake_mcap)
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO wallet_reputation (wallet_address, copy_trade_score) VALUES (?,?)",
@@ -128,7 +139,14 @@ async def test_no_candidates_returns_empty_ranked():
 
 
 @pytest.mark.asyncio
-async def test_whale_presence_detected_from_active_tracked_wallet():
+async def test_whale_presence_detected_from_active_tracked_wallet(monkeypatch):
+    import backend.aggregate_score as agg_module
+
+    async def fake_mcap(mint):
+        return {"market_cap": 50_000.0, "liquidity_usd": 10_000.0}
+
+    monkeypatch.setattr(agg_module, "_dexscreener_mcap", fake_mcap)
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO tracked_wallets (chain, address, balance_usd, archived_at) VALUES ('solana',?,?,NULL)",
@@ -150,7 +168,14 @@ async def test_whale_presence_detected_from_active_tracked_wallet():
 
 
 @pytest.mark.asyncio
-async def test_archived_whale_wallet_does_not_count():
+async def test_archived_whale_wallet_does_not_count(monkeypatch):
+    import backend.aggregate_score as agg_module
+
+    async def fake_mcap(mint):
+        return {"market_cap": 50_000.0, "liquidity_usd": 10_000.0}
+
+    monkeypatch.setattr(agg_module, "_dexscreener_mcap", fake_mcap)
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO tracked_wallets (chain, address, balance_usd, archived_at) VALUES ('solana',?,?,'2026-01-01 00:00:00')",
@@ -169,3 +194,58 @@ async def test_archived_whale_wallet_does_not_count():
 
     assert len(result["ranked"]) == 1
     assert result["ranked"][0]["components"]["whale_presence"]["raw"] is False
+
+
+@pytest.mark.asyncio
+async def test_usdc_disqualified_as_major_regardless_of_score(monkeypatch):
+    """Real bug regression: the Aggregate Winner banner scored USDC #1
+    (huge real volume/liquidity/conviction -- mathematically correct, but
+    useless for a degen-plays feature). USDC's real Solana mint must be
+    excluded outright, never even entering the ranked pool."""
+    import backend.aggregate_score as agg_module
+
+    async def fake_mcap(mint):
+        return {"market_cap": 50_000_000_000.0, "liquidity_usd": 1_000_000_000.0}
+
+    monkeypatch.setattr(agg_module, "_dexscreener_mcap", fake_mcap)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO wallet_reputation (wallet_address, copy_trade_score) VALUES (?,?)",
+            ("HugeWallet111111111111111111111111111111", 999.0),
+        )
+        await db.execute(
+            "INSERT INTO token_wallet_roles (mint, symbol, wallet_address, role) VALUES (?,?,?,?)",
+            ("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "penny", "HugeWallet111111111111111111111111111111", "top_holder"),
+        )
+        await db.commit()
+
+    result = await compute_aggregate_scores(
+        [{"address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "symbol": "penny", "platform_breadth": 6}],
+        helius_key="",
+    )
+
+    assert result["ranked"] == []
+    assert len(result["disqualified"]) == 1
+    assert "major/stablecoin" in result["disqualified"][0]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_ten_dollar_mcap_dust_disqualified(monkeypatch):
+    """Real bug regression: pump.fun's leader slot showed a ~$10-mcap
+    dead token. The aggregate scorer's own dust floor must reject it too."""
+    import backend.aggregate_score as agg_module
+
+    async def fake_mcap(mint):
+        return {"market_cap": 10.0, "liquidity_usd": 5.0}
+
+    monkeypatch.setattr(agg_module, "_dexscreener_mcap", fake_mcap)
+
+    result = await compute_aggregate_scores(
+        [{"address": "DustMint1111111111111111111111111111111", "symbol": "DUST", "platform_breadth": 1}],
+        helius_key="",
+    )
+
+    assert result["ranked"] == []
+    assert len(result["disqualified"]) == 1
+    assert "dust" in result["disqualified"][0]["reason"]

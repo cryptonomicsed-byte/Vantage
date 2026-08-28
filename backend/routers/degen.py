@@ -10,6 +10,7 @@ from backend.db import get_db
 from backend.routers.alpha import _dexscreener_mcap
 from backend import market_sources as ms
 from backend import moonshot_client
+from backend.degen_filters import passes_all_filters, is_major_or_stable
 from contextlib import asynccontextmanager
 import aiosqlite
 
@@ -703,97 +704,139 @@ async def high_conviction_tokens(limit: int=20, x_agent_key: str=Header(...)):
 # ════════════════════════════════════════════════════════════════
 
 async def _geckoterminal_leader() -> Optional[dict]:
-    """GeckoTerminal's own trending-pools order -- pools[0] IS the #1
-    trending pool per GeckoTerminal's own ranking, not re-sorted here."""
+    """GeckoTerminal's own trending-pools order -- walked in that real
+    order (not re-sorted) until the first candidate clears the major/
+    stablecoin exclusion + dust floor (see degen_filters.py). GeckoTerminal
+    pool payloads have no direct market-cap field, so the dust floor here
+    uses real pool liquidity (reserve_in_usd) as the proof-of-life proxy."""
     pools, _ = await _trending_pools_cached()
-    if not pools:
-        return None
-    p = pools[0]
-    attrs = p.get("attributes", {})
-    name = attrs.get("name", "")
-    symbol = name.split(" / ")[0][:12] if " / " in name else name[:12]
-    vol = attrs.get("volume_usd", {})
-    vol_24h = float(str(vol.get("h24", 0))) if isinstance(vol, dict) else 0
-    return {
-        "platform": "GeckoTerminal", "symbol": symbol, "name": name,
-        "address": _mint_from_pool(p),
-        "metric_label": "24h volume", "metric_value": vol_24h,
-        "market_cap": None,  # GeckoTerminal pool payload has no direct mcap field
-    }
+    for p in pools:
+        attrs = p.get("attributes", {})
+        name = attrs.get("name", "")
+        symbol = name.split(" / ")[0][:12] if " / " in name else name[:12]
+        address = _mint_from_pool(p)
+        liquidity = attrs.get("reserve_in_usd")
+        liquidity = float(liquidity) if liquidity is not None else None
+        if not passes_all_filters(symbol, address, market_cap=None, liquidity_usd=liquidity):
+            continue
+        vol = attrs.get("volume_usd", {})
+        vol_24h = float(str(vol.get("h24", 0))) if isinstance(vol, dict) else 0
+        return {
+            "platform": "GeckoTerminal", "symbol": symbol, "name": name,
+            "address": address,
+            "metric_label": "24h volume", "metric_value": vol_24h,
+            "market_cap": None,  # GeckoTerminal pool payload has no direct mcap field
+            "liquidity_usd": liquidity,
+        }
+    return None
 
 
 async def _dexscreener_leader() -> Optional[dict]:
     """DexScreener's own real native ranking: /token-boosts/top/v1, sorted
     by totalAmount (boost spend) -- DexScreener's own promotion mechanism,
     a genuinely DexScreener-native signal distinct from GeckoTerminal or
-    any Vantage-derived score. Enriched with real market cap via the
-    shared _dexscreener_mcap once we have the address."""
+    any Vantage-derived score. Walked in that real order until the first
+    candidate clears the major/stablecoin exclusion + dust floor (see
+    degen_filters.py) -- major tokens are rarely boosted (no need to pay
+    to promote BTC) but checked for consistency/safety regardless."""
     boosts = await ms._get_json("https://api.dexscreener.com/token-boosts/top/v1", timeout=8.0)
-    if not isinstance(boosts, list) or not boosts:
+    if not isinstance(boosts, list):
         return None
-    top = boosts[0]
-    address = top.get("tokenAddress")
-    snap = await _dexscreener_mcap(address) if address else None
-    snap = snap if isinstance(snap, dict) else {}
-    return {
-        "platform": "DexScreener", "symbol": None, "name": top.get("description"),
-        "address": address,
-        "metric_label": "boost amount", "metric_value": top.get("totalAmount"),
-        "market_cap": snap.get("market_cap"),
-        "price_usd": snap.get("price_usd"),
-        "dexscreener_url": top.get("url") or snap.get("dexscreener_url"),
-    }
+    for top in boosts:
+        address = top.get("tokenAddress")
+        snap = await _dexscreener_mcap(address) if address else None
+        snap = snap if isinstance(snap, dict) else {}
+        if not passes_all_filters(None, address, snap.get("market_cap"), snap.get("liquidity_usd")):
+            continue
+        return {
+            "platform": "DexScreener", "symbol": None, "name": top.get("description"),
+            "address": address,
+            "metric_label": "boost amount", "metric_value": top.get("totalAmount"),
+            "market_cap": snap.get("market_cap"),
+            "price_usd": snap.get("price_usd"),
+            "dexscreener_url": top.get("url") or snap.get("dexscreener_url"),
+        }
+    return None
 
 
 async def _coingecko_leader() -> Optional[dict]:
-    """CoinGecko's own market-cap ranking -- coingecko_markets() already
-    requests order=market_cap_desc, so [0] IS CoinGecko's #1 by market cap,
-    their own primary ranking metric."""
-    markets = await ms.coingecko_markets(1)
-    if not markets:
-        return None
-    m = markets[0]
-    return {
-        "platform": "CoinGecko", "symbol": m.get("symbol"), "name": m.get("name"),
-        "address": None,  # CoinGecko's markets endpoint is symbol-based, not a Solana mint
-        "metric_label": "market cap rank", "metric_value": m.get("rank"),
-        "market_cap": m.get("market_cap"),
-        "price_usd": m.get("price"),
-    }
+    """CoinGecko's real /search/trending -- coins people are actively
+    searching for right now, genuinely biased toward small/mid-cap movers
+    (confirmed live: top trending result had market_cap_rank ~870).
+
+    Was coingecko_markets()[0] (order=market_cap_desc) -- a REAL BUG: that
+    endpoint is BY DEFINITION always market-cap-ranked, so "top by market
+    cap" showed BTC every single time. Not a missing filter, the wrong
+    data source entirely for a degen-plays feature -- switched to
+    coingecko_trending(), still walked until the first candidate clears
+    the major/stablecoin exclusion + dust floor as defense-in-depth (a
+    real major occasionally trends too, e.g. during a big news event)."""
+    trending = await ms.coingecko_trending(15)
+    for m in trending:
+        symbol = m.get("symbol")
+        mc = m.get("market_cap_usd")
+        if not passes_all_filters(symbol, None, mc):
+            continue
+        return {
+            "platform": "CoinGecko", "symbol": symbol, "name": m.get("name"),
+            "address": None,  # CoinGecko's trending endpoint is symbol-based, not a Solana mint
+            "metric_label": "market cap rank", "metric_value": m.get("market_cap_rank"),
+            "market_cap": mc,
+            "price_usd": m.get("price_usd"),
+        }
+    return None
 
 
 async def _pumpfun_leader() -> Optional[dict]:
     """Top of pumpfun_tier_scanner.py's own composite score (real volume +
     trade count + participant diversity, wash-trading-penalized -- see
     that daemon's score_tokens() for the exact formula), among currently
-    live (not evicted/migrated) tracked tokens. This score is pump.fun's
-    real activity run through Vantage's own scanner, since pump.fun itself
-    exposes no public ranking API -- the closest thing to "pump.fun's own
-    top pick" available without one."""
+    live (not evicted/migrated) tracked tokens that clear the real dust
+    floor -- was un-bounded, a real bug that let a ~$10-mcap dead token
+    win this slot. Walks the real score-ranked order (not just row #1)
+    so a dust token near the top of the activity-score ranking doesn't
+    silently return nothing; major-token exclusion is checked too for
+    consistency even though pump.fun mints are never real majors in
+    practice (every pump.fun mint has its own dedicated address, never
+    reuses BTC/USDC/etc's real mint)."""
     async with _db() as db:
         cur = await db.execute(
             """SELECT mint, symbol, market_cap_usd, score, manipulation_flags
                FROM pumpfun_premigration_tokens
                WHERE evicted=0 AND migrated=0
-               ORDER BY score DESC LIMIT 1"""
+               ORDER BY score DESC LIMIT 20"""
         )
-        row = await cur.fetchone()
-    if not row:
-        return None
-    return {
-        "platform": "pump.fun", "symbol": row.get("symbol"), "name": None,
-        "address": row.get("mint"),
-        "metric_label": "activity score", "metric_value": row.get("score"),
-        "market_cap": row.get("market_cap_usd"),
-        "manipulation_flags": json.loads(row.get("manipulation_flags") or "[]"),
-    }
+        rows = await cur.fetchall()
+    for row in rows:
+        if not passes_all_filters(row.get("symbol"), row.get("mint"), row.get("market_cap_usd")):
+            continue
+        return {
+            "platform": "pump.fun", "symbol": row.get("symbol"), "name": None,
+            "address": row.get("mint"),
+            "metric_label": "activity score", "metric_value": row.get("score"),
+            "market_cap": row.get("market_cap_usd"),
+            "manipulation_flags": json.loads(row.get("manipulation_flags") or "[]"),
+        }
+    return None
 
 
 async def _vantage_conviction_leader() -> Optional[dict]:
     """Top of Vantage's own smart-wallet conviction score (real overlap
     between token_wallet_roles and wallet_reputation.copy_trade_score,
     see _token_conviction) -- this platform's own signal, not derived from
-    any of the other 5."""
+    any of the other 5.
+
+    REAL BUG FOUND live: this slot showed a token labeled "penny" that was
+    actually USDC's real Solana mint (EPjFWdd5...). Root cause is a
+    separate, serious upstream data-quality bug: token_wallet_roles has
+    DOZENS of unrelated symbols (STEVE, TRUMP, PUMP, penny, ...) all
+    mapped to USDC's one real address -- some wallet-role daemon (outside
+    this repo) is confusing quote/base tokens when a wallet trades through
+    USDC. Not fixable here at the source, but address-based exclusion
+    (degen_filters.is_major_or_stable checks address BEFORE symbol) catches
+    it correctly regardless of which garbage symbol shows up for that
+    address. Walks the real conviction-ranked order (not just row #1) so
+    a major sitting at the top doesn't just return nothing."""
     async with _db() as db:
         cur = await db.execute(
             """WITH per_wallet AS (
@@ -804,20 +847,22 @@ async def _vantage_conviction_leader() -> Optional[dict]:
             )
             SELECT mint, MAX(symbol) as symbol, COUNT(*) as smart_wallet_count,
                    SUM(copy_trade_score) as conviction_score
-            FROM per_wallet GROUP BY mint ORDER BY conviction_score DESC LIMIT 1"""
+            FROM per_wallet GROUP BY mint ORDER BY conviction_score DESC LIMIT 20"""
         )
-        row = await cur.fetchone()
-    if not row:
-        return None
-    mc = await _dexscreener_mcap(row["mint"])
-    mc = mc if isinstance(mc, dict) else {}
-    return {
-        "platform": "Vantage Conviction", "symbol": row.get("symbol"), "name": None,
-        "address": row.get("mint"),
-        "metric_label": "conviction score", "metric_value": row.get("conviction_score"),
-        "market_cap": mc.get("market_cap"),
-        "smart_wallet_count": row.get("smart_wallet_count"),
-    }
+        rows = await cur.fetchall()
+    for row in rows:
+        mc = await _dexscreener_mcap(row["mint"])
+        mc = mc if isinstance(mc, dict) else {}
+        if not passes_all_filters(row.get("symbol"), row.get("mint"), mc.get("market_cap"), mc.get("liquidity_usd")):
+            continue
+        return {
+            "platform": "Vantage Conviction", "symbol": row.get("symbol"), "name": None,
+            "address": row.get("mint"),
+            "metric_label": "conviction score", "metric_value": row.get("conviction_score"),
+            "market_cap": mc.get("market_cap"),
+            "smart_wallet_count": row.get("smart_wallet_count"),
+        }
+    return None
 
 
 async def _moonshot_leader() -> Optional[dict]:
@@ -825,17 +870,21 @@ async def _moonshot_leader() -> Optional[dict]:
     real endpoint + a documented, currently-unreachable-host caveat
     (api.moonshot.cc NXDOMAIN as of this build). Returns None (not an
     error) when unreachable, same as every other platform here on a
-    genuine miss."""
-    t = await moonshot_client.moonshot_top_token("solana")
-    if not t:
-        return None
-    return {
-        "platform": "Moonshot", "symbol": t.get("symbol"), "name": t.get("name"),
-        "address": t.get("address"),
-        "metric_label": "curve progress", "metric_value": t.get("curve_progress_pct"),
-        "market_cap": t.get("market_cap"),
-        "price_usd": t.get("price_usd"),
-    }
+    genuine miss. Walks the real ranked list (not just [0]) for the
+    major/dust filters -- Moonshot mints are its own bonding-curve
+    launches, never real majors, but checked for consistency."""
+    tokens = await moonshot_client.moonshot_tokens("top", "solana")
+    for t in tokens:
+        if not passes_all_filters(t.get("symbol"), t.get("address"), t.get("market_cap"), t.get("liquidity_usd")):
+            continue
+        return {
+            "platform": "Moonshot", "symbol": t.get("symbol"), "name": t.get("name"),
+            "address": t.get("address"),
+            "metric_label": "curve progress", "metric_value": t.get("curve_progress_pct"),
+            "market_cap": t.get("market_cap"),
+            "price_usd": t.get("price_usd"),
+        }
+    return None
 
 
 async def _gather_platform_leaders() -> list[dict]:
@@ -896,12 +945,20 @@ async def _assemble_aggregate_candidates() -> list[dict]:
     high-conviction, deduped by address, with a real platform_breadth
     count per candidate (how many independent sources/signal-types
     surfaced this exact address) -- the raw input to aggregate_score.py's
-    'platform breadth' component."""
+    'platform breadth' component.
+
+    Major/stablecoin exclusion applied here (cheap, address+symbol are
+    already known, no network call needed) -- real bug found live: the
+    Aggregate Winner banner scored USDC #1 (huge real volume/liquidity/
+    conviction, mathematically correct, but useless for a degen-plays
+    feature). The dust floor (market-cap/liquidity minimum) is applied
+    later in aggregate_score.compute_aggregate_scores(), where real
+    market-cap data is already being fetched per candidate anyway."""
     breadth: dict[str, int] = {}
     symbol_by_addr: dict[str, Optional[str]] = {}
 
     def touch(addr: Optional[str], symbol: Optional[str] = None):
-        if not addr:
+        if not addr or is_major_or_stable(symbol, addr):
             return
         breadth[addr] = breadth.get(addr, 0) + 1
         if symbol and not symbol_by_addr.get(addr):

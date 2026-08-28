@@ -66,10 +66,24 @@ STEP 2 -- Five real, independently-sourced component scores per candidate,
 
 STEP 3 -- DISQUALIFICATION (hard, overrides any score -- a disqualified
   token can never be the winner regardless of how high it scores):
-    a) manipulation_flags non-empty in pumpfun_premigration_tokens for
+    a) MAJOR/STABLECOIN EXCLUSION (degen_filters.is_major_or_stable) --
+       real bug found live 2026-08-28: this scorer's own math correctly
+       picked USDC as #1 (huge real volume/liquidity/conviction), which
+       is mathematically right but useless for a degen-plays feature.
+       Address-checked first (robust against corrupted symbol data --
+       token_wallet_roles had USDC's real mint labeled "penny" among
+       dozens of other unrelated symbols, a separate upstream bug), then
+       symbol-checked as a catch-all. See degen_filters.py's own
+       docstring for the full list and reasoning.
+    b) DUST FLOOR (degen_filters.passes_dust_floor) -- real bug found
+       live: no floor at all let pump.fun's leader slot show a ~$10-mcap
+       dead token. Reuses routers/alpha.py's own RUG_MCAP_FLOOR ($7,000,
+       already owner-approved) rather than inventing a new number; falls
+       back to real liquidity when market cap is genuinely unknown.
+    c) manipulation_flags non-empty in pumpfun_premigration_tokens for
        this mint (real, persisted wash-trading detection --
        pumpfun_tier_scanner.py's own score_tokens(), see that daemon).
-    b) live mint/freeze-authority check via Helius RPC (same real check
+    d) live mint/freeze-authority check via Helius RPC (same real check
        /rug-check already performs) -- an active mint authority (can print
        unlimited supply) or freeze authority (can freeze holder wallets)
        disqualifies. Cached 10 min per mint to bound RPC calls across the
@@ -92,6 +106,7 @@ import aiosqlite
 from .db import get_db
 from .routers.alpha import _dexscreener_mcap
 from .wallet_pruning import WHALE_BALANCE_USD
+from .degen_filters import is_major_or_stable, passes_dust_floor
 
 logger = logging.getLogger(__name__)
 
@@ -194,21 +209,28 @@ async def _whale_presence(mint: str, db) -> bool:
     return (await cur.fetchone()) is not None
 
 
-async def _volume_24h(mint: str, pumpfun_volume_by_mint: dict) -> float:
-    """GeckoTerminal/DexScreener volume via the already-shared
-    _dexscreener_mcap snapshot (DexScreener's liquidity/volume-aware pair
-    selection), falling back to pump.fun's own persisted volume_sol_total
-    (converted to a comparable magnitude, not USD -- both are just used as
-    a relative ranking input within this candidate pool, never displayed
-    as an absolute dollar figure interchangeably)."""
+async def _market_snapshot(mint: str, pumpfun_row: Optional[dict]) -> dict:
+    """One real market-data fetch per candidate, reused for BOTH the
+    volume_momentum component and the dust-floor check (previously two
+    separate concerns risked drifting -- combined so there's exactly one
+    source of truth per candidate per request).
+
+    volume: DexScreener liquidity_usd (real pair depth) if available,
+    else pump.fun's own persisted volume_sol_total (a comparable relative
+    magnitude within this pool, never shown as an interchangeable dollar
+    figure). market_cap/liquidity_usd: DexScreener's real numbers if
+    available, else pump.fun's own persisted market_cap_usd for
+    pre-migration tokens DexScreener hasn't indexed yet."""
     snap = await _dexscreener_mcap(mint)
-    if isinstance(snap, dict) and snap.get("liquidity_usd"):
-        # DexScreener's Token schema (see moonshot/dexscreener docs) ties
-        # liquidity to real pair depth; used here only as a same-token
-        # relative-volume proxy when direct h24 volume isn't part of the
-        # already-fetched snapshot.
-        return float(snap["liquidity_usd"])
-    return float(pumpfun_volume_by_mint.get(mint, 0.0))
+    snap = snap if isinstance(snap, dict) else {}
+    pf_volume = float((pumpfun_row or {}).get("volume_sol_total") or 0.0)
+    pf_mcap = (pumpfun_row or {}).get("market_cap_usd")
+    volume = float(snap["liquidity_usd"]) if snap.get("liquidity_usd") else pf_volume
+    return {
+        "volume": volume,
+        "market_cap": snap.get("market_cap") if snap.get("market_cap") is not None else pf_mcap,
+        "liquidity_usd": snap.get("liquidity_usd"),
+    }
 
 
 def _normalize(values: dict[str, float]) -> dict[str, float]:
@@ -243,20 +265,30 @@ async def compute_aggregate_scores(
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         pumpfun_rows = await (await db.execute(
-            "SELECT mint, volume_sol_total FROM pumpfun_premigration_tokens WHERE mint IN ({})".format(
+            "SELECT mint, volume_sol_total, market_cap_usd FROM pumpfun_premigration_tokens WHERE mint IN ({})".format(
                 ",".join("?" * len(addresses))
             ),
             addresses,
         )).fetchall()
-        pumpfun_volume_by_mint = {r["mint"]: r["volume_sol_total"] for r in pumpfun_rows}
+        pumpfun_by_mint = {r["mint"]: dict(r) for r in pumpfun_rows}
 
         raw: dict[str, dict] = {}
         disqualified: list[dict] = []
+        candidate_meta: dict[str, Optional[str]] = {}
         for c in candidates:
             addr = c.get("address")
-            if not addr or addr in raw:
+            if not addr or addr in raw or addr in candidate_meta:
                 continue
             symbol = c.get("symbol")
+            candidate_meta[addr] = symbol
+
+            if is_major_or_stable(symbol, addr):
+                # Real bug fixed here: majors/stablecoins (USDC scored #1
+                # by this engine's own math -- high real volume/liquidity/
+                # conviction, but useless for a degen-plays feature) are
+                # excluded outright, not just down-weighted.
+                disqualified.append({"address": addr, "symbol": symbol, "reason": "major/stablecoin token, excluded from degen scoring"})
+                continue
 
             flags = await _pumpfun_manipulation_flags(addr, db)
             if flags:
@@ -274,14 +306,28 @@ async def compute_aggregate_scores(
                 "platform_breadth": c.get("platform_breadth", 0),
             }
 
-    # Volume + rug check run outside the DB connection (real network calls) --
-    # bounded concurrency over the (small) surviving candidate set.
+    # Market data (volume + market cap, for both the volume_momentum
+    # component and the dust-floor check) + rug check run outside the DB
+    # connection (real network calls) -- bounded concurrency over the
+    # (small) surviving candidate set.
     surviving = list(raw.keys())
-    volumes = await asyncio.gather(
-        *[_volume_24h(a, pumpfun_volume_by_mint) for a in surviving], return_exceptions=True
+    snapshots = await asyncio.gather(
+        *[_market_snapshot(a, pumpfun_by_mint.get(a)) for a in surviving], return_exceptions=True
     )
-    for a, v in zip(surviving, volumes):
-        raw[a]["volume_momentum"] = v if isinstance(v, (int, float)) else 0.0
+    for a, snap in zip(surviving, snapshots):
+        snap = snap if isinstance(snap, dict) else {"volume": 0.0, "market_cap": None, "liquidity_usd": None}
+        raw[a]["volume_momentum"] = snap["volume"]
+        raw[a]["_market_cap"] = snap["market_cap"]
+        raw[a]["_liquidity_usd"] = snap["liquidity_usd"]
+
+    # Dust floor -- real bug fixed here: pump.fun's platform-leader slot
+    # showed a ~$10-mcap dead token; the aggregate scorer had no floor at
+    # all before this. Reuses routers/alpha.py's own RUG_MCAP_FLOOR value
+    # (see degen_filters.py's module docstring) rather than a new number.
+    for addr in list(raw.keys()):
+        if not passes_dust_floor(raw[addr].pop("_market_cap"), raw[addr].pop("_liquidity_usd")):
+            disqualified.append({"address": addr, "symbol": raw[addr]["symbol"], "reason": "below minimum market-cap/liquidity floor (dust)"})
+            del raw[addr]
 
     if helius_key:
         risk_checks = await asyncio.gather(

@@ -87,10 +87,13 @@ async def test_pumpfun_leader_none_when_no_live_tokens():
 @pytest.mark.asyncio
 async def test_pumpfun_leader_surfaces_manipulation_flags():
     async with aiosqlite.connect(DB_PATH) as db:
+        # market_cap_usd must clear degen_filters.MIN_MARKET_CAP_USD ($7,000)
+        # or the real dust floor filters this row out before the
+        # manipulation-flag surfacing this test actually checks ever runs.
         await db.execute(
             "INSERT INTO pumpfun_premigration_tokens (mint, symbol, market_cap_usd, score, manipulation_flags, evicted, migrated) "
             "VALUES (?,?,?,?,?,0,0)",
-            ("FlaggedMint111111111111111111111111111", "FLAG", 5000.0, 30.0,
+            ("FlaggedMint111111111111111111111111111", "FLAG", 25000.0, 30.0,
              '["low_unique_buyer_diversity"]'),
         )
         await db.commit()
@@ -102,7 +105,19 @@ async def test_pumpfun_leader_surfaces_manipulation_flags():
 
 
 @pytest.mark.asyncio
-async def test_vantage_conviction_leader_sums_smart_wallet_overlap():
+async def test_vantage_conviction_leader_sums_smart_wallet_overlap(monkeypatch):
+    # _vantage_conviction_leader enriches its top candidates with a real
+    # _dexscreener_mcap network call to check the dust floor -- mocked here
+    # (no network in tests) to return a market cap that clears
+    # degen_filters.MIN_MARKET_CAP_USD, isolating this test to the SQL
+    # conviction-ranking logic it actually exists to verify.
+    import backend.routers.degen as degen_module
+
+    async def fake_mcap(mint):
+        return {"market_cap": 50_000.0, "liquidity_usd": 10_000.0}
+
+    monkeypatch.setattr(degen_module, "_dexscreener_mcap", fake_mcap)
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO wallet_reputation (wallet_address, display_name, copy_trade_score) VALUES (?,?,?)",
@@ -140,3 +155,69 @@ async def test_vantage_conviction_leader_sums_smart_wallet_overlap():
 async def test_vantage_conviction_leader_none_when_no_overlap():
     leader = await _vantage_conviction_leader()
     assert leader is None
+
+
+@pytest.mark.asyncio
+async def test_pumpfun_leader_skips_dust_for_higher_market_cap_candidate():
+    """Real bug regression: pump.fun's slot showed a ~$10-mcap dead token.
+    A dust-tier top-score row must be skipped in favor of the next
+    real-mcap candidate, not returned (and not silently return None
+    either, when a real candidate exists further down)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO pumpfun_premigration_tokens (mint, symbol, market_cap_usd, score, manipulation_flags, evicted, migrated) "
+            "VALUES (?,?,?,?,?,0,0)",
+            ("DustMint1111111111111111111111111111111", "DUST", 10.0, 99.0, "[]"),
+        )
+        await db.execute(
+            "INSERT INTO pumpfun_premigration_tokens (mint, symbol, market_cap_usd, score, manipulation_flags, evicted, migrated) "
+            "VALUES (?,?,?,?,?,0,0)",
+            ("RealMint11111111111111111111111111111111", "REAL", 25000.0, 40.0, "[]"),
+        )
+        await db.commit()
+
+    leader = await _pumpfun_leader()
+
+    assert leader is not None
+    assert leader["symbol"] == "REAL"
+
+
+@pytest.mark.asyncio
+async def test_vantage_conviction_leader_skips_major_for_lower_conviction_degen(monkeypatch):
+    """Real bug regression: this slot showed USDC's real mint (labeled
+    "penny" due to a separate upstream data-corruption bug) as the #1
+    conviction pick. A major/stablecoin at the top of the conviction
+    ranking must be skipped in favor of the next real degen candidate."""
+    import backend.routers.degen as degen_module
+
+    async def fake_mcap(mint):
+        return {"market_cap": 50_000.0, "liquidity_usd": 10_000.0}
+
+    monkeypatch.setattr(degen_module, "_dexscreener_mcap", fake_mcap)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO wallet_reputation (wallet_address, display_name, copy_trade_score) VALUES (?,?,?)",
+            ("BigWallet111111111111111111111111111111", "Big", 100.0),
+        )
+        await db.execute(
+            "INSERT INTO wallet_reputation (wallet_address, display_name, copy_trade_score) VALUES (?,?,?)",
+            ("SmallWallet11111111111111111111111111111", "Small", 5.0),
+        )
+        # USDC's real mint -- highest conviction, but must be excluded.
+        await db.execute(
+            "INSERT INTO token_wallet_roles (mint, symbol, wallet_address, role) VALUES (?,?,?,?)",
+            ("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "penny", "BigWallet111111111111111111111111111111", "top_holder"),
+        )
+        # A real degen token, lower conviction -- must win instead.
+        await db.execute(
+            "INSERT INTO token_wallet_roles (mint, symbol, wallet_address, role) VALUES (?,?,?,?)",
+            ("RealDegenMint111111111111111111111111111", "DEGEN", "SmallWallet11111111111111111111111111111", "first_buyer"),
+        )
+        await db.commit()
+
+    leader = await _vantage_conviction_leader()
+
+    assert leader is not None
+    assert leader["address"] == "RealDegenMint111111111111111111111111111"
+    assert leader["symbol"] == "DEGEN"

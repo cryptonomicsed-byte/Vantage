@@ -303,6 +303,47 @@ async def coingecko_volatility(symbol: str, days: int = 7) -> Optional[dict]:
     return None
 
 
+async def coingecko_trending(limit: int = 15) -> list[dict]:
+    """CoinGecko's real /search/trending -- coins people are actively
+    searching for right now, genuinely biased toward small/mid-cap
+    movers (confirmed live: top result had market_cap_rank ~870), unlike
+    coingecko_markets() which is always market-cap-ranked and therefore
+    structurally can never surface anything but a major/blue-chip. Added
+    specifically because degen.py's CoinGecko platform-leader slot was
+    showing BTC (a real bug -- "top by market cap" cannot be a degen
+    pick by definition). Cached 120s."""
+    key = f"cg_trending:{limit}"
+    cached = _cache_get(key, 120)
+    if cached is not None:
+        return cached
+    data = await _get_json("https://api.coingecko.com/api/v3/search/trending", timeout=10)
+    rows: list[dict] = []
+    if isinstance(data, dict):
+        for c in (data.get("coins") or [])[:limit]:
+            item = c.get("item") or {}
+            price_data = item.get("data") or {}
+            # market_cap comes back as a pre-formatted display string
+            # ("$18,083,088"), not a number -- real, confirmed live
+            # 2026-08-28. Parse to float; None if unparseable/absent.
+            mc_raw = price_data.get("market_cap")
+            mc_usd = None
+            if isinstance(mc_raw, str):
+                cleaned = re.sub(r"[^0-9.]", "", mc_raw)
+                mc_usd = float(cleaned) if cleaned else None
+            elif isinstance(mc_raw, (int, float)):
+                mc_usd = float(mc_raw)
+            rows.append({
+                "symbol": (item.get("symbol") or "").upper(),
+                "name": item.get("name"),
+                "market_cap_rank": item.get("market_cap_rank"),
+                "price_usd": price_data.get("price"),
+                "market_cap_usd": mc_usd,
+            })
+    if rows:
+        _cache_put(key, rows)
+    return rows
+
+
 async def coingecko_global() -> dict:
     """Global market metrics: total mcap, 24h volume, BTC dominance. Cached 300s."""
     cached = _cache_get("cg_global", 300)
