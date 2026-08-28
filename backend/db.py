@@ -1787,6 +1787,35 @@ CREATE TABLE IF NOT EXISTS external_iranti_memories (
             await db.execute("ALTER TABLE tracked_wallets ADD COLUMN notes TEXT DEFAULT ''")
         except Exception:
             pass
+        # degen_score/tokens_traded/unique_tokens/trade_count/balance_usd/
+        # balance_checked_at existed on production (confirmed via .schema)
+        # with no matching migration anywhere in this codebase -- schema
+        # drift from undocumented manual DB surgery at some point. Added
+        # here so a fresh DB (tests, a new deploy) actually reproduces the
+        # real schema every reader of this table (alpha.py's /moneyflow,
+        # wallet_pruning.py) assumes exists.
+        for col_ddl in (
+            "degen_score INTEGER DEFAULT 0",
+            "tokens_traded TEXT DEFAULT ''",
+            "unique_tokens INTEGER DEFAULT 0",
+            "trade_count INTEGER DEFAULT 0",
+            "balance_usd REAL DEFAULT 0",
+            "balance_checked_at TEXT",
+        ):
+            try:
+                await db.execute(f"ALTER TABLE tracked_wallets ADD COLUMN {col_ddl}")
+            except Exception:
+                pass
+        # Archival for wallet_pruning.py -- NULL means active/counted, a
+        # timestamp means it failed the activity/signal bar and is excluded
+        # from /api/moneyflow and default listings, but never hard-deleted
+        # (reversible: a wallet that goes active again gets re-activated,
+        # not re-inserted from scratch).
+        try:
+            await db.execute("ALTER TABLE tracked_wallets ADD COLUMN archived_at TEXT")
+        except Exception:
+            pass
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_tracked_wallets_archived ON tracked_wallets(archived_at)")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS wallet_edges (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
