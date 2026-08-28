@@ -390,22 +390,45 @@ async def exchange_spreads(symbol: str = "BTC") -> dict:
     return out
 
 
+# Public, base-tier (lowest-volume, no fee-token discount) spot taker fees,
+# published by each exchange as of general knowledge -- NOT fetched live, and
+# real fees vary by account tier/fee-token discounts, so net_spread_pct below
+# is a conservative estimate, not a guarantee. Documented here rather than
+# left as a magic number, and the field is named/labeled so callers can't
+# mistake it for the raw spread.
+_TAKER_FEE_PCT = {
+    "binance": 0.10, "okx": 0.10, "kucoin": 0.10,
+    "coinbase": 0.60, "gemini": 0.40,
+}
+
+
 async def real_arbitrage(symbols: Optional[list[str]] = None) -> list[dict]:
-    """Real cross-exchange spreads for a basket of liquid majors, ranked by spread."""
+    """Real cross-exchange spreads for a basket of liquid majors, ranked by
+    net (fee-adjusted) spread. Raw spread_pct alone overstates real
+    profitability -- executing an arb costs a taker fee on both legs, and a
+    "5%" raw spread between two high-fee venues can be a fraction of that
+    after fees, while a "0.3%" spread between two low-fee venues can be
+    genuinely more actionable. net_spread_pct subtracts both legs' estimated
+    taker fees (see _TAKER_FEE_PCT) so ranking reflects real opportunity."""
     symbols = symbols or ["BTC", "ETH", "SOL", "XRP", "DOGE", "AVAX", "LINK"]
     spreads = await asyncio.gather(*[exchange_spreads(s) for s in symbols])
     opps = []
     for s in spreads:
         if s.get("buy_venue") and s.get("spread_pct", 0) > 0:
+            buy_fee = _TAKER_FEE_PCT.get(s["buy_venue"], 0.20)
+            sell_fee = _TAKER_FEE_PCT.get(s["sell_venue"], 0.20)
+            net = round(s["spread_pct"] - buy_fee - sell_fee, 3)
             opps.append({
                 "route": f"{s['buy_venue']}→{s['sell_venue']}",
                 "pair": f"{s['symbol']}/USD",
                 "spread_pct": s["spread_pct"],
+                "net_spread_pct": net,
+                "est_fees_pct": round(buy_fee + sell_fee, 2),
                 "buy_price": s.get("buy_price"),
                 "sell_price": s.get("sell_price"),
                 "venues": len(s.get("venues", {})),
             })
-    opps.sort(key=lambda o: -o["spread_pct"])
+    opps.sort(key=lambda o: -o["net_spread_pct"])
     return opps
 
 
@@ -526,8 +549,14 @@ async def market_breadth() -> dict:
     if dom:
         indicators.append(f"BTC dominance: {round(dom, 1)}%")
 
+    if avg is not None:
+        # Exact 0.0 avg (perfectly flat breadth) previously fell through to
+        # "bearish" -- `(avg or 0) > 0` treats 0 the same as missing data.
+        overall = "bullish" if avg > 0 else "bearish" if avg < 0 else "neutral"
+    else:
+        overall = "bullish" if "greed" in mood else "bearish"
     out = {
-        "overall": "bullish" if (avg or 0) > 0 else "bearish" if avg is not None else ("greed" in mood and "bullish" or "bearish"),
+        "overall": overall,
         "fear_greed": score,
         "mood": mood,
         "gainers_pct": breadth_pct if breadth_pct is not None else 0,
@@ -540,20 +569,30 @@ async def market_breadth() -> dict:
 
 
 async def top_movers(limit: int = 8) -> list[dict]:
-    """Real alpha proxy: top gainers from the top-100 by 24h change + volume.
-    CoinPaprika primary (datacenter-friendly), CoinGecko fallback."""
+    """Real alpha proxy: top movers (either direction) from the top-100 by
+    24h change magnitude + volume. CoinPaprika primary (datacenter-friendly),
+    CoinGecko fallback.
+
+    Was gainers-only (sorted by raw signed change_24h, descending) despite
+    `conviction` already being computed from abs(change_24h) -- a -40% crash
+    scored the same conviction as a +40% pump but was silently discarded
+    before ever reaching the ranked list. Now ranks by magnitude so both
+    directions surface, and callers get an explicit `direction` field
+    instead of having to infer it from the sign of change_24h themselves."""
     markets = await coinpaprika_markets(100) or await coingecko_markets(100)
     ranked = [m for m in markets if isinstance(m.get("change_24h"), (int, float))]
-    ranked.sort(key=lambda m: -(m["change_24h"] or 0))
+    ranked.sort(key=lambda m: -abs(m["change_24h"] or 0))
     out = []
     for m in ranked[:limit]:
+        change = m["change_24h"]
         out.append({
             "symbol": m["symbol"],
             "price": m["price"],
-            "change_24h": round(m["change_24h"], 2),
+            "change_24h": round(change, 2),
             "volume_24h": m["volume_24h"],
-            "conviction": round(min(5.0, abs(m["change_24h"]) / 5), 2),
-            "signal": "breakout" if m["change_24h"] > 10 else "momentum",
+            "conviction": round(min(5.0, abs(change) / 5), 2),
+            "direction": "up" if change >= 0 else "down",
+            "signal": "breakout" if abs(change) > 10 else "momentum",
         })
     return out
 
@@ -648,7 +687,19 @@ async def ohlc(symbol: str, interval: str = "1d", limit: int = 200) -> list[dict
 
 # ── DeFi yields (DefiLlama) ─────────────────────────────────────────────────────────
 async def defillama_yields(limit: int = 25, min_tvl: float = 1_000_000) -> list[dict]:
-    """Top yield pools by APY with a TVL floor, from DefiLlama. Cached 300s."""
+    """Top yield pools by APY with a TVL floor, from DefiLlama. Cached 300s.
+
+    Sorting by raw APY with no other context surfaces junk: DefiLlama's own
+    `outlier` flag exists specifically to mark pools whose APY figure is
+    known-broken/gameable (a stale oracle, a just-launched farm with no
+    real depth yet, etc.) -- those are dropped here rather than ever being
+    the #1 result. For what does clear the bar, apyBase (organic trading/
+    lending yield) vs apyReward (emissions/incentive-token yield, which
+    dries up whenever the project stops subsidizing it) and DefiLlama's own
+    ilRisk/predictedClass are surfaced too -- a 400% APY that's 395% reward
+    emissions and 5% real yield is a very different pool from one earning
+    400% organically, and the current bare `apy` figure doesn't distinguish
+    them at all."""
     key = f"yields:{limit}:{int(min_tvl)}"
     cached = _cache_get(key, 300)
     if cached is not None:
@@ -659,14 +710,21 @@ async def defillama_yields(limit: int = 25, min_tvl: float = 1_000_000) -> list[
     for p in pools:
         tvl = p.get("tvlUsd") or 0
         apy = p.get("apy")
+        if p.get("outlier"):
+            continue
         if tvl >= min_tvl and isinstance(apy, (int, float)):
+            pred = p.get("predictions") or {}
             rows.append({
                 "pool": p.get("symbol"),
                 "project": p.get("project"),
                 "chain": p.get("chain"),
                 "apy": round(apy, 2),
+                "apy_base": round(p["apyBase"], 2) if isinstance(p.get("apyBase"), (int, float)) else None,
+                "apy_reward": round(p["apyReward"], 2) if isinstance(p.get("apyReward"), (int, float)) else None,
                 "tvl_usd": round(tvl, 0),
                 "stablecoin": bool(p.get("stablecoin")),
+                "il_risk": p.get("ilRisk"),
+                "predicted_direction": pred.get("predictedClass"),
             })
     rows.sort(key=lambda r: -(r["apy"] or 0))
     rows = rows[:limit]
@@ -1374,6 +1432,12 @@ async def backtest(symbol: str, days: int = 90, fast: int = 10, slow: int = 30) 
     position = 0
     entry = 0.0
     rets: list[float] = []
+    # Mark-to-market equity curve (starts at 1.0) so max drawdown reflects
+    # the real day-by-day ride, not just the between-trade returns -- a
+    # strategy can "beat buy-and-hold" on total return while still passing
+    # through a much deeper trough along the way than buy-and-hold ever did,
+    # and total-return-only figures hide that entirely.
+    equity = [1.0]
     for i in range(slow, len(prices)):
         f, s = sma(prices, fast, i), sma(prices, slow, i)
         if f > s and position == 0:
@@ -1381,6 +1445,7 @@ async def backtest(symbol: str, days: int = 90, fast: int = 10, slow: int = 30) 
         elif f < s and position == 1:
             rets.append(prices[i] / entry - 1)
             position = 0
+        equity.append(equity[-1] * (prices[i] / entry) if position == 1 and i > slow and prices[i - 1] else equity[-1])
     if position == 1:
         rets.append(prices[-1] / entry - 1)
 
@@ -1390,6 +1455,13 @@ async def backtest(symbol: str, days: int = 90, fast: int = 10, slow: int = 30) 
     strat_return = (strat - 1) * 100
     bh_return = (prices[-1] / prices[0] - 1) * 100
     wins = len([r for r in rets if r > 0])
+
+    peak = equity[0]
+    max_dd = 0.0
+    for e in equity:
+        peak = max(peak, e)
+        max_dd = min(max_dd, (e / peak - 1))
+
     out = {
         "symbol": symbol,
         "days": days,
@@ -1400,6 +1472,7 @@ async def backtest(symbol: str, days: int = 90, fast: int = 10, slow: int = 30) 
         "win_rate_pct": round(wins / len(rets) * 100, 1) if rets else 0,
         "beat_buy_hold": strat_return > bh_return,
         "data_points": len(prices),
+        "max_drawdown_pct": round(max_dd * 100, 2),
     }
     return _cache_put(key, out)
 

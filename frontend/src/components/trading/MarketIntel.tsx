@@ -146,15 +146,19 @@ function AresArbitrage() {
   if (loading && !data) return <div style={{ color: 'var(--muted)', padding: 20 }}>Loading…</div>
   return (
     <div>
-      <div className="ares-section-title">{opps.length} Arbitrage Opportunities</div>
+      <div className="ares-section-title">{opps.length} Arbitrage Opportunities <span style={{ fontSize: 11, color: 'var(--muted)' }}>(net = spread minus est. taker fees both legs)</span></div>
       <table className="ares-table">
-        <thead><tr><th>Route</th><th>Pair</th><th>Spread</th><th>Buy</th><th>Sell</th></tr></thead>
+        <thead><tr><th>Route</th><th>Pair</th><th>Raw Spread</th><th>Est. Fees</th><th>Net Spread</th><th>Buy</th><th>Sell</th></tr></thead>
         <tbody>
           {opps.map((o: any, i: number) => (
-            <tr key={i} className={o.spread_pct > 3 ? 'threat-high' : ''}>
+            <tr key={i} className={(o.net_spread_pct ?? o.spread_pct) > 3 ? 'threat-high' : ''}>
               <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{o.route}</td>
               <td>{o.pair && o.pair.includes('/') ? <TokenLink symbol={o.pair.split('/')[0]} /> : o.pair}</td>
-              <td style={{ color: o.spread_pct > 3 ? 'var(--danger)' : 'var(--warning)', fontWeight: 700 }}>{o.spread_pct?.toFixed(1)}%</td>
+              <td style={{ color: 'var(--muted)' }}>{o.spread_pct?.toFixed(2)}%</td>
+              <td style={{ color: 'var(--muted)' }}>−{o.est_fees_pct?.toFixed(2) ?? '?'}%</td>
+              <td style={{ color: (o.net_spread_pct ?? 0) > 0 ? ((o.net_spread_pct ?? 0) > 3 ? 'var(--danger)' : 'var(--warning)') : 'var(--muted)', fontWeight: 700 }}>
+                {o.net_spread_pct !== undefined ? `${o.net_spread_pct.toFixed(2)}%` : '—'}
+              </td>
               <td>${o.buy_price?.toFixed(2)}</td>
               <td>${o.sell_price?.toFixed(2)}</td>
             </tr>
@@ -262,12 +266,15 @@ function AresAlpha() {
     <div>
       <div className="ares-section-title">{items.length} Active Signals</div>
       <table className="ares-table">
-        <thead><tr><th>Token</th><th>Conviction</th><th>Price</th><th>Volume 24h</th></tr></thead>
+        <thead><tr><th>Token</th><th>Conviction</th><th>24h Change</th><th>Price</th><th>Volume 24h</th></tr></thead>
         <tbody>
           {items.map((i: any, idx: number) => (
             <tr key={idx}>
               <td style={{ fontWeight: 600 }}>{i.symbol ? <TokenLink symbol={i.symbol} ca={i.ca || i.address} chain={i.chain} /> : '?'}</td>
               <td style={{ color: (i.conviction||0) > 3 ? 'var(--danger)' : 'var(--warning)', fontWeight: 700 }}>{(i.conviction||0).toFixed(2)}</td>
+              <td style={{ fontFamily: 'monospace', color: i.direction === 'down' ? 'var(--danger)' : 'var(--green)', fontWeight: 700 }}>
+                {i.direction === 'down' ? '▼' : '▲'} {(i.change_24h||0).toFixed(2)}%
+              </td>
               <td style={{ fontFamily: 'monospace' }}>${(i.price||0).toFixed(8)}</td>
               <td style={{ fontFamily: 'monospace' }}>${(i.volume_24h||0).toLocaleString()}</td>
             </tr>
