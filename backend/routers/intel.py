@@ -654,11 +654,21 @@ async def add_watchlist_wallet(req: WatchlistAddRequest, agent: dict = Depends(g
     return dict(row)
 
 @router.get("/watchlist")
-async def list_watchlist_wallets(agent: dict = Depends(get_agent)):
-    """List every tracked wallet — shared across all agents, like /trace and /whales."""
+async def list_watchlist_wallets(agent: dict = Depends(get_agent), include_archived: bool = Query(False)):
+    """List every ACTIVE tracked wallet — shared across all agents, like /trace
+    and /whales. Excludes archived_at IS NOT NULL rows by default (see
+    backend/wallet_pruning.py) -- without this, every consumer of this
+    endpoint (including MoneyFlowGraph.tsx's "My Tracked Wallets" filter)
+    sees the full historical tracked_wallets count, not the real active
+    set. Pass include_archived=true for the rare case of wanting the
+    unfiltered list (e.g. an admin/audit view)."""
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM tracked_wallets ORDER BY created_at DESC") as cur:
+        query = "SELECT * FROM tracked_wallets"
+        if not include_archived:
+            query += " WHERE archived_at IS NULL"
+        query += " ORDER BY created_at DESC"
+        async with db.execute(query) as cur:
             rows = [dict(r) for r in await cur.fetchall()]
     return {"wallets": rows, "count": len(rows)}
 
@@ -749,12 +759,15 @@ async def remove_blacklisted_wallet(entry_id: int, agent: dict = Depends(get_age
 
 @router.get("/watchlist/refresh")
 async def refresh_watchlist_wallets(agent: dict = Depends(get_agent)):
-    """Re-run the wallet trace for every tracked wallet at once (bounded
-    concurrency, reusing address_lookup's own 20s cache) and flag large recent
-    balance moves as whale activity."""
+    """Re-run the wallet trace for every ACTIVE tracked wallet at once
+    (bounded concurrency, reusing address_lookup's own 20s cache) and flag
+    large recent balance moves as whale activity. Skips archived_at IS NOT
+    NULL rows (see backend/wallet_pruning.py) -- before this filter existed,
+    every call here re-traced all 86k+ tracked_wallets rows regardless of
+    activity, most of which had never shown any real signal."""
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM tracked_wallets ORDER BY created_at DESC") as cur:
+        async with db.execute("SELECT * FROM tracked_wallets WHERE archived_at IS NULL ORDER BY created_at DESC") as cur:
             rows = [dict(r) for r in await cur.fetchall()]
     if not rows:
         return {"wallets": [], "count": 0}

@@ -182,6 +182,7 @@ async def smart_wallets(limit: int=20, x_agent_key: str=Header(...)):
             FROM tracked_wallets w
             WHERE w.chain IN ('solana','pumpfun')
               AND w.address_type != 'exchange'
+              AND w.archived_at IS NULL
               AND {label_exclusions}
             ORDER BY edge_count DESC LIMIT ?
         """, (limit,))
