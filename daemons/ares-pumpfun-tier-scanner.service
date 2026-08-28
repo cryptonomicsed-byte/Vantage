@@ -1,0 +1,36 @@
+[Unit]
+# Real-time PumpPortal WebSocket tracker for pre-migration bonding-curve
+# tokens — populates pumpfun_premigration_tokens (score, market_cap_usd,
+# manipulation_flags) that routers/degen.py's platform-leaders and
+# aggregate-score endpoints read directly. Was ad-hoc nohup, no restart
+# policy -- found dead 2026-08-28 after crashing from repeated SQLite
+# lock contention ("database is locked"), silently leaving the whole
+# table frozen for 24+ hours with nothing to restart it. Migrated to a
+# real managed unit with Restart=always so a future crash from the same
+# transient contention self-heals instead of silently going stale again.
+Description=ares-pumpfun-tier-scanner — real-time pre-migration bonding-curve tier tracker
+After=network.target vantage.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ares/Vantage
+ExecStart=/opt/ares/venv/bin/python3 -u daemons/pumpfun_tier_scanner.py
+Restart=always
+RestartSec=10
+
+# root, matching the other already-deployed daemons that write to the
+# same vantage.db (vantage-wallet-tracker.service, etc) -- not hardened
+# to a dedicated user here since that would need verifying DB file
+# permissions under the new user, which isn't testable without VPS
+# access at unit-authoring time. Worth revisiting alongside the other
+# same-pattern daemons, not a one-off change for this unit alone.
+User=root
+
+# This daemon already prints its own [HH:MM:SS] message log -- kept
+# going to the same file (not journal) so existing tooling/diagnostics
+# that tail ares_logs/pumpfun_tier_scanner.log keep working unchanged.
+StandardOutput=append:/opt/ares/ares_logs/pumpfun_tier_scanner.log
+StandardError=append:/opt/ares/ares_logs/pumpfun_tier_scanner.log
+
+[Install]
+WantedBy=multi-user.target

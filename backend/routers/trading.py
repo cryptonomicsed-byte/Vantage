@@ -1280,12 +1280,24 @@ def _decode_private_key_bytes(plaintext_key: str) -> bytes:
         return b
     raise ValueError(f"Unrecognized private key format/length ({len(b)} bytes)")
 
+def _jupiter_headers() -> dict:
+    """x-api-key header for api.jup.ag, if configured. Same key + same
+    empirical verification as execution_engine.py's _jupiter_headers()
+    (2026-08-28: x-ratelimit-remaining 4→9 keyless vs keyed, confirmed
+    live) -- read directly via os.environ since JUPITER_API_KEY is
+    deployed unprefixed, not through backend.config.settings (which would
+    require the VANTAGE_ prefix). Empty dict when unset -- keyless
+    (0.5 RPS) is a real, working fallback, not a broken state."""
+    key = os.environ.get("JUPITER_API_KEY", "")
+    return {"x-api-key": key} if key else {}
+
+
 async def _jupiter_quote(input_mint: str, output_mint: str, amount_lamports: int, slippage_bps: int = 300) -> dict:
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.get("https://api.jup.ag/swap/v1/quote", params={
             "inputMint": input_mint, "outputMint": output_mint,
             "amount": amount_lamports, "slippageBps": slippage_bps,
-        })
+        }, headers=_jupiter_headers())
         r.raise_for_status()
         return r.json()
 
@@ -1295,7 +1307,7 @@ async def _jupiter_swap_tx(quote: dict, user_pubkey: str) -> str:
             "quoteResponse": quote, "userPublicKey": user_pubkey,
             "wrapAndUnwrapSol": True, "dynamicComputeUnitLimit": True,
             "prioritizationFeeLamports": "auto",
-        })
+        }, headers=_jupiter_headers())
         r.raise_for_status()
         return r.json().get("swapTransaction", "")
 
