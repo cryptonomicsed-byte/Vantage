@@ -10,6 +10,10 @@ interface Token {
   graduated?: boolean
   reason?: string
   address?: string
+  market_cap?: number | null
+  sell_buy_ratio?: number
+  buys_24h?: number
+  sells_24h?: number
 }
 
 interface MustBuyToken {
@@ -20,19 +24,23 @@ interface MustBuyToken {
   price_change_24h?: number
   source_count: number
   source_types: string[]
+  market_cap?: number | null
+  summary?: string
 }
 
 interface Theme {
   count: number
   tokens: string[]
   theme?: string
+  volume_24h?: number
 }
 
 interface Wallet {
   wallet: string
   label: string
-  edges?: number
-  last_seen?: string
+  edge_count?: number
+  hours_since?: number
+  status?: 'hot' | 'active' | 'dormant'
 }
 
 interface CopyWallet {
@@ -44,7 +52,11 @@ interface CopyWallet {
   first_buyer_count: number
   top_trader_count: number
   top_holder_count: number
+  deployer_count?: number
+  tokens_tracked?: number
   currently_hot_tokens: number
+  verified_call_count?: number
+  verified_avg_return_pct?: number
   reasoning: string
 }
 
@@ -53,6 +65,7 @@ interface ConvictionToken {
   symbol: string
   smart_wallet_count: number
   conviction_score: number
+  market_cap?: number | null
   smart_wallets: { wallet: string; display_name: string; copy_trade_score: number }[]
 }
 
@@ -119,16 +132,26 @@ export default function Top5Degen() {
   const [themes, setThemes] = useState<Theme[]>(() => loadCache('themes', []))
 
   useEffect(() => {
-    const themeMap: Record<string, { count: number; tokens: string[] }> = {}
+    // volume_24h summed per theme from data already fetched for `trending`
+    // (no extra API call) -- a theme's token COUNT alone doesn't say
+    // whether it's 5 dead tokens or 5 tokens moving real money.
+    const themeMap: Record<string, { count: number; tokens: string[]; volume_24h: number }> = {}
     ;(trending.items || []).forEach((t: any) => {
       const name = (t.name || t.symbol || '').toLowerCase()
-      if (name.includes('ai') || name.includes('agent')) { themeMap['AI Agents'] = themeMap['AI Agents'] || { count: 0, tokens: [] }; themeMap['AI Agents'].count++; themeMap['AI Agents'].tokens.push(t.symbol || t.name) }
-      else if (name.includes('meme') || name.includes('pepe') || name.includes('bonk')) { themeMap['Memes'] = themeMap['Memes'] || { count: 0, tokens: [] }; themeMap['Memes'].count++; themeMap['Memes'].tokens.push(t.symbol || t.name) }
-      else if (name.includes('bull') || name.includes('moon') || name.includes('100x')) { themeMap['Degen'] = themeMap['Degen'] || { count: 0, tokens: [] }; themeMap['Degen'].count++; themeMap['Degen'].tokens.push(t.symbol || t.name) }
-      else if (name) { themeMap['Other'] = themeMap['Other'] || { count: 0, tokens: [] }; themeMap['Other'].count++; themeMap['Other'].tokens.push(t.symbol || t.name) }
+      const vol = Number(t.volume_24h) || 0
+      const add = (key: string) => {
+        themeMap[key] = themeMap[key] || { count: 0, tokens: [], volume_24h: 0 }
+        themeMap[key].count++
+        themeMap[key].tokens.push(t.symbol || t.name)
+        themeMap[key].volume_24h += vol
+      }
+      if (name.includes('ai') || name.includes('agent')) add('AI Agents')
+      else if (name.includes('meme') || name.includes('pepe') || name.includes('bonk')) add('Memes')
+      else if (name.includes('bull') || name.includes('moon') || name.includes('100x')) add('Degen')
+      else if (name) add('Other')
     })
     if (Object.keys(themeMap).length > 0) {
-      const next = Object.entries(themeMap).map(([k, v]) => ({ theme: k, ...v })).sort((a, b) => b.count - a.count)
+      const next = Object.entries(themeMap).map(([k, v]) => ({ theme: k, ...v })).sort((a, b) => b.volume_24h - a.volume_24h)
       setThemes(next)
       saveCache('themes', next)
     }
@@ -189,8 +212,9 @@ export default function Top5Degen() {
                   }}>{s}</span>
                 ))}
               </span>
-              <span style={{ flex: 1, textAlign: 'right', color: 'var(--muted)', fontSize: 10 }}>
-                {t.volume_24h ? `$${(t.volume_24h / 1000).toFixed(0)}k` : ''}
+              <span style={{ flex: 1, textAlign: 'right', color: 'var(--muted)', fontSize: 10 }} title={t.summary}>
+                {t.market_cap ? `MC $${(t.market_cap / 1000).toFixed(0)}k` : t.market_cap === null ? 'MC n/a' : ''}
+                {t.volume_24h ? ` · Vol $${(t.volume_24h / 1000).toFixed(0)}k` : ''}
                 {t.price_change_24h != null ? ` · ${t.price_change_24h > 0 ? '+' : ''}${t.price_change_24h.toFixed(0)}%` : ''}
               </span>
               <span style={{ fontWeight: 700, color: '#a855f7', minWidth: 32, textAlign: 'right' }}>{t.score.toFixed(0)}</span>
@@ -219,7 +243,16 @@ export default function Top5Degen() {
               <span style={{ color: 'var(--muted)', fontSize: 10 }}>#{i + 1}</span>
               <span style={{ fontWeight: 600, color: '#8b5cf6', flex: 1, fontSize: 10 }}><WalletLink address={w.wallet} /></span>
               <span style={{ color: 'var(--muted)', fontSize: 10 }}>{w.label}</span>
-              <span style={{ fontWeight: 600, fontSize: 10 }}>{w.edges || ''}</span>
+              {w.status && (
+                <span style={{
+                  fontSize: 8, padding: '1px 5px', borderRadius: 3,
+                  background: w.status === 'hot' ? 'rgba(239,68,68,0.15)' : w.status === 'active' ? 'rgba(34,197,94,0.15)' : 'rgba(148,163,184,0.15)',
+                  color: w.status === 'hot' ? '#ef4444' : w.status === 'active' ? '#22c55e' : 'var(--muted)',
+                }} title={w.hours_since != null ? `last active ${w.hours_since.toFixed(1)}h ago` : ''}>
+                  {w.status}
+                </span>
+              )}
+              <span style={{ fontWeight: 600, fontSize: 10 }} title="wallet-graph edges">{w.edge_count ?? ''}</span>
             </div>
           ))}
         </div>
@@ -259,6 +292,15 @@ export default function Top5Degen() {
                     )}
                   </div>
                   <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 2 }}>{w.reasoning}</div>
+                  <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 2, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    {!!w.verified_call_count && (
+                      <span title="verified calls vs their realized outcome">
+                        📈 {w.verified_call_count} calls, avg {(w.verified_avg_return_pct ?? 0) > 0 ? '+' : ''}{(w.verified_avg_return_pct ?? 0).toFixed(0)}%
+                      </span>
+                    )}
+                    {!!w.tokens_tracked && <span>{w.tokens_tracked} tokens tracked</span>}
+                    {!!w.deployer_count && <span style={{ color: '#f59e0b' }} title="also deployed tokens -- weigh copy-trades accordingly">⚠️ {w.deployer_count} deploys</span>}
+                  </div>
                 </div>
                 <span style={{ fontWeight: 700, color: '#22d3ee', fontSize: 12, minWidth: 32, textAlign: 'right' }}>{w.copy_trade_score.toFixed(0)}</span>
               </div>
@@ -286,8 +328,14 @@ export default function Top5Degen() {
                 borderRadius: 6, border: '1px solid rgba(34,211,238,0.15)', fontSize: 11,
               }}>
                 <span style={{ color: 'var(--muted)', minWidth: 16 }}>#{i + 1}</span>
-                <span style={{ fontWeight: 600, color: '#fff', flex: 1 }}><TokenLink symbol={t.symbol} ca={t.mint} /></span>
-                <span style={{ fontSize: 9, color: 'var(--muted)' }}>{t.smart_wallet_count} wallet{t.smart_wallet_count === 1 ? '' : 's'}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ fontWeight: 600, color: '#fff' }}><TokenLink symbol={t.symbol} ca={t.mint} /></span>
+                  <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 1 }} title={t.smart_wallets.map(w => w.display_name || w.wallet.slice(0, 6)).join(', ')}>
+                    {t.market_cap ? `MC $${t.market_cap.toLocaleString(undefined, { maximumFractionDigits: 0 })} · ` : t.market_cap === null ? 'MC n/a · ' : ''}
+                    {t.smart_wallet_count} wallet{t.smart_wallet_count === 1 ? '' : 's'}
+                    {t.smart_wallets.length > 0 && `: ${t.smart_wallets.slice(0, 2).map(w => w.display_name || w.wallet.slice(0, 4) + '…').join(', ')}${t.smart_wallets.length > 2 ? ` +${t.smart_wallets.length - 2}` : ''}`}
+                  </div>
+                </div>
                 <span style={{ fontWeight: 700, color: '#22d3ee', fontSize: 12, minWidth: 36, textAlign: 'right' }}>{t.conviction_score.toFixed(0)}</span>
               </div>
             ))}
@@ -312,6 +360,11 @@ export default function Top5Degen() {
               }}>
                 <span style={{ fontWeight: 600, color: '#06b6d4' }}>{th.theme}</span>
                 <span style={{ color: 'var(--muted)' }}>{th.count}</span>
+                {!!th.volume_24h && (
+                  <span style={{ color: 'var(--muted)', fontSize: 9 }} title="combined 24h volume">
+                    ${th.volume_24h >= 1000 ? `${(th.volume_24h / 1000).toFixed(0)}k` : th.volume_24h.toFixed(0)}
+                  </span>
+                )}
               </div>
             ))}
           </div>
@@ -333,7 +386,9 @@ export default function Top5Degen() {
             }}>
               <span>🎓</span>
               <span style={{ fontWeight: 600, color: '#22c55e' }}><TokenLink symbol={t.symbol} ca={t.address} /></span>
-              <span style={{ color: 'var(--muted)' }}>${(t.volume_24h || 0).toLocaleString()}</span>
+              <span style={{ color: 'var(--muted)' }}>
+                {t.market_cap ? `MC $${t.market_cap.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : `Vol $${(t.volume_24h || 0).toLocaleString()}`}
+              </span>
             </div>
           ))}
         </div>
@@ -354,7 +409,7 @@ export default function Top5Degen() {
               }}>
                 <span style={{ fontWeight: 600, minWidth: 50, color: '#ef4444' }}><TokenLink symbol={t.symbol} ca={t.address} /></span>
                 <span style={{ flex: 1, color: 'var(--muted)', fontSize: 10 }}>
-                  Sell/Buy: {(t as any).sell_buy_ratio || '?'}x — ${(t.volume_24h || 0).toLocaleString()}
+                  {t.reason || `Sell/Buy: ${t.sell_buy_ratio ?? '?'}x — Vol $${(t.volume_24h || 0).toLocaleString()}`}
                 </span>
                 <span style={{ color: t.price_change_24h && t.price_change_24h < 0 ? '#ef4444' : '#22c55e', fontSize: 10 }}>
                   {t.price_change_24h != null ? (t.price_change_24h > 0 ? '+' : '') + t.price_change_24h + '%' : ''}

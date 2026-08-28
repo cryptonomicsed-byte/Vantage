@@ -353,10 +353,32 @@ async def sell_rotations(limit: int=5, x_agent_key: str=Header(...)):
             pc = attrs.get('price_change_percentage',{})
             pc_24h = float(str(pc.get('h24',0))) if isinstance(pc,dict) else 0
             symbol = name.split(' / ')[0][:12] if ' / ' in name else name[:12]
+            # address was never set here -- TokenLink's CA prop (and thus
+            # its trade panel) had nothing to point at for every rotation
+            # card. Same _mint_from_pool used by every other endpoint here.
             if sells_24h > buys_24h and vol_24h > 10000:
-                rotations.append(dict(symbol=symbol,name=name,sell_buy_ratio=round(sells_24h/max(1,buys_24h),1),volume_24h=vol_24h,price_change_24h=pc_24h))
+                rotations.append(dict(symbol=symbol,name=name,address=_mint_from_pool(p),sell_buy_ratio=round(sells_24h/max(1,buys_24h),1),volume_24h=vol_24h,price_change_24h=pc_24h,buys_24h=buys_24h,sells_24h=sells_24h))
         rotations.sort(key=lambda x:-x['sell_buy_ratio'])
-        resp = {'rotations':rotations[:limit],'count':len(rotations[:limit]),'source':'GeckoTerminal','cached':from_cache}
+        top = rotations[:limit]
+
+        # Real market cap, bounded to just the top N shown -- same labeled
+        # pattern as /top5: a sell/buy ratio and a bare volume figure don't
+        # tell you if this is a $500 rug or a $5M token rotating out, mcap
+        # does.
+        mcaps = await asyncio.gather(
+            *[_dexscreener_mcap(t["address"]) if t["address"] else asyncio.sleep(0, result=None) for t in top],
+            return_exceptions=True,
+        )
+        for t, mc in zip(top, mcaps):
+            mc = mc if isinstance(mc, (int, float)) else None
+            t["market_cap"] = mc
+            mc_part = f"MC ${mc:,.0f}" if mc else "MC n/a"
+            t["reason"] = (
+                f"{mc_part} · Sell/Buy {t['sell_buy_ratio']}x ({t['sells_24h']}/{t['buys_24h']}) "
+                f"· Vol ${t['volume_24h']:,.0f} · {t['price_change_24h']:+.1f}%"
+            )
+
+        resp = {'rotations':top,'count':len(top),'source':'GeckoTerminal','cached':from_cache}
         return _cache_put("sell_rotations", resp) if rotations else (_cache_get_stale("sell_rotations") or resp)
     except Exception:
         return _cache_get_stale("sell_rotations") or {'rotations':[],'count':0}
@@ -468,6 +490,23 @@ async def must_buy_20(limit: int=20, hours: int=24, x_agent_key: str=Header(...)
         c["source_types"] = source_types
         c["score"] = round(c["score"], 1)
         out.append(c)
+
+    # Real market cap, bounded to just the `limit` items actually returned
+    # (not all `candidates` scanned) -- same fix as /top5's market_cap: a
+    # bare $ volume figure reads as market cap at a glance, this makes both
+    # explicit. Only fetched for candidates with a known contract address.
+    mcaps = await asyncio.gather(
+        *[_dexscreener_mcap(c["ca"]) if c["ca"] else asyncio.sleep(0, result=None) for c in out],
+        return_exceptions=True,
+    )
+    for c, mc in zip(out, mcaps):
+        mc = mc if isinstance(mc, (int, float)) else None
+        c["market_cap"] = mc
+        mc_part = f"MC ${mc:,.0f}" if mc else "MC n/a"
+        c["summary"] = (
+            f"{mc_part} · Vol ${c['volume_24h']:,.0f} · {c['price_change_24h']:+.1f}% "
+            f"· {c['source_count']} source{'s' if c['source_count'] != 1 else ''}"
+        )
 
     resp = {"must_buy": out, "count": len(out), "candidates_scanned": len(candidates), "window_hours": hours}
     return _cache_put("must_buy_20", resp) if out else (_cache_get_stale("must_buy_20") or resp)
@@ -585,4 +624,16 @@ async def high_conviction_tokens(limit: int=20, x_agent_key: str=Header(...)):
             conv = await _token_conviction(db, t["mint"])
             ranked.append({"mint": t["mint"], "symbol": t["symbol"], **conv})
     ranked.sort(key=lambda t: -t["conviction_score"])
-    return {"tokens": ranked[:limit], "count": len(ranked[:limit])}
+    out = ranked[:limit]
+
+    # Real market cap, bounded to just the `limit` tokens returned (not the
+    # full ranked pool) -- same labeled-figure pattern as /top5 and
+    # /must-buy-20, so "conviction_score" (a wallet-overlap sum) is never
+    # confused for a dollar figure.
+    mcaps = await asyncio.gather(
+        *[_dexscreener_mcap(t["mint"]) for t in out], return_exceptions=True
+    )
+    for t, mc in zip(out, mcaps):
+        t["market_cap"] = mc if isinstance(mc, (int, float)) else None
+
+    return {"tokens": out, "count": len(out)}
