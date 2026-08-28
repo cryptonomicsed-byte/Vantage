@@ -17,11 +17,46 @@ migrations, so this file creates them directly (real production schema,
 confirmed via sqlite3 .schema against the live DB) rather than assuming
 init_agents_db() provides them.
 """
+import json
+from datetime import datetime, timezone
+
 import aiosqlite
 import pytest
 
 from backend.db import DB_PATH, init_agents_db
+from backend.degen_filters import PUMPFUN_MIN_MARKET_CAP_USD, PUMPFUN_MAX_MARKET_CAP_USD
 from backend.routers.degen import _pumpfun_leader, _vantage_conviction_leader
+
+
+def _now_ts() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+async def _insert_pumpfun_token(db, mint: str, symbol: str, **overrides):
+    """A pump.fun row that clears degen_filters.pumpfun_token_is_alive's
+    full real screening by default (mcap mid-band, 2 distinct
+    participants, 2 trades, fresh last_trade_at, real curve liquidity) --
+    override individual fields per test to probe one criterion at a time,
+    same pattern as test_degen_filters.py's _real_alive_token()."""
+    row = dict(
+        mint=mint, symbol=symbol,
+        market_cap_usd=(PUMPFUN_MIN_MARKET_CAP_USD + PUMPFUN_MAX_MARKET_CAP_USD) / 2,
+        score=20.0, manipulation_flags="[]", evicted=0, migrated=0,
+        buy_count=2, sell_count=1,
+        unique_buyers=json.dumps(["WalletA", "WalletB"]),
+        unique_sellers=json.dumps(["WalletC"]),
+        last_trade_at=_now_ts(),
+        v_sol_in_curve=30.0,
+    )
+    row.update(overrides)
+    await db.execute(
+        """INSERT INTO pumpfun_premigration_tokens
+           (mint, symbol, market_cap_usd, score, manipulation_flags, evicted, migrated,
+            buy_count, sell_count, unique_buyers, unique_sellers, last_trade_at, v_sol_in_curve)
+           VALUES (:mint,:symbol,:market_cap_usd,:score,:manipulation_flags,:evicted,:migrated,
+                   :buy_count,:sell_count,:unique_buyers,:unique_sellers,:last_trade_at,:v_sol_in_curve)""",
+        row,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -52,22 +87,10 @@ async def _init_schema():
 @pytest.mark.asyncio
 async def test_pumpfun_leader_picks_highest_score_among_live_tokens():
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO pumpfun_premigration_tokens (mint, symbol, market_cap_usd, score, manipulation_flags, evicted, migrated) "
-            "VALUES (?,?,?,?,?,0,0)",
-            ("LowScoreMint111111111111111111111111111", "LOW", 10000.0, 5.0, "[]"),
-        )
-        await db.execute(
-            "INSERT INTO pumpfun_premigration_tokens (mint, symbol, market_cap_usd, score, manipulation_flags, evicted, migrated) "
-            "VALUES (?,?,?,?,?,0,0)",
-            ("HighScoreMint11111111111111111111111111", "HIGH", 20000.0, 42.0, "[]"),
-        )
+        await _insert_pumpfun_token(db, "LowScoreMint111111111111111111111111111", "LOW", score=5.0)
+        await _insert_pumpfun_token(db, "HighScoreMint11111111111111111111111111", "HIGH", score=42.0)
         # Higher score, but evicted -- must not win.
-        await db.execute(
-            "INSERT INTO pumpfun_premigration_tokens (mint, symbol, market_cap_usd, score, manipulation_flags, evicted, migrated) "
-            "VALUES (?,?,?,?,?,1,0)",
-            ("EvictedMint111111111111111111111111111", "EVICT", 99999.0, 100.0, "[]"),
-        )
+        await _insert_pumpfun_token(db, "EvictedMint111111111111111111111111111", "EVICT", score=100.0, evicted=1)
         await db.commit()
 
     leader = await _pumpfun_leader()
@@ -87,14 +110,14 @@ async def test_pumpfun_leader_none_when_no_live_tokens():
 @pytest.mark.asyncio
 async def test_pumpfun_leader_surfaces_manipulation_flags():
     async with aiosqlite.connect(DB_PATH) as db:
-        # market_cap_usd must clear degen_filters.MIN_MARKET_CAP_USD ($7,000)
-        # or the real dust floor filters this row out before the
-        # manipulation-flag surfacing this test actually checks ever runs.
-        await db.execute(
-            "INSERT INTO pumpfun_premigration_tokens (mint, symbol, market_cap_usd, score, manipulation_flags, evicted, migrated) "
-            "VALUES (?,?,?,?,?,0,0)",
-            ("FlaggedMint111111111111111111111111111", "FLAG", 25000.0, 30.0,
-             '["low_unique_buyer_diversity"]'),
+        # Real screening note: manipulation_flags is surfaced (not
+        # disqualifying by itself in _pumpfun_leader -- the daemon's own
+        # score already discounts flagged tokens) -- this row must still
+        # clear pumpfun_token_is_alive's real activity screen to appear
+        # at all, hence the full helper insert.
+        await _insert_pumpfun_token(
+            db, "FlaggedMint111111111111111111111111111", "FLAG",
+            score=30.0, manipulation_flags='["low_unique_buyer_diversity"]',
         )
         await db.commit()
 
@@ -161,19 +184,13 @@ async def test_vantage_conviction_leader_none_when_no_overlap():
 async def test_pumpfun_leader_skips_dust_for_higher_market_cap_candidate():
     """Real bug regression: pump.fun's slot showed a ~$10-mcap dead token.
     A dust-tier top-score row must be skipped in favor of the next
-    real-mcap candidate, not returned (and not silently return None
-    either, when a real candidate exists further down)."""
+    real, in-band, actually-alive candidate, not returned (and not
+    silently return None either, when a real candidate exists further
+    down)."""
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO pumpfun_premigration_tokens (mint, symbol, market_cap_usd, score, manipulation_flags, evicted, migrated) "
-            "VALUES (?,?,?,?,?,0,0)",
-            ("DustMint1111111111111111111111111111111", "DUST", 10.0, 99.0, "[]"),
-        )
-        await db.execute(
-            "INSERT INTO pumpfun_premigration_tokens (mint, symbol, market_cap_usd, score, manipulation_flags, evicted, migrated) "
-            "VALUES (?,?,?,?,?,0,0)",
-            ("RealMint11111111111111111111111111111111", "REAL", 25000.0, 40.0, "[]"),
-        )
+        await _insert_pumpfun_token(db, "DustMint1111111111111111111111111111111", "DUST",
+                                     score=99.0, market_cap_usd=10.0)
+        await _insert_pumpfun_token(db, "RealMint11111111111111111111111111111111", "REAL", score=40.0)
         await db.commit()
 
     leader = await _pumpfun_leader()
@@ -224,21 +241,35 @@ async def test_vantage_conviction_leader_skips_major_for_lower_conviction_degen(
 
 
 @pytest.mark.asyncio
-async def test_pumpfun_leader_accepts_legitimate_low_cap_premigration_token():
-    """Real finding 2026-08-28: applying the general $7k dust floor to
-    pump.fun's own pre-migration tokens emptied this slot entirely --
-    real top-scored pump.fun tokens legitimately sit at $3,000-4,500
-    (graduation is ~$69k). Must use the lower PUMPFUN_MIN_MARKET_CAP_USD
-    floor and still return a real leader, not go empty."""
+async def test_pumpfun_leader_accepts_legitimate_low_cap_token_in_band_with_real_activity():
+    """Refined 2026-08-28: the owner replaced the earlier flat floor with
+    an explicit $14k-$32k lifecycle band + real activity minimums (see
+    degen_filters.pumpfun_token_is_alive). A token mid-band with genuine
+    recent multi-participant activity must still win this slot -- the
+    stricter screening isn't supposed to empty it out entirely, just
+    exclude noise/dead tokens within or around the band."""
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO pumpfun_premigration_tokens (mint, symbol, market_cap_usd, score, manipulation_flags, evicted, migrated) "
-            "VALUES (?,?,?,?,?,0,0)",
-            ("LegitLowCapMint1111111111111111111111111", "LOWCAP", 3500.0, 18.9, "[]"),
-        )
+        await _insert_pumpfun_token(db, "LegitLowCapMint1111111111111111111111111", "LOWCAP", score=18.9)
         await db.commit()
 
     leader = await _pumpfun_leader()
 
     assert leader is not None
     assert leader["symbol"] == "LOWCAP"
+
+
+async def test_pumpfun_leader_rejects_below_band_even_with_high_score():
+    """Real finding 2026-08-28: right after a fresh pumpfun_tier_scanner.py
+    restart, EVERY currently-tracked token sits well under the $14k band
+    floor (confirmed live: max mcap $5,647 across 243 tokens) -- this is
+    expected, not a bug, and the slot must correctly show no leader
+    rather than falling back to an under-band token just because it has
+    the highest score."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _insert_pumpfun_token(db, "BelowBandMint1111111111111111111111111", "LOW",
+                                     score=99.0, market_cap_usd=3500.0)
+        await db.commit()
+
+    leader = await _pumpfun_leader()
+
+    assert leader is None

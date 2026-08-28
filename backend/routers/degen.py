@@ -10,7 +10,10 @@ from backend.db import get_db
 from backend.routers.alpha import _dexscreener_mcap
 from backend import market_sources as ms
 from backend import moonshot_client
-from backend.degen_filters import passes_all_filters, is_major_or_stable, PUMPFUN_MIN_MARKET_CAP_USD
+from backend.degen_filters import (
+    passes_all_filters, is_major_or_stable, pumpfun_token_is_alive,
+    PUMPFUN_MIN_MARKET_CAP_USD, PUMPFUN_MAX_MARKET_CAP_USD,
+)
 from contextlib import asynccontextmanager
 import aiosqlite
 
@@ -791,32 +794,44 @@ async def _pumpfun_leader() -> Optional[dict]:
     """Top of pumpfun_tier_scanner.py's own composite score (real volume +
     trade count + participant diversity, wash-trading-penalized -- see
     that daemon's score_tokens() for the exact formula), among currently
-    live (not evicted/migrated) tracked tokens that clear the real dust
-    floor -- was un-bounded, a real bug that let a ~$10-mcap dead token
-    win this slot. Walks the real score-ranked order (not just row #1)
-    so a dust token near the top of the activity-score ranking doesn't
-    silently return nothing; major-token exclusion is checked too for
+    live (not evicted/migrated) tracked tokens that are genuinely ALIVE
+    right now -- see degen_filters.pumpfun_token_is_alive() for the full
+    real screening (owner-specified $14k-$32k lifecycle band + distinct
+    participants + total trades + last-trade freshness + real curve
+    liquidity, refined 2026-08-28 after the earlier flat $500 floor still
+    let dead/frozen tokens through). Major-token exclusion checked too for
     consistency even though pump.fun mints are never real majors in
-    practice (every pump.fun mint has its own dedicated address, never
-    reuses BTC/USDC/etc's real mint).
+    practice.
 
-    Uses PUMPFUN_MIN_MARKET_CAP_USD ($500), NOT the general $7k floor --
-    found live 2026-08-28 that the general floor emptied this slot
-    entirely: pump.fun's real top-20-by-activity-score tokens legitimately
-    sit at $3,000-4,500 pre-migration (graduation is ~$69k), so $7k was
-    excluding every normal, live, not-yet-graduated token, not just dust.
-    See degen_filters.py's PUMPFUN_MIN_MARKET_CAP_USD docstring."""
+    Market-cap band applied directly in SQL (real, efficient pre-filter
+    on an indexed-ish column, not fetched-then-discarded) -- the
+    remaining real activity criteria need buy_count/sell_count/
+    unique_buyers/unique_sellers/last_trade_at/v_sol_in_curve, checked in
+    Python per-candidate via pumpfun_token_is_alive()."""
     async with _db() as db:
         cur = await db.execute(
-            """SELECT mint, symbol, market_cap_usd, score, manipulation_flags
+            """SELECT mint, symbol, market_cap_usd, score, manipulation_flags,
+                      buy_count, sell_count, unique_buyers, unique_sellers,
+                      last_trade_at, v_sol_in_curve
                FROM pumpfun_premigration_tokens
                WHERE evicted=0 AND migrated=0
-               ORDER BY score DESC LIMIT 20"""
+                 AND market_cap_usd BETWEEN ? AND ?
+               ORDER BY score DESC LIMIT 50""",
+            (PUMPFUN_MIN_MARKET_CAP_USD, PUMPFUN_MAX_MARKET_CAP_USD),
         )
         rows = await cur.fetchall()
     for row in rows:
-        if not passes_all_filters(row.get("symbol"), row.get("mint"), row.get("market_cap_usd"),
-                                   min_market_cap=PUMPFUN_MIN_MARKET_CAP_USD):
+        if is_major_or_stable(row.get("symbol"), row.get("mint")):
+            continue
+        if not pumpfun_token_is_alive(
+            market_cap_usd=row.get("market_cap_usd"),
+            buy_count=row.get("buy_count") or 0,
+            sell_count=row.get("sell_count") or 0,
+            unique_buyers_json=row.get("unique_buyers"),
+            unique_sellers_json=row.get("unique_sellers"),
+            last_trade_at=row.get("last_trade_at"),
+            v_sol_in_curve=row.get("v_sol_in_curve"),
+        ):
             continue
         return {
             "platform": "pump.fun", "symbol": row.get("symbol"), "name": None,

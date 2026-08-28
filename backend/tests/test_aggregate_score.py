@@ -254,13 +254,19 @@ async def test_ten_dollar_mcap_dust_disqualified(monkeypatch):
 @pytest.mark.asyncio
 async def test_pumpfun_own_mcap_wins_over_unreliable_thin_dexscreener_pair(monkeypatch):
     """Real bug regression: a live pre-migration pump.fun token
-    ($richness) had pump.fun's own real tracked mcap ($3,043) but ALSO
-    one thin/unreliable DexScreener pair reporting marketCap=$10.75 (a
-    ~300x discrepancy -- likely a stray seed LP, not real price
-    discovery). The old logic trusted whichever source returned
+    ($richness) had pump.fun's own real tracked mcap but ALSO one thin/
+    unreliable DexScreener pair reporting marketCap=$10.75 (a ~300x
+    discrepancy from the real value -- likely a stray seed LP, not real
+    price discovery). The old logic trusted whichever source returned
     "something," incorrectly disqualifying a real active token as dust.
     A mint actively tracked in pumpfun_premigration_tokens must use
-    pump.fun's own mcap, not an incidental thin external pair."""
+    pump.fun's own mcap, not an incidental thin external pair.
+
+    mcap set within the owner-specified $14k-$32k band (refined
+    2026-08-28, after the original live bug at $3,043 -- which is now
+    correctly below-band on its own, a separate real exclusion) so this
+    test still isolates the ONE thing it's regression-testing: mcap
+    source priority, not the band or activity screen."""
     import backend.aggregate_score as agg_module
 
     async def fake_mcap_thin_pair(mint):
@@ -272,9 +278,12 @@ async def test_pumpfun_own_mcap_wins_over_unreliable_thin_dexscreener_pair(monke
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT INTO pumpfun_premigration_tokens (mint, symbol, market_cap_usd, volume_sol_total, score, manipulation_flags, evicted, migrated) "
-            "VALUES (?,?,?,?,?,?,0,0)",
-            ("RichnessMint1111111111111111111111111111", "richness", 3043.18, 100.0, 18.93, "[]"),
+            """INSERT INTO pumpfun_premigration_tokens
+               (mint, symbol, market_cap_usd, volume_sol_total, score, manipulation_flags, evicted, migrated,
+                buy_count, sell_count, unique_buyers, unique_sellers, last_trade_at, v_sol_in_curve)
+               VALUES (?,?,?,?,?,?,0,0,?,?,?,?,datetime('now'),?)""",
+            ("RichnessMint1111111111111111111111111111", "richness", 20000.0, 100.0, 18.93, "[]",
+             2, 1, '["WalletA","WalletB"]', '["WalletC"]', 30.0),
         )
         await db.commit()
 

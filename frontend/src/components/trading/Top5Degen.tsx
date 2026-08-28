@@ -460,7 +460,15 @@ export default function Top5Degen() {
               {p.available ? (
                 <>
                   <span style={{ fontWeight: 600, minWidth: 70, color: '#fff' }}>
-                    {p.address ? <TokenLink symbol={p.symbol || p.name || '?'} ca={p.address} /> : (p.symbol || p.name || '—')}
+                    {/* Real bug: CoinGecko's leader has no Solana address
+                        (global-market lookup, not Solana-specific), so this
+                        fell back to plain unclickable text while all 5 other
+                        platforms rendered a clickable TokenLink. TokenLink's
+                        `ca` prop is already optional -- EntityProfileCard
+                        gracefully shows just symbol info (no trade panel)
+                        when ca is absent -- so there was never a reason to
+                        special-case the no-address case here at all. */}
+                    {(p.symbol || p.name) ? <TokenLink symbol={p.symbol || p.name || '?'} ca={p.address || undefined} /> : '—'}
                   </span>
                   <span style={{ flex: 1, color: 'var(--muted)', fontSize: 10 }}>
                     {p.metric_label}: <b style={{ color: '#fff' }}>{p.metric_value != null ? p.metric_value : '—'}</b>
