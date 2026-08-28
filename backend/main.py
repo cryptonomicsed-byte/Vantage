@@ -98,6 +98,23 @@ async def _rate_limit_prune_loop():
             logger.warning("rate limit counter prune failed: %s", e)
         await asyncio.sleep(300)
 
+
+async def _wallet_pruning_loop():
+    """Periodic tracked_wallets activity scoring (see wallet_pruning.py) --
+    keeps /api/moneyflow's node count real even if the upstream discovery
+    daemons (outside this repo) resume unconditional inserts. Runs less
+    often than the rate-limit prune since this scans real DB rows, not an
+    in-memory dict; 30 min is frequent enough for a signal that only
+    changes over days (recent-activity windows)."""
+    await asyncio.sleep(60)  # let startup settle before the first DB-wide scan
+    from .wallet_pruning import prune_inactive_tracked_wallets
+    while True:
+        try:
+            await prune_inactive_tracked_wallets()
+        except Exception as e:
+            logger.warning("wallet pruning pass failed: %s", e)
+        await asyncio.sleep(1800)
+
 # Per-peer circuit breaker state (in-memory; DB columns shadow for observability)
 # Structure: {peer_id: {"failures": int, "open_until": float}}
 _peer_breakers: dict[int, dict] = {}
@@ -520,6 +537,7 @@ async def lifespan(app: FastAPI):
     watch_task = asyncio.create_task(_platform_subscription_loop())
     weather_task = asyncio.create_task(_weather_alert_loop())
     rate_limit_prune_task = asyncio.create_task(_rate_limit_prune_loop())
+    wallet_pruning_task = asyncio.create_task(_wallet_pruning_loop())
 
     # Execution engine was built + tested but never actually started anywhere
     # (an audit on 2026-08-17 found it dead code, unimported outside tests).
@@ -542,7 +560,7 @@ async def lifespan(app: FastAPI):
     last30days_task = asyncio.create_task(_last30days_watch_loop())
 
     yield
-    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, buzz_inbound_task, last30days_task]
+    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, last30days_task]
     if execution_engine_task is not None:
         shutdown_tasks.append(execution_engine_task)
     for t in shutdown_tasks:

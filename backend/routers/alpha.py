@@ -392,13 +392,20 @@ async def money_flow(
             except aiosqlite.Error:
                 pass
 
-        # Every tracked wallet, even ones with zero observed edges yet — so
-        # adding a wallet via the watchlist makes it appear immediately.
+        # Every ACTIVE tracked wallet, even ones with zero observed edges yet
+        # — so adding a wallet via the watchlist makes it appear immediately.
+        # "Active" excludes archived_at IS NOT NULL rows -- see
+        # wallet_pruning.py. Production had 86,573 tracked_wallets before
+        # that existed (99.85% zero-signal stub rows from three ad-hoc
+        # discovery daemons with no scoring gate), which alone produced a
+        # ~87k-node graph no force-directed renderer can handle. This filter
+        # is the primary fix for that, not a client-side band-aid.
         tracked_rows: list[dict] = []
         try:
             tracked_rows = [dict(r) for r in await (await db.execute(
                 "SELECT chain, address, label, address_type, degen_score, "
-                "trade_count, unique_tokens, notes, balance_usd FROM tracked_wallets")).fetchall()]
+                "trade_count, unique_tokens, notes, balance_usd FROM tracked_wallets "
+                "WHERE archived_at IS NULL")).fetchall()]
         except aiosqlite.Error:
             pass
 
@@ -808,9 +815,28 @@ async def money_flow(
         n["last_seen"] = last_seen.get(n["id"], n["first_seen"])
         node_list.append(n)
     node_list.sort(key=lambda x: -x["size"])
+
+    # Hard safety valve on wallet node count -- belt-and-suspenders on top of
+    # wallet_pruning.py's periodic archival (which runs every 30 min and
+    # can't gate the ad-hoc discovery daemons outside this repo directly).
+    # If those daemons resume firehosing tracked_wallets between prune
+    # passes, this keeps the graph renderable in the meantime by keeping
+    # only the highest-size (already sorted) wallets rather than returning
+    # an unbounded response. Tokens/social/exchange nodes are never capped
+    # here -- they're already small (~500 tokens) and are the actual subject
+    # of the graph.
+    MAX_WALLET_NODES = 1500
+    wallet_nodes = [n for n in node_list if n["type"] == "wallet"]
+    if len(wallet_nodes) > MAX_WALLET_NODES:
+        dropped_ids = {n["id"] for n in wallet_nodes[MAX_WALLET_NODES:]}
+        node_list = [n for n in node_list if n["id"] not in dropped_ids]
+    else:
+        dropped_ids = set()
+
     edge_list = [
         {**e, "volume_sol": round(e["volume_sol"], 4), "net_sol": round(e["net_sol"], 4)}
         for e in edges.values()
+        if e["source"] not in dropped_ids and e["target"] not in dropped_ids
     ]
 
     return {
