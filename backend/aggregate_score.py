@@ -156,57 +156,80 @@ async def _has_active_mint_or_freeze_authority(mint: str, helius_key: str) -> Op
         return None
 
 
-async def _pumpfun_manipulation_flags(mint: str, db) -> list[str]:
-    cur = await db.execute(
-        "SELECT manipulation_flags FROM pumpfun_premigration_tokens WHERE mint=?", (mint,)
-    )
-    row = await cur.fetchone()
-    if not row:
-        return []
-    try:
-        return json.loads(row["manipulation_flags"] or "[]")
-    except Exception:
-        return []
+# ── Batched signal lookups ────────────────────────────────────────────────
+# Real latency fix, found live 2026-08-28 (owner report): the per-candidate
+# loop in compute_aggregate_scores() used to call 4 lookups (manipulation
+# flags, smart-money conviction, social sentiment, whale presence) with a
+# sequential `await` each, per candidate -- up to 41 candidates x 4 awaits
+# = up to 164 serialized round trips against the SAME aiosqlite connection
+# (which itself serializes work onto one thread, so per-candidate awaiting
+# them "concurrently" wouldn't have parallelized the actual disk I/O
+# anyway). manipulation_flags is now read from the same bulk
+# pumpfun_premigration_tokens fetch compute_aggregate_scores already does
+# (that SELECT just needed the column added). The other 3 below use the
+# same principle already applied to the DexScreener market-data fetch: one
+# IN-clause query covering the WHOLE candidate pool, instead of N
+# individual single-mint queries. These return {mint: value} maps; callers
+# look up per-candidate with .get().
 
-
-async def _smart_money_conviction(mint: str, db) -> float:
+async def _smart_money_conviction_batch(mints: list, db) -> dict:
+    if not mints:
+        return {}
     cur = await db.execute(
-        """SELECT SUM(wr.copy_trade_score) as total
+        """SELECT twr.mint, SUM(wr.copy_trade_score) as total
            FROM token_wallet_roles twr
            JOIN wallet_reputation wr ON wr.wallet_address = twr.wallet_address
-           WHERE twr.mint = ? AND wr.copy_trade_score > 0""",
-        (mint,),
+           WHERE twr.mint IN ({}) AND wr.copy_trade_score > 0
+           GROUP BY twr.mint""".format(",".join("?" * len(mints))),
+        mints,
     )
-    row = await cur.fetchone()
-    return float(row["total"]) if row and row["total"] else 0.0
+    return {r["mint"]: float(r["total"] or 0.0) for r in await cur.fetchall()}
 
 
-async def _social_sentiment_score(mint: str, symbol: Optional[str], db) -> float:
-    where = ["contract_address = ?"]
-    params: list = [mint]
-    if symbol:
-        where.append("UPPER(ticker) = ?")
-        params.append(symbol.upper())
+async def _social_sentiment_score_batch(mint_symbol: dict, db) -> dict:
+    """mint_symbol: {mint: symbol_or_None}. One query across every mint AND
+    every known symbol (both real match axes the per-mint version used),
+    then attributed back to whichever mint(s) each row's contract_address
+    or ticker actually matches -- same OR-match semantics as before, just
+    evaluated in Python instead of once per mint in SQL."""
+    mints = list(mint_symbol.keys())
+    if not mints:
+        return {}
+    symbols = sorted({s.upper() for s in mint_symbol.values() if s})
+    where = ["contract_address IN ({})".format(",".join("?" * len(mints)))]
+    params: list = list(mints)
+    if symbols:
+        where.append("UPPER(ticker) IN ({})".format(",".join("?" * len(symbols))))
+        params.extend(symbols)
     cur = await db.execute(
-        f"""SELECT confidence FROM social_signals
+        f"""SELECT contract_address, ticker, confidence FROM social_signals
             WHERE ({' OR '.join(where)}) AND UPPER(sentiment) = 'BULLISH'
               AND created_at >= datetime('now', '-24 hours')""",
         params,
     )
     rows = await cur.fetchall()
-    return sum(float(r["confidence"] or 0.5) for r in rows)
+    out = {m: 0.0 for m in mints}
+    for r in rows:
+        conf = float(r["confidence"] or 0.5)
+        ca = r["contract_address"]
+        ticker = (r["ticker"] or "").upper()
+        for m, sym in mint_symbol.items():
+            if ca == m or (sym and ticker == sym.upper()):
+                out[m] = out.get(m, 0.0) + conf
+    return out
 
 
-async def _whale_presence(mint: str, db) -> bool:
+async def _whale_presence_batch(mints: list, db) -> set:
+    if not mints:
+        return set()
     cur = await db.execute(
-        """SELECT 1 FROM token_wallet_roles twr
+        """SELECT DISTINCT twr.mint FROM token_wallet_roles twr
            JOIN tracked_wallets tw ON tw.address = twr.wallet_address
-           WHERE twr.mint = ? AND tw.archived_at IS NULL
-             AND COALESCE(tw.balance_usd, 0) >= ?
-           LIMIT 1""",
-        (mint, WHALE_BALANCE_USD),
+           WHERE twr.mint IN ({}) AND tw.archived_at IS NULL
+             AND COALESCE(tw.balance_usd, 0) >= ?""".format(",".join("?" * len(mints))),
+        [*mints, WHALE_BALANCE_USD],
     )
-    return (await cur.fetchone()) is not None
+    return {r["mint"] for r in await cur.fetchall()}
 
 
 def _market_snapshot_from_dex(dex_snap: Optional[dict], pumpfun_row: Optional[dict]) -> dict:
@@ -308,7 +331,8 @@ async def compute_aggregate_scores(
         db.row_factory = aiosqlite.Row
         pumpfun_rows = await (await db.execute(
             """SELECT mint, symbol, volume_sol_total, market_cap_usd, buy_count, sell_count,
-                      unique_buyers, unique_sellers, last_trade_at, v_sol_in_curve
+                      unique_buyers, unique_sellers, last_trade_at, v_sol_in_curve,
+                      manipulation_flags
                FROM pumpfun_premigration_tokens WHERE mint IN ({})""".format(
                 ",".join("?" * len(addresses))
             ),
@@ -316,12 +340,16 @@ async def compute_aggregate_scores(
         )).fetchall()
         pumpfun_by_mint = {r["mint"]: dict(r) for r in pumpfun_rows}
 
-        raw: dict[str, dict] = {}
+        # First pass: symbol backfill + major/stable exclusion only (cheap,
+        # no DB round trip beyond what's already fetched above) -- builds
+        # the address list that actually needs the 3 real signal lookups,
+        # so majors/stables never waste a query.
         disqualified: list[dict] = []
         candidate_meta: dict[str, Optional[str]] = {}
+        breadth_by_addr: dict[str, int] = {}
         for c in candidates:
             addr = c.get("address")
-            if not addr or addr in raw or addr in candidate_meta:
+            if not addr or addr in candidate_meta:
                 continue
             # Real bug fixed here: candidates surfaced only via must-buy-20/
             # high-conviction (not one of the 6 platform-leaders, which DO
@@ -331,6 +359,7 @@ async def compute_aggregate_scores(
             # until now. Backfill from there before falling back to None.
             symbol = c.get("symbol") or (pumpfun_by_mint.get(addr) or {}).get("symbol")
             candidate_meta[addr] = symbol
+            breadth_by_addr[addr] = c.get("platform_breadth", 0)
 
             if is_major_or_stable(symbol, addr):
                 # Real bug fixed here: majors/stablecoins (USDC scored #1
@@ -338,22 +367,41 @@ async def compute_aggregate_scores(
                 # conviction, but useless for a degen-plays feature) are
                 # excluded outright, not just down-weighted.
                 disqualified.append({"address": addr, "symbol": symbol, "reason": "major/stablecoin token, excluded from degen scoring"})
-                continue
+                del candidate_meta[addr]
 
-            flags = await _pumpfun_manipulation_flags(addr, db)
+        # manipulation_flags now comes from the same bulk pumpfun_rows fetch
+        # above (added to that SELECT) instead of a second per-mint query.
+        for addr in list(candidate_meta.keys()):
+            symbol = candidate_meta[addr]
+            flags_raw = (pumpfun_by_mint.get(addr) or {}).get("manipulation_flags")
+            try:
+                flags = json.loads(flags_raw or "[]")
+            except Exception:
+                flags = []
             if flags:
                 disqualified.append({"address": addr, "symbol": symbol, "reason": f"manipulation_flags: {flags}"})
-                continue
+                del candidate_meta[addr]
 
-            smart_money = await _smart_money_conviction(addr, db)
-            social = await _social_sentiment_score(addr, symbol, db)
-            whale = await _whale_presence(addr, db)
+        # Real latency fix (see the 3 _*_batch functions' docstrings): one
+        # query per signal type covering the WHOLE remaining pool, instead
+        # of up to 3 x N sequential per-mint queries -- was the dominant
+        # remaining cost after the DexScreener batching fix, confirmed live
+        # 2026-08-28 (still ~21s with only the market-data fetch batched).
+        pool = list(candidate_meta.keys())
+        smart_money_map, social_map, whale_set = await asyncio.gather(
+            _smart_money_conviction_batch(pool, db),
+            _social_sentiment_score_batch(candidate_meta, db),
+            _whale_presence_batch(pool, db),
+        )
+
+        raw: dict[str, dict] = {}
+        for addr, symbol in candidate_meta.items():
             raw[addr] = {
                 "symbol": symbol,
-                "smart_money": smart_money,
-                "social_sentiment": social,
-                "whale_presence": 1.0 if whale else 0.0,
-                "platform_breadth": c.get("platform_breadth", 0),
+                "smart_money": smart_money_map.get(addr, 0.0),
+                "social_sentiment": social_map.get(addr, 0.0),
+                "whale_presence": 1.0 if addr in whale_set else 0.0,
+                "platform_breadth": breadth_by_addr.get(addr, 0),
             }
 
     # Market data (volume + market cap, for both the volume_momentum
