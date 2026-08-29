@@ -111,6 +111,15 @@ STEP 3 -- DISQUALIFICATION (hard, overrides any score -- a disqualified
        from real data, exactly like (d) -- None (no data / InsightX's own
        tight rate limit already hit this minute / unconfigured) never
        disqualifies, same fail-soft discipline throughout this file.
+    g) InsightX DEX Metrics clusters + bundlers (added 2026-08-29,
+       backend/dex_metrics_client.py) -- real, independently-sourced
+       ADDITIONAL cross-check alongside (c)'s own manipulation_flags: a
+       real coordinated wallet cluster or bundler ring holding >5% of
+       supply also disqualifies. Same fail-soft/no-data-never-disqualifies
+       discipline as (f); shares that same account's rate-limit budget.
+       (InsightX's Atlas API was NOT integrated: confirmed via their own
+       docs it's currently decommissioned with no replacement endpoints
+       live yet -- nothing real to build against as of this writing.)
 
 STEP 4 -- The winner is the highest total-weighted-score candidate among
   the NON-disqualified ones. Ties broken by raw smart-money conviction
@@ -132,6 +141,7 @@ from .wallet_pruning import WHALE_BALANCE_USD
 from .degen_filters import is_major_or_stable, passes_dust_floor, pumpfun_token_is_alive, MIN_MARKET_CAP_USD
 from .nansen_client import smart_money_holdings_by_mint
 from .insightx_client import labels_for_addresses, scanner_for_token, scanner_risk_flags
+from .dex_metrics_client import clusters_for_token, bundlers_for_token, manipulation_signal
 
 logger = logging.getLogger(__name__)
 
@@ -595,6 +605,39 @@ async def compute_aggregate_scores(
                     "address": a,
                     "symbol": raw[a]["symbol"],
                     "reason": f"InsightX Scanner: drainable/honeypot risk (score={flags['score']})",
+                })
+                del raw[a]
+
+    # InsightX DEX Metrics (clusters + bundlers) -- real, independently-
+    # sourced ADDITIONAL manipulation check alongside step 3c's own
+    # manipulation_flags (pumpfun_tier_scanner.py's persisted wash-trading
+    # detection above) -- a different detection method (InsightX's own
+    # coordinated-wallet/bundler analysis) cross-validating the same real
+    # risk category, not a replacement. Same discipline as every other
+    # InsightX check in this function: only disqualifies on a definite
+    # flagged=True from real data (manipulation_signal()'s own >5%-of-
+    # supply threshold -- see dex_metrics_client.py's docstring for why a
+    # bare nonzero percentage isn't enough, real detection noise exists),
+    # never on has_data=False (unconfigured/down/this process's own
+    # conservative per-minute budget already spent this minute -- shared
+    # account-wide quota with the Scanner calls just above).
+    still_alive_3 = list(raw.keys())
+    if still_alive_3:
+        cluster_results, bundler_results = await asyncio.gather(
+            asyncio.gather(*[clusters_for_token(a) for a in still_alive_3], return_exceptions=True),
+            asyncio.gather(*[bundlers_for_token(a) for a in still_alive_3], return_exceptions=True),
+        )
+        for a, clusters, bundlers in zip(still_alive_3, cluster_results, bundler_results):
+            if isinstance(clusters, BaseException):
+                clusters = None
+            if isinstance(bundlers, BaseException):
+                bundlers = None
+            sig = manipulation_signal(clusters, bundlers)
+            if sig["flagged"] and a in raw:
+                disqualified.append({
+                    "address": a,
+                    "symbol": raw[a]["symbol"],
+                    "reason": f"InsightX DEX Metrics: coordinated wallet concentration (cluster={sig['cluster_pct']}, bundler={sig['bundler_pct']})",
                 })
                 del raw[a]
 
