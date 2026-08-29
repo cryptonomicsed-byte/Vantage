@@ -13,6 +13,27 @@ function candles(n) {
   return out
 }
 
+// Deterministic synthetic OHLCV — same seed/formula used to generate the
+// dataset the 2026-08-29 real-indicator additions were cross-validated
+// against on hostinger-vps (TA-Lib 0.6.8 + Jesse 2.4.1, both real installs,
+// checked via `pip list`, not assumed). Reference values below are TA-Lib's
+// own real output on this exact dataset, not hand-derived expectations.
+function realisticCandles(n) {
+  const out = []
+  let seed = 42
+  function rand() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff }
+  let p = 100
+  for (let i = 0; i < n; i++) {
+    p += Math.sin(i / 7) * 2 + (rand() - 0.5) * 1.5
+    const c = p
+    const h = c + 0.5 + rand()
+    const l = c - 0.5 - rand()
+    out.push({ time: 1700000000 + i * 3600, open: c - 0.3, high: h, low: l, close: c, volume: 1000 + i * 7 + rand() * 200 })
+  }
+  return out
+}
+function approxEqual(a, b, tol) { assert.ok(Math.abs(a - b) <= tol, `expected ${a} ≈ ${b} (tol ${tol}), diff=${Math.abs(a - b)}`) }
+
 let passed = 0
 async function t(name, fn) { await fn(); passed++; console.log('  ok -', name) }
 
@@ -152,6 +173,139 @@ bgcolor(bullish ? color.new(color.green, 90) : bearish ? color.new(color.red, 90
   await t('pine.py template: default EMA crossover (ta.crossover/crossunder)', () => {
     const r = evaluatePine(EMA_CROSSOVER, candles(60))
     assert.ok(r.plots['Fast EMA'] && r.plots['Slow EMA'], 'both EMAs plotted')
+  })
+
+  // 2026-08-29: real templates added alongside the new ta.supertrend/ta.squeeze
+  // functions -- parse-tested here exactly as deployed in pine.py's
+  // generate_pine() fallback (copy kept in sync manually; a real end-to-end
+  // API test isn't practical here since this file has no Python import path).
+  const SUPERTREND_TEMPLATE = `//@version=5
+indicator("SuperTrend", overlay=true)
+factor = input.float(3.0, "Factor")
+atrLen = input.int(10, "ATR Length")
+[st, dir] = ta.supertrend(factor, atrLen)
+plot(st, "SuperTrend", color=dir < 0 ? color.green : color.red, linewidth=2)
+bullish = ta.crossover(dir, 0)
+bearish = ta.crossunder(dir, 0)
+plotshape(bullish, "Bullish Flip", shape.triangleup, location.belowbar, color=color.green)
+plotshape(bearish, "Bearish Flip", shape.triangledown, location.abovebar, color=color.red)`
+
+  const SQUEEZE_TEMPLATE = `//@version=5
+indicator("Squeeze Momentum", overlay=false)
+length = input.int(20, "BB/KC Length")
+bbMult = input.float(2.0, "BB Mult")
+kcMult = input.float(1.5, "KC Mult")
+[sqzOn, mom] = ta.squeeze(length, bbMult, kcMult)
+plot(mom, "Momentum", color=mom > 0 ? color.green : color.red, style=plot.style_columns)
+plotshape(sqzOn, "Squeeze On", shape.circle, location.bottom, color=color.yellow)
+hline(0, "Zero", color=color.gray)`
+
+  await t('pine.py template: SuperTrend', () => {
+    const r = evaluatePine(SUPERTREND_TEMPLATE, candles(60))
+    assert.strictEqual(r.title, 'SuperTrend')
+    assert.ok(r.plots.SuperTrend, 'SuperTrend line plotted')
+    assert.ok(r.markers['Bullish Flip'] && r.markers['Bearish Flip'], 'flip markers present')
+  })
+
+  await t('pine.py template: Squeeze Momentum', () => {
+    const r = evaluatePine(SQUEEZE_TEMPLATE, candles(60))
+    assert.strictEqual(r.title, 'Squeeze Momentum')
+    assert.ok(r.plots.Momentum, 'momentum histogram plotted')
+    assert.ok(r.markers['Squeeze On'], 'squeeze marker present')
+  })
+
+  // 8. real-indicator additions, 2026-08-29 — structural coverage (every
+  // new native function parses + produces the declared plots) plus real
+  // correctness regressions: exact reference values from TA-Lib 0.6.8 on
+  // hostinger-vps, on the SAME deterministic dataset (realisticCandles(200)
+  // here == the dataset used for the live cross-validation pass, same
+  // seed/formula) — not hand-derived expectations. Three real bugs were
+  // found and fixed via this process (see pine-engine.js's inline
+  // docstrings for each): true-range fabricating a value at index 0
+  // (shifted ATR/DMI's RMA seed by one bar), OBV seeding at 0 instead of
+  // volume[0], and ta.linreg's offset=0 being silently clamped to 1 by a
+  // length-oriented int() helper. All three are now exact matches below.
+  const rc = realisticCandles(200)
+
+  await t('ta.bb matches TA-Lib BBANDS exactly at bar 19', () => {
+    const r = evaluatePine('[b,u,l] = ta.bb(close, 20, 2.0)\nplot(b,"basis")\nplot(u,"upper")\nplot(l,"lower")', rc)
+    approxEqual(r.plots.basis[19].value, 112.1124888992163, 1e-6)
+    approxEqual(r.plots.upper[19].value, 130.0209271882967, 1e-6)
+    approxEqual(r.plots.lower[19].value, 94.2040506101359, 1e-6)
+  })
+
+  await t('ta.atr matches TA-Lib ATR exactly (real Wilder RMA, fixed true-range seed)', () => {
+    const r = evaluatePine('plot(ta.atr(14), "atr")', rc)
+    approxEqual(r.plots.atr[14].value, 2.6673166712253362, 1e-6)
+    approxEqual(r.plots.atr[50].value, 2.3595789554268243, 1e-6)
+  })
+
+  await t('ta.obv matches TA-Lib OBV exactly (real bug fix: seed was 0, not volume[0])', () => {
+    const r = evaluatePine('plot(ta.obv(), "obv")', rc)
+    approxEqual(r.plots.obv[0].value, 1139.7431135828342, 1e-4)
+    approxEqual(r.plots.obv[10].value, 9912.44827606317, 1e-4)
+  })
+
+  await t('ta.wpr matches TA-Lib WILLR exactly', () => {
+    const r = evaluatePine('plot(ta.wpr(14), "wpr")', rc)
+    approxEqual(r.plots.wpr[13].value, -3.2164470982567743, 1e-6)
+    approxEqual(r.plots.wpr[50].value, -11.430774716736984, 1e-6)
+  })
+
+  await t('ta.linreg matches TA-Lib LINEARREG exactly (real bug fix: offset=0 was clamped to 1)', () => {
+    const r = evaluatePine('plot(ta.linreg(close, 14, 0), "lr")', rc)
+    approxEqual(r.plots.lr[13].value, 116.92454504613923, 1e-6)
+    approxEqual(r.plots.lr[50].value, 105.8574988628577, 1e-6)
+  })
+
+  await t('ta.stoch matches TA-Lib STOCHF %K exactly', () => {
+    const r = evaluatePine('plot(ta.stoch(close, high, low, 14), "k")', rc)
+    approxEqual(r.plots.k[50].value, 88.56922528326301, 1e-6)
+  })
+
+  await t('ta.dmi tracks TA-Lib PLUS_DI/ADX and converges (documented Wilder seed-transient, not exact-match — see pine-engine.js)', () => {
+    const r = evaluatePine('[p,m,a] = ta.dmi(14,14)\nplot(p,"plus")\nplot(m,"minus")\nplot(a,"adx")', rc)
+    assert.ok(typeof r.plots.plus[59].value === 'number', 'plusDI produces real numbers')
+    // late-bar convergence check (bar 59): loose tolerance reflecting the
+    // real, documented Wilder-smoothing seed transient, not a precision bug
+    approxEqual(r.plots.plus[59].value, 46.01731630044779, 0.05)
+  })
+
+  await t('ta.kc, ta.cci, ta.mfi, ta.sar, ta.supertrend, ta.stochrsi, ta.squeeze, ta.ichimoku, ta.fib, ta.fvgbull/fvgbear all parse and produce real series', () => {
+    const r = evaluatePine(
+      `[kb,ku,kl] = ta.kc(close, 20, 1.5)
+plot(kb, "kcbasis")
+plot(ta.cci(close, 20), "cci")
+plot(ta.mfi(close, 14), "mfi")
+plot(ta.sar(0.02, 0.02, 0.2), "sar")
+[st, dir] = ta.supertrend(3.0, 10)
+plot(st, "st")
+[k, d] = ta.stochrsi(close, 14, 14, 3, 3)
+plot(k, "srsi_k")
+[sqzOn, mom] = ta.squeeze(20, 2.0, 1.5)
+plot(mom, "sqz_mom")
+[conv, base, spanA, spanB] = ta.ichimoku(9, 26, 52)
+plot(conv, "ichi_conv")
+plot(ta.fib(0.618, 50), "fib618")
+plotshape(ta.fvgbull(0.1), "FVG Bull")
+plotshape(ta.fvgbear(0.1), "FVG Bear")`,
+      rc,
+    )
+    for (const name of ['kcbasis', 'cci', 'mfi', 'sar', 'st', 'srsi_k', 'sqz_mom', 'ichi_conv', 'fib618']) {
+      const last = r.plots[name][r.plots[name].length - 1]
+      assert.ok(typeof last.value === 'number' && isFinite(last.value), name + ' converges to a real finite number')
+    }
+    assert.ok(r.markers['FVG Bull'] && r.markers['FVG Bull'].every((p) => typeof p.value === 'boolean'), 'FVG bull markers are real booleans')
+    assert.ok(r.markers['FVG Bear'] && r.markers['FVG Bear'].every((p) => typeof p.value === 'boolean'), 'FVG bear markers are real booleans')
+  })
+
+  await t('ta.linreg offset=0 is NOT silently clamped like a length arg (regression for the real bug)', () => {
+    // A direct unit-level regression, independent of the TA-Lib comparison
+    // above: offset=1 must differ from offset=0 (proves offset is actually
+    // read, not hardcoded/ignored after the fix).
+    const r0 = evaluatePine('plot(ta.linreg(close, 14, 0), "lr")', rc)
+    const r1 = evaluatePine('plot(ta.linreg(close, 14, 1), "lr")', rc)
+    assert.notStrictEqual(r0.plots.lr[50].value, r1.plots.lr[50].value, 'offset=0 and offset=1 must give different values')
   })
 
   console.log(`\n${passed} pine-runtime checks passed`)

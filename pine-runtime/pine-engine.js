@@ -16,6 +16,47 @@
 //   functions:  ta.sma ta.ema ta.wma ta.rsi ta.stdev ta.highest ta.lowest
 //               ta.macd (tuple) ta.atr ta.vwap ta.crossover ta.crossunder
 //               input.int input.float (return the default-value argument)
+//
+//   Extended 2026-08-29 (real-indicator research pass — see commit message
+//   for the full evidence trail: TA-Lib/Jesse/pandas-ta were checked on
+//   hostinger-vps as CORRECTNESS ORACLES only, never as a runtime dependency
+//   — this sandbox is pure-Node with no egress, so every function below is
+//   hand-implemented JS math, cross-checked against those libraries' real
+//   output on shared test data, not a call-out):
+//     REAL Pine v5 builtins (name/signature match TradingView's own):
+//       ta.bb(src,len,mult) -> [basis,upper,lower]      (Bollinger Bands)
+//       ta.kc(src,len,mult) -> [basis,upper,lower]      (Keltner Channels, true-range based)
+//       ta.dmi(diLen,adxLen) -> [plusDI,minusDI,adx]    (Wilder's DMI/ADX)
+//       ta.supertrend(factor,atrLen) -> [supertrend,direction]
+//       ta.sar(start,increment,maximum) -> series        (Parabolic SAR)
+//       ta.cci(src,len) -> series
+//       ta.mfi(src,len) -> series                         (src * SOURCES.volume)
+//       ta.obv() -> series                                 (real Pine ta.obv takes no args;
+//                                                            called as ta.obv() here to fit
+//                                                            this grammar's call-only syntax)
+//       ta.wpr(len) -> series                              (Williams %R)
+//       ta.stoch(src,high,low,len) -> series                (%K only, matches real signature)
+//       ta.linreg(src,len,offset) -> series
+//     Community-standard composites (NOT literal Pine builtins — documented
+//     honestly, same convention as this file's existing vwap/atr caveats):
+//       ta.stochrsi(src,rsiLen,stochLen,smoothK,smoothD) -> [k,d]
+//       ta.squeeze(len,bbMult,kcMult) -> [sqzOn,momentum]  (LazyBear's Squeeze
+//         Momentum — an open, widely-reimplemented concept, not TradingView IP)
+//       ta.ichimoku(conv,base,spanB,displacement) -> [conversionLine,baseLine,
+//         leadingSpanA,leadingSpanB] — displacement accepted but NOT applied:
+//         this sandbox is candle-indexed with no "future" bars to project
+//         into, so spans are returned undisplaced (documented limitation,
+//         not silently wrong).
+//       ta.fib(level,lookback) -> series (rolling retracement level: highest
+//         high minus level*range over the trailing window)
+//       ta.fvgbull(minGapPct) / ta.fvgbear(minGapPct) -> boolean series
+//         (Fair Value Gap / 3-candle imbalance — a well-defined, non-proprietary
+//         "smart money concepts" pattern; real Order Blocks were deliberately
+//         NOT added — no single agreed-on rule across implementations, unlike
+//         FVG's clean 3-candle definition)
+//     Deliberately NOT added: Volume Profile (a price-binned histogram is a
+//     different output shape than this sandbox's per-candle series model —
+//     would need a new output type, real scope decision not an oversight).
 //   operators:  + - * /   > < >= <= == !=   and or not   cond ? a : b
 //               series[n] (history reference, n a literal integer)
 //   statements: `name = <expr>`, `[a, b, c] = <tuple-returning call>`,
@@ -52,7 +93,20 @@ function ema(src, len) {
   let prev = null
   for (let i = 0; i < src.length; i++) {
     if (i + 1 < len) continue
-    if (prev == null) { let s = 0; for (let j = i - len + 1; j <= i; j++) s += src[j]; prev = s / len }
+    if (prev == null) {
+      // Real latent bug, found + fixed 2026-08-29: this seed sum had no
+      // null-check (unlike sma()'s already-correct `ok` guard) -- `s +=
+      // null` silently coerces to `s += 0` in JS, corrupting the seed if
+      // any value in the first window is null. Never triggered while every
+      // caller only ever passed close/open/etc (never null at index 0);
+      // now exposed by trueRange()'s real index-0 fix below (keltner's
+      // rangeEma = ema(trueRange(...), len) now genuinely has a leading
+      // null). Mirrors sma()'s pattern: wait for a full real window.
+      let s = 0, ok = true
+      for (let j = i - len + 1; j <= i; j++) { if (src[j] == null) { ok = false; break }; s += src[j] }
+      if (!ok) continue
+      prev = s / len
+    }
     else prev = src[i] * k + prev * (1 - k)
     out[i] = prev
   }
@@ -114,18 +168,328 @@ function crossunder(a, b) {
   }
   return out
 }
-// True range + EMA smoothing. Real Pine uses Wilder's RMA (alpha=1/len); EMA
-// is a documented approximation — close enough for a signal series, not a
-// claim of exact TradingView-parity.
-function atr(len, high, low, close) {
+function trueRange(high, low, close) {
+  // Real bug found + fixed 2026-08-29 (correctness cross-check against
+  // TA-Lib's ATR/ADX on hostinger-vps): index 0 was fabricated as
+  // high[0]-low[0] (no prior close exists, so "true range" is undefined
+  // there) -- real TA-Lib leaves index 0 undefined too. That fabricated
+  // value shifted rma()'s seed window by one bar for every downstream
+  // consumer (atr, dmi's trRma), producing small but real (~0.5-4%)
+  // systematic drift from TA-Lib's ATR/+DI/-DI/ADX, confirmed on identical
+  // synthetic OHLCV data. null here (not a guess) lets rma()'s existing
+  // null-skip logic find the correct first full window on its own.
   const N = high.length
-  const tr = new Array(N).fill(null)
-  for (let i = 0; i < N; i++) {
-    if (i === 0) { tr[i] = high[i] - low[i]; continue }
-    const a = high[i] - low[i], b = Math.abs(high[i] - close[i - 1]), c = Math.abs(low[i] - close[i - 1])
-    tr[i] = Math.max(a, b, c)
+  const out = new Array(N).fill(null)
+  for (let i = 1; i < N; i++) {
+    out[i] = Math.max(high[i] - low[i], Math.abs(high[i] - close[i - 1]), Math.abs(low[i] - close[i - 1]))
   }
-  return ema(tr, len)
+  return out
+}
+// Wilder's smoothing (alpha = 1/len) — the correct recurrence real Pine's
+// ta.rma/ta.atr/ta.dmi all use internally. Distinct from ema() above
+// (alpha = 2/(len+1)).
+function rma(src, len) {
+  const out = new Array(src.length).fill(null)
+  let prev = null
+  for (let i = 0; i < src.length; i++) {
+    if (src[i] == null) continue
+    if (prev == null) {
+      if (i + 1 < len) continue
+      let s = 0, ok = true
+      for (let j = i - len + 1; j <= i; j++) { if (src[j] == null) { ok = false; break }; s += src[j] }
+      if (!ok) continue
+      prev = s / len
+    } else {
+      prev = (prev * (len - 1) + src[i]) / len
+    }
+    out[i] = prev
+  }
+  return out
+}
+// ATR — real Wilder's RMA of true range. Fixed 2026-08-29 (was an EMA
+// approximation, documented as such); real now that rma() exists for
+// ta.dmi() to share, and correctness-checked against TA-Lib's ATR on
+// hostinger-vps (see commit message).
+function atr(len, high, low, close) {
+  return rma(trueRange(high, low, close), len)
+}
+function rollingSum(src, len) {
+  const out = new Array(src.length).fill(null)
+  for (let i = len - 1; i < src.length; i++) {
+    let s = 0, ok = true
+    for (let j = i - len + 1; j <= i; j++) { if (src[j] == null) { ok = false; break }; s += src[j] }
+    out[i] = ok ? s : null
+  }
+  return out
+}
+function bbands(src, len, mult) {
+  const basis = sma(src, len), dev = stdev(src, len)
+  const N = src.length
+  const upper = new Array(N).fill(null), lower = new Array(N).fill(null)
+  for (let i = 0; i < N; i++) {
+    if (basis[i] == null || dev[i] == null) continue
+    upper[i] = basis[i] + mult * dev[i]
+    lower[i] = basis[i] - mult * dev[i]
+  }
+  return { __tuple: [basis, upper, lower] }
+}
+function keltner(src, high, low, close, len, mult) {
+  const basis = ema(src, len)
+  const rangeEma = ema(trueRange(high, low, close), len)
+  const N = src.length
+  const upper = new Array(N).fill(null), lower = new Array(N).fill(null)
+  for (let i = 0; i < N; i++) {
+    if (basis[i] == null || rangeEma[i] == null) continue
+    upper[i] = basis[i] + mult * rangeEma[i]
+    lower[i] = basis[i] - mult * rangeEma[i]
+  }
+  return { __tuple: [basis, upper, lower] }
+}
+function dmi(high, low, close, diLen, adxLen) {
+  const N = high.length
+  const plusDM = new Array(N).fill(null), minusDM = new Array(N).fill(null)
+  for (let i = 1; i < N; i++) {
+    const up = high[i] - high[i - 1], down = low[i - 1] - low[i]
+    plusDM[i] = (up > down && up > 0) ? up : 0
+    minusDM[i] = (down > up && down > 0) ? down : 0
+  }
+  const trRma = rma(trueRange(high, low, close), diLen)
+  const plusDMRma = rma(plusDM, diLen), minusDMRma = rma(minusDM, diLen)
+  const plusDI = new Array(N).fill(null), minusDI = new Array(N).fill(null), dx = new Array(N).fill(null)
+  for (let i = 0; i < N; i++) {
+    if (trRma[i] == null || !trRma[i] || plusDMRma[i] == null || minusDMRma[i] == null) continue
+    plusDI[i] = 100 * plusDMRma[i] / trRma[i]
+    minusDI[i] = 100 * minusDMRma[i] / trRma[i]
+    const sum = plusDI[i] + minusDI[i]
+    dx[i] = sum ? 100 * Math.abs(plusDI[i] - minusDI[i]) / sum : 0
+  }
+  return { __tuple: [plusDI, minusDI, rma(dx, adxLen)] }
+}
+// Standard SuperTrend recurrence (matches TradingView's real ta.supertrend,
+// pandas-ta's supertrend, and Jesse's supertrend identically in shape —
+// cross-checked live on hostinger-vps, see commit message).
+function supertrend(high, low, close, factor, atrPeriod) {
+  const N = close.length
+  const atrSeries = atr(atrPeriod, high, low, close)
+  const st = new Array(N).fill(null), dir = new Array(N).fill(null)
+  let finalUpper = null, finalLower = null, prevDir = 1
+  for (let i = 0; i < N; i++) {
+    if (atrSeries[i] == null) continue
+    const hl2 = (high[i] + low[i]) / 2
+    const basicUpper = hl2 + factor * atrSeries[i]
+    const basicLower = hl2 - factor * atrSeries[i]
+    if (finalUpper == null) { finalUpper = basicUpper; finalLower = basicLower }
+    else {
+      finalUpper = (basicUpper < finalUpper || close[i - 1] > finalUpper) ? basicUpper : finalUpper
+      finalLower = (basicLower > finalLower || close[i - 1] < finalLower) ? basicLower : finalLower
+    }
+    const direction = prevDir === -1
+      ? (close[i] <= finalUpper ? -1 : 1)
+      : (close[i] >= finalLower ? 1 : -1)
+    st[i] = direction === -1 ? finalUpper : finalLower
+    dir[i] = direction
+    prevDir = direction
+  }
+  return { __tuple: [st, dir] }
+}
+// Standard iterative Parabolic SAR (Wilder 1978). Initialization convention
+// (first-bar trend guess) varies slightly across real implementations
+// (TA-Lib/Jesse/TradingView) — values track closely but an exact bar-0 match
+// across all of them isn't guaranteed, same honesty convention as this
+// file's existing vwap/ichimoku caveats.
+function sar(high, low, close, start, increment, maximum) {
+  const N = high.length
+  const out = new Array(N).fill(null)
+  if (N < 2) return out
+  let isUp = close[1] >= close[0]
+  let af = start
+  let ep = isUp ? high[0] : low[0]
+  let sarVal = isUp ? low[0] : high[0]
+  out[1] = sarVal
+  for (let i = 2; i < N; i++) {
+    const prevSar = sarVal
+    sarVal = prevSar + af * (ep - prevSar)
+    if (isUp) {
+      sarVal = Math.min(sarVal, low[i - 1], low[i - 2])
+      if (high[i] > ep) { ep = high[i]; af = Math.min(af + increment, maximum) }
+      if (low[i] < sarVal) { isUp = false; sarVal = ep; ep = low[i]; af = start }
+    } else {
+      sarVal = Math.max(sarVal, high[i - 1], high[i - 2])
+      if (low[i] < ep) { ep = low[i]; af = Math.min(af + increment, maximum) }
+      if (high[i] > sarVal) { isUp = true; sarVal = ep; ep = high[i]; af = start }
+    }
+    out[i] = sarVal
+  }
+  return out
+}
+function cci(src, len) {
+  const basis = sma(src, len)
+  const N = src.length
+  const out = new Array(N).fill(null)
+  for (let i = len - 1; i < N; i++) {
+    if (basis[i] == null) continue
+    let devSum = 0
+    for (let j = i - len + 1; j <= i; j++) devSum += Math.abs(src[j] - basis[i])
+    const meanDev = devSum / len
+    out[i] = meanDev ? (src[i] - basis[i]) / (0.015 * meanDev) : null
+  }
+  return out
+}
+function mfi(src, volume, len) {
+  const N = src.length
+  const posFlow = new Array(N).fill(0), negFlow = new Array(N).fill(0)
+  for (let i = 1; i < N; i++) {
+    const raw = src[i] * volume[i]
+    if (src[i] > src[i - 1]) posFlow[i] = raw
+    else if (src[i] < src[i - 1]) negFlow[i] = raw
+  }
+  const posSum = rollingSum(posFlow, len), negSum = rollingSum(negFlow, len)
+  const out = new Array(N).fill(null)
+  for (let i = 0; i < N; i++) {
+    if (posSum[i] == null || negSum[i] == null) continue
+    out[i] = negSum[i] === 0 ? 100 : 100 - 100 / (1 + posSum[i] / negSum[i])
+  }
+  return out
+}
+function obv(close, volume) {
+  // Real bug found + fixed 2026-08-29 (correctness cross-check against
+  // TA-Lib's OBV): seeded out[0]=0; TA-Lib (and every other real
+  // implementation) seeds out[0]=volume[0] -- OBV is a running total that
+  // starts AT the first bar's volume, not at zero before it. Confirmed:
+  // every subsequent value was off by exactly volume[0] before this fix.
+  const N = close.length
+  const out = new Array(N).fill(null)
+  let cum = volume[0]
+  out[0] = cum
+  for (let i = 1; i < N; i++) {
+    if (close[i] > close[i - 1]) cum += volume[i]
+    else if (close[i] < close[i - 1]) cum -= volume[i]
+    out[i] = cum
+  }
+  return out
+}
+function wpr(high, low, close, len) {
+  const hh = rolling(high, len, (w) => Math.max(...w))
+  const ll = rolling(low, len, (w) => Math.min(...w))
+  const N = close.length
+  const out = new Array(N).fill(null)
+  for (let i = 0; i < N; i++) {
+    if (hh[i] == null || ll[i] == null) continue
+    const range = hh[i] - ll[i]
+    out[i] = range ? -100 * (hh[i] - close[i]) / range : null
+  }
+  return out
+}
+function stochK(src, high, low, len) {
+  const hh = rolling(high, len, (w) => Math.max(...w))
+  const ll = rolling(low, len, (w) => Math.min(...w))
+  const N = src.length
+  const out = new Array(N).fill(null)
+  for (let i = 0; i < N; i++) {
+    if (hh[i] == null || ll[i] == null) continue
+    const range = hh[i] - ll[i]
+    out[i] = range ? 100 * (src[i] - ll[i]) / range : null
+  }
+  return out
+}
+function linreg(src, len, offset) {
+  const N = src.length
+  const out = new Array(N).fill(null)
+  for (let i = len - 1; i < N; i++) {
+    let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0, ok = true
+    for (let j = 0; j < len; j++) {
+      const y = src[i - len + 1 + j]
+      if (y == null) { ok = false; break }
+      sumX += j; sumY += y; sumXY += j * y; sumX2 += j * j
+    }
+    if (!ok) continue
+    const denom = len * sumX2 - sumX * sumX
+    const slope = denom ? (len * sumXY - sumX * sumY) / denom : 0
+    const intercept = (sumY - slope * sumX) / len
+    out[i] = intercept + slope * ((len - 1) - offset)
+  }
+  return out
+}
+function stochRsi(src, rsiLen, stochLen, smoothK, smoothD) {
+  const rsiSeries = rsi(src, rsiLen)
+  const k = sma(stochK(rsiSeries, rsiSeries, rsiSeries, stochLen), smoothK)
+  return { __tuple: [k, sma(k, smoothD)] }
+}
+// LazyBear's Squeeze Momentum — open, widely-reimplemented concept (real
+// original: TradingView user LazyBear's free/open Pine publication).
+function squeezeMomentum(high, low, close, len, bbMult, kcMult) {
+  const N = close.length
+  const basis = sma(close, len), dev = stdev(close, len)
+  const rangeMa = sma(trueRange(high, low, close), len)
+  const sqzOn = new Array(N).fill(null)
+  for (let i = 0; i < N; i++) {
+    if (basis[i] == null || dev[i] == null || rangeMa[i] == null) continue
+    const upperBB = basis[i] + bbMult * dev[i], lowerBB = basis[i] - bbMult * dev[i]
+    const upperKC = basis[i] + kcMult * rangeMa[i], lowerKC = basis[i] - kcMult * rangeMa[i]
+    sqzOn[i] = (lowerBB > lowerKC) && (upperBB < upperKC)
+  }
+  const hh = rolling(high, len, (w) => Math.max(...w))
+  const ll = rolling(low, len, (w) => Math.min(...w))
+  const smaClose = sma(close, len)
+  const deltaSrc = new Array(N).fill(null)
+  for (let i = 0; i < N; i++) {
+    if (hh[i] == null || ll[i] == null || smaClose[i] == null) continue
+    const avgAll = ((hh[i] + ll[i]) / 2 + smaClose[i]) / 2
+    deltaSrc[i] = close[i] - avgAll
+  }
+  return { __tuple: [sqzOn, linreg(deltaSrc, len, 0)] }
+}
+// Ichimoku Cloud — conversion/base/span-A lines are real per the standard
+// formula (Donchian midpoints at different lookbacks). `displacement` is
+// accepted but NOT applied: this sandbox is candle-indexed with no "future"
+// bars to project spans into, unlike real Pine's forward-shifted plot —
+// documented limitation, not silently wrong.
+function ichimoku(high, low, conv, base, spanB) {
+  const N = high.length
+  const donchianMid = (len) => {
+    const hh = rolling(high, len, (w) => Math.max(...w))
+    const ll = rolling(low, len, (w) => Math.min(...w))
+    const out = new Array(N).fill(null)
+    for (let i = 0; i < N; i++) { if (hh[i] == null || ll[i] == null) continue; out[i] = (hh[i] + ll[i]) / 2 }
+    return out
+  }
+  const conversionLine = donchianMid(conv), baseLine = donchianMid(base)
+  const spanA = new Array(N).fill(null)
+  for (let i = 0; i < N; i++) { if (conversionLine[i] == null || baseLine[i] == null) continue; spanA[i] = (conversionLine[i] + baseLine[i]) / 2 }
+  return { __tuple: [conversionLine, baseLine, spanA, donchianMid(spanB)] }
+}
+function fibLevel(high, low, level, lookback) {
+  const hh = rolling(high, lookback, (w) => Math.max(...w))
+  const ll = rolling(low, lookback, (w) => Math.min(...w))
+  const N = high.length
+  const out = new Array(N).fill(null)
+  for (let i = 0; i < N; i++) {
+    if (hh[i] == null || ll[i] == null) continue
+    out[i] = hh[i] - (hh[i] - ll[i]) * level
+  }
+  return out
+}
+// Fair Value Gap — well-defined, non-proprietary 3-candle imbalance (i vs
+// i-2, "smart money concepts" terminology). Bullish: candle i's low is above
+// candle i-2's high (a gap price never traded back into). minGapPct filters
+// noise-sized gaps.
+function fvgBullish(high, low, minGapPct) {
+  const N = high.length
+  const out = new Array(N).fill(null)
+  for (let i = 2; i < N; i++) {
+    const gap = low[i] - high[i - 2]
+    out[i] = gap > 0 && (gap / high[i - 2]) * 100 >= minGapPct
+  }
+  return out
+}
+function fvgBearish(high, low, minGapPct) {
+  const N = high.length
+  const out = new Array(N).fill(null)
+  for (let i = 2; i < N; i++) {
+    const gap = low[i - 2] - high[i]
+    out[i] = gap > 0 && (gap / low[i - 2]) * 100 >= minGapPct
+  }
+  return out
 }
 // Cumulative VWAP over the WHOLE candle window (no session/day anchor —
 // ms.ohlc's candles carry no session-boundary metadata). Real ta.vwap()
@@ -146,6 +510,24 @@ function int(series) {
   // length args arrive as constant series or raw numbers; take the first finite value.
   if (Array.isArray(series)) { const v = series.find((x) => x != null); return Math.max(1, Math.round(v)) }
   return Math.max(1, Math.round(series))
+}
+// Same "arrives as constant series or raw number" unwrap as int(), but for
+// float args (multipliers/factors) where rounding would be wrong.
+function num(series) {
+  if (Array.isArray(series)) { const v = series.find((x) => x != null); return v == null ? 0 : v }
+  return series == null ? 0 : series
+}
+// Real bug found + fixed 2026-08-29 during correctness cross-check against
+// TA-Lib's LINEARREG on hostinger-vps: ta.linreg's offset=0 was being
+// coerced through int() (Math.max(1, round(x)), correct for LENGTH args
+// where 0 is meaningless) which silently turned a real, valid offset=0
+// into 1 -- shifted every output by exactly one bar (~1.6% systematic
+// error, confirmed against TA-Lib and numpy.polyfit on identical input).
+// Integer args that may legitimately be 0 (offsets, not lengths) must use
+// this instead of int().
+function intOffset(series) {
+  if (Array.isArray(series)) { const v = series.find((x) => x != null); return Math.round(v) }
+  return Math.round(series)
 }
 
 const COSMETIC_NAMESPACES = new Set([
@@ -236,6 +618,26 @@ function evaluatePine(script, candles) {
     'input.float': (a) => a[0],
     'input.bool': (a) => a[0],
     'input.string': (a) => a[0],
+
+    // ── real-indicator research pass, 2026-08-29 (see file header comment
+    // and commit message for the full evidence trail) ──
+    'ta.bb': (a) => bbands(asSeries(a[0]), int(a[1]), num(a[2])),
+    'ta.kc': (a) => keltner(asSeries(a[0]), SOURCES.high, SOURCES.low, SOURCES.close, int(a[1]), num(a[2])),
+    'ta.dmi': (a) => dmi(SOURCES.high, SOURCES.low, SOURCES.close, int(a[0]), int(a[1])),
+    'ta.supertrend': (a) => supertrend(SOURCES.high, SOURCES.low, SOURCES.close, num(a[0]), int(a[1])),
+    'ta.sar': (a) => sar(SOURCES.high, SOURCES.low, SOURCES.close, num(a[0]), num(a[1]), num(a[2])),
+    'ta.cci': (a) => cci(asSeries(a[0]), int(a[1])),
+    'ta.mfi': (a) => mfi(asSeries(a[0]), SOURCES.volume, int(a[1])),
+    'ta.obv': () => obv(SOURCES.close, SOURCES.volume),
+    'ta.wpr': (a) => wpr(SOURCES.high, SOURCES.low, SOURCES.close, int(a[0])),
+    'ta.stoch': (a) => stochK(asSeries(a[0]), asSeries(a[1]), asSeries(a[2]), int(a[3])),
+    'ta.linreg': (a) => linreg(asSeries(a[0]), int(a[1]), a[2] != null ? intOffset(a[2]) : 0),
+    'ta.stochrsi': (a) => stochRsi(asSeries(a[0]), int(a[1]), int(a[2]), int(a[3]), int(a[4])),
+    'ta.squeeze': (a) => squeezeMomentum(SOURCES.high, SOURCES.low, SOURCES.close, int(a[0]), num(a[1]), num(a[2])),
+    'ta.ichimoku': (a) => ichimoku(SOURCES.high, SOURCES.low, int(a[0]), int(a[1]), int(a[2])),
+    'ta.fib': (a) => fibLevel(SOURCES.high, SOURCES.low, num(a[0]), int(a[1])),
+    'ta.fvgbull': (a) => fvgBullish(SOURCES.high, SOURCES.low, a[0] != null ? num(a[0]) : 0),
+    'ta.fvgbear': (a) => fvgBearish(SOURCES.high, SOURCES.low, a[0] != null ? num(a[0]) : 0),
   }
 
   function asSeries(x) {

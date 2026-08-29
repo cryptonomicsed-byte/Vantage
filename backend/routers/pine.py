@@ -374,6 +374,27 @@ v = ta.vwap(close)
 plot(v, "VWAP", color=color.orange, linewidth=2)
 volColor = close >= open ? color.green : color.red
 plot(volume, "Volume", color=color.new(volColor, 70), style=plot.style_columns)"""
+    elif "supertrend" in lower or "super trend" in lower:
+        script = f"""//@version=5
+indicator("SuperTrend", overlay=true)
+factor = input.float(3.0, "Factor")
+atrLen = input.int(10, "ATR Length")
+[st, dir] = ta.supertrend(factor, atrLen)
+plot(st, "SuperTrend", color=dir < 0 ? color.green : color.red, linewidth=2)
+bullish = ta.crossover(dir, 0)
+bearish = ta.crossunder(dir, 0)
+plotshape(bullish, "Bullish Flip", shape.triangleup, location.belowbar, color=color.green)
+plotshape(bearish, "Bearish Flip", shape.triangledown, location.abovebar, color=color.red)"""
+    elif "squeeze" in lower and "momentum" in lower:
+        script = f"""//@version=5
+indicator("Squeeze Momentum", overlay=false)
+length = input.int(20, "BB/KC Length")
+bbMult = input.float(2.0, "BB Mult")
+kcMult = input.float(1.5, "KC Mult")
+[sqzOn, mom] = ta.squeeze(length, bbMult, kcMult)
+plot(mom, "Momentum", color=mom > 0 ? color.green : color.red, style=plot.style_columns)
+plotshape(sqzOn, "Squeeze On", shape.circle, location.bottom, color=color.yellow)
+hline(0, "Zero", color=color.gray)"""
     else:
         # Default: EMA crossover
         script = f"""//@version=5
