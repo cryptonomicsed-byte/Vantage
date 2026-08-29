@@ -26,16 +26,21 @@ def _now_ts() -> str:
 
 
 async def _insert_token(db, mint: str, symbol: str, name: str, **overrides):
+    # market_cap_usd/buy_count/sell_count default to values that clear the
+    # real activity floor _fetch_recent_tokens now enforces (passes_dust_floor
+    # + MIN_REAL_TRADES=2) -- see narrative_detection.py's real bug fix:
+    # a name-pattern match alone used to flag tokens with zero real trades.
     row = dict(
         mint=mint, symbol=symbol, name=name,
         market_cap_usd=20000.0, score=10.0, manipulation_flags="[]",
         evicted=0, migrated=0, last_trade_at=_now_ts(),
+        buy_count=1, sell_count=1,
     )
     row.update(overrides)
     await db.execute(
         """INSERT INTO pumpfun_premigration_tokens
-           (mint, symbol, name, market_cap_usd, score, manipulation_flags, evicted, migrated, last_trade_at)
-           VALUES (:mint,:symbol,:name,:market_cap_usd,:score,:manipulation_flags,:evicted,:migrated,:last_trade_at)""",
+           (mint, symbol, name, market_cap_usd, score, manipulation_flags, evicted, migrated, last_trade_at, buy_count, sell_count)
+           VALUES (:mint,:symbol,:name,:market_cap_usd,:score,:manipulation_flags,:evicted,:migrated,:last_trade_at,:buy_count,:sell_count)""",
         row,
     )
 
