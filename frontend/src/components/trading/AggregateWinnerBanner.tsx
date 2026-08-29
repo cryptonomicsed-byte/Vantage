@@ -19,10 +19,24 @@ import { TokenLink } from './EntityProfileCard'
  * because this component does any filtering itself.
  */
 
+interface SmartMoneyRaw {
+  copy_trade_score: number
+  nansen_smart_money_usd: number | null
+}
+
 interface ScoreComponent {
-  raw: number | boolean
+  raw: number | boolean | SmartMoneyRaw
   normalized: number
   weight: number
+  sources?: {
+    copy_trade_normalized: number
+    nansen_normalized: number | null
+    nansen_available: boolean
+  }
+}
+
+function isSmartMoneyRaw(raw: ScoreComponent['raw']): raw is SmartMoneyRaw {
+  return typeof raw === 'object' && raw !== null && 'copy_trade_score' in raw
 }
 
 interface NarrativeFlag {
@@ -131,11 +145,27 @@ export default function AggregateWinnerBanner() {
                 border: '1px solid rgba(255,255,255,0.06)', fontSize: 10,
               }}>
                 <div style={{ color: 'var(--muted)', marginBottom: 2 }}>{COMPONENT_LABEL[key] || key} ({(comp.weight * 100).toFixed(0)}%)</div>
-                <div style={{ color: '#fff', fontWeight: 600 }}>
-                  raw: {typeof comp.raw === 'boolean' ? (comp.raw ? 'yes' : 'no') : comp.raw}
-                  {' · '}norm: {comp.normalized.toFixed(3)}
-                  {' · '}contrib: {(comp.normalized * comp.weight).toFixed(4)}
-                </div>
+                {isSmartMoneyRaw(comp.raw) ? (
+                  <div style={{ color: '#fff', fontWeight: 600 }}>
+                    <div>
+                      copy-trade: {comp.raw.copy_trade_score}
+                      {comp.sources && ` (norm ${comp.sources.copy_trade_normalized.toFixed(3)})`}
+                    </div>
+                    <div style={{ color: comp.sources?.nansen_available ? '#fff' : 'var(--muted)' }}>
+                      Nansen: {comp.raw.nansen_smart_money_usd != null
+                        ? `$${comp.raw.nansen_smart_money_usd.toLocaleString()}`
+                        : (comp.sources?.nansen_available ? 'no data for this token' : 'unavailable — not configured or no data')}
+                      {comp.sources?.nansen_available && comp.sources.nansen_normalized != null && ` (norm ${comp.sources.nansen_normalized.toFixed(3)})`}
+                    </div>
+                    <div>norm: {comp.normalized.toFixed(3)} · contrib: {(comp.normalized * comp.weight).toFixed(4)}</div>
+                  </div>
+                ) : (
+                  <div style={{ color: '#fff', fontWeight: 600 }}>
+                    raw: {typeof comp.raw === 'boolean' ? (comp.raw ? 'yes' : 'no') : comp.raw}
+                    {' · '}norm: {comp.normalized.toFixed(3)}
+                    {' · '}contrib: {(comp.normalized * comp.weight).toFixed(4)}
+                  </div>
+                )}
               </div>
             ))}
           </div>

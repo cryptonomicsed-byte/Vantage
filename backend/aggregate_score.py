@@ -33,13 +33,22 @@ STEP 2 -- Five real, independently-sourced component scores per candidate,
      evidence -- one source can be noisy or gamed, six agreeing is a much
      stronger signal.
 
-  2. SMART-MONEY CONVICTION (weight 0.30, the largest single weight) --
-     real copy_trade_score sum from wallets already vetted by
+  2. SMART-MONEY CONVICTION (weight 0.28, the largest single weight) --
+     TWO independently-sourced real signals, blended, both surfaced
+     separately in the response (never silently merged into one opaque
+     number): (a) copy_trade_score sum from wallets already vetted by
      wallet_learner.py's own performance tracking (see
-     degen.py::_token_conviction). Weighted highest because
-     copy_trade_score is itself already a REAL, backtested signal (built
-     from wallets' own verified trading performance), not a raw popularity
-     count -- it's the single most concrete number this pool has.
+     degen.py::_token_conviction) -- weighted highest of the two because
+     it's built from wallets' own verified trading performance, not a raw
+     popularity count; (b) ADDITIONALLY, 2026-08-29: Nansen's own
+     smart-money cohort holdings (see backend/nansen_client.py) when
+     NANSEN_API_KEY is configured and Nansen has real data for a
+     candidate -- a second, differently-sourced conviction signal (their
+     own wallet-labeling, not Vantage's). Each normalized independently,
+     then blended 70% copy_trade_score / 30% Nansen -- but only when
+     Nansen actually returned data for this candidate pool; unconfigured
+     or down, the component collapses to 100% copy_trade_score, never
+     blocking or degrading real scoring.
 
   3. VOLUME / MOMENTUM (weight 0.20) -- real 24h volume from whichever
      source has it for this address (GeckoTerminal pool data first,
@@ -62,7 +71,9 @@ STEP 2 -- Five real, independently-sourced component scores per candidate,
      ~86,600 tracked wallets pass bar already established and justified
      tonight, not a new number invented for this feature).
 
-  Weights sum to 1.0: 0.25 + 0.30 + 0.20 + 0.15 + 0.10 = 1.00
+  Weights sum to 1.0 -- see WEIGHTS dict below for current real values
+  (checked by assertion at import time; also includes narrative_combo,
+  added 2026-08-28, not described in this older paragraph list).
 
 STEP 3 -- DISQUALIFICATION (hard, overrides any score -- a disqualified
   token can never be the winner regardless of how high it scores):
@@ -107,6 +118,7 @@ from .db import get_db
 from .routers.alpha import _dexscreener_mcap_batch
 from .wallet_pruning import WHALE_BALANCE_USD
 from .degen_filters import is_major_or_stable, passes_dust_floor, pumpfun_token_is_alive, MIN_MARKET_CAP_USD
+from .nansen_client import smart_money_holdings_by_mint
 
 logger = logging.getLogger(__name__)
 
@@ -445,13 +457,25 @@ async def compute_aggregate_scores(
     # latency and a source of spurious dust-floor disqualifications from
     # individually-rate-limited requests coming back empty).
     surviving = list(raw.keys())
-    dex_snapshots = await _dexscreener_mcap_batch(surviving)
+    # Nansen smart-money holdings (real, ADDITIONAL signal alongside the
+    # existing wallet_reputation/copy_trade_score conviction above -- see
+    # backend/nansen_client.py's docstring for why it's kept separate
+    # rather than merged into the same raw number: different source,
+    # different units (USD value vs. an arbitrary point sum), and Nansen
+    # being down/unconfigured must never block or skew scoring). One
+    # batched call (whole-chain, cached) alongside the DexScreener fetch,
+    # not N per-mint calls.
+    dex_snapshots, nansen_map = await asyncio.gather(
+        _dexscreener_mcap_batch(surviving),
+        smart_money_holdings_by_mint(surviving),
+    )
     for a in surviving:
         snap = _market_snapshot_from_dex(dex_snapshots.get(a), pumpfun_by_mint.get(a))
         raw[a]["volume_momentum"] = snap["volume"]
         raw[a]["_market_cap"] = snap["market_cap"]
         raw[a]["_liquidity_usd"] = snap["liquidity_usd"]
         raw[a]["_from_pumpfun_only"] = snap.get("from_pumpfun_only", False)
+        raw[a]["_nansen_smart_money_usd"] = (nansen_map.get(a) or {}).get("value_usd")
 
     # Dust / dead-token floor. Two paths:
     #   - Candidates with a real DexScreener listing use
@@ -509,14 +533,37 @@ async def compute_aggregate_scores(
                 del raw[a]
 
     # Normalize each component 0..1 across the surviving candidate pool.
-    components = ["smart_money", "platform_breadth", "volume_momentum", "social_sentiment", "whale_presence", "narrative_combo"]
+    # smart_money is special: TWO independently-sourced signals combined
+    # into one weighted component (Vantage's own wallet_reputation/
+    # copy_trade_score conviction, ADDITIONALLY Nansen's smart-money
+    # holdings USD value when configured/available -- see nansen_client.py).
+    # Each is normalized separately (different units, different source),
+    # then blended 70/30 copytrade/nansen -- but ONLY when Nansen actually
+    # returned real data for at least one candidate in this pool; if
+    # Nansen is unconfigured or down, this collapses to 100% the existing
+    # copytrade signal, never silently zeroing out real scoring.
+    components = ["platform_breadth", "volume_momentum", "social_sentiment", "whale_presence", "narrative_combo"]
     normalized: dict[str, dict[str, float]] = {}
     for comp in components:
         normalized[comp] = _normalize({a: raw[a][comp] for a in raw})
 
+    norm_copytrade = _normalize({a: raw[a]["smart_money"] for a in raw})
+    nansen_present = len(nansen_map) > 0
+    norm_nansen = _normalize({a: (raw[a].get("_nansen_smart_money_usd") or 0.0) for a in raw}) if nansen_present else {}
+    NANSEN_BLEND_WEIGHT = 0.3  # of the smart_money component's own weight, when Nansen has real data
+    smart_money_combined: dict[str, float] = {}
+    for a in raw:
+        ct = norm_copytrade.get(a, 0.0)
+        if nansen_present:
+            ns = norm_nansen.get(a, 0.0)
+            smart_money_combined[a] = (1 - NANSEN_BLEND_WEIGHT) * ct + NANSEN_BLEND_WEIGHT * ns
+        else:
+            smart_money_combined[a] = ct
+
     ranked = []
     for addr, data in raw.items():
         scores = {comp: normalized[comp].get(addr, 0.0) for comp in components}
+        scores["smart_money"] = smart_money_combined.get(addr, 0.0)
         total = (
             scores["smart_money"] * WEIGHTS["smart_money"]
             + scores["platform_breadth"] * WEIGHTS["platform_breadth"]
@@ -526,13 +573,26 @@ async def compute_aggregate_scores(
             + scores["narrative_combo"] * WEIGHTS["narrative_combo"]
         )
         narrative = data.get("_narrative")
+        nansen_usd = data.get("_nansen_smart_money_usd")
         ranked.append({
             "address": addr,
             "symbol": data["symbol"],
             "total_score": round(total, 4),
             "narrative_flag": narrative,
             "components": {
-                "smart_money": {"raw": round(data["smart_money"], 2), "normalized": round(scores["smart_money"], 4), "weight": WEIGHTS["smart_money"]},
+                "smart_money": {
+                    "raw": {
+                        "copy_trade_score": round(data["smart_money"], 2),
+                        "nansen_smart_money_usd": round(nansen_usd, 2) if nansen_usd is not None else None,
+                    },
+                    "normalized": round(scores["smart_money"], 4),
+                    "weight": WEIGHTS["smart_money"],
+                    "sources": {
+                        "copy_trade_normalized": round(norm_copytrade.get(addr, 0.0), 4),
+                        "nansen_normalized": round(norm_nansen.get(addr, 0.0), 4) if nansen_present else None,
+                        "nansen_available": nansen_present,
+                    },
+                },
                 "platform_breadth": {"raw": data["platform_breadth"], "normalized": round(scores["platform_breadth"], 4), "weight": WEIGHTS["platform_breadth"]},
                 "volume_momentum": {"raw": round(data["volume_momentum"], 2), "normalized": round(scores["volume_momentum"], 4), "weight": WEIGHTS["volume_momentum"]},
                 "social_sentiment": {"raw": round(data["social_sentiment"], 2), "normalized": round(scores["social_sentiment"], 4), "weight": WEIGHTS["social_sentiment"]},
@@ -541,5 +601,9 @@ async def compute_aggregate_scores(
             },
         })
 
-    ranked.sort(key=lambda r: (-r["total_score"], -r["components"]["smart_money"]["raw"]))
+    # Tie-break by raw copy_trade_score specifically (not the combined/
+    # normalized smart_money value) -- same real, concrete, backtested
+    # signal this tiebreak always used; smart_money.raw became a dict once
+    # Nansen was added, so pull the one real number back out of it.
+    ranked.sort(key=lambda r: (-r["total_score"], -r["components"]["smart_money"]["raw"]["copy_trade_score"]))
     return {"ranked": ranked, "disqualified": disqualified, "methodology": WEIGHTS}

@@ -294,3 +294,110 @@ async def test_pumpfun_own_mcap_wins_over_unreliable_thin_dexscreener_pair(monke
 
     assert len(result["ranked"]) == 1
     assert result["ranked"][0]["symbol"] == "richness"
+
+
+# ── Nansen smart-money holdings: real ADDITIONAL signal, not a replacement ──
+
+@pytest.mark.asyncio
+async def test_smart_money_uses_pure_copytrade_when_nansen_unavailable(monkeypatch):
+    """No NANSEN_API_KEY / Nansen down / no data for this pool -> the
+    smart_money component must collapse to 100% the existing
+    copy_trade_score signal, never degrade or block real scoring."""
+    import backend.aggregate_score as agg_module
+
+    async def fake_mcap_batch(mints):
+        return {m: {"market_cap": 50_000.0, "liquidity_usd": 10_000.0} for m in mints}
+
+    async def fake_nansen_empty(mints):
+        return {}  # no key configured / no data, real fail-soft shape
+
+    monkeypatch.setattr(agg_module, "_dexscreener_mcap_batch", fake_mcap_batch)
+    monkeypatch.setattr(agg_module, "smart_money_holdings_by_mint", fake_nansen_empty)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO wallet_reputation (wallet_address, copy_trade_score) VALUES (?,?)",
+            ("SmartWallet1111111111111111111111111111", 25.0),
+        )
+        await db.execute(
+            "INSERT INTO token_wallet_roles (mint, symbol, wallet_address, role) VALUES (?,?,?,?)",
+            ("SoloMint1111111111111111111111111111111", "SOLO", "SmartWallet1111111111111111111111111111", "top_holder"),
+        )
+        await db.commit()
+
+    result = await compute_aggregate_scores(
+        [{"address": "SoloMint1111111111111111111111111111111", "symbol": "SOLO", "platform_breadth": 1}],
+        helius_key="",
+    )
+
+    assert len(result["ranked"]) == 1
+    sm = result["ranked"][0]["components"]["smart_money"]
+    assert sm["raw"]["copy_trade_score"] == 25.0
+    assert sm["raw"]["nansen_smart_money_usd"] is None
+    assert sm["sources"]["nansen_available"] is False
+    assert sm["sources"]["nansen_normalized"] is None
+    # lone survivor with real (>0) copytrade signal -> normalize's n==1
+    # presence-of-signal rule gives 1.0, and with Nansen unavailable the
+    # combined score must equal that pure copytrade normalization exactly.
+    assert sm["normalized"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_nansen_signal_blended_and_disclosed_when_available(monkeypatch):
+    """Real regression for the blend math: two candidates with IDENTICAL
+    copy_trade_score, but one has real Nansen smart-money USD value and
+    the other has none -- the Nansen-backed one must score strictly
+    higher (30% blend weight is real, not decorative), and both raw
+    numbers must be visible in the response, not silently merged into
+    one opaque figure."""
+    import backend.aggregate_score as agg_module
+
+    async def fake_mcap_batch(mints):
+        return {m: {"market_cap": 50_000.0, "liquidity_usd": 10_000.0} for m in mints}
+
+    async def fake_nansen(mints):
+        # Only NansenMint has real Nansen data; PlainMint has none (missing
+        # key, not a zero -- per nansen_client's documented contract).
+        return {"NansenMint111111111111111111111111111111": {
+            "value_usd": 500_000.0, "holders_count": 12, "balance_change_24h_pct": 4.2,
+        }}
+
+    monkeypatch.setattr(agg_module, "_dexscreener_mcap_batch", fake_mcap_batch)
+    monkeypatch.setattr(agg_module, "smart_money_holdings_by_mint", fake_nansen)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO wallet_reputation (wallet_address, copy_trade_score) VALUES (?,?)",
+            ("EqualWallet111111111111111111111111111", 10.0),
+        )
+        for mint, sym in [
+            ("NansenMint111111111111111111111111111111", "NANSEN"),
+            ("PlainMint111111111111111111111111111111", "PLAIN"),
+        ]:
+            await db.execute(
+                "INSERT INTO token_wallet_roles (mint, symbol, wallet_address, role) VALUES (?,?,?,?)",
+                (mint, sym, "EqualWallet111111111111111111111111111", "top_holder"),
+            )
+        await db.commit()
+
+    result = await compute_aggregate_scores(
+        [
+            {"address": "NansenMint111111111111111111111111111111", "symbol": "NANSEN", "platform_breadth": 1},
+            {"address": "PlainMint111111111111111111111111111111", "symbol": "PLAIN", "platform_breadth": 1},
+        ],
+        helius_key="",
+    )
+
+    by_addr = {r["address"]: r for r in result["ranked"]}
+    nansen_sm = by_addr["NansenMint111111111111111111111111111111"]["components"]["smart_money"]
+    plain_sm = by_addr["PlainMint111111111111111111111111111111"]["components"]["smart_money"]
+
+    # Identical raw copy_trade_score...
+    assert nansen_sm["raw"]["copy_trade_score"] == plain_sm["raw"]["copy_trade_score"] == 10.0
+    # ...but Nansen data disclosed separately and only for the real candidate.
+    assert nansen_sm["raw"]["nansen_smart_money_usd"] == 500_000.0
+    assert plain_sm["raw"]["nansen_smart_money_usd"] is None
+    assert nansen_sm["sources"]["nansen_available"] is True
+    # And the blend gives the Nansen-backed candidate a real, strictly
+    # higher combined smart_money score despite equal copy_trade_score.
+    assert nansen_sm["normalized"] > plain_sm["normalized"]
