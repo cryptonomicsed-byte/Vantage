@@ -72,17 +72,39 @@ logger = logging.getLogger(__name__)
 # ── Config ────────────────────────────────────────────────────────────
 LOOKBACK_HOURS = 6          # "currently running" window for heat computation
 HOT_THRESHOLD = 2           # distinct tokens matched within lookback = "hot"
-DYNAMIC_THEME_MIN_TOKENS = 2  # min distinct tokens sharing a keyword to become a theme
+# Real live-data finding 2026-08-29: at production scale (~300 tokens/6h),
+# 2 distinct tokens sharing an ordinary English word is common by pure
+# chance, not narrative signal -- a live scan produced 96 "dynamic themes"
+# and 91 "combo flags" for words like "this"/"world"/"fund"/"solana",
+# drowning out real signal. Raised from 2 to 4 (meaningfully above chance
+# co-occurrence at this candidate-pool size) alongside the expanded
+# stopword list below, which was the bigger real gap.
+DYNAMIC_THEME_MIN_TOKENS = 4
 FUZZY_THRESHOLD = 0.72       # difflib ratio for spelling/phonetic proximity match
-MIN_KEYWORD_LEN = 3          # ignore fragments shorter than this (too noisy)
+MIN_KEYWORD_LEN = 4          # ignore fragments shorter than this (too noisy; was 3)
 
 # Generic words that appear in huge numbers of unrelated memecoin names --
-# excluded so they never become a "theme" on their own (dynamic discovery
-# would otherwise flag "coin"/"moon"/"inu" as a hot narrative every day).
+# excluded so they never become a "theme" on their own. The crypto-specific
+# subset alone (first line) was insufficient in practice: live production
+# data showed ordinary English FUNCTION words ("this", "that", "world",
+# "fund", "for", "me", "get") colliding across unrelated token names just
+# as often as crypto slang, since real memecoin names are often full
+# phrases ("Sell Me This Shitcoin", "World Oil Fund"). This is a standard
+# short English stopword list, not an attempt to filter meaning -- any
+# keyword here can never become a dynamic theme on its own, but still
+# contributes to seed-theme substring matching where relevant.
 _STOPWORDS = {
     "coin", "token", "inu", "moon", "official", "new", "the", "on", "sol",
     "pump", "fun", "baby", "mini", "safe", "doge", "shib", "elon", "king",
-    "og", "ai", "meme", "gem", "v2", "the", "a", "of", "wif",
+    "og", "ai", "meme", "gem", "v2", "a", "of", "wif",
+    "this", "that", "these", "those", "here", "there", "with", "from",
+    "your", "you", "our", "and", "for", "not", "but", "are", "was",
+    "were", "will", "can", "has", "have", "had", "its", "it's", "into",
+    "onto", "over", "under", "about", "world", "fund", "get", "got",
+    "best", "top", "first", "real", "true", "just", "only", "very",
+    "more", "most", "some", "any", "all", "one", "two", "three",
+    "what", "who", "how", "why", "when", "where", "which", "than",
+    "then", "them", "they", "his", "her", "she", "him", "out", "now",
 }
 
 # Seed lexicon: hand-curated, real recurring memecoin narrative categories.

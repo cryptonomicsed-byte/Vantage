@@ -126,11 +126,16 @@ async def test_single_token_theme_is_not_hot():
 
 @pytest.mark.asyncio
 async def test_dynamic_theme_discovered_from_cooccurring_unlisted_keyword():
-    # "zorbatron" is in no seed lexicon at all -- two tokens both using it
-    # must still surface as a real, auto-discovered theme.
+    # "zorbatron" is in no seed lexicon at all -- DYNAMIC_THEME_MIN_TOKENS
+    # (4) distinct tokens using it must still surface as a real,
+    # auto-discovered theme (raised from 2 after live production data
+    # showed 2 was noise-prone at real candidate-pool scale -- see
+    # narrative_detection.py's DYNAMIC_THEME_MIN_TOKENS docstring).
     async with aiosqlite.connect(DB_PATH) as db:
         await _insert_token(db, "Zor1" + "1" * 39, "ZORB1", "Zorbatron Prime")
         await _insert_token(db, "Zor2" + "2" * 39, "ZORB2", "Baby Zorbatron")
+        await _insert_token(db, "Zor3" + "3" * 39, "ZORB3", "Zorbatron Classic")
+        await _insert_token(db, "Zor4" + "4" * 39, "ZORB4", "Second Gen Zorbatron")
         await db.commit()
 
     result = await compute_narrative_heat()
