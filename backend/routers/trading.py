@@ -2122,6 +2122,32 @@ async def list_journal(agent: dict = Depends(get_agent), limit: int = Query(50, 
         )).fetchall()
         return [dict(r) for r in rows]
 
+# ── Shadow Account ──────────────────────────────────────────
+# Retrospective self-behavior mining + counterfactual attribution over an
+# agent's OWN real trade history. Adapted from HKUDS/Vibe-Trading's
+# shadow_account module (2026-08-29 pattern audit) -- see
+# backend/backtest/shadow_account.py's module docstring for the full
+# methodology and why it deliberately differs from the source repo (no
+# cross-symbol backtest of the extracted rules; classifies the agent's own
+# realized trades as rule-compliant or not).
+
+@router.get("/shadow-account")
+async def shadow_account_report(
+    agent: dict = Depends(get_agent),
+    min_support: int = Query(3, ge=1, le=50),
+    max_rules: int = Query(3, ge=1, le=10),
+):
+    """Extract this agent's shadow profile (rules distilled from its own
+    profitable trades) and the delta-PnL attribution against its real
+    history. 400 if there isn't enough profitable trade history yet --
+    never fabricates a rule from insufficient evidence."""
+    from backend.backtest.shadow_account import build_shadow_report
+
+    try:
+        return await build_shadow_report(agent["id"], min_support=min_support, max_rules=max_rules)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 # ── Risk ────────────────────────────────────────────────────
 
 @router.get("/risk")
