@@ -914,6 +914,8 @@ async def _gather_platform_leaders() -> list[dict]:
     """The real gather logic shared by /platform-leaders and the aggregate
     scorer's candidate-pool assembly (task (b) reuses task (a)'s output
     directly rather than re-deriving it)."""
+    from backend.narrative_detection import mint_combo_flag
+
     leaders = await asyncio.gather(
         _geckoterminal_leader(), _dexscreener_leader(), _coingecko_leader(),
         _pumpfun_leader(), _vantage_conviction_leader(), _moonshot_leader(),
@@ -926,6 +928,17 @@ async def _gather_platform_leaders() -> list[dict]:
             results.append(leader)
         elif isinstance(leader, Exception):
             logger.debug("platform-leaders: a source raised: %s", leader)
+
+    # Narrative combo flag (backend/narrative_detection.py) applies to any
+    # platform's pick, keyed by real mint address -- not just pump.fun's,
+    # since a token that combined two hot narratives can go on to surface
+    # via GeckoTerminal/DexScreener trending too.
+    addrs = [r["address"] for r in results if r.get("address")]
+    if addrs:
+        flags = await asyncio.gather(*[mint_combo_flag(a) for a in addrs], return_exceptions=True)
+        flag_by_addr = {a: f for a, f in zip(addrs, flags) if isinstance(f, dict)}
+        for r in results:
+            r["narrative_flag"] = flag_by_addr.get(r.get("address"))
     return results
 
 

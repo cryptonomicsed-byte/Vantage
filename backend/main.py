@@ -822,6 +822,8 @@ app.include_router(composio_router)
 
 from .routers.degen import router as degen_router
 app.include_router(degen_router)
+from .routers.narratives import router as narratives_router
+app.include_router(narratives_router)
 
 from .routers.wallets import router as wallets_router
 app.include_router(wallets_router)
