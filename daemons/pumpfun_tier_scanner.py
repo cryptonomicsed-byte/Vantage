@@ -38,7 +38,21 @@ import vantage_db_shim as _vshim
 import urllib.request
 import websockets
 
-PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
+# subscribeTokenTrade/subscribeAccountTrade require an API key funded with
+# >=0.02 SOL (PumpPortal server-side rejection message, confirmed live) --
+# without it, PumpPortal silently rejects every trade subscription and only
+# "create"/"migration" events (unauthenticated, free) ever arrive. Root
+# cause of every tracked token showing exactly 1 trade forever (creation
+# only) across 210k+ historical rows. Key is a wallet created via
+# https://pumpportal.fun/api/create-wallet -- see
+# /etc/vantage-secrets/pumpportal.env on hostinger (never in git). Falls
+# back to the unauthenticated URL if unset so this daemon still runs (with
+# only create/migration visibility) rather than crash on a missing secret.
+_PUMPPORTAL_API_KEY = os.environ.get("PUMPPORTAL_API_KEY", "")
+PUMPPORTAL_WS = (
+    f"wss://pumpportal.fun/api/data?api-key={_PUMPPORTAL_API_KEY}"
+    if _PUMPPORTAL_API_KEY else "wss://pumpportal.fun/api/data"
+)
 FRESH_GRACE_SECONDS = int(os.environ.get("PUMPFUN_FRESH_GRACE_SECONDS", 7 * 60))
 RUNNING_GRACE_SECONDS = int(os.environ.get("PUMPFUN_RUNNING_GRACE_SECONDS", 60))
 FRESH_TIER_CEILING_USD = 10_000  # below this, use the longer grace window
