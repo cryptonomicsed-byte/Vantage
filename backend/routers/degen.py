@@ -10,6 +10,7 @@ from backend.db import get_db
 from backend.routers.alpha import _dexscreener_mcap
 from backend import market_sources as ms
 from backend import moonshot_client
+from backend.insightx_client import scanner_for_token, scanner_risk_flags
 from backend.degen_filters import (
     passes_all_filters, is_major_or_stable, pumpfun_token_is_alive,
     PUMPFUN_MIN_MARKET_CAP_USD, PUMPFUN_MAX_MARKET_CAP_USD,
@@ -364,6 +365,27 @@ async def rug_check(mint: str=Query(...), x_agent_key: str=Header(...)):
             risk_score += 10
         else:
             checks.append({"check":"PRICE","status":"PASS","detail":f"${price:.8f}"})
+        # InsightX Scanner -- real, independently-sourced ADDITIONAL check
+        # (backend/insightx_client.py), appended alongside the existing
+        # Helius mint/freeze + Birdeye price checks above, never replacing
+        # them. This endpoint is already one-mint-per-request (agent-
+        # triggered, not a hot per-candidate loop), which is exactly the
+        # real usage pattern InsightX's tight per-minute/monthly quota can
+        # sustain -- see that module's docstring for the confirmed-live
+        # rate-limit numbers driving this design. has_data=False (no
+        # InsightX data / budget exhausted this minute / unconfigured)
+        # adds no check at all, same "no signal, no verdict" discipline as
+        # the rest of this file.
+        scan = await scanner_for_token(mint)
+        flags = scanner_risk_flags(scan)
+        if flags["has_data"]:
+            if flags["drainable"]:
+                checks.append({"check":"INSIGHTX_DRAINABLE","status":"FAIL","detail":"InsightX Scanner flags this token as drainable/honeypot risk"})
+                risk_score += 40
+            else:
+                checks.append({"check":"INSIGHTX_DRAINABLE","status":"PASS","detail":"InsightX Scanner: no drainable/honeypot flag"})
+            if flags["score"] is not None:
+                checks.append({"check":"INSIGHTX_SCORE","status":"PASS" if flags["score"] >= 50 else "WARN","detail":f"InsightX safety score: {flags['score']}/100"})
         safe = risk_score <= 20
         return {"mint":mint,"checks":checks,"risk_score":risk_score,"safe":safe,"supply":supply}
     except Exception as e:

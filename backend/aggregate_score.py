@@ -99,6 +99,18 @@ STEP 3 -- DISQUALIFICATION (hard, overrides any score -- a disqualified
        unlimited supply) or freeze authority (can freeze holder wallets)
        disqualifies. Cached 10 min per mint to bound RPC calls across the
        (small, bounded) candidate pool.
+    e) InsightX Labels (added 2026-08-29, backend/insightx_client.py) --
+       real, independently-sourced ADDITIONAL check alongside (a): an
+       address InsightX labels exchange/CEX/stablecoin also disqualifies,
+       same "no signal ever silently replaces existing data" discipline as
+       Nansen's smart_money blend below. No-op if InsightX is
+       unconfigured/down (returns {}).
+    f) InsightX Scanner (added 2026-08-29) -- real, independently-sourced
+       ADDITIONAL rug-check alongside (d): a definite drainable/honeypot
+       flag disqualifies. Only ever disqualifies on a definite True flag
+       from real data, exactly like (d) -- None (no data / InsightX's own
+       tight rate limit already hit this minute / unconfigured) never
+       disqualifies, same fail-soft discipline throughout this file.
 
 STEP 4 -- The winner is the highest total-weighted-score candidate among
   the NON-disqualified ones. Ties broken by raw smart-money conviction
@@ -119,6 +131,7 @@ from .routers.alpha import _dexscreener_mcap_batch
 from .wallet_pruning import WHALE_BALANCE_USD
 from .degen_filters import is_major_or_stable, passes_dust_floor, pumpfun_token_is_alive, MIN_MARKET_CAP_USD
 from .nansen_client import smart_money_holdings_by_mint
+from .insightx_client import labels_for_addresses, scanner_for_token, scanner_risk_flags
 
 logger = logging.getLogger(__name__)
 
@@ -408,6 +421,30 @@ async def compute_aggregate_scores(
                 disqualified.append({"address": addr, "symbol": symbol, "reason": "major/stablecoin token, excluded from degen scoring"})
                 del candidate_meta[addr]
 
+        # InsightX Labels -- real, independently-sourced ADDITIONAL signal
+        # alongside is_major_or_stable's own curated address/symbol lists
+        # above (never replacing them: if InsightX is unconfigured/down,
+        # labels_for_addresses returns {} and this loop is simply a no-op).
+        # One batched call covering the whole surviving pool (its own real
+        # 100-address/call max, per-address cached) -- catches an exchange/
+        # CEX-controlled address or a stablecoin contract the curated lists
+        # don't happen to enumerate, the same class of bug is_major_or_stable
+        # was built to fix for USDC.
+        if candidate_meta:
+            labels = await labels_for_addresses(list(candidate_meta.keys()))
+            for addr in list(candidate_meta.keys()):
+                info = labels.get(addr)
+                if not info:
+                    continue
+                tags = {str(t).lower() for t in (info.get("tags") or [])}
+                if tags & {"exchange", "stablecoin", "cex"}:
+                    disqualified.append({
+                        "address": addr,
+                        "symbol": candidate_meta[addr],
+                        "reason": f"InsightX label: {info.get('label')} ({sorted(tags)})",
+                    })
+                    del candidate_meta[addr]
+
         # manipulation_flags now comes from the same bulk pumpfun_rows fetch
         # above (added to that SELECT) instead of a second per-mint query.
         for addr in list(candidate_meta.keys()):
@@ -530,6 +567,35 @@ async def compute_aggregate_scores(
         for a, risk in zip(still_alive, risk_checks):
             if risk is True and a in raw:
                 disqualified.append({"address": a, "symbol": raw[a]["symbol"], "reason": "active mint or freeze authority"})
+                del raw[a]
+
+    # InsightX Scanner -- real, independently-sourced ADDITIONAL rug-check
+    # signal, same "only disqualify on a definite risk flag, never on None"
+    # discipline as the mint/freeze-authority check just above (None here
+    # means InsightX had no data / was unreachable / this process already
+    # hit its own conservative per-minute call budget -- see
+    # insightx_client.py's docstring for why that budget exists: the real
+    # API's per-minute rate limit is genuinely tight, confirmed live).
+    # Deliberately runs on the POST-dust-floor survivor list (still_alive),
+    # same reasoning as the bug fix documented above the mint/freeze check:
+    # don't spend a scarce, budget-capped call on a candidate that's
+    # already disqualified and thrown away regardless of the result.
+    still_alive_2 = list(raw.keys())
+    if still_alive_2:
+        scans = await asyncio.gather(
+            *[scanner_for_token(a) for a in still_alive_2],
+            return_exceptions=True,
+        )
+        for a, scan in zip(still_alive_2, scans):
+            if isinstance(scan, BaseException):
+                continue
+            flags = scanner_risk_flags(scan)
+            if flags["has_data"] and flags["drainable"] and a in raw:
+                disqualified.append({
+                    "address": a,
+                    "symbol": raw[a]["symbol"],
+                    "reason": f"InsightX Scanner: drainable/honeypot risk (score={flags['score']})",
+                })
                 del raw[a]
 
     # Normalize each component 0..1 across the surviving candidate pool.
