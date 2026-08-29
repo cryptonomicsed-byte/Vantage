@@ -131,9 +131,17 @@ services:
       - postgres
 
 networks:
-  # internal: true → containers on this network have no route to the internet.
-  pine_isolated:
-    internal: true
+  # NOT internal: same bug already found + fixed for parrot_isolated below —
+  # `internal: true` makes Compose refuse to publish ports at ALL (no gateway
+  # = no route in or out), which silently broke the 127.0.0.1:9871 binding
+  # the Vantage backend needs to reach this on (confirmed live 2026-08-29:
+  # `docker port ares-pine-runtime` returned nothing, every /api/pine/run
+  # call 503'd even though the container was "Up"). pine-engine.js makes no
+  # outbound network call anywhere in its code, so egress is a behavioral
+  # guarantee, not a network-level one — same posture as parrot_isolated.
+  # For a hard (not just behavioral) guarantee, add an iptables/nftables rule
+  # on the host dropping outbound traffic from this container's IP.
+  pine_isolated: {}
   # NOT internal: Compose refuses to publish ports at all for an internal
   # network (no gateway = no route in or out), which silently broke the
   # 127.0.0.1:9878 binding this scanner needs to be reachable from the host.
