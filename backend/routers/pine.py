@@ -151,6 +151,120 @@ async def delete_indicator(indicator_id: int, agent: dict = Depends(get_agent)):
     return {"status": "deleted"}
 
 
+@router.post("/indicators/{indicator_id}/signal")
+async def evaluate_pine_signal(indicator_id: int, request: Request, agent: dict = Depends(get_agent)):
+    """Evaluate a saved Pine indicator against the latest real candle and,
+    if it triggers, optionally place a real (paper-fill) order tagged
+    trigger_reason='pine:<id>:<name>' -- so trade_outcome_learner.py's
+    source_performance tracks this indicator's real trading performance
+    over time, same as any other signal source. Wires 2026-08-29's
+    previously-disconnected pine_indicators table into the actual
+    paper-fill/learning loop instead of leaving Pine indicators as chart
+    overlays with no downstream effect.
+
+    Trigger source: plotshape() markers ONLY (see pine-engine.js) -- the
+    one output shape that's genuinely boolean/discrete in this engine.
+    Scripts with no markers (Bollinger Squeeze, MACD Custom, VWAP Custom,
+    the default EMA-crossover template all only feed their crossover/
+    squeeze booleans into bgcolor(), which is parse-validated but produces
+    no numeric/boolean series) have nothing to act on -- returns
+    triggered=false honestly rather than inventing a signal from a plot.
+
+    Direction heuristic: a triggered marker whose name contains
+    bear/sell/short/down is SELL, everything else is BUY (matches
+    pine.py's own RSI Divergence template: "Bearish Div"/"Bullish Div").
+
+    Hard safety boundary: this endpoint only ever creates a pending order
+    and, for BUY, paper-fills it (simulated, never real settlement) --
+    it never calls any live-execution path. A Pine script cannot move real
+    funds through this endpoint under any input.
+    """
+    body = await _parse_body(request)
+    symbol = (body.get("symbol") or "BTC").strip()
+    interval = (body.get("interval") or "1d").strip()
+    chain = (body.get("chain") or "solana").strip()
+    quantity = float(body.get("quantity") or 0)
+    execute = bool(body.get("execute", False))
+
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        row = await (await db.execute(
+            "SELECT * FROM pine_indicators WHERE id=? AND (agent_id=? OR shared=1)",
+            (indicator_id, agent["id"]))).fetchone()
+    if not row:
+        raise HTTPException(404, "Indicator not found")
+    indicator = dict(row)
+
+    candles = await ms.ohlc(symbol, interval, 200)
+    if not candles:
+        raise HTTPException(404, f"No candle data for {symbol.upper()} ({interval})")
+
+    try:
+        async with httpx.AsyncClient(timeout=6) as c:
+            r = await c.post(f"{PINE_RUNTIME_URL.rstrip('/')}/run",
+                             json={"script": indicator["script"], "candles": candles})
+        if r.status_code != 200:
+            detail = r.json().get("error", r.text) if r.headers.get("content-type", "").startswith("application/json") else r.text
+            raise HTTPException(422, f"Pine error: {detail}")
+        result = r.json()
+    except httpx.HTTPError:
+        raise HTTPException(503, "Pine sandbox is unavailable")
+
+    markers = result.get("markers") or {}
+    if not markers:
+        return {
+            "triggered": False,
+            "indicator_id": indicator_id,
+            "reason": "script has no plotshape() markers to act on -- only plotshape() "
+                      "output is a real boolean signal in this sandbox",
+        }
+
+    last_idx = len(candles) - 1
+    triggered_names = [
+        name for name, series in markers.items()
+        if series and len(series) > last_idx and series[last_idx].get("value") is True
+    ]
+    if not triggered_names:
+        return {"triggered": False, "indicator_id": indicator_id, "checked_markers": sorted(markers)}
+
+    def _direction(name: str) -> str:
+        low = name.lower()
+        return "SELL" if any(w in low for w in ("bear", "sell", "short", "down")) else "BUY"
+
+    side = _direction(triggered_names[0])
+    source = f"pine:{indicator_id}:{indicator['name']}"
+    response = {
+        "triggered": True,
+        "indicator_id": indicator_id,
+        "indicator_name": indicator["name"],
+        "matched_markers": triggered_names,
+        "side": side,
+        "symbol": symbol.upper(),
+    }
+
+    if not execute or quantity <= 0:
+        response["order"] = None
+        response["note"] = "preview only -- pass execute=true and a real quantity to place a paper order"
+        return response
+
+    # Reuse the real order-creation + paper-fill paths (risk limits, journal
+    # entries, live-quote fill price) rather than duplicating that logic.
+    from .trading import OrderCreate, create_order, paper_fill_order
+
+    order_data = OrderCreate(symbol=symbol.upper(), side=side.lower(), chain=chain,
+                              quantity=quantity, trigger_reason=source)
+    created = await create_order(order_data, agent)
+    response["order"] = created
+
+    if side == "BUY":
+        response["fill"] = await paper_fill_order(created["id"], agent)
+    else:
+        response["fill"] = None
+        response["fill_note"] = "SELL orders are created pending, not auto-paper-filled (no automatic position-matching in this pass)"
+
+    return response
+
+
 @router.post("/generate")
 async def generate_pine(request: Request, agent: dict = Depends(get_agent)):
     """Natural-language → Pine Script generation.

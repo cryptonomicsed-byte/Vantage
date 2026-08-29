@@ -559,8 +559,16 @@ async def lifespan(app: FastAPI):
 
     last30days_task = asyncio.create_task(_last30days_watch_loop())
 
+    # trade_outcome_learner: was referenced by name in routers/trading.py's
+    # GET /source-performance docstring since that endpoint was written, but
+    # never actually existed anywhere (found 2026-08-29 while wiring Pine
+    # Script indicators into it -- the endpoint would 500 on any real call,
+    # "no such table"). Real per-source PnL tracking now runs here.
+    from .trade_outcome_learner import outcome_learner_loop
+    outcome_learner_task = asyncio.create_task(outcome_learner_loop())
+
     yield
-    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, last30days_task]
+    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, last30days_task, outcome_learner_task]
     if execution_engine_task is not None:
         shutdown_tasks.append(execution_engine_task)
     for t in shutdown_tasks:
