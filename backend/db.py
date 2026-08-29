@@ -1527,6 +1527,16 @@ CREATE TABLE IF NOT EXISTS external_iranti_memories (
                 UNIQUE(agent_id, label)
             )
         """)
+        # PumpPortal Lightning wallets carry a second secret alongside the
+        # Solana private key -- an API key gating subscribeTokenTrade/
+        # subscribeAccountTrade (their Data API) and Trading API execution.
+        # Encrypted the same way as encrypted_private_key, same
+        # decrypt_key_for_agent path, just a second column since it's a
+        # genuinely separate credential, not a duplicate of the private key.
+        try:
+            await db.execute("ALTER TABLE trading_wallets ADD COLUMN encrypted_api_key TEXT DEFAULT ''")
+        except Exception:
+            pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS trading_balances (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
