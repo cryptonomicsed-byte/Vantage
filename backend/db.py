@@ -1873,6 +1873,55 @@ CREATE TABLE IF NOT EXISTS external_iranti_memories (
         await db.execute("CREATE INDEX IF NOT EXISTS idx_pumpfun_last_trade ON pumpfun_premigration_tokens(last_trade_at)")
         await db.commit()
 
+    # ── Narrative detection (backend/narrative_detection.py) ────────────
+    # Persisted so narrative "heat" is learned over time, not recomputed
+    # from scratch every request -- narrative_theme_tokens is the full
+    # audit trail (every theme traces to the exact real tokens that
+    # produced it); narrative_combo_flags records tokens whose name/symbol
+    # combined 2+ already-hot narratives.
+    async with get_db() as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS narrative_themes (
+                theme_key TEXT PRIMARY KEY,
+                label TEXT NOT NULL,
+                keywords TEXT NOT NULL DEFAULT '[]',
+                first_seen_at TEXT,
+                last_seen_at TEXT,
+                token_count INTEGER DEFAULT 0,
+                heat_score REAL DEFAULT 0,
+                updated_at TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS narrative_theme_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                theme_key TEXT NOT NULL,
+                mint TEXT NOT NULL,
+                symbol TEXT DEFAULT '',
+                name TEXT DEFAULT '',
+                matched_keyword TEXT DEFAULT '',
+                market_cap_usd REAL,
+                score REAL,
+                detected_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(theme_key, mint)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS narrative_combo_flags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mint TEXT NOT NULL UNIQUE,
+                symbol TEXT DEFAULT '',
+                name TEXT DEFAULT '',
+                theme_keys TEXT NOT NULL DEFAULT '[]',
+                theme_labels TEXT NOT NULL DEFAULT '[]',
+                detected_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_narrative_theme_tokens_theme ON narrative_theme_tokens(theme_key)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_narrative_theme_tokens_mint ON narrative_theme_tokens(mint)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_narrative_themes_heat ON narrative_themes(heat_score)")
+        await db.commit()
+
     # ── pump.fun scalp exit-strategy positions ───────────────
     async with get_db() as db:
         await db.execute("""
