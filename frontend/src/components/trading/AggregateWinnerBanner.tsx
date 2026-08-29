@@ -25,10 +25,16 @@ interface ScoreComponent {
   weight: number
 }
 
+interface NarrativeFlag {
+  theme_labels: string[]
+  detected_at: string
+}
+
 interface RankedToken {
   address: string
   symbol: string | null
   total_score: number
+  narrative_flag?: NarrativeFlag | null
   components: Record<string, ScoreComponent>
 }
 
@@ -46,6 +52,7 @@ const COMPONENT_LABEL: Record<string, string> = {
   volume_momentum: 'Volume / Momentum',
   social_sentiment: 'Social Sentiment',
   whale_presence: 'Whale / Money-Flow Presence',
+  narrative_combo: 'Narrative Combo (2+ hot themes)',
 }
 
 export default function AggregateWinnerBanner() {
@@ -89,6 +96,17 @@ export default function AggregateWinnerBanner() {
         <span style={{ fontWeight: 700, fontSize: 14, color: '#fff' }}>
           <TokenLink symbol={winner.symbol || winner.address.slice(0, 6)} ca={winner.address} />
         </span>
+        {winner.narrative_flag && (
+          <span
+            title={winner.narrative_flag.theme_labels.join(' + ')}
+            style={{
+              fontSize: 9, fontWeight: 700, color: '#c026d3', padding: '2px 6px',
+              borderRadius: 4, border: '1px solid rgba(192,38,211,0.4)', background: 'rgba(192,38,211,0.08)',
+            }}
+          >
+            🔥 NARRATIVE COMBO
+          </span>
+        )}
         <span style={{ fontSize: 11, color: 'var(--muted)' }}>
           score <b style={{ color: '#eab308' }}>{winner.total_score.toFixed(3)}</b> / 1.000
         </span>
@@ -121,6 +139,13 @@ export default function AggregateWinnerBanner() {
               </div>
             ))}
           </div>
+
+          {winner.narrative_flag && (
+            <div style={{ fontSize: 10, color: '#c026d3' }}>
+              🔥 Combines: {winner.narrative_flag.theme_labels.join(' + ')} — both independently trending
+              (see Hot Narratives panel). Detected {new Date(winner.narrative_flag.detected_at + 'Z').toLocaleString()}.
+            </div>
+          )}
 
           {data.ranked.length > 1 && (
             <div style={{ fontSize: 10, color: 'var(--muted)' }}>

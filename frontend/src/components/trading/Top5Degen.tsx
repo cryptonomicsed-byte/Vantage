@@ -69,6 +69,11 @@ interface ConvictionToken {
   smart_wallets: { wallet: string; display_name: string; copy_trade_score: number }[]
 }
 
+interface NarrativeFlag {
+  theme_labels: string[]
+  detected_at: string
+}
+
 interface PlatformLeader {
   platform: string
   available: boolean
@@ -81,6 +86,41 @@ interface PlatformLeader {
   price_usd?: number | string | null
   manipulation_flags?: string[]
   smart_wallet_count?: number
+  narrative_flag?: NarrativeFlag | null
+}
+
+// Hot Narratives — backend/narrative_detection.py's real keyword-pattern
+// mining: recurring themes across currently-active pump.fun token names
+// (>=2 distinct real tokens sharing a theme within 6h = "hot"), plus any
+// token whose name/symbol combined 2+ already-hot themes (the real
+// 'PINKFONE' pattern). sample_tokens is always real, persisted data — see
+// that module's docstring for the honest keyword-only v1 limits.
+interface NarrativeThemeToken {
+  mint: string
+  symbol: string
+  name: string
+  matched_keyword: string
+  market_cap_usd: number | null
+  score: number | null
+  detected_at: string
+}
+interface HotNarrative {
+  theme_key: string
+  label: string
+  keywords: string[]
+  heat_score: number
+  token_count: number
+  first_seen_at: string
+  last_seen_at: string
+  sample_tokens: NarrativeThemeToken[]
+}
+interface ComboFlag {
+  mint: string
+  symbol: string
+  name: string
+  theme_keys: string[]
+  theme_labels: string[]
+  detected_at: string
 }
 
 // ── Persisted-cache fetch — the fix for "info shows, I navigate away, come
@@ -143,6 +183,8 @@ export default function Top5Degen() {
   const sellRotations = useCachedList<Token>('sell_rotations', '/api/intel/degen/sell-rotations?limit=5', 'rotations')
   const platformLeaders = useCachedList<PlatformLeader>('platform_leaders', '/api/intel/degen/platform-leaders', 'leaders', 60000)
   const trending = useCachedList<any>('pumpfun_trending', '/api/intel/pumpfun/trending?limit=5', 'trending')
+  const hotNarratives = useCachedList<HotNarrative>('hot_narratives', '/api/intel/narratives/hot', 'themes', 120000)
+  const comboFlags = useCachedList<ComboFlag>('narrative_combo_flags', '/api/intel/narratives/combo-flags?limit=10', 'flags', 120000)
 
   const [themes, setThemes] = useState<Theme[]>(() => loadCache('themes', []))
 
@@ -477,6 +519,17 @@ export default function Top5Degen() {
                   {p.manipulation_flags && p.manipulation_flags.length > 0 && (
                     <span title={p.manipulation_flags.join(', ')} style={{ color: '#ef4444', fontSize: 9, fontWeight: 700 }}>⚠ FLAGGED</span>
                   )}
+                  {p.narrative_flag && (
+                    <span
+                      title={p.narrative_flag.theme_labels.join(' + ')}
+                      style={{
+                        fontSize: 9, fontWeight: 700, color: '#c026d3', padding: '1px 5px',
+                        borderRadius: 4, border: '1px solid rgba(192,38,211,0.4)', background: 'rgba(192,38,211,0.08)',
+                      }}
+                    >
+                      🔥 COMBO
+                    </span>
+                  )}
                 </>
               ) : (
                 <span style={{ flex: 1, color: 'var(--muted)', fontSize: 10, fontStyle: 'italic' }}>unavailable — source unreachable or no data</span>
@@ -484,6 +537,68 @@ export default function Top5Degen() {
             </div>
           ))}
         </div>
+      </div>
+
+      {/* 🔥 HOT NARRATIVES — real keyword-pattern mining over currently-active
+          pump.fun token names (backend/narrative_detection.py). A theme is
+          "hot" once >=2 distinct real tokens share it within 6h. Combo Flags
+          are tokens whose own name/symbol combined 2+ already-hot themes --
+          the actual 'PINKFONE' pattern this feature exists to catch.
+          Keyword-only v1 (fuzzy spelling + dynamic co-occurrence, not
+          semantic/embedding clustering) -- see that module's docstring. */}
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+          <Flame size={14} color="#c026d3" />
+          <span style={{ fontWeight: 700, fontSize: 13, color: '#c026d3' }}>HOT NARRATIVES</span>
+          <span style={{ fontSize: 9, color: 'var(--muted)' }}>keyword-pattern mining, real tokens only — not semantic clustering</span>
+        </div>
+        {hotNarratives.items.length > 0 ? (
+          <div style={{ display: 'grid', gap: 4, marginBottom: 8 }}>
+            {hotNarratives.items.map((t, i) => (
+              <div key={i} style={{
+                padding: '6px 8px', borderRadius: 6, border: '1px solid rgba(192,38,211,0.2)', fontSize: 11,
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontWeight: 700, color: '#c026d3' }}>{t.label}</span>
+                  <span style={{ fontSize: 10, color: 'var(--muted)' }}>
+                    heat <b style={{ color: '#fff' }}>{t.heat_score}</b> · {t.token_count} tokens ever · keywords: {t.keywords.join(', ')}
+                  </span>
+                </div>
+                {t.sample_tokens.length > 0 && (
+                  <div style={{ marginTop: 3, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                    {t.sample_tokens.slice(0, 6).map((s, j) => (
+                      <span key={j} style={{ fontSize: 9.5 }}>
+                        <TokenLink symbol={s.symbol || s.name || s.mint.slice(0, 6)} ca={s.mint} />
+                        <span style={{ color: 'var(--muted)' }}> ("{s.matched_keyword}")</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div style={{ fontSize: 10, color: 'var(--muted)', marginBottom: 8 }}>No narrative theme currently shared by 2+ live tokens</div>
+        )}
+
+        {comboFlags.items.length > 0 && (
+          <div style={{ display: 'grid', gap: 4 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--muted)' }}>COMBO-FLAGGED TOKENS</div>
+            {comboFlags.items.map((f, i) => (
+              <div key={i} style={{
+                display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px',
+                borderRadius: 6, border: '1px solid rgba(192,38,211,0.3)', background: 'rgba(192,38,211,0.05)', fontSize: 11,
+              }}>
+                <span style={{ fontWeight: 700, minWidth: 90 }}>
+                  <TokenLink symbol={f.symbol || f.name || f.mint.slice(0, 6)} ca={f.mint} />
+                </span>
+                <span style={{ flex: 1, color: 'var(--muted)', fontSize: 10 }}>
+                  combines: {f.theme_labels.join(' + ')}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )
