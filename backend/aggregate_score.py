@@ -104,7 +104,7 @@ from typing import Optional
 import aiosqlite
 
 from .db import get_db
-from .routers.alpha import _dexscreener_mcap
+from .routers.alpha import _dexscreener_mcap_batch
 from .wallet_pruning import WHALE_BALANCE_USD
 from .degen_filters import is_major_or_stable, passes_dust_floor, pumpfun_token_is_alive, MIN_MARKET_CAP_USD
 
@@ -209,11 +209,17 @@ async def _whale_presence(mint: str, db) -> bool:
     return (await cur.fetchone()) is not None
 
 
-async def _market_snapshot(mint: str, pumpfun_row: Optional[dict]) -> dict:
-    """One real market-data fetch per candidate, reused for BOTH the
-    volume_momentum component and the dust-floor check (previously two
-    separate concerns risked drifting -- combined so there's exactly one
-    source of truth per candidate per request).
+def _market_snapshot_from_dex(dex_snap: Optional[dict], pumpfun_row: Optional[dict]) -> dict:
+    """Same real combining logic as the old per-mint _market_snapshot, but
+    takes an already-fetched DexScreener snapshot instead of making its own
+    network call -- see compute_aggregate_scores(), which now fetches all
+    candidates' DexScreener data in one batched call (_dexscreener_mcap_batch)
+    up front rather than N individual per-mint calls. Real bug this fixes:
+    N concurrent single-token DexScreener requests to the same host were
+    both slow (the actual 26-30s latency, confirmed live 2026-08-28) and
+    individually rate-limitable -- a real token could come back with
+    market_cap=None purely from one of the N requests getting throttled,
+    then get wrongly disqualified as "dust" despite having a real listing.
 
     volume: DexScreener liquidity_usd (real pair depth) if available,
     else pump.fun's own persisted volume_sol_total (a comparable relative
@@ -239,8 +245,7 @@ async def _market_snapshot(mint: str, pumpfun_row: Optional[dict]) -> dict:
     pump.fun's own pre-migration tokens legitimately sit far below the
     general $7k floor, which is calibrated for "graduated then
     collapsed," not "hasn't graduated yet")."""
-    snap = await _dexscreener_mcap(mint)
-    snap = snap if isinstance(snap, dict) else {}
+    snap = dex_snap if isinstance(dex_snap, dict) else {}
     pf_volume = float((pumpfun_row or {}).get("volume_sol_total") or 0.0)
     pf_mcap = (pumpfun_row or {}).get("market_cap_usd")
     volume = float(snap["liquidity_usd"]) if snap.get("liquidity_usd") else pf_volume
@@ -256,10 +261,25 @@ async def _market_snapshot(mint: str, pumpfun_row: Optional[dict]) -> dict:
 
 
 def _normalize(values: dict[str, float]) -> dict[str, float]:
-    """Min-max scale a {key: raw_value} map to {key: 0..1}. All-equal or
-    empty input maps everything to 0.0 (no signal to distinguish on)."""
+    """Min-max scale a {key: raw_value} map to {key: 0..1}.
+
+    Real bug fixed here, found live 2026-08-28: a candidate pool of exactly
+    1 survivor (after disqualification) trivially has min==max==that one
+    value, so the old "hi-lo < 1e-12 -> everything 0.0" branch caught this
+    case too -- a token with real signal (e.g. volume_momentum raw=6822.66)
+    scored a flat total_score of 0.0, contradicting its own raw data.
+    Min-max normalization genuinely CANNOT express relative magnitude with
+    only one point to compare -- there's no "worst" to be better than. The
+    honest substitute (not an invented curve/threshold) is presence-of-
+    signal: a lone survivor gets 1.0 on any component where it has real
+    (>0) raw signal, 0.0 where it has none. This only applies to the true
+    n==1 case; when 2+ candidates are genuinely tied at the same value
+    (hi==lo with len>1), 0.0-for-all is still correct -- there IS a real
+    "best" to compare against, they just didn't distinguish themselves."""
     if not values:
         return {}
+    if len(values) == 1:
+        return {k: (1.0 if v > 0 else 0.0) for k, v in values.items()}
     lo, hi = min(values.values()), max(values.values())
     if hi - lo < 1e-12:
         return {k: 0.0 for k in values}
@@ -287,7 +307,7 @@ async def compute_aggregate_scores(
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         pumpfun_rows = await (await db.execute(
-            """SELECT mint, volume_sol_total, market_cap_usd, buy_count, sell_count,
+            """SELECT mint, symbol, volume_sol_total, market_cap_usd, buy_count, sell_count,
                       unique_buyers, unique_sellers, last_trade_at, v_sol_in_curve
                FROM pumpfun_premigration_tokens WHERE mint IN ({})""".format(
                 ",".join("?" * len(addresses))
@@ -303,7 +323,13 @@ async def compute_aggregate_scores(
             addr = c.get("address")
             if not addr or addr in raw or addr in candidate_meta:
                 continue
-            symbol = c.get("symbol")
+            # Real bug fixed here: candidates surfaced only via must-buy-20/
+            # high-conviction (not one of the 6 platform-leaders, which DO
+            # carry a symbol) could reach here with symbol=None even though
+            # pumpfun_premigration_tokens has the real symbol for any
+            # pump.fun-origin mint -- that column just wasn't selected above
+            # until now. Backfill from there before falling back to None.
+            symbol = c.get("symbol") or (pumpfun_by_mint.get(addr) or {}).get("symbol")
             candidate_meta[addr] = symbol
 
             if is_major_or_stable(symbol, addr):
@@ -331,15 +357,15 @@ async def compute_aggregate_scores(
             }
 
     # Market data (volume + market cap, for both the volume_momentum
-    # component and the dust-floor check) + rug check run outside the DB
-    # connection (real network calls) -- bounded concurrency over the
-    # (small) surviving candidate set.
+    # component and the dust-floor check) -- ONE batched DexScreener call
+    # for the whole surviving pool (see _dexscreener_mcap_batch's docstring
+    # for why: N individual per-mint calls was both the real ~26-30s
+    # latency and a source of spurious dust-floor disqualifications from
+    # individually-rate-limited requests coming back empty).
     surviving = list(raw.keys())
-    snapshots = await asyncio.gather(
-        *[_market_snapshot(a, pumpfun_by_mint.get(a)) for a in surviving], return_exceptions=True
-    )
-    for a, snap in zip(surviving, snapshots):
-        snap = snap if isinstance(snap, dict) else {"volume": 0.0, "market_cap": None, "liquidity_usd": None, "from_pumpfun_only": False}
+    dex_snapshots = await _dexscreener_mcap_batch(surviving)
+    for a in surviving:
+        snap = _market_snapshot_from_dex(dex_snapshots.get(a), pumpfun_by_mint.get(a))
         raw[a]["volume_momentum"] = snap["volume"]
         raw[a]["_market_cap"] = snap["market_cap"]
         raw[a]["_liquidity_usd"] = snap["liquidity_usd"]

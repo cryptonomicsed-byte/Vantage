@@ -304,6 +304,66 @@ def _market_cap_from_pair(pair: dict) -> Optional[float]:
     return float(mcap)
 
 
+async def _dexscreener_mcap_batch(mints: list) -> dict:
+    """Real DexScreener batching -- /latest/dex/tokens/{a,b,c,...} accepts
+    comma-separated addresses in one call (verified live: a 2-address
+    request returns 30 real pairs spanning both tokens). Used instead of
+    N individual _dexscreener_mcap() calls when scoring a whole candidate
+    pool at once (aggregate_score.py) -- N concurrent single-token requests
+    to the same host is both slower (no batching) and more likely to get
+    individually rate-limited than a couple of batched calls, which can
+    silently turn a real market cap into a None (mis-scored as "no data")
+    on any one of the N.
+
+    Chunks at 30 addresses per call (DexScreener's documented per-request
+    address limit for this endpoint). Returns {mint: snapshot_or_None},
+    same snapshot shape as _dexscreener_mcap. A whole chunk failing (network
+    error, non-200) leaves every mint in that chunk mapped to None rather
+    than raising -- same fail-soft contract as the single-mint version."""
+    out: dict = {}
+    if not mints:
+        return out
+    chunks = [mints[i:i + 30] for i in range(0, len(mints), 30)]
+
+    async def _fetch_chunk(chunk: list) -> None:
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                r = await client.get(
+                    f"https://api.dexscreener.com/latest/dex/tokens/{','.join(chunk)}",
+                    headers={"User-Agent": "Vantage/1.0"},
+                )
+                if r.status_code != 200:
+                    for m in chunk:
+                        out[m] = None
+                    return
+                pairs = (r.json() or {}).get("pairs") or []
+        except Exception:
+            for m in chunk:
+                out[m] = None
+            return
+
+        by_mint: dict = {}
+        for p in pairs:
+            addr = (p.get("baseToken") or {}).get("address")
+            if addr:
+                by_mint.setdefault(addr, []).append(p)
+        for m in chunk:
+            best = _select_best_pair(by_mint.get(m, []))
+            if best is None:
+                out[m] = None
+                continue
+            out[m] = {
+                "market_cap": _market_cap_from_pair(best),
+                "price_usd": best.get("priceUsd"),
+                "price_change_24h": (best.get("priceChange") or {}).get("h24"),
+                "liquidity_usd": (best.get("liquidity") or {}).get("usd"),
+                "dexscreener_url": best.get("url"),
+            }
+
+    await asyncio.gather(*[_fetch_chunk(c) for c in chunks])
+    return out
+
+
 async def _dexscreener_mcap(mint: str) -> Optional[dict]:
     """Best-effort market snapshot for a single mint via DexScreener's token
     endpoint, from the most-recently-active pair (see _select_best_pair --
