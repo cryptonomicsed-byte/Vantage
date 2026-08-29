@@ -97,10 +97,10 @@ async def test_higher_conviction_candidate_wins(monkeypatch):
     # the conviction-ranking logic it actually exists to verify.
     import backend.aggregate_score as agg_module
 
-    async def fake_mcap(mint):
-        return {"market_cap": 50_000.0, "liquidity_usd": 10_000.0}
+    async def fake_mcap_batch(mints):
+        return {m: {"market_cap": 50_000.0, "liquidity_usd": 10_000.0} for m in mints}
 
-    monkeypatch.setattr(agg_module, "_dexscreener_mcap", fake_mcap)
+    monkeypatch.setattr(agg_module, "_dexscreener_mcap_batch", fake_mcap_batch)
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -142,10 +142,10 @@ async def test_no_candidates_returns_empty_ranked():
 async def test_whale_presence_detected_from_active_tracked_wallet(monkeypatch):
     import backend.aggregate_score as agg_module
 
-    async def fake_mcap(mint):
-        return {"market_cap": 50_000.0, "liquidity_usd": 10_000.0}
+    async def fake_mcap_batch(mints):
+        return {m: {"market_cap": 50_000.0, "liquidity_usd": 10_000.0} for m in mints}
 
-    monkeypatch.setattr(agg_module, "_dexscreener_mcap", fake_mcap)
+    monkeypatch.setattr(agg_module, "_dexscreener_mcap_batch", fake_mcap_batch)
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -171,10 +171,10 @@ async def test_whale_presence_detected_from_active_tracked_wallet(monkeypatch):
 async def test_archived_whale_wallet_does_not_count(monkeypatch):
     import backend.aggregate_score as agg_module
 
-    async def fake_mcap(mint):
-        return {"market_cap": 50_000.0, "liquidity_usd": 10_000.0}
+    async def fake_mcap_batch(mints):
+        return {m: {"market_cap": 50_000.0, "liquidity_usd": 10_000.0} for m in mints}
 
-    monkeypatch.setattr(agg_module, "_dexscreener_mcap", fake_mcap)
+    monkeypatch.setattr(agg_module, "_dexscreener_mcap_batch", fake_mcap_batch)
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -204,10 +204,10 @@ async def test_usdc_disqualified_as_major_regardless_of_score(monkeypatch):
     excluded outright, never even entering the ranked pool."""
     import backend.aggregate_score as agg_module
 
-    async def fake_mcap(mint):
-        return {"market_cap": 50_000_000_000.0, "liquidity_usd": 1_000_000_000.0}
+    async def fake_mcap_batch(mints):
+        return {m: {"market_cap": 50_000_000_000.0, "liquidity_usd": 1_000_000_000.0} for m in mints}
 
-    monkeypatch.setattr(agg_module, "_dexscreener_mcap", fake_mcap)
+    monkeypatch.setattr(agg_module, "_dexscreener_mcap_batch", fake_mcap_batch)
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -236,10 +236,10 @@ async def test_ten_dollar_mcap_dust_disqualified(monkeypatch):
     dead token. The aggregate scorer's own dust floor must reject it too."""
     import backend.aggregate_score as agg_module
 
-    async def fake_mcap(mint):
-        return {"market_cap": 10.0, "liquidity_usd": 5.0}
+    async def fake_mcap_batch(mints):
+        return {m: {"market_cap": 10.0, "liquidity_usd": 5.0} for m in mints}
 
-    monkeypatch.setattr(agg_module, "_dexscreener_mcap", fake_mcap)
+    monkeypatch.setattr(agg_module, "_dexscreener_mcap_batch", fake_mcap_batch)
 
     result = await compute_aggregate_scores(
         [{"address": "DustMint1111111111111111111111111111111", "symbol": "DUST", "platform_breadth": 1}],
@@ -269,12 +269,12 @@ async def test_pumpfun_own_mcap_wins_over_unreliable_thin_dexscreener_pair(monke
     source priority, not the band or activity screen."""
     import backend.aggregate_score as agg_module
 
-    async def fake_mcap_thin_pair(mint):
+    async def fake_mcap_batch_thin_pair(mints):
         # Simulates the real observed discrepancy: a technically-present
         # but unreliable DexScreener listing for a pre-migration token.
-        return {"market_cap": 10.75, "liquidity_usd": None}
+        return {m: {"market_cap": 10.75, "liquidity_usd": None} for m in mints}
 
-    monkeypatch.setattr(agg_module, "_dexscreener_mcap", fake_mcap_thin_pair)
+    monkeypatch.setattr(agg_module, "_dexscreener_mcap_batch", fake_mcap_batch_thin_pair)
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(

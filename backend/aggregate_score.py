@@ -110,12 +110,18 @@ from .degen_filters import is_major_or_stable, passes_dust_floor, pumpfun_token_
 
 logger = logging.getLogger(__name__)
 
+# 2026-08-28: added narrative_combo (see backend/narrative_detection.py --
+# real keyword-pattern-mining component: a token whose name/symbol combines
+# 2+ currently-hot narrative themes, e.g. 'PINKFONE' during a live phone-prop
+# + cause-awareness spike, gets a real boost here). Existing weights
+# proportionally reduced (not zeroed) to make room, still summing to 1.0.
 WEIGHTS = {
-    "smart_money": 0.30,
-    "platform_breadth": 0.25,
-    "volume_momentum": 0.20,
-    "social_sentiment": 0.15,
-    "whale_presence": 0.10,
+    "smart_money": 0.28,
+    "platform_breadth": 0.20,
+    "volume_momentum": 0.17,
+    "social_sentiment": 0.13,
+    "whale_presence": 0.09,
+    "narrative_combo": 0.13,
 }
 assert abs(sum(WEIGHTS.values()) - 1.0) < 1e-9, "aggregate score weights must sum to 1.0"
 
@@ -216,6 +222,27 @@ async def _social_sentiment_score_batch(mint_symbol: dict, db) -> dict:
         for m, sym in mint_symbol.items():
             if ca == m or (sym and ticker == sym.upper()):
                 out[m] = out.get(m, 0.0) + conf
+    return out
+
+
+async def _narrative_combo_batch(mints: list, db) -> dict:
+    """Batched narrative-combo lookup -- see backend/narrative_detection.py
+    for the real keyword-pattern-mining that populates narrative_combo_flags.
+    One IN-clause query for the whole pool, same batching discipline as the
+    other _*_batch helpers here."""
+    if not mints:
+        return {}
+    cur = await db.execute(
+        """SELECT mint, theme_labels, detected_at FROM narrative_combo_flags
+           WHERE mint IN ({})""".format(",".join("?" * len(mints))),
+        mints,
+    )
+    out = {}
+    for r in await cur.fetchall():
+        try:
+            out[r["mint"]] = {"theme_labels": json.loads(r["theme_labels"] or "[]"), "detected_at": r["detected_at"]}
+        except Exception:
+            continue
     return out
 
 
@@ -387,21 +414,28 @@ async def compute_aggregate_scores(
         # of up to 3 x N sequential per-mint queries -- was the dominant
         # remaining cost after the DexScreener batching fix, confirmed live
         # 2026-08-28 (still ~21s with only the market-data fetch batched).
+        # narrative_combo_map added the same way (batched IN-clause query,
+        # not N individual mint_combo_flag() calls) rather than reintroducing
+        # the exact per-candidate-connection pattern just fixed above.
         pool = list(candidate_meta.keys())
-        smart_money_map, social_map, whale_set = await asyncio.gather(
+        smart_money_map, social_map, whale_set, narrative_combo_map = await asyncio.gather(
             _smart_money_conviction_batch(pool, db),
             _social_sentiment_score_batch(candidate_meta, db),
             _whale_presence_batch(pool, db),
+            _narrative_combo_batch(pool, db),
         )
 
         raw: dict[str, dict] = {}
         for addr, symbol in candidate_meta.items():
+            narrative = narrative_combo_map.get(addr)
             raw[addr] = {
                 "symbol": symbol,
                 "smart_money": smart_money_map.get(addr, 0.0),
                 "social_sentiment": social_map.get(addr, 0.0),
                 "whale_presence": 1.0 if addr in whale_set else 0.0,
                 "platform_breadth": breadth_by_addr.get(addr, 0),
+                "narrative_combo": 1.0 if narrative else 0.0,
+                "_narrative": narrative,
             }
 
     # Market data (volume + market cap, for both the volume_momentum
@@ -475,7 +509,7 @@ async def compute_aggregate_scores(
                 del raw[a]
 
     # Normalize each component 0..1 across the surviving candidate pool.
-    components = ["smart_money", "platform_breadth", "volume_momentum", "social_sentiment", "whale_presence"]
+    components = ["smart_money", "platform_breadth", "volume_momentum", "social_sentiment", "whale_presence", "narrative_combo"]
     normalized: dict[str, dict[str, float]] = {}
     for comp in components:
         normalized[comp] = _normalize({a: raw[a][comp] for a in raw})
@@ -489,17 +523,21 @@ async def compute_aggregate_scores(
             + scores["volume_momentum"] * WEIGHTS["volume_momentum"]
             + scores["social_sentiment"] * WEIGHTS["social_sentiment"]
             + scores["whale_presence"] * WEIGHTS["whale_presence"]
+            + scores["narrative_combo"] * WEIGHTS["narrative_combo"]
         )
+        narrative = data.get("_narrative")
         ranked.append({
             "address": addr,
             "symbol": data["symbol"],
             "total_score": round(total, 4),
+            "narrative_flag": narrative,
             "components": {
                 "smart_money": {"raw": round(data["smart_money"], 2), "normalized": round(scores["smart_money"], 4), "weight": WEIGHTS["smart_money"]},
                 "platform_breadth": {"raw": data["platform_breadth"], "normalized": round(scores["platform_breadth"], 4), "weight": WEIGHTS["platform_breadth"]},
                 "volume_momentum": {"raw": round(data["volume_momentum"], 2), "normalized": round(scores["volume_momentum"], 4), "weight": WEIGHTS["volume_momentum"]},
                 "social_sentiment": {"raw": round(data["social_sentiment"], 2), "normalized": round(scores["social_sentiment"], 4), "weight": WEIGHTS["social_sentiment"]},
                 "whale_presence": {"raw": bool(data["whale_presence"]), "normalized": round(scores["whale_presence"], 4), "weight": WEIGHTS["whale_presence"]},
+                "narrative_combo": {"raw": bool(data["narrative_combo"]), "normalized": round(scores["narrative_combo"], 4), "weight": WEIGHTS["narrative_combo"], "detail": narrative},
             },
         })
 
