@@ -136,11 +136,13 @@ networks:
   # = no route in or out), which silently broke the 127.0.0.1:9871 binding
   # the Vantage backend needs to reach this on (confirmed live 2026-08-29:
   # `docker port ares-pine-runtime` returned nothing, every /api/pine/run
-  # call 503'd even though the container was "Up"). pine-engine.js makes no
-  # outbound network call anywhere in its code, so egress is a behavioral
-  # guarantee, not a network-level one — same posture as parrot_isolated.
-  # For a hard (not just behavioral) guarantee, add an iptables/nftables rule
-  # on the host dropping outbound traffic from this container's IP.
+  # call 503'd even though the container was "Up"). Unlike parrot_isolated,
+  # this one DOES get a hard network-level egress guarantee back: see
+  # ops/pine-runtime/enforce-egress-block.sh (a DOCKER-USER iptables rule
+  # dropping new outbound connections from this subnet), deployed via
+  # ops/pine-runtime/pine-egress-block.service on every boot. Confirmed live
+  # both ways: `docker exec ares-pine-runtime wget 1.1.1.1` times out, while
+  # `curl 127.0.0.1:9871/healthz` (the actual required inbound path) works.
   pine_isolated: {}
   # NOT internal: Compose refuses to publish ports at all for an internal
   # network (no gateway = no route in or out), which silently broke the
