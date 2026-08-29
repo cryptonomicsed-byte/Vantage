@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, "/opt/ares")
 import api_key_pool
+import vantage_db_shim as _vshim  # WAL + busy_timeout real fix, see that module's docstring
 
 # Optional: load a local .env for manual runs (systemd already injects env).
 def _load_dotenv():
@@ -57,7 +58,18 @@ START_TS = int(time.time())
 
 
 def init_db():
-    db = sqlite3.connect(DB_PATH)
+    # Real fix, 2026-08-29: this connection is held for the entire process
+    # lifetime (see main()'s `db = init_db()` then `while True:`), reused
+    # across every 120s cycle -- a bare sqlite3.connect() here had NO
+    # busy_timeout at all (Python's 5s default), the shortest timeout of
+    # any of the ~4 processes that concurrently hold vantage.db open
+    # (lsof-confirmed), making this connection a real contributor to the
+    # fleet-wide "database is locked" incident even though vantage.db was
+    # already WAL (WAL alone doesn't prevent writer-vs-writer contention;
+    # busy_timeout is what makes a blocked writer wait instead of failing
+    # instantly). See daemons/vantage_db_shim.py + memory
+    # sqlite-vs-postgres-ecosystem-decision.md.
+    db = _vshim.connect_wal(DB_PATH)
     db.execute("""
         CREATE TABLE IF NOT EXISTS wallet_trades (
             signature    TEXT PRIMARY KEY,
