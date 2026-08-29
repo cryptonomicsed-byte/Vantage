@@ -452,13 +452,25 @@ async def compute_aggregate_scores(
             disqualified.append({"address": addr, "symbol": raw[addr]["symbol"], "reason": reason})
             del raw[addr]
 
-    if helius_key:
+    # Real bug fixed here, found live 2026-08-28 while investigating latency:
+    # `surviving` was snapshotted BEFORE the dust-floor loop above deletes
+    # entries from `raw` -- so this ran a real Helius RPC call for every
+    # PRE-dust-floor candidate (up to ~37-40), most of which were already
+    # disqualified and thrown away regardless of the risk-check result.
+    # Wasted the dominant share of the request's real latency on addresses
+    # that could never be the winner anyway, AND was a latent crash: if a
+    # risk check came back True for an address the dust floor had already
+    # deleted from `raw`, `del raw[a]` below would KeyError the whole
+    # request. Re-derive the post-dust-floor survivor list here instead of
+    # reusing the stale pre-filter one.
+    still_alive = list(raw.keys())
+    if helius_key and still_alive:
         risk_checks = await asyncio.gather(
-            *[_has_active_mint_or_freeze_authority(a, helius_key) for a in surviving],
+            *[_has_active_mint_or_freeze_authority(a, helius_key) for a in still_alive],
             return_exceptions=True,
         )
-        for a, risk in zip(surviving, risk_checks):
-            if risk is True:
+        for a, risk in zip(still_alive, risk_checks):
+            if risk is True and a in raw:
                 disqualified.append({"address": a, "symbol": raw[a]["symbol"], "reason": "active mint or freeze authority"})
                 del raw[a]
 
