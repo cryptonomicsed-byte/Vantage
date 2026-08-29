@@ -1527,6 +1527,16 @@ CREATE TABLE IF NOT EXISTS external_iranti_memories (
                 UNIQUE(agent_id, label)
             )
         """)
+        # PumpPortal Lightning wallets carry a second secret alongside the
+        # Solana private key -- an API key gating subscribeTokenTrade/
+        # subscribeAccountTrade (their Data API) and Trading API execution.
+        # Encrypted the same way as encrypted_private_key, same
+        # decrypt_key_for_agent path, just a second column since it's a
+        # genuinely separate credential, not a duplicate of the private key.
+        try:
+            await db.execute("ALTER TABLE trading_wallets ADD COLUMN encrypted_api_key TEXT DEFAULT ''")
+        except Exception:
+            pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS trading_balances (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1920,6 +1930,28 @@ CREATE TABLE IF NOT EXISTS external_iranti_memories (
         await db.execute("CREATE INDEX IF NOT EXISTS idx_narrative_theme_tokens_theme ON narrative_theme_tokens(theme_key)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_narrative_theme_tokens_mint ON narrative_theme_tokens(mint)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_narrative_themes_heat ON narrative_themes(heat_score)")
+        await db.commit()
+
+    # ── pump.fun inter-trade gap log (empirical RUNNING_GRACE_SECONDS
+    # tuning) — pumpfun_premigration_tokens only ever keeps the single most
+    # recent last_trade_at, overwritten on every trade, so there was no way
+    # to retroactively answer "how long was this token silent right before
+    # its next trade arrived, proving it was still alive." This table
+    # records that gap live, going forward, tagged with the market cap at
+    # the moment the pause started -- real observed "alive but paused"
+    # durations for tokens at/above the 10k mcap tier, not a guess. See
+    # pumpfun_tier_scanner.py::apply_trade. ──────────────────────────
+    async with get_db() as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS pumpfun_trade_gaps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mint TEXT,
+                market_cap_usd REAL,
+                gap_seconds REAL,
+                recorded_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_pumpfun_gaps_mcap ON pumpfun_trade_gaps(market_cap_usd)")
         await db.commit()
 
     # ── pump.fun scalp exit-strategy positions ───────────────

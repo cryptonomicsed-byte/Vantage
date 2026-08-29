@@ -104,10 +104,9 @@ from typing import Optional
 import aiosqlite
 
 from .db import get_db
-from .routers.alpha import _dexscreener_mcap
+from .routers.alpha import _dexscreener_mcap_batch
 from .wallet_pruning import WHALE_BALANCE_USD
 from .degen_filters import is_major_or_stable, passes_dust_floor, pumpfun_token_is_alive, MIN_MARKET_CAP_USD
-from .narrative_detection import mint_combo_flag
 
 logger = logging.getLogger(__name__)
 
@@ -163,64 +162,114 @@ async def _has_active_mint_or_freeze_authority(mint: str, helius_key: str) -> Op
         return None
 
 
-async def _pumpfun_manipulation_flags(mint: str, db) -> list[str]:
-    cur = await db.execute(
-        "SELECT manipulation_flags FROM pumpfun_premigration_tokens WHERE mint=?", (mint,)
-    )
-    row = await cur.fetchone()
-    if not row:
-        return []
-    try:
-        return json.loads(row["manipulation_flags"] or "[]")
-    except Exception:
-        return []
+# ── Batched signal lookups ────────────────────────────────────────────────
+# Real latency fix, found live 2026-08-28 (owner report): the per-candidate
+# loop in compute_aggregate_scores() used to call 4 lookups (manipulation
+# flags, smart-money conviction, social sentiment, whale presence) with a
+# sequential `await` each, per candidate -- up to 41 candidates x 4 awaits
+# = up to 164 serialized round trips against the SAME aiosqlite connection
+# (which itself serializes work onto one thread, so per-candidate awaiting
+# them "concurrently" wouldn't have parallelized the actual disk I/O
+# anyway). manipulation_flags is now read from the same bulk
+# pumpfun_premigration_tokens fetch compute_aggregate_scores already does
+# (that SELECT just needed the column added). The other 3 below use the
+# same principle already applied to the DexScreener market-data fetch: one
+# IN-clause query covering the WHOLE candidate pool, instead of N
+# individual single-mint queries. These return {mint: value} maps; callers
+# look up per-candidate with .get().
 
-
-async def _smart_money_conviction(mint: str, db) -> float:
+async def _smart_money_conviction_batch(mints: list, db) -> dict:
+    if not mints:
+        return {}
     cur = await db.execute(
-        """SELECT SUM(wr.copy_trade_score) as total
+        """SELECT twr.mint, SUM(wr.copy_trade_score) as total
            FROM token_wallet_roles twr
            JOIN wallet_reputation wr ON wr.wallet_address = twr.wallet_address
-           WHERE twr.mint = ? AND wr.copy_trade_score > 0""",
-        (mint,),
+           WHERE twr.mint IN ({}) AND wr.copy_trade_score > 0
+           GROUP BY twr.mint""".format(",".join("?" * len(mints))),
+        mints,
     )
-    row = await cur.fetchone()
-    return float(row["total"]) if row and row["total"] else 0.0
+    return {r["mint"]: float(r["total"] or 0.0) for r in await cur.fetchall()}
 
 
-async def _social_sentiment_score(mint: str, symbol: Optional[str], db) -> float:
-    where = ["contract_address = ?"]
-    params: list = [mint]
-    if symbol:
-        where.append("UPPER(ticker) = ?")
-        params.append(symbol.upper())
+async def _social_sentiment_score_batch(mint_symbol: dict, db) -> dict:
+    """mint_symbol: {mint: symbol_or_None}. One query across every mint AND
+    every known symbol (both real match axes the per-mint version used),
+    then attributed back to whichever mint(s) each row's contract_address
+    or ticker actually matches -- same OR-match semantics as before, just
+    evaluated in Python instead of once per mint in SQL."""
+    mints = list(mint_symbol.keys())
+    if not mints:
+        return {}
+    symbols = sorted({s.upper() for s in mint_symbol.values() if s})
+    where = ["contract_address IN ({})".format(",".join("?" * len(mints)))]
+    params: list = list(mints)
+    if symbols:
+        where.append("UPPER(ticker) IN ({})".format(",".join("?" * len(symbols))))
+        params.extend(symbols)
     cur = await db.execute(
-        f"""SELECT confidence FROM social_signals
+        f"""SELECT contract_address, ticker, confidence FROM social_signals
             WHERE ({' OR '.join(where)}) AND UPPER(sentiment) = 'BULLISH'
               AND created_at >= datetime('now', '-24 hours')""",
         params,
     )
     rows = await cur.fetchall()
-    return sum(float(r["confidence"] or 0.5) for r in rows)
+    out = {m: 0.0 for m in mints}
+    for r in rows:
+        conf = float(r["confidence"] or 0.5)
+        ca = r["contract_address"]
+        ticker = (r["ticker"] or "").upper()
+        for m, sym in mint_symbol.items():
+            if ca == m or (sym and ticker == sym.upper()):
+                out[m] = out.get(m, 0.0) + conf
+    return out
 
 
-async def _whale_presence(mint: str, db) -> bool:
+async def _narrative_combo_batch(mints: list, db) -> dict:
+    """Batched narrative-combo lookup -- see backend/narrative_detection.py
+    for the real keyword-pattern-mining that populates narrative_combo_flags.
+    One IN-clause query for the whole pool, same batching discipline as the
+    other _*_batch helpers here."""
+    if not mints:
+        return {}
     cur = await db.execute(
-        """SELECT 1 FROM token_wallet_roles twr
-           JOIN tracked_wallets tw ON tw.address = twr.wallet_address
-           WHERE twr.mint = ? AND tw.archived_at IS NULL
-             AND COALESCE(tw.balance_usd, 0) >= ?
-           LIMIT 1""",
-        (mint, WHALE_BALANCE_USD),
+        """SELECT mint, theme_labels, detected_at FROM narrative_combo_flags
+           WHERE mint IN ({})""".format(",".join("?" * len(mints))),
+        mints,
     )
-    return (await cur.fetchone()) is not None
+    out = {}
+    for r in await cur.fetchall():
+        try:
+            out[r["mint"]] = {"theme_labels": json.loads(r["theme_labels"] or "[]"), "detected_at": r["detected_at"]}
+        except Exception:
+            continue
+    return out
 
 
-async def _market_snapshot(mint: str, pumpfun_row: Optional[dict]) -> dict:
-    """One real market-data fetch per candidate, reused for BOTH the
-    volume_momentum component and the dust-floor check (previously two
-    separate concerns risked drifting -- combined so there's exactly one
-    source of truth per candidate per request).
+async def _whale_presence_batch(mints: list, db) -> set:
+    if not mints:
+        return set()
+    cur = await db.execute(
+        """SELECT DISTINCT twr.mint FROM token_wallet_roles twr
+           JOIN tracked_wallets tw ON tw.address = twr.wallet_address
+           WHERE twr.mint IN ({}) AND tw.archived_at IS NULL
+             AND COALESCE(tw.balance_usd, 0) >= ?""".format(",".join("?" * len(mints))),
+        [*mints, WHALE_BALANCE_USD],
+    )
+    return {r["mint"] for r in await cur.fetchall()}
+
+
+def _market_snapshot_from_dex(dex_snap: Optional[dict], pumpfun_row: Optional[dict]) -> dict:
+    """Same real combining logic as the old per-mint _market_snapshot, but
+    takes an already-fetched DexScreener snapshot instead of making its own
+    network call -- see compute_aggregate_scores(), which now fetches all
+    candidates' DexScreener data in one batched call (_dexscreener_mcap_batch)
+    up front rather than N individual per-mint calls. Real bug this fixes:
+    N concurrent single-token DexScreener requests to the same host were
+    both slow (the actual 26-30s latency, confirmed live 2026-08-28) and
+    individually rate-limitable -- a real token could come back with
+    market_cap=None purely from one of the N requests getting throttled,
+    then get wrongly disqualified as "dust" despite having a real listing.
 
     volume: DexScreener liquidity_usd (real pair depth) if available,
     else pump.fun's own persisted volume_sol_total (a comparable relative
@@ -246,8 +295,7 @@ async def _market_snapshot(mint: str, pumpfun_row: Optional[dict]) -> dict:
     pump.fun's own pre-migration tokens legitimately sit far below the
     general $7k floor, which is calibrated for "graduated then
     collapsed," not "hasn't graduated yet")."""
-    snap = await _dexscreener_mcap(mint)
-    snap = snap if isinstance(snap, dict) else {}
+    snap = dex_snap if isinstance(dex_snap, dict) else {}
     pf_volume = float((pumpfun_row or {}).get("volume_sol_total") or 0.0)
     pf_mcap = (pumpfun_row or {}).get("market_cap_usd")
     volume = float(snap["liquidity_usd"]) if snap.get("liquidity_usd") else pf_volume
@@ -263,10 +311,25 @@ async def _market_snapshot(mint: str, pumpfun_row: Optional[dict]) -> dict:
 
 
 def _normalize(values: dict[str, float]) -> dict[str, float]:
-    """Min-max scale a {key: raw_value} map to {key: 0..1}. All-equal or
-    empty input maps everything to 0.0 (no signal to distinguish on)."""
+    """Min-max scale a {key: raw_value} map to {key: 0..1}.
+
+    Real bug fixed here, found live 2026-08-28: a candidate pool of exactly
+    1 survivor (after disqualification) trivially has min==max==that one
+    value, so the old "hi-lo < 1e-12 -> everything 0.0" branch caught this
+    case too -- a token with real signal (e.g. volume_momentum raw=6822.66)
+    scored a flat total_score of 0.0, contradicting its own raw data.
+    Min-max normalization genuinely CANNOT express relative magnitude with
+    only one point to compare -- there's no "worst" to be better than. The
+    honest substitute (not an invented curve/threshold) is presence-of-
+    signal: a lone survivor gets 1.0 on any component where it has real
+    (>0) raw signal, 0.0 where it has none. This only applies to the true
+    n==1 case; when 2+ candidates are genuinely tied at the same value
+    (hi==lo with len>1), 0.0-for-all is still correct -- there IS a real
+    "best" to compare against, they just didn't distinguish themselves."""
     if not values:
         return {}
+    if len(values) == 1:
+        return {k: (1.0 if v > 0 else 0.0) for k, v in values.items()}
     lo, hi = min(values.values()), max(values.values())
     if hi - lo < 1e-12:
         return {k: 0.0 for k in values}
@@ -294,8 +357,9 @@ async def compute_aggregate_scores(
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         pumpfun_rows = await (await db.execute(
-            """SELECT mint, volume_sol_total, market_cap_usd, buy_count, sell_count,
-                      unique_buyers, unique_sellers, last_trade_at, v_sol_in_curve
+            """SELECT mint, symbol, volume_sol_total, market_cap_usd, buy_count, sell_count,
+                      unique_buyers, unique_sellers, last_trade_at, v_sol_in_curve,
+                      manipulation_flags
                FROM pumpfun_premigration_tokens WHERE mint IN ({})""".format(
                 ",".join("?" * len(addresses))
             ),
@@ -303,15 +367,26 @@ async def compute_aggregate_scores(
         )).fetchall()
         pumpfun_by_mint = {r["mint"]: dict(r) for r in pumpfun_rows}
 
-        raw: dict[str, dict] = {}
+        # First pass: symbol backfill + major/stable exclusion only (cheap,
+        # no DB round trip beyond what's already fetched above) -- builds
+        # the address list that actually needs the 3 real signal lookups,
+        # so majors/stables never waste a query.
         disqualified: list[dict] = []
         candidate_meta: dict[str, Optional[str]] = {}
+        breadth_by_addr: dict[str, int] = {}
         for c in candidates:
             addr = c.get("address")
-            if not addr or addr in raw or addr in candidate_meta:
+            if not addr or addr in candidate_meta:
                 continue
-            symbol = c.get("symbol")
+            # Real bug fixed here: candidates surfaced only via must-buy-20/
+            # high-conviction (not one of the 6 platform-leaders, which DO
+            # carry a symbol) could reach here with symbol=None even though
+            # pumpfun_premigration_tokens has the real symbol for any
+            # pump.fun-origin mint -- that column just wasn't selected above
+            # until now. Backfill from there before falling back to None.
+            symbol = c.get("symbol") or (pumpfun_by_mint.get(addr) or {}).get("symbol")
             candidate_meta[addr] = symbol
+            breadth_by_addr[addr] = c.get("platform_breadth", 0)
 
             if is_major_or_stable(symbol, addr):
                 # Real bug fixed here: majors/stablecoins (USDC scored #1
@@ -319,37 +394,60 @@ async def compute_aggregate_scores(
                 # conviction, but useless for a degen-plays feature) are
                 # excluded outright, not just down-weighted.
                 disqualified.append({"address": addr, "symbol": symbol, "reason": "major/stablecoin token, excluded from degen scoring"})
-                continue
+                del candidate_meta[addr]
 
-            flags = await _pumpfun_manipulation_flags(addr, db)
+        # manipulation_flags now comes from the same bulk pumpfun_rows fetch
+        # above (added to that SELECT) instead of a second per-mint query.
+        for addr in list(candidate_meta.keys()):
+            symbol = candidate_meta[addr]
+            flags_raw = (pumpfun_by_mint.get(addr) or {}).get("manipulation_flags")
+            try:
+                flags = json.loads(flags_raw or "[]")
+            except Exception:
+                flags = []
             if flags:
                 disqualified.append({"address": addr, "symbol": symbol, "reason": f"manipulation_flags: {flags}"})
-                continue
+                del candidate_meta[addr]
 
-            smart_money = await _smart_money_conviction(addr, db)
-            social = await _social_sentiment_score(addr, symbol, db)
-            whale = await _whale_presence(addr, db)
-            narrative = await mint_combo_flag(addr)
+        # Real latency fix (see the 3 _*_batch functions' docstrings): one
+        # query per signal type covering the WHOLE remaining pool, instead
+        # of up to 3 x N sequential per-mint queries -- was the dominant
+        # remaining cost after the DexScreener batching fix, confirmed live
+        # 2026-08-28 (still ~21s with only the market-data fetch batched).
+        # narrative_combo_map added the same way (batched IN-clause query,
+        # not N individual mint_combo_flag() calls) rather than reintroducing
+        # the exact per-candidate-connection pattern just fixed above.
+        pool = list(candidate_meta.keys())
+        smart_money_map, social_map, whale_set, narrative_combo_map = await asyncio.gather(
+            _smart_money_conviction_batch(pool, db),
+            _social_sentiment_score_batch(candidate_meta, db),
+            _whale_presence_batch(pool, db),
+            _narrative_combo_batch(pool, db),
+        )
+
+        raw: dict[str, dict] = {}
+        for addr, symbol in candidate_meta.items():
+            narrative = narrative_combo_map.get(addr)
             raw[addr] = {
                 "symbol": symbol,
-                "smart_money": smart_money,
-                "social_sentiment": social,
-                "whale_presence": 1.0 if whale else 0.0,
-                "platform_breadth": c.get("platform_breadth", 0),
+                "smart_money": smart_money_map.get(addr, 0.0),
+                "social_sentiment": social_map.get(addr, 0.0),
+                "whale_presence": 1.0 if addr in whale_set else 0.0,
+                "platform_breadth": breadth_by_addr.get(addr, 0),
                 "narrative_combo": 1.0 if narrative else 0.0,
                 "_narrative": narrative,
             }
 
     # Market data (volume + market cap, for both the volume_momentum
-    # component and the dust-floor check) + rug check run outside the DB
-    # connection (real network calls) -- bounded concurrency over the
-    # (small) surviving candidate set.
+    # component and the dust-floor check) -- ONE batched DexScreener call
+    # for the whole surviving pool (see _dexscreener_mcap_batch's docstring
+    # for why: N individual per-mint calls was both the real ~26-30s
+    # latency and a source of spurious dust-floor disqualifications from
+    # individually-rate-limited requests coming back empty).
     surviving = list(raw.keys())
-    snapshots = await asyncio.gather(
-        *[_market_snapshot(a, pumpfun_by_mint.get(a)) for a in surviving], return_exceptions=True
-    )
-    for a, snap in zip(surviving, snapshots):
-        snap = snap if isinstance(snap, dict) else {"volume": 0.0, "market_cap": None, "liquidity_usd": None, "from_pumpfun_only": False}
+    dex_snapshots = await _dexscreener_mcap_batch(surviving)
+    for a in surviving:
+        snap = _market_snapshot_from_dex(dex_snapshots.get(a), pumpfun_by_mint.get(a))
         raw[a]["volume_momentum"] = snap["volume"]
         raw[a]["_market_cap"] = snap["market_cap"]
         raw[a]["_liquidity_usd"] = snap["liquidity_usd"]
@@ -388,13 +486,25 @@ async def compute_aggregate_scores(
             disqualified.append({"address": addr, "symbol": raw[addr]["symbol"], "reason": reason})
             del raw[addr]
 
-    if helius_key:
+    # Real bug fixed here, found live 2026-08-28 while investigating latency:
+    # `surviving` was snapshotted BEFORE the dust-floor loop above deletes
+    # entries from `raw` -- so this ran a real Helius RPC call for every
+    # PRE-dust-floor candidate (up to ~37-40), most of which were already
+    # disqualified and thrown away regardless of the risk-check result.
+    # Wasted the dominant share of the request's real latency on addresses
+    # that could never be the winner anyway, AND was a latent crash: if a
+    # risk check came back True for an address the dust floor had already
+    # deleted from `raw`, `del raw[a]` below would KeyError the whole
+    # request. Re-derive the post-dust-floor survivor list here instead of
+    # reusing the stale pre-filter one.
+    still_alive = list(raw.keys())
+    if helius_key and still_alive:
         risk_checks = await asyncio.gather(
-            *[_has_active_mint_or_freeze_authority(a, helius_key) for a in surviving],
+            *[_has_active_mint_or_freeze_authority(a, helius_key) for a in still_alive],
             return_exceptions=True,
         )
-        for a, risk in zip(surviving, risk_checks):
-            if risk is True:
+        for a, risk in zip(still_alive, risk_checks):
+            if risk is True and a in raw:
                 disqualified.append({"address": a, "symbol": raw[a]["symbol"], "reason": "active mint or freeze authority"})
                 del raw[a]
 

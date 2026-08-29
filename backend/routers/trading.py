@@ -372,7 +372,23 @@ async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent)
     chain = data.chain.lower()
     label = data.label or f"{system.upper()} {chain.title()}"
     
-    if system == "bipon39":
+    if system == "pumpportal":
+        # Real, free endpoint (no funds needed to create the wallet+key
+        # itself) -- https://pumpportal.fun/create-wallet. Distinct from
+        # bip39/bipon39: this is PumpPortal's own Lightning wallet, whose
+        # API key is what gates their Data API's subscribeTokenTrade/
+        # subscribeAccountTrade (confirmed live: unfunded key still gets
+        # rejected with "Minimum balance not met" -- needs >=0.02 SOL sent
+        # to the returned address before those subscriptions work). This
+        # branch only creates the credential; funding is a separate real
+        # money action left to the human via the returned address.
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get("https://pumpportal.fun/api/create-wallet")
+                result = r.json() if r.status_code == 200 else None
+        except Exception:
+            result = None
+    elif system == "bipon39":
         try:
             r = await _asyncio.to_thread(lambda: _sp.run(
                 ["bipon39", "generate"], capture_output=True, text=True, timeout=10
@@ -394,7 +410,18 @@ async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent)
     if not result:
         raise HTTPException(500, "Wallet generation failed")
 
-    if system == "bipon39":
+    pumpportal_api_key = ""
+    if system == "pumpportal":
+        # Real shape confirmed live: {"apiKey","walletPublicKey","privateKey"}
+        # -- Solana only, PumpPortal doesn't offer other chains.
+        if chain != "solana":
+            raise HTTPException(422, f"pumpportal wallet generation only supports chain='solana' (got '{chain}')")
+        address = result.get("walletPublicKey", "")
+        private_key = result.get("privateKey", "")
+        pumpportal_api_key = result.get("apiKey", "")
+        if not pumpportal_api_key:
+            raise HTTPException(500, "pumpportal response missing apiKey")
+    elif system == "bipon39":
         # The `bipon39` CLI's actual output shape is keys.bip44.<chain>.private_key_hex
         # — no "chains"/"address" key at all (that shape only matches the
         # other, non-bipon39 generator below). This never worked before;
@@ -431,16 +458,20 @@ async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent)
     # correct pattern (crypto_utils's whole design principle is "the raw API
     # key is the only secret needed" -- it was just never actually raw here).
     encrypted = encrypt_key_for_agent(private_key, {"id": agent["id"], "api_key": x_agent_key})
+    encrypted_pumpportal_key = (
+        encrypt_key_for_agent(pumpportal_api_key, {"id": agent["id"], "api_key": x_agent_key})
+        if pumpportal_api_key else ""
+    )
 
     async with get_db() as db:
         cur = await db.execute(
-            "INSERT INTO trading_wallets (agent_id, label, chain, address, encrypted_private_key) VALUES (?,?,?,?,?)",
-            (agent["id"], label, chain, address, encrypted)
+            "INSERT INTO trading_wallets (agent_id, label, chain, address, encrypted_private_key, encrypted_api_key) VALUES (?,?,?,?,?,?)",
+            (agent["id"], label, chain, address, encrypted, encrypted_pumpportal_key)
         )
         await _sync_to_tracked_wallets(db, agent["id"], chain, address, label)
         await db.commit()
         wallet_id = cur.lastrowid
-    
+
     response = {
         "id": wallet_id, "label": label, "chain": chain,
         "address": address, "system": system,
@@ -455,6 +486,16 @@ async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent)
         # only the human-portable backup phrase is no longer surfaced.
         "warning": "Private key encrypted at rest, decryptable only with your own API key. No separate mnemonic backup is issued.",
     }
+    if system == "pumpportal":
+        response["pumpportal_api_key"] = pumpportal_api_key
+        response["funding_required"] = (
+            "This wallet's API key is created but unfunded. PumpPortal's Data API "
+            "(subscribeTokenTrade/subscribeAccountTrade) and Trading API require the "
+            "wallet to hold at least 0.02 SOL -- confirmed live: an unfunded key gets "
+            "rejected with 'Minimum balance not met'. Send SOL to the address above to "
+            "activate it. The API key is shown once here; it is encrypted at rest the "
+            "same way as the private key."
+        )
     if "ifascript" in result:
         # The bipon39 CLI's ifascript block names the result with literal
         # deity names (dominant_macro="ṢÀNGÓ"/"ÈṢÙ"/etc, and every entry in

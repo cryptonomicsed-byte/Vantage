@@ -1000,37 +1000,55 @@ async def _assemble_aggregate_candidates() -> list[dict]:
         if symbol and not symbol_by_addr.get(addr):
             symbol_by_addr[addr] = symbol
 
-    leaders = await _gather_platform_leaders()
+    # Real latency fix, found live 2026-08-28: these 3 sources were each
+    # `await`ed one after another -- confirmed live that platform-leaders
+    # alone can take ~38s (6 platforms, some individually slow/unreachable)
+    # and high-conviction ~14s, summing to the dominant share of the whole
+    # aggregate-score endpoint's latency even after batching every DB/
+    # network call *inside* compute_aggregate_scores. None of these 3
+    # depend on each other's output, so there's no reason to run them
+    # sequentially -- gathered concurrently instead, total wall time
+    # becomes the slowest of the 3 rather than the sum of all 3.
+    async def _high_conviction_source() -> list[dict]:
+        async with _db() as db:
+            try:
+                cur = await db.execute(
+                    """WITH per_wallet AS (
+                        SELECT DISTINCT twr.mint, twr.symbol, twr.wallet_address, wr.copy_trade_score
+                        FROM token_wallet_roles twr
+                        JOIN wallet_reputation wr ON wr.wallet_address = twr.wallet_address
+                        WHERE wr.copy_trade_score > 0
+                    )
+                    SELECT mint, MAX(symbol) as symbol, SUM(copy_trade_score) as conviction_score
+                    FROM per_wallet GROUP BY mint ORDER BY conviction_score DESC LIMIT 20"""
+                )
+                return [dict(r) for r in await cur.fetchall()]
+            except Exception as e:
+                logger.debug("aggregate candidates: high-conviction source failed: %s", e)
+                return []
+
+    async def _must_buy_20_source() -> dict:
+        try:
+            return await _must_buy_20_core(limit=20, hours=24)
+        except Exception as e:
+            logger.debug("aggregate candidates: must-buy-20 source failed: %s", e)
+            return {"must_buy": []}
+
+    leaders, conviction_rows, mb20 = await asyncio.gather(
+        _gather_platform_leaders(), _high_conviction_source(), _must_buy_20_source(),
+    )
+
     for leader in leaders:
         if leader.get("available"):
             touch(leader.get("address"), leader.get("symbol"))
 
-    async with _db() as db:
-        try:
-            cur = await db.execute(
-                """WITH per_wallet AS (
-                    SELECT DISTINCT twr.mint, twr.symbol, twr.wallet_address, wr.copy_trade_score
-                    FROM token_wallet_roles twr
-                    JOIN wallet_reputation wr ON wr.wallet_address = twr.wallet_address
-                    WHERE wr.copy_trade_score > 0
-                )
-                SELECT mint, MAX(symbol) as symbol, SUM(copy_trade_score) as conviction_score
-                FROM per_wallet GROUP BY mint ORDER BY conviction_score DESC LIMIT 20"""
-            )
-            for row in await cur.fetchall():
-                touch(row.get("mint"), row.get("symbol"))
-        except Exception as e:
-            logger.debug("aggregate candidates: high-conviction source failed: %s", e)
+    for row in conviction_rows:
+        touch(row.get("mint"), row.get("symbol"))
 
     # must-buy-20 candidates carry a symbol + ca, not always both real --
     # only usable here when a real contract address is present (an
     # aggregate score needs an address to check manipulation flags/whale
     # overlap against; a symbol-only entry can't be scored on those axes).
-    try:
-        mb20 = await _must_buy_20_core(limit=20, hours=24)
-    except Exception as e:
-        mb20 = {"must_buy": []}
-        logger.debug("aggregate candidates: must-buy-20 source failed: %s", e)
     for c in mb20.get("must_buy", []):
         if c.get("ca"):
             touch(c["ca"], c.get("symbol"))
