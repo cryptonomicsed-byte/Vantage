@@ -19,7 +19,11 @@
 # Idempotent: safe to run on every boot / redeploy. Removes any prior rule
 # for this subnet before re-adding, so it never accumulates duplicates.
 #
-# Deployed via ops/pine-runtime/pine-egress-block.service (systemd oneshot,
+# Deployed via ops/pine-runtime/pine-egress-block.service.example (copy to
+# /etc/systemd/system/pine-egress-block.service on the deploy host --
+# *.service is gitignored repo-wide for secret-bearing units, this one has
+# no secrets but follows the same .service.example convention regardless;
+# systemd oneshot,
 # After=docker.service, runs on every boot).
 set -euo pipefail
 
