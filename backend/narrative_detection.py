@@ -59,6 +59,10 @@ import json
 import logging
 import re
 import time
+
+from backend.degen_filters import passes_dust_floor
+
+MIN_REAL_TRADES = 2  # same bar as PUMPFUN_MIN_TOTAL_TRADES: proof trading continued past the first tx
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from typing import Optional
@@ -181,16 +185,37 @@ async def _fetch_recent_tokens(db) -> list[dict]:
     """Real candidate universe: pump.fun pre-migration tokens with a real
     name, active within LOOKBACK_HOURS. Deliberately does not invent or
     backfill missing names -- rows with no usable name/symbol are simply
-    unmatchable and skipped."""
+    unmatchable and skipped.
+
+    Real bug fixed here (owner-reported): narrative/combo detection had no
+    liquidity/volume/market-cap floor at all, so a name-pattern match alone
+    (e.g. "pinkfone") could flag a token with zero real trading activity --
+    real narrative, dead token. Gated on passes_dust_floor() (the same
+    general $7k mcap / $2k liquidity-fallback bar used across the rest of
+    this codebase) plus a minimum real trade count -- deliberately NOT
+    aggregate_score.py's narrow $14k-$32k pump.fun graduation-window band,
+    since narrative detection needs to see tokens across more of their real
+    lifecycle than just that late slice, or almost nothing would ever
+    qualify as a candidate here."""
     cur = await db.execute(
-        f"""SELECT mint, symbol, name, score, market_cap_usd, last_trade_at
+        f"""SELECT mint, symbol, name, score, market_cap_usd, last_trade_at,
+                   buy_count, sell_count
             FROM pumpfun_premigration_tokens
             WHERE evicted = 0
               AND last_trade_at >= datetime('now', '-{LOOKBACK_HOURS} hours')
               AND (name != '' OR symbol != '')""",
     )
     rows = await cur.fetchall()
-    return [dict(r) for r in rows]
+    alive = []
+    for r in rows:
+        d = dict(r)
+        trades = (d.get("buy_count") or 0) + (d.get("sell_count") or 0)
+        if trades < MIN_REAL_TRADES:
+            continue
+        if not passes_dust_floor(d.get("market_cap_usd")):
+            continue
+        alive.append(d)
+    return alive
 
 
 def _discover_dynamic_themes(tokens: list[dict]) -> dict[str, dict]:
@@ -314,6 +339,7 @@ async def compute_narrative_heat() -> dict:
                 "mint": mint, "symbol": token.get("symbol"), "name": token.get("name"),
                 "theme_keys": qualifying, "theme_labels": labels,
                 "narrative": "combines: " + " + ".join(f"[{lb}]" for lb in labels) + ", both independently trending",
+                "market_cap_usd": token.get("market_cap_usd"),
             }
             combo_flags.append(flag)
             await db.execute(
