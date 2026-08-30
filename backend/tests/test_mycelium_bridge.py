@@ -311,3 +311,86 @@ def test_post_observation_fail_soft_on_unreachable_gateway(monkeypatch):
 
     monkeypatch.setattr(mb.urllib.request, "urlopen", boom)
     assert mb.post_observation(agent="a", session="s", action="act", target="t", payload={}) is False
+
+
+# ── emit_wallet_reputation_traces ───────────────────────────────────────
+
+def _wallet_row(address="W1", score=45.2, **extra):
+    d = {"wallet_address": address, "chain": "solana", "copy_trade_score": score}
+    d.update(extra)
+    return d
+
+
+def test_wallet_reputation_emits_top_n_only(sent):
+    rows = [_wallet_row("W1", 45.2), _wallet_row("W2", 10.0), _wallet_row("W3", 99.0)]
+    assert mb.emit_wallet_reputation_traces(rows, top_n=2) == 2
+    targets = {c["body"]["target"] for c in sent}
+    assert targets == {"W1", "W3"}  # W2 (lowest) excluded by top_n=2
+
+
+def test_wallet_reputation_skips_zero_or_missing_score(sent):
+    rows = [_wallet_row("W1", 0), {"wallet_address": "W2"}, _wallet_row("W3", 5.0)]
+    assert mb.emit_wallet_reputation_traces(rows) == 1
+    assert sent[0]["body"]["target"] == "W3"
+
+
+def test_wallet_reputation_dedups_on_unchanged_score(sent):
+    rows = [_wallet_row("W1", 45.2)]
+    mb.emit_wallet_reputation_traces(rows)
+    assert mb.emit_wallet_reputation_traces(rows) == 0
+    assert len(sent) == 1
+
+
+def test_wallet_reputation_re_emits_on_changed_score(sent):
+    mb.emit_wallet_reputation_traces([_wallet_row("W1", 45.2)])
+    assert mb.emit_wallet_reputation_traces([_wallet_row("W1", 60.0)]) == 1
+    assert len(sent) == 2
+
+
+def test_wallet_reputation_real_payload_shape(sent):
+    rows = [_wallet_row("W1", 45.2, display_name="@foo (twitter)", name_source="social_claim",
+                         first_buyer_count=3, currently_hot_tokens=2, reasoning="first buyer on 3 token(s)")]
+    mb.emit_wallet_reputation_traces(rows)
+    body = sent[0]["body"]
+    assert body["agent"] == "wallet_learner"
+    assert body["action"] == "wallet_reputation"
+    assert body["payload"]["display_name"] == "@foo (twitter)"
+    assert body["payload"]["copy_trade_score"] == 45.2
+    assert body["payload"]["reasoning"] == "first buyer on 3 token(s)"
+
+
+# ── emit_verified_call_trace ────────────────────────────────────────────
+
+def _verified_call(wallet="W1", **extra):
+    d = {"platform": "twitter", "username": "foo", "wallet_address": wallet, "mint": "M1",
+         "symbol": "FOO", "entry_price_usd": 0.001, "entry_tx_signature": "sig123",
+         "current_price_usd": 0.002, "pct_change": 100.0}
+    d.update(extra)
+    return d
+
+
+def test_verified_call_emits_real_shape(sent):
+    assert mb.emit_verified_call_trace(_verified_call()) is True
+    body = sent[0]["body"]
+    assert body["agent"] == "social_tracker"
+    assert body["action"] == "verified_social_call"
+    assert body["target"] == "W1"
+    assert body["payload"]["pct_change"] == 100.0
+    assert body["payload"]["entry_tx_signature"] == "sig123"
+
+
+def test_verified_call_missing_wallet_is_a_noop(sent):
+    assert mb.emit_verified_call_trace({"platform": "twitter"}) is False
+    assert sent == []
+
+
+def test_verified_call_has_no_dedup_every_real_call_is_a_new_fact(sent):
+    # Unlike the other emitters, repeated calls with identical content are
+    # NOT deduped here -- the caller (social_tracker.py) only ever invokes
+    # this once per genuinely new verified_calls row (guarded upstream by
+    # that table's own ON CONFLICT...DO NOTHING), so every invocation
+    # already represents a real, new fact.
+    vc = _verified_call()
+    mb.emit_verified_call_trace(vc)
+    mb.emit_verified_call_trace(vc)
+    assert len(sent) == 2

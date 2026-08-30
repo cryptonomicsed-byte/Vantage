@@ -308,3 +308,133 @@ def emit_narrative_theme_trace(theme_key: str, label: str, heat_score: int, samp
     if ok:
         _last_emitted[key] = value_key
     return ok
+
+
+# ── 2026-08-30, ecosystem-wide follow-up audit ────────────────────────────
+# Extending coverage beyond the Vantage FastAPI process: /opt/ares/
+# wallet_learner.py and /opt/ares/social_tracker.py are separate standalone
+# daemons (systemd services ares-wallet-learner / ares-social-tracker), not
+# routes in this backend -- but both already successfully import backend.*
+# modules directly (wallet_blacklist, wallet_naming; sys.path.insert(0,
+# "/opt/ares/Vantage") at their own top), so importing this module the same
+# way and calling the functions below is the natural fit, not a new
+# integration pattern.
+#
+# Real finding while auditing wallet_learner's own territory: /opt/ares/
+# trade_outcome_learner.py (a live, currently-running standalone daemon,
+# ares-trade-outcome-learner.service, active 10h+ at audit time) writes
+# into the SAME trading_order_outcomes/source_performance tables this
+# module's emit_source_performance_traces() already reads and emits from --
+# it is NOT the "lost writer" an earlier session (incorrectly) concluded
+# had disappeared when building backend/trade_outcome_learner.py. Confirmed
+# no active double-write in the last 10h (both target different order
+# lifecycle states -- 'submitted'+tx_hash for real on-chain fills here,
+# 'filled'+avg_fill_price for paper-fills in the in-process module) and its
+# real aggregate contributions already flow into Mycelium via the shared
+# table + this module's existing emission, so no new wiring was needed for
+# it specifically -- flagged in the owner-facing report as a real
+# consistency risk worth a human decision, not silently left undocumented.
+
+
+def emit_wallet_reputation_traces(rows: list[dict], top_n: int = 20) -> int:
+    """Emit real observation traces for the top-N (by copy_trade_score)
+    wallets from one wallet_learner.py score_wallets() cycle -- that
+    script can score thousands of wallets per 30-min cycle, so this is
+    deliberately bounded to the ones actually worth Mycelium's attention
+    (same "bounded, not everything" discipline as emit_platform_leader_
+    traces), not a per-wallet trace flood.
+
+    `rows`: dicts with wallet_address/chain/display_name/name_source/
+    name_confidence/copy_trade_score/first_buyer_count/top_trader_count/
+    top_holder_count/currently_hot_tokens/reasoning -- wallet_reputation's
+    own real columns, no reshaping.
+
+    target = the wallet address. Dedup per (wallet_address, copy_trade_score
+    rounded to 1dp, matching that table's own real rounding) -- a wallet's
+    score changing between cycles is real signal; being re-selected into
+    the top 20 with an unchanged score is not.
+
+    Returns the real count of traces successfully emitted this call."""
+    ranked = sorted(
+        (r for r in rows if r.get("wallet_address") and r.get("copy_trade_score")),
+        key=lambda r: r["copy_trade_score"], reverse=True,
+    )[:top_n]
+
+    emitted = 0
+    for row in ranked:
+        address = row["wallet_address"]
+        score = round(float(row["copy_trade_score"]), 1)
+
+        key = ("wallet_reputation", address)
+        value_key = score
+        if _last_emitted.get(key) == value_key:
+            continue
+
+        ok = post_observation(
+            agent="wallet_learner",
+            session="wallet-reputation-cycle",
+            action="wallet_reputation",
+            target=address,
+            payload={
+                "chain": row.get("chain"),
+                "display_name": row.get("display_name"),
+                "name_source": row.get("name_source"),
+                "name_confidence": row.get("name_confidence"),
+                "copy_trade_score": score,
+                "first_buyer_count": row.get("first_buyer_count"),
+                "top_trader_count": row.get("top_trader_count"),
+                "top_holder_count": row.get("top_holder_count"),
+                "currently_hot_tokens": row.get("currently_hot_tokens"),
+                "reasoning": row.get("reasoning"),
+            },
+        )
+        if ok:
+            _last_emitted[key] = value_key
+            emitted += 1
+    return emitted
+
+
+def emit_verified_call_trace(row: dict) -> bool:
+    """Emit one real observation trace for a social_tracker.py verified
+    call -- a REAL on-chain-verified trading-call outcome (the wallet's
+    actual swap, actual entry price computed from the swap amounts, actual
+    current price -- never a self-reported PnL screenshot; see that
+    module's own docstring). This is a richer, ground-truth-outcome-linked
+    sibling to mycelium/miners/signal_quality.py's heuristic text-based
+    scoring: that domain scores whether a CALL was well-constructed;
+    this reports whether a call was actually RIGHT, verified on-chain.
+
+    `row`: dicts with platform/username/wallet_address/mint/symbol/
+    entry_price_usd/entry_tx_signature/current_price_usd/pct_change --
+    verified_calls' own real columns, no reshaping.
+
+    target = the wallet address that made the real on-chain trade (same
+    role wallet-intel's own traces use for "what/who is this ABOUT").
+    No dedup: the caller only ever calls this once a NEW verified_calls
+    row has genuinely been inserted (that table's own
+    ON CONFLICT...DO NOTHING already guards against re-verifying the same
+    platform+username+wallet+mint claim) -- every call here is a real,
+    new, discrete fact by construction, same posture as pine.py's
+    per-order trigger trace.
+
+    Returns True if emitted, False only on a real Mycelium-gateway
+    failure (fail-soft, never raises)."""
+    wallet_address = row.get("wallet_address")
+    if not wallet_address:
+        return False
+    return post_observation(
+        agent="social_tracker",
+        session="verified-calls",
+        action="verified_social_call",
+        target=wallet_address,
+        payload={
+            "platform": row.get("platform"),
+            "username": row.get("username"),
+            "mint": row.get("mint"),
+            "symbol": row.get("symbol"),
+            "entry_price_usd": row.get("entry_price_usd"),
+            "entry_tx_signature": row.get("entry_tx_signature"),
+            "current_price_usd": row.get("current_price_usd"),
+            "pct_change": row.get("pct_change"),
+        },
+    )
