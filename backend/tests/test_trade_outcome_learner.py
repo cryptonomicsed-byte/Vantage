@@ -18,6 +18,7 @@ from backend.trade_outcome_learner import (
     record_outcomes_once,
     refresh_source_performance,
     run_once,
+    snapshot_submitted_entries,
 )
 
 
@@ -197,3 +198,195 @@ async def test_bootstraps_cleanly_on_a_database_with_no_prior_table(db_env, monk
     await init_outcome_tables()
     result = await run_once()
     assert sum(result["marked"].values()) == 2
+
+
+# ── Consolidation (2026-08-30): status='submitted' real on-chain orders ──
+# execute_live_order never sets avg_fill_price -- only tx_hash/executed_at
+# -- so these orders need the two-phase snapshot-then-evaluate path ported
+# from the now-retired standalone /opt/ares/trade_outcome_learner.py daemon.
+
+@pytest.mark.asyncio
+async def test_snapshot_submitted_entries_creates_a_real_row(db_env, monkeypatch):
+    await _seed_agent_and_orders(db_env, [
+        {"id": 1, "side": "BUY", "symbol": "BTC", "status": "submitted", "hours_ago": 0.01,
+         "trigger_reason": "strategy_terminal"},
+    ])
+    import backend.routers.trading as trading_mod
+    async def fake_quote(symbol):
+        return 60000.0
+    monkeypatch.setattr(trading_mod, "_fetch_quote", fake_quote)
+
+    await init_outcome_tables()
+    async with db_env.get_db() as db:
+        db.row_factory = aiosqlite.Row
+        snapshotted = await snapshot_submitted_entries(db)
+        await db.commit()
+    assert snapshotted == 1
+
+    async with db_env.get_db() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute("SELECT * FROM trading_order_outcomes")).fetchall()
+    row = dict(rows[0])
+    assert row["order_id"] == 1
+    assert row["entry_price_usd"] == pytest.approx(60000.0)
+    assert row["entry_recorded_at"] is not None
+    assert row["source"] == "strategy_terminal"
+    assert row["pnl_pct_1h"] is None  # not yet evaluated -- only snapshotted
+
+
+@pytest.mark.asyncio
+async def test_snapshot_submitted_entries_no_quote_is_retried_not_faked(db_env, monkeypatch):
+    await _seed_agent_and_orders(db_env, [
+        {"id": 1, "side": "BUY", "symbol": "UNKNOWNCOIN", "status": "submitted", "hours_ago": 0.01},
+    ])
+    import backend.routers.trading as trading_mod
+    async def fake_quote(symbol):
+        return None
+    monkeypatch.setattr(trading_mod, "_fetch_quote", fake_quote)
+
+    await init_outcome_tables()
+    async with db_env.get_db() as db:
+        db.row_factory = aiosqlite.Row
+        snapshotted = await snapshot_submitted_entries(db)
+    assert snapshotted == 0
+
+    async with db_env.get_db() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute("SELECT COUNT(*) AS c FROM trading_order_outcomes")).fetchall()
+    assert dict(rows[0])["c"] == 0
+
+
+@pytest.mark.asyncio
+async def test_submitted_order_evaluated_once_entry_recorded_at_ages_past_window(db_env, monkeypatch):
+    await _seed_agent_and_orders(db_env, [
+        {"id": 1, "side": "BUY", "symbol": "BTC", "status": "submitted", "hours_ago": 30,
+         "trigger_reason": "strategy_terminal"},
+    ])
+    import backend.routers.trading as trading_mod
+    async def fake_quote(symbol):
+        return 60000.0
+    monkeypatch.setattr(trading_mod, "_fetch_quote", fake_quote)
+
+    await init_outcome_tables()
+    # Snapshot first (as record_outcomes_once itself would do), then
+    # backdate entry_recorded_at to simulate real elapsed time -- the
+    # snapshot always uses datetime('now'), so this is the only way to
+    # test window-eligibility without literally waiting.
+    async with db_env.get_db() as db:
+        db.row_factory = aiosqlite.Row
+        await snapshot_submitted_entries(db)
+        await db.execute(
+            "UPDATE trading_order_outcomes SET entry_recorded_at = datetime('now', '-30 hours') WHERE order_id = 1"
+        )
+        await db.commit()
+
+    async def rising_quote(symbol):
+        return 66000.0  # +10% vs the 60000 entry snapshot
+    monkeypatch.setattr(trading_mod, "_fetch_quote", rising_quote)
+
+    marked = await record_outcomes_once()
+    assert marked["1h"] == 1
+    assert marked["24h"] == 1
+
+    async with db_env.get_db() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute("SELECT * FROM trading_order_outcomes WHERE order_id=1")).fetchall()
+    row = dict(rows[0])
+    assert row["pnl_pct_1h"] == pytest.approx(10.0)
+    assert row["pnl_pct_24h"] == pytest.approx(10.0)
+    # Entry price stays the real snapshot, never overwritten by a later mark.
+    assert row["entry_price_usd"] == pytest.approx(60000.0)
+
+
+@pytest.mark.asyncio
+async def test_submitted_order_too_recent_is_not_evaluated_yet(db_env, monkeypatch):
+    await _seed_agent_and_orders(db_env, [
+        {"id": 1, "side": "BUY", "symbol": "BTC", "status": "submitted", "hours_ago": 0.01},
+    ])
+    import backend.routers.trading as trading_mod
+    async def fake_quote(symbol):
+        return 60000.0
+    monkeypatch.setattr(trading_mod, "_fetch_quote", fake_quote)
+
+    await init_outcome_tables()
+    marked = await record_outcomes_once()  # snapshot happens now, entry_recorded_at = right now
+    assert marked["1h"] == 0
+    assert marked["24h"] == 0
+
+    async with db_env.get_db() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute("SELECT * FROM trading_order_outcomes WHERE order_id=1")).fetchall()
+    row = dict(rows[0])
+    assert row["entry_price_usd"] == pytest.approx(60000.0)  # snapshotted
+    assert row["pnl_pct_1h"] is None  # but not yet evaluated -- too recent
+
+
+@pytest.mark.asyncio
+async def test_filled_and_submitted_orders_both_marked_in_one_cycle_no_cross_contamination(db_env, monkeypatch):
+    """The real consolidation scenario: one paper-filled order and one real
+    on-chain submitted order, same cycle, must each get their own correct
+    independent entry price and pnl -- never mixed up."""
+    await _seed_agent_and_orders(db_env, [
+        {"id": 1, "side": "BUY", "symbol": "BTC", "avg_fill_price": 50000, "status": "filled", "hours_ago": 30},
+        {"id": 2, "side": "BUY", "symbol": "ETH", "status": "submitted", "hours_ago": 30},
+    ])
+    import backend.routers.trading as trading_mod
+    await init_outcome_tables()
+
+    # Order 2 (submitted) needs its snapshot to land BEFORE the 30h-ago
+    # backdate below, matching real usage (record_outcomes_once snapshots
+    # first, then evaluates) -- but since this test needs both entry AND
+    # eval to reflect the SAME 30h-ago window, snapshot then backdate here
+    # too, same technique as the dedicated snapshot test above.
+    async def snapshot_quote(symbol):
+        return {"ETH": 3000.0}.get(symbol)
+    monkeypatch.setattr(trading_mod, "_fetch_quote", snapshot_quote)
+    async with db_env.get_db() as db:
+        db.row_factory = aiosqlite.Row
+        await snapshot_submitted_entries(db)
+        await db.execute(
+            "UPDATE trading_order_outcomes SET entry_recorded_at = datetime('now', '-30 hours') WHERE order_id = 2"
+        )
+        await db.commit()
+
+    async def eval_quote(symbol):
+        return {"BTC": 55000.0, "ETH": 3300.0}.get(symbol)
+    monkeypatch.setattr(trading_mod, "_fetch_quote", eval_quote)
+
+    marked = await record_outcomes_once()
+    assert marked["1h"] == 2
+    assert marked["24h"] == 2
+
+    async with db_env.get_db() as db:
+        db.row_factory = aiosqlite.Row
+        rows = {r["order_id"]: dict(r) for r in await (await db.execute("SELECT * FROM trading_order_outcomes")).fetchall()}
+    assert rows[1]["entry_price_usd"] == pytest.approx(50000.0)
+    assert rows[1]["pnl_pct_1h"] == pytest.approx(10.0)  # (55000-50000)/50000
+    assert rows[2]["entry_price_usd"] == pytest.approx(3000.0)
+    assert rows[2]["pnl_pct_1h"] == pytest.approx(10.0)  # (3300-3000)/3000
+
+
+@pytest.mark.asyncio
+async def test_snapshot_is_idempotent_no_duplicate_row_on_second_cycle(db_env, monkeypatch):
+    await _seed_agent_and_orders(db_env, [
+        {"id": 1, "side": "BUY", "symbol": "BTC", "status": "submitted", "hours_ago": 0.01},
+    ])
+    import backend.routers.trading as trading_mod
+    async def fake_quote(symbol):
+        return 60000.0
+    monkeypatch.setattr(trading_mod, "_fetch_quote", fake_quote)
+
+    await init_outcome_tables()
+    async with db_env.get_db() as db:
+        db.row_factory = aiosqlite.Row
+        first = await snapshot_submitted_entries(db)
+        await db.commit()
+        second = await snapshot_submitted_entries(db)
+        await db.commit()
+    assert first == 1
+    assert second == 0  # already has a row -- NOT EXISTS guard, no re-snapshot
+
+    async with db_env.get_db() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute("SELECT COUNT(*) AS c FROM trading_order_outcomes")).fetchall()
+    assert dict(rows[0])["c"] == 1
