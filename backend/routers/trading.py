@@ -288,6 +288,73 @@ async def get_wallet(wallet_id: int, agent: dict = Depends(get_agent)):
         w["balances"] = [dict(b) for b in bal_rows]
         return w
 
+@router.post("/wallets/{wallet_id}/onramp")
+async def create_onramp_session(
+    wallet_id: int,
+    currency: str = Query("SOL"),
+    fiat_amount: Optional[float] = Query(None),
+    fiat_currency: str = Query("USD"),
+    agent: dict = Depends(get_agent),
+):
+    """Debit-card fiat-to-crypto on-ramp — real, signed MoonPay widget URL
+    that sells crypto directly into this wallet's own real address.
+
+    MoonPay is the regulated money-transmitter of record: it owns 100% of
+    KYC/AML, card processing, and fraud checks inside its own hosted
+    widget once the user's browser navigates to the returned URL. This
+    endpoint's only real responsibility is looking up the wallet's real
+    address and generating a correctly HMAC-SHA256-signed URL (see
+    backend/moonpay_client.py's module docstring for the real comparison
+    against Transak/Coinbase Onramp/Stripe Crypto Onramp and why MoonPay
+    was chosen, plus the exact signing algorithm and its honest
+    limitations).
+
+    503 if MOONPAY_API_KEY/MOONPAY_SECRET_KEY aren't configured -- no
+    fake/unsigned URL is ever returned. Whichever key IS configured
+    (pk_test_/sk_test_ sandbox or pk_live_/sk_live_ production) decides
+    the environment automatically; this endpoint never guesses."""
+    from backend import moonpay_client
+
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        row = await (await db.execute(
+            "SELECT id, label, chain, address FROM trading_wallets WHERE id=? AND agent_id=?",
+            (wallet_id, agent["id"])
+        )).fetchone()
+    if not row:
+        raise HTTPException(404, "Wallet not found")
+    wallet = dict(row)
+    if wallet["chain"] != "solana":
+        raise HTTPException(400, f"On-ramp currently supports Solana wallets only (this wallet is {wallet['chain']})")
+
+    if not moonpay_client.is_configured():
+        raise HTTPException(
+            503,
+            "MoonPay on-ramp is not configured on this Vantage instance -- "
+            "a real pk_test_/sk_test_ (sandbox) or pk_live_/sk_live_ (production) "
+            "API key pair from a real MoonPay dashboard signup (moonpay.com) is required."
+        )
+
+    try:
+        result = moonpay_client.build_onramp_url(
+            wallet_address=wallet["address"],
+            currency=currency,
+            fiat_amount=fiat_amount,
+            fiat_currency=fiat_currency,
+        )
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+
+    return {
+        "wallet_id": wallet_id,
+        "wallet_label": wallet["label"],
+        "wallet_address": wallet["address"],
+        **result,
+    }
+
+
 @router.delete("/wallets/{wallet_id}")
 async def delete_wallet(wallet_id: int, agent: dict = Depends(get_agent)):
     async with get_db() as db:
