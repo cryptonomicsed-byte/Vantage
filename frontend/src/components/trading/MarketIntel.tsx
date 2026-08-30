@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, Waypoints, ListOrdered, Share2, Flame, Brain, Scale, UserCog } from 'lucide-react'
+import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, Waypoints, ListOrdered, Share2, Flame, Brain, Scale, UserCog, PlusCircle } from 'lucide-react'
 import Top5Degen from './Top5Degen'
 import MoneyFlowGraph from '../MoneyFlowGraph'
 import CouncilSection from '../CouncilSection'
@@ -816,6 +816,109 @@ function AresTrace() {
   )
 }
 
+// ── Unified ingestion — paste a Twitter/X link or handle, Telegram link or
+// handle, Solana wallet address, or Polymarket/EVM wallet address; the
+// backend auto-detects and routes to the real existing tracker for that
+// domain (see backend/routers/intel.py POST /api/intel/ingest). Falls back
+// to an explicit type selector only when detection is genuinely ambiguous
+// (a bare @handle could be Twitter or Telegram). ───────────────────────────
+function AresIngest() {
+  const [input, setInput] = useState('')
+  const [label, setLabel] = useState('')
+  const [ambiguous, setAmbiguous] = useState<string[] | null>(null)
+  const [typeOverride, setTypeOverride] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [result, setResult] = useState<any>(null)
+  const [error, setError] = useState('')
+
+  async function submit(explicitType?: string) {
+    if (!input.trim()) return
+    setLoading(true); setError(''); setResult(null)
+    try {
+      const r = await intelAuthApi('/ingest', {
+        method: 'POST',
+        body: JSON.stringify({ input: input.trim(), label: label.trim(), type: explicitType || typeOverride || undefined }),
+      })
+      const d = await r.json()
+      if (r.ok) {
+        setResult(d); setAmbiguous(null); setTypeOverride('')
+      } else if (d?.detail?.error === 'ambiguous') {
+        setAmbiguous(d.detail.candidates || [])
+      } else {
+        setError(typeof d?.detail === 'string' ? d.detail : (d?.detail?.message || 'Failed to add'))
+      }
+    } catch {
+      setError('Request failed — check connection')
+    }
+    setLoading(false)
+  }
+
+  return (
+    <div style={{ maxWidth: 640 }}>
+      <div style={{ color: 'var(--muted)', marginBottom: 16, fontSize: 13 }}>
+        Paste a Twitter/X username or profile link, a Telegram channel/group username or t.me link,
+        a Solana wallet address, or a Polymarket wallet address — it's auto-detected and added to the
+        right tracker. No SSH or CLI needed.
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+        <input
+          className="ares-input"
+          placeholder="Paste a link, handle, or wallet address…"
+          value={input}
+          onChange={e => { setInput(e.target.value); setAmbiguous(null); setResult(null); setError('') }}
+          onKeyDown={e => e.key === 'Enter' && !ambiguous && submit()}
+          style={{ minWidth: 320, flex: 1, fontFamily: 'monospace' }}
+        />
+        <input
+          className="ares-input"
+          placeholder="Label (optional)"
+          value={label}
+          onChange={e => setLabel(e.target.value)}
+          style={{ maxWidth: 180 }}
+        />
+        <button className="btn btn-primary btn-sm" onClick={() => submit()} disabled={loading || !input.trim()}>
+          {loading ? 'Adding…' : 'Add'}
+        </button>
+      </div>
+
+      {ambiguous && (
+        <div style={{ padding: 12, border: '1px solid var(--border)', borderRadius: 8, marginTop: 8 }}>
+          <div style={{ marginBottom: 8, fontSize: 13 }}>Could not tell if this is Twitter or Telegram — pick one:</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {ambiguous.map(c => (
+              <button key={c} className="btn btn-ghost btn-sm" onClick={() => { setTypeOverride(c); submit(c) }}>
+                {c === 'twitter' ? 'Twitter/X' : 'Telegram'}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {error && (
+        <div style={{ color: 'var(--danger)', marginTop: 12, fontSize: 13 }}>{error}</div>
+      )}
+
+      {result && (
+        <div style={{ padding: 12, border: '1px solid var(--border)', borderRadius: 8, marginTop: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+            <span style={{ color: '#39ff14', fontWeight: 700, fontSize: 13 }}>Added</span>
+            <TypeBadge type={result.type} />
+            <span style={{ color: 'var(--muted)', fontSize: 12 }}>→ {result.tracker}</span>
+          </div>
+          <pre style={{ fontSize: 11, color: 'var(--muted)', whiteSpace: 'pre-wrap', margin: 0 }}>
+            {JSON.stringify(result.result ?? { wallet: result.wallet, output: result.output }, null, 2)}
+          </pre>
+          {result.degen_watchlist_note && (
+            <div style={{ marginTop: 8, fontSize: 11, color: 'var(--warning, #ffaa00)' }}>
+              {result.degen_watchlist_note}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 const ADDRESS_TYPE_LABELS: Record<string, string> = {
   wallet: 'Wallet', exchange: 'Exchange', contract: 'Contract (CA)', smart_wallet: 'Smart Wallet',
 }
@@ -838,6 +941,7 @@ function TypeBadge({ type }: { type: string }) {
 
 const INTEL_TABS = [
   { id: 'top5', label: 'Top 5', icon: Flame },
+  { id: 'ingest', label: 'Add Tracker', icon: PlusCircle },
   { id: 'overview',  label: 'Overview',  icon: Radio },
   { id: 'trace',     label: 'Trace',     icon: Waypoints },
   { id: 'arbitrage', label: 'Arbitrage', icon: TrendingUp },
@@ -870,6 +974,7 @@ export default function MarketIntel() {
         ))}
       </div>
       {tab === 'top5' && <Top5Degen />}
+      {tab === 'ingest' && <AresIngest />}
       {tab === 'overview' && <AresOverview />}
       {tab === 'trace' && <AresTrace />}
       {tab === 'arbitrage' && <AresArbitrage />}
