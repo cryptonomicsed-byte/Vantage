@@ -987,6 +987,17 @@ async def platform_leaders(x_agent_key: str = Header(...)):
     # Stable display order matching the task's platform inventory order.
     order = {name: i for i, name in enumerate(platform_names)}
     results.sort(key=lambda r: order.get(r["platform"], 99))
+
+    # Real observation traces into Mycelium's substrate (2026-08-30 audit --
+    # each platform's own #1 pick was computed fresh every call and never
+    # persisted/observable anywhere else). Fail-soft, deduped per platform
+    # -- see mycelium_bridge.emit_platform_leader_traces's own docstring.
+    try:
+        from backend.mycelium_bridge import emit_platform_leader_traces
+        emit_platform_leader_traces(results)
+    except Exception as e:
+        logger.debug("platform_leaders: mycelium trace emit failed: %s", e)
+
     return {"leaders": results, "count": len(results), "generated_at": int(time.time())}
 
 
@@ -1101,4 +1112,14 @@ async def aggregate_score(x_agent_key: str = Header(...)):
     result = await compute_aggregate_scores(candidates, helius_key=HELIUS)
     result["candidates_considered"] = len(candidates)
     result["generated_at"] = int(time.time())
+
+    # Real observation trace into Mycelium's substrate (2026-08-30 audit --
+    # this "ultimate winner" score was computed fresh every call and never
+    # persisted/observable anywhere else). Fail-soft, deduped -- see
+    # mycelium_bridge.emit_aggregate_score_trace's own docstring.
+    try:
+        from backend.mycelium_bridge import emit_aggregate_score_trace
+        emit_aggregate_score_trace(result.get("ranked") or [], result.get("disqualified") or [])
+    except Exception as e:
+        logger.debug("aggregate_score: mycelium trace emit failed: %s", e)
     return result

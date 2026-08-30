@@ -102,9 +102,27 @@ def test_unchanged_updated_at_is_not_re_emitted(sent):
     assert len(sent) == 1  # only the first call actually hit the network
 
 
-def test_changed_updated_at_is_re_emitted(sent):
+def test_changed_updated_at_alone_is_not_re_emitted(sent):
+    # Real bug regression: refresh_source_performance()'s own SQL bumps
+    # updated_at on every full recompute even when n_trades/wins/
+    # avg_pnl_pct are unchanged (confirmed live 2026-08-30) -- dedup must
+    # key on the real VALUES, not this always-changing timestamp.
     mb.emit_source_performance_traces([_row(updated_at="2026-08-29 20:00:00")])
     emitted_second = mb.emit_source_performance_traces([_row(updated_at="2026-08-29 20:10:00")])
+    assert emitted_second == 0
+    assert len(sent) == 1
+
+
+def test_changed_avg_pnl_pct_is_re_emitted_even_with_same_updated_at(sent):
+    mb.emit_source_performance_traces([_row(avg_pnl_pct=3.5, updated_at="t1")])
+    emitted_second = mb.emit_source_performance_traces([_row(avg_pnl_pct=4.0, updated_at="t1")])
+    assert emitted_second == 1
+    assert len(sent) == 2
+
+
+def test_changed_n_trades_is_re_emitted(sent):
+    mb.emit_source_performance_traces([_row(n_trades=10, wins=7, updated_at="t1")])
+    emitted_second = mb.emit_source_performance_traces([_row(n_trades=11, wins=7, updated_at="t1")])
     assert emitted_second == 1
     assert len(sent) == 2
 
@@ -150,3 +168,146 @@ def test_empty_rows_list_returns_zero_without_any_network_call(sent):
     emitted = mb.emit_source_performance_traces([])
     assert emitted == 0
     assert sent == []
+
+
+# ── emit_aggregate_score_trace ──────────────────────────────────────────
+
+def _ranked(address="ADDR1", symbol="FOO", total_score=0.75, components=None):
+    return [{"address": address, "symbol": symbol, "total_score": total_score,
+             "components": components or {"platform_breadth": {"score": 1.0}}}]
+
+
+def test_aggregate_score_emits_the_real_winner(sent):
+    assert mb.emit_aggregate_score_trace(_ranked(), disqualified=[{"a": 1}]) is True
+    assert len(sent) == 1
+    body = sent[0]["body"]
+    assert body["agent"] == "aggregate_score"
+    assert body["kind"] == "observation"
+    assert body["action"] == "aggregate_winner"
+    assert body["target"] == "ADDR1"
+    assert body["payload"]["symbol"] == "FOO"
+    assert body["payload"]["total_score"] == 0.75
+    assert body["payload"]["disqualified_count"] == 1
+
+
+def test_aggregate_score_empty_ranked_is_a_noop(sent):
+    assert mb.emit_aggregate_score_trace([], []) is False
+    assert sent == []
+
+
+def test_aggregate_score_dedups_on_unchanged_score(sent):
+    ranked = _ranked(total_score=0.75)
+    assert mb.emit_aggregate_score_trace(ranked, []) is True
+    assert mb.emit_aggregate_score_trace(ranked, []) is False
+    assert len(sent) == 1
+
+
+def test_aggregate_score_re_emits_on_changed_score(sent):
+    mb.emit_aggregate_score_trace(_ranked(total_score=0.75), [])
+    assert mb.emit_aggregate_score_trace(_ranked(total_score=0.90), []) is True
+    assert len(sent) == 2
+
+
+def test_aggregate_score_re_emits_on_changed_winner_same_score(sent):
+    mb.emit_aggregate_score_trace(_ranked(address="ADDR1", total_score=0.75), [])
+    assert mb.emit_aggregate_score_trace(_ranked(address="ADDR2", total_score=0.75), []) is True
+    assert len(sent) == 2
+
+
+# ── emit_platform_leader_traces ─────────────────────────────────────────
+
+def _leader(platform="GeckoTerminal", address="A1", available=True, **extra):
+    d = {"platform": platform, "address": address, "available": available, "symbol": "X"}
+    d.update(extra)
+    return d
+
+
+def test_platform_leaders_emits_one_per_available_platform(sent):
+    leaders = [_leader("GeckoTerminal", "A1"), _leader("DexScreener", "A2")]
+    assert mb.emit_platform_leader_traces(leaders) == 2
+    assert len(sent) == 2
+
+
+def test_platform_leaders_skips_unavailable_platforms(sent):
+    leaders = [_leader("GeckoTerminal", "A1"), {"platform": "DexScreener", "available": False}]
+    assert mb.emit_platform_leader_traces(leaders) == 1
+    assert len(sent) == 1
+
+
+def test_platform_leaders_skips_missing_address(sent):
+    leaders = [{"platform": "GeckoTerminal", "available": True, "address": None}]
+    assert mb.emit_platform_leader_traces(leaders) == 0
+    assert sent == []
+
+
+def test_platform_leaders_dedups_unchanged_pick(sent):
+    leaders = [_leader("GeckoTerminal", "A1")]
+    mb.emit_platform_leader_traces(leaders)
+    assert mb.emit_platform_leader_traces(leaders) == 0
+    assert len(sent) == 1
+
+
+def test_platform_leaders_re_emits_when_platforms_pick_rotates(sent):
+    mb.emit_platform_leader_traces([_leader("GeckoTerminal", "A1")])
+    assert mb.emit_platform_leader_traces([_leader("GeckoTerminal", "A2")]) == 1
+    assert len(sent) == 2
+
+
+def test_platform_leaders_dedup_scoped_per_platform(sent):
+    mb.emit_platform_leader_traces([_leader("GeckoTerminal", "A1")])
+    # Same address, different platform -- must NOT be treated as already-seen.
+    assert mb.emit_platform_leader_traces([_leader("DexScreener", "A1")]) == 1
+    assert len(sent) == 2
+
+
+# ── emit_narrative_theme_trace ──────────────────────────────────────────
+
+def test_narrative_theme_emits_real_heat(sent):
+    assert mb.emit_narrative_theme_trace("kw_moon", "Moon", 3, ["m1", "m2", "m3"]) is True
+    body = sent[0]["body"]
+    assert body["agent"] == "narrative_detection"
+    assert body["action"] == "narrative_theme_heat"
+    assert body["target"] == "kw_moon"
+    assert body["payload"] == {"label": "Moon", "heat_score": 3, "sample_mints": ["m1", "m2", "m3"]}
+
+
+def test_narrative_theme_sample_mints_capped_at_10(sent):
+    mints = [f"m{i}" for i in range(25)]
+    mb.emit_narrative_theme_trace("kw_moon", "Moon", 25, mints)
+    assert len(sent[0]["body"]["payload"]["sample_mints"]) == 10
+
+
+def test_narrative_theme_dedups_on_unchanged_heat(sent):
+    mb.emit_narrative_theme_trace("kw_moon", "Moon", 3, ["m1"])
+    assert mb.emit_narrative_theme_trace("kw_moon", "Moon", 3, ["m1"]) is False
+    assert len(sent) == 1
+
+
+def test_narrative_theme_re_emits_on_changed_heat(sent):
+    mb.emit_narrative_theme_trace("kw_moon", "Moon", 3, ["m1"])
+    assert mb.emit_narrative_theme_trace("kw_moon", "Moon", 5, ["m1", "m2"]) is True
+    assert len(sent) == 2
+
+
+# ── post_observation (shared primitive) ─────────────────────────────────
+
+def test_post_observation_real_shape(sent):
+    ok = mb.post_observation(agent="pine_signal", session="pine-1", action="pine_signal_triggered",
+                              target="BTC", payload={"side": "BUY"})
+    assert ok is True
+    body = sent[0]["body"]
+    assert body == {
+        "agent": "pine_signal", "session": "pine-1", "kind": "observation",
+        "action": "pine_signal_triggered", "target": "BTC", "outcome": "info",
+        "payload": {"side": "BUY"},
+    }
+
+
+def test_post_observation_fail_soft_on_unreachable_gateway(monkeypatch):
+    import urllib.error
+
+    def boom(request, timeout=None):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(mb.urllib.request, "urlopen", boom)
+    assert mb.post_observation(agent="a", session="s", action="act", target="t", payload={}) is False

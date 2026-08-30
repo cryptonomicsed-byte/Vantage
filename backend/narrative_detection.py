@@ -277,11 +277,19 @@ async def compute_narrative_heat() -> dict:
 
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-        # Persist theme heat + matched tokens.
+        # Persist theme heat + matched tokens. Also collect real hot themes
+        # (heat >= HOT_THRESHOLD, same bar get_hot_narratives() itself uses)
+        # for a separate Mycelium trace emission below the combo_flags one
+        # already in this function -- a genuinely different signal
+        # ("theme X just went hot") from combo_flags' mint-level ("this
+        # token combines two hot themes").
+        hot_themes: list[tuple[str, str, int, list[str]]] = []
         for theme_key, matched in theme_matches.items():
             distinct_mints = {m["mint"] for m in matched}
             heat = len(distinct_mints)
             label = all_themes[theme_key]["label"]
+            if heat >= HOT_THRESHOLD:
+                hot_themes.append((theme_key, label, heat, sorted(distinct_mints)))
             await db.execute(
                 """INSERT INTO narrative_themes (theme_key, label, keywords, first_seen_at, last_seen_at, token_count, heat_score, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -372,6 +380,21 @@ async def compute_narrative_heat() -> dict:
                     )
         except Exception as e:
             logger.debug("narrative_detection: mycelium trace emit failed: %s", e)
+
+    # Real, SEPARATE observation traces for theme-level heat (2026-08-30
+    # audit) -- "theme X just went hot" vs combo_flags' mint-level "this
+    # token combines two hot themes" above. Uses mycelium_bridge's shared
+    # dedup (keyed on (theme_key, heat_score), not this function's own
+    # unconditional-every-call posture the combo_flags block above has) so
+    # /hot's default refresh=True on every poll doesn't re-emit identical
+    # heat for an unchanged theme.
+    if hot_themes:
+        try:
+            from backend.mycelium_bridge import emit_narrative_theme_trace
+            for theme_key, label, heat, mints in hot_themes:
+                emit_narrative_theme_trace(theme_key, label, heat, mints)
+        except Exception as e:
+            logger.debug("narrative_detection: theme-heat trace emit failed: %s", e)
 
     return {
         "themes_detected": len(theme_matches),

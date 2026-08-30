@@ -262,6 +262,28 @@ async def evaluate_pine_signal(indicator_id: int, request: Request, agent: dict 
         response["fill"] = None
         response["fill_note"] = "SELL orders are created pending, not auto-paper-filled (no automatic position-matching in this pass)"
 
+    # Real observation trace into Mycelium's substrate (2026-08-30 audit --
+    # a Pine-indicator-triggered order was previously invisible to Mycelium
+    # entirely; trade_outcome_learner.py's own source_performance trace only
+    # covers this source's AGGREGATE PnL over time, not the individual
+    # trigger event itself). Every real order here has its own new
+    # autoincrement id, so unlike the other emitters in this module this is
+    # a genuine discrete event -- no value-based dedup needed, each call
+    # that reaches this point already represents a real, new order.
+    try:
+        from backend.mycelium_bridge import post_observation
+        post_observation(
+            agent="pine_signal", session=f"pine-{indicator_id}",
+            action="pine_signal_triggered", target=symbol.upper(),
+            payload={
+                "indicator_id": indicator_id, "indicator_name": indicator["name"],
+                "matched_markers": triggered_names, "side": side,
+                "order_id": created.get("id"), "source": source,
+            },
+        )
+    except Exception as e:
+        logger.debug("evaluate_pine_signal: mycelium trace emit failed: %s", e)
+
     return response
 
 
