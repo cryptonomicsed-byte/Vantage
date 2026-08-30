@@ -52,11 +52,25 @@ just happened.
 import json
 import os
 import sqlite3
+import sys
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
+# vantage_signals.py lives in daemons/ alongside this file in the repo, but
+# the deployed copy runs standalone from /opt/ares (WorkingDirectory in the
+# systemd unit) as a bare top-level script with no daemons/ on sys.path --
+# that unqualified import crashed on every start (ModuleNotFoundError, before
+# ever reaching the ODDS_API_KEY fail-soft check below). Confirmed live: the
+# service crash-looped every 30s (Restart=always) with zero real attempts to
+# reach The Odds API. Try both layouts so this works whether this file sits
+# directly in /opt/ares (deployed) or in daemons/ (repo checkout).
+_here = os.path.dirname(os.path.abspath(__file__))
+for _candidate in (_here, os.path.join(_here, "daemons"), "/opt/ares/Vantage/daemons"):
+    if os.path.exists(os.path.join(_candidate, "vantage_signals.py")):
+        sys.path.insert(0, _candidate)
+        break
 from vantage_signals import post_signal
 
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
