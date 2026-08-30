@@ -35,6 +35,14 @@ score=65', ...):
                             "pine:<indicator_id>:<name>", set by
                             routers/pine.py's evaluate-and-fill endpoint)
     else                -> "manual_ui" fallback
+
+2026-08-29: after each cycle's real recompute, also emits real
+per-source-performance observation traces into Mycelium's trace substrate
+(backend/mycelium_bridge.py) -- so Mycelium's pattern miners have real,
+structured source-quality signal to reason over alongside wallet_intel's
+and signal_quality's own traces already in that same substrate, not just
+the raw numbers this module already exposes via the API above. Fail-soft:
+Mycelium being down never affects this module's own real job.
 """
 from __future__ import annotations
 
@@ -44,6 +52,7 @@ import logging
 import aiosqlite
 
 from .db import get_db
+from . import mycelium_bridge
 
 logger = logging.getLogger(__name__)
 
@@ -194,10 +203,36 @@ async def refresh_source_performance() -> int:
         return updated
 
 
+async def _emit_mycelium_traces() -> int:
+    """Real per-source-performance observation traces into Mycelium's
+    trace substrate (backend/mycelium_bridge.py), tied to this exact cycle
+    boundary -- after refresh_source_performance() has just recomputed the
+    real table, not on a separate independent timer. Reads the same
+    source_performance columns GET /api/trading/source-performance itself
+    reads, no reshaping. asyncio.to_thread because mycelium_bridge's HTTP
+    call is a blocking urllib request (same convention wallet_intel/
+    collector.py already uses on the Mycelium side of this exact
+    integration) -- must not block this loop's own event loop.
+    Fail-soft: mycelium_bridge itself never raises, but this is wrapped in
+    its own try/except anyway so a bug in trace emission can never take
+    down real outcome-marking."""
+    try:
+        async with get_db() as db:
+            db.row_factory = aiosqlite.Row
+            rows = await (await db.execute(
+                "SELECT source, window, n_trades, wins, avg_pnl_pct, updated_at FROM source_performance"
+            )).fetchall()
+        return await asyncio.to_thread(mycelium_bridge.emit_source_performance_traces, [dict(r) for r in rows])
+    except Exception:
+        logger.exception("trade_outcome_learner: mycelium trace emission failed")
+        return 0
+
+
 async def run_once() -> dict:
     marked = await record_outcomes_once()
     sources_updated = await refresh_source_performance()
-    return {"marked": marked, "sources_updated": sources_updated}
+    mycelium_traces_emitted = await _emit_mycelium_traces()
+    return {"marked": marked, "sources_updated": sources_updated, "mycelium_traces_emitted": mycelium_traces_emitted}
 
 
 async def outcome_learner_loop() -> None:
