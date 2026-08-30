@@ -64,8 +64,8 @@
 //               plot(<expr>[, "title"][, named=...]) -> numeric series output
 //               hline(<expr>[, "title"][, named=...]) -> constant-level series
 //               plotshape(<expr>[, "title"][, named=...]) -> boolean marker series
-//               bgcolor(<expr>) -> parse-validated only (pure visual cue, no
-//                 numeric equivalent to extract)
+//               bgcolor(<expr>) / barcolor(<expr>) -> parse-validated only
+//                 (pure visual cues, no numeric equivalent to extract)
 //   cosmetic namespaces (color/shape/location/plot/size/line/label/scale/font/
 //   text/xloc/yloc/extend/display/format): any bare property or function call
 //   under these (color.red, color.new(color.red, 90), plot.style_columns, ...)
@@ -575,7 +575,7 @@ function stripNamed(argToks) {
   return { name: null, toks: argToks }
 }
 
-const CALL_STATEMENTS = new Set(['plot', 'hline', 'bgcolor', 'plotshape', 'indicator', 'strategy'])
+const CALL_STATEMENTS = new Set(['plot', 'hline', 'bgcolor', 'barcolor', 'plotshape', 'indicator', 'strategy'])
 
 // ── parser/evaluator over series ──
 function evaluatePine(script, candles) {
@@ -863,7 +863,7 @@ function evaluatePine(script, candles) {
         const series = asSeries(condArg.value)
         const name = (titleArg && titleArg.value) || `marker_${++plotN}`
         markers[name] = candles.map((c, i) => ({ time: Number(c.time), value: series[i] === true }))
-      } else if (fname === 'bgcolor') {
+      } else if (fname === 'bgcolor' || fname === 'barcolor') {
         // Pure visual cue (a color, not a number) — parse-validated above,
         // no numeric series to extract. Deliberately not an error.
       }
