@@ -352,6 +352,27 @@ async def compute_narrative_heat() -> dict:
 
         await db.commit()
 
+    # Feed real combo-flag detections into Mycelium as observation traces so its
+    # miners can learn which narrative combinations actually predict pumps vs
+    # noise over time (outcome is unknown at detection time -- Mycelium's own
+    # outcome-linking, same pattern signal_quality uses, closes that loop later).
+    if combo_flags:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                for flag in combo_flags:
+                    await client.post(
+                        "http://127.0.0.1:8811/api/trace",
+                        json=dict(
+                            agent="narrative_detection", session="narrative",
+                            kind="observation", action="narrative_combo",
+                            target=flag.get("mint", ""), outcome="info",
+                            payload=flag,
+                        ),
+                    )
+        except Exception as e:
+            logger.debug("narrative_detection: mycelium trace emit failed: %s", e)
+
     return {
         "themes_detected": len(theme_matches),
         "dynamic_themes_discovered": len(dynamic_themes),
