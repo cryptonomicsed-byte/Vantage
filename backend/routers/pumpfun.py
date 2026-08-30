@@ -3,16 +3,19 @@ Data: GeckoTerminal (real-time Solana pools), Birdeye (prices), Jupiter (quotes)
 """
 import asyncio, json, os, urllib.request, hashlib
 from pathlib import Path
-from fastapi import APIRouter, Query, HTTPException, Header
+from fastapi import APIRouter, Query, HTTPException, Header, UploadFile, File, Form
 import aiosqlite
+import httpx
 from backend.db import get_db
 from backend.routers.alpha import _dexscreener_mcap
+from backend.crypto_utils import decrypt_key_for_agent
 from contextlib import asynccontextmanager
 
 router = APIRouter(prefix="/api/intel/pumpfun", tags=["pumpfun"])
 DB = Path("/opt/ares/Vantage/data/vantage.db")
 BIRDEYE = os.environ.get("BIRDEYE_KEY", "")
 HELIUS = os.environ.get("HELIUS_API_KEY", "")
+PINATA_JWT = os.environ.get("PINATA_JWT", "")
 
 
 @asynccontextmanager
@@ -380,4 +383,226 @@ async def trace_token(mint: str, symbol: str = Query(""), x_agent_key: str = Hea
         "first_buyers": first_buyers,
         "concentrated": result.get("holders", {}).get("concentrated", False),
         "wallets_tracked": len({w for w in [creator] + [h["wallet"] for h in holders] + [t["wallet"] for t in traders] + [b["wallet"] for b in first_buyers] if w}),
+    }
+
+# ════════════════════════════════════════════════════════════════
+# TOKEN CREATION — real deployment via PumpPortal's Lightning (hosted)
+# Trading API (https://pumpportal.fun/api/trade, action=create), which
+# signs+broadcasts server-side using the wallet's own PumpPortal-custodied
+# key. Scoped to wallets created via POST /api/trading/wallets/generate
+# {system:"pumpportal"} (trading.py's generate_wallet already mints and
+# encrypts a real PumpPortal Lightning API key per-agent) -- NOT the
+# generic local-signing path trading.py's execute_live_order uses for
+# Jupiter swaps. Reason: pump.fun token creation needs a *second* keypair
+# (the new mint account) to co-sign the create instruction alongside the
+# payer; PumpPortal's Local Trading API supports that by returning an
+# unsigned tx for the caller to sign with both keys, but that doubles the
+# real key-handling surface for a first cut of this feature. Lightning
+# mode avoids that entirely (PumpPortal generates+signs the mint keypair
+# server-side, already inside the same custodial boundary this codebase
+# accepted the moment it minted a PumpPortal API key for that wallet).
+# Local-signing (self-custodied wallets) is a real gap, not silently
+# pretended-away -- see the 422 below.
+#
+# Fee reality check (deliberately not hardcoded as a flat "0.02 SOL fee"
+# anywhere in this code): PumpPortal's own docs say there's no separate
+# platform fee for creation itself -- the real cost is (a) Solana rent for
+# the new mint/metadata/bonding-curve accounts (~0.02 SOL, standard
+# rent-exempt minimum for those account sizes, paid automatically by the
+# transaction) plus (b) PumpPortal's standard trading fee applied to
+# whatever `dev_buy_sol` amount is requested (0 is valid -- creates the
+# token with no initial buy). The UI should show `dev_buy_sol` as the only
+# amount actually controllable by the caller.
+# ════════════════════════════════════════════════════════════════
+
+PINATA_UPLOAD_URL = "https://uploads.pinata.cloud/v3/files"
+
+
+def _require_pinata():
+    if not PINATA_JWT:
+        raise HTTPException(
+            503,
+            "Token creation is not configured on this deployment: PINATA_JWT is unset. "
+            "Pump.fun no longer accepts direct metadata uploads -- an IPFS pinning "
+            "credential (Pinata) is a real prerequisite, not optional, for this feature.",
+        )
+
+
+@router.get("/create/config")
+async def create_config(x_agent_key: str = Header(...)):
+    """Lets the frontend show real availability instead of a form that
+    fails at submit time. `ready=False` here means the owner still needs
+    to set PINATA_JWT (image/metadata IPFS pinning) before any launch can
+    actually happen -- there is no working fallback for that step."""
+    if not await get_agent(x_agent_key): raise HTTPException(401)
+    return {
+        "ipfs_ready": bool(PINATA_JWT),
+        "requires_wallet_system": "pumpportal",
+        "note": (
+            "Real deployment requires a PumpPortal Lightning wallet "
+            "(POST /api/trading/wallets/generate {system:'pumpportal'}), funded "
+            "with at least the dev-buy amount plus ~0.02 SOL rent."
+            if PINATA_JWT else
+            "PINATA_JWT is not set on this server -- token creation is disabled "
+            "until an IPFS pinning credential is configured."
+        ),
+    }
+
+
+async def _pinata_upload_bytes(data: bytes, filename: str, content_type: str) -> str:
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.post(
+            PINATA_UPLOAD_URL,
+            headers={"Authorization": f"Bearer {PINATA_JWT}"},
+            data={"network": "public"},
+            files={"file": (filename, data, content_type)},
+        )
+        r.raise_for_status()
+        cid = r.json().get("data", {}).get("cid", "")
+        if not cid:
+            raise HTTPException(502, f"Pinata upload returned no cid: {r.text[:200]}")
+        return cid
+
+
+@router.post("/create/upload-image")
+async def upload_image(image: UploadFile = File(...), x_agent_key: str = Header(...)):
+    """Step 1 of 2 for real deployment: pin the token image to IPFS. Returns
+    a URL to pass back as `image_url` to POST /create. Separated from the
+    final create call so a caller can inspect/confirm the pinned image
+    before anything on-chain (or money-spending) happens."""
+    if not await get_agent(x_agent_key): raise HTTPException(401)
+    _require_pinata()
+    body = await image.read()
+    if len(body) > 5 * 1024 * 1024:
+        raise HTTPException(413, "Image too large (5MB limit)")
+    cid = await _pinata_upload_bytes(body, image.filename or "token.png", image.content_type or "image/png")
+    return {"cid": cid, "url": f"https://ipfs.io/ipfs/{cid}"}
+
+
+class _CreateTokenBody:
+    """Plain holder, not a pydantic model -- kept as Form(...) params below
+    so this endpoint accepts the same multipart-friendly shape as the image
+    upload, letting a single frontend form submit both in one flow if it
+    wants to (image_url from the prior step is just a string field here)."""
+
+
+@router.post("/create")
+async def create_token(
+    wallet_id: int = Form(...),
+    name: str = Form(...),
+    symbol: str = Form(...),
+    image_url: str = Form(...),
+    description: str = Form(""),
+    twitter: str = Form(""),
+    telegram: str = Form(""),
+    website: str = Form(""),
+    dev_buy_sol: float = Form(0.0),
+    slippage: float = Form(10.0),
+    priority_fee: float = Form(0.0005),
+    dry_run: bool = Form(True),
+    x_agent_key: str = Header(...),
+):
+    """Real pump.fun token creation. `dry_run=True` (the default -- callers
+    must explicitly opt into spending real SOL) pins the metadata JSON to
+    IPFS and returns exactly what would be submitted, without ever calling
+    PumpPortal's create action or touching the wallet's key. `dry_run=False`
+    performs the actual on-chain creation and (if dev_buy_sol > 0) initial
+    buy, spending real SOL from the wallet."""
+    agent = await get_agent(x_agent_key)
+    if not agent: raise HTTPException(401)
+    _require_pinata()
+
+    if len(symbol) > 10:
+        raise HTTPException(422, f"Symbol '{symbol}' exceeds pump.fun's 10-character limit")
+    if not name or not symbol:
+        raise HTTPException(422, "name and symbol are required")
+
+    async with _db() as db:
+        cur = await db.execute(
+            "SELECT * FROM trading_wallets WHERE id=? AND agent_id=?",
+            (wallet_id, agent["id"]),
+        )
+        wallet = await cur.fetchone()
+    if not wallet:
+        raise HTTPException(404, "Wallet not found")
+    if wallet.get("chain") != "solana":
+        raise HTTPException(422, f"Wallet is chain='{wallet.get('chain')}' -- token creation is Solana-only")
+    encrypted_pp_key = wallet.get("encrypted_api_key")
+    if not encrypted_pp_key:
+        raise HTTPException(
+            422,
+            "This wallet has no PumpPortal Lightning API key. Real deployment currently "
+            "requires a wallet generated via POST /api/trading/wallets/generate "
+            "{system:'pumpportal'} -- self-custodied wallets aren't wired up for token "
+            "creation yet (would need local dual-keypair signing, not implemented).",
+        )
+
+    metadata = {
+        "name": name, "symbol": symbol, "image": image_url,
+        "description": description, "twitter": twitter,
+        "telegram": telegram, "website": website,
+    }
+    metadata_cid = await _pinata_upload_bytes(
+        json.dumps({k: v for k, v in metadata.items() if v}).encode(),
+        "metadata.json", "application/json",
+    )
+    metadata_uri = f"https://ipfs.io/ipfs/{metadata_cid}"
+
+    payload = {
+        "action": "create",
+        "tokenMetadata": {"name": name, "symbol": symbol, "uri": metadata_uri},
+        "denominatedInSol": "true",
+        "amount": dev_buy_sol,
+        "slippage": slippage,
+        "priorityFee": priority_fee,
+        "pool": "pump",
+    }
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "metadata_uri": metadata_uri,
+            "payload_preview": payload,
+            "estimated_cost_sol": round(0.02 + dev_buy_sol, 6),
+            "note": (
+                "Nothing was submitted on-chain and no key was touched. "
+                "Re-call with dry_run=false to actually create the token and spend real SOL."
+            ),
+        }
+
+    try:
+        pp_api_key = decrypt_key_for_agent(encrypted_pp_key, {"id": agent["id"], "api_key": x_agent_key})
+    except Exception:
+        raise HTTPException(500, "Failed to decrypt this wallet's PumpPortal API key -- wrong agent key, or corrupted")
+    if not pp_api_key:
+        raise HTTPException(500, "Decrypted PumpPortal API key is empty")
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(
+                f"https://pumpportal.fun/api/trade?api-key={pp_api_key}",
+                json=payload,
+            )
+            body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {"raw": r.text}
+    except Exception as e:
+        raise HTTPException(502, f"PumpPortal create request failed: {e}")
+
+    signature = body.get("signature")
+    if not signature:
+        # Real, surfaced failure -- not swallowed into a fake "success".
+        raise HTTPException(502, f"PumpPortal did not return a signature: {body}")
+
+    async with _db() as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO tracked_wallets (chain,address,label,added_by_agent_id) VALUES (?,?,?,?)",
+            ("pumpfun", metadata_uri, f"{symbol}-launch", agent["id"]),
+        )
+        await db.commit()
+
+    return {
+        "dry_run": False,
+        "signature": signature,
+        "metadata_uri": metadata_uri,
+        "explorer_url": f"https://solscan.io/tx/{signature}",
+        "dev_buy_sol": dev_buy_sol,
     }
