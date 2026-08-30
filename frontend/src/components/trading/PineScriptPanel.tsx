@@ -71,9 +71,8 @@ dev = mult * ta.stdev(close, length)
 upper = basis + dev
 lower = basis - dev
 plot(basis, "SMA", color=color.blue)
-u = plot(upper, "Upper", color=color.red)
-l = plot(lower, "Lower", color=color.green)
-fill(u, l, color=color.new(color.gray, 95))`,
+plot(upper, "Upper", color=color.red)
+plot(lower, "Lower", color=color.green)`,
   },
   {
     name: 'vantage_volume_profile',
@@ -145,6 +144,128 @@ sma50 = ta.sma(close, 50)
 sentiment = ((close - sma20) / sma20 * 50) + ((close - sma50) / sma50 * 50)
 plot(sentiment, "Sentiment", color=sentiment > 0 ? color.green : color.red)
 hline(0, "Neutral", color=color.gray)`,
+  },
+  // ── 2026-08-29 additions: real new ta.* functions added to pine-engine.js
+  // tonight, correctness-checked against TA-Lib/Jesse on hostinger-vps (see
+  // that commit for the full evidence trail). Each preset below is a real,
+  // runnable script exercising the new function, not a placeholder.
+  {
+    name: 'vantage_supertrend',
+    label: 'SuperTrend',
+    category: 'trend',
+    code: `//@version=5
+indicator("SuperTrend", overlay=true)
+factor = input.float(3.0, "Factor")
+atrLen = input.int(10, "ATR Length")
+[st, dir] = ta.supertrend(factor, atrLen)
+plot(st, "SuperTrend", color=dir < 0 ? color.green : color.red, linewidth=2)
+bullish = ta.crossover(dir, 0)
+bearish = ta.crossunder(dir, 0)
+plotshape(bullish, "Bullish Flip", shape.triangleup, location.belowbar, color=color.green)
+plotshape(bearish, "Bearish Flip", shape.triangledown, location.abovebar, color=color.red)`,
+  },
+  {
+    name: 'vantage_squeeze_momentum',
+    label: 'Squeeze Momentum',
+    category: 'oscillator',
+    code: `//@version=5
+indicator("Squeeze Momentum", overlay=false)
+length = input.int(20, "BB/KC Length")
+bbMult = input.float(2.0, "BB Mult")
+kcMult = input.float(1.5, "KC Mult")
+[sqzOn, mom] = ta.squeeze(length, bbMult, kcMult)
+plot(mom, "Momentum", color=mom > 0 ? color.green : color.red, style=plot.style_columns)
+plotshape(sqzOn, "Squeeze On", shape.circle, location.bottom, color=color.yellow)
+hline(0, "Zero", color=color.gray)`,
+  },
+  {
+    name: 'vantage_ichimoku',
+    label: 'Ichimoku Cloud',
+    category: 'trend',
+    code: `//@version=5
+indicator("Ichimoku Cloud", overlay=true)
+[conv, base, spanA, spanB] = ta.ichimoku(9, 26, 52)
+plot(conv, "Conversion", color=color.blue)
+plot(base, "Base", color=color.red)
+plot(spanA, "Leading Span A", color=color.green)
+plot(spanB, "Leading Span B", color=color.orange)`,
+  },
+  {
+    name: 'vantage_adx_dmi',
+    label: 'ADX / DMI',
+    category: 'trend',
+    code: `//@version=5
+indicator("ADX / DMI", overlay=false)
+[plusDI, minusDI, adx] = ta.dmi(14, 14)
+plot(plusDI, "+DI", color=color.green)
+plot(minusDI, "-DI", color=color.red)
+plot(adx, "ADX", color=color.white)
+hline(25, "Trending", color=color.gray)`,
+  },
+  {
+    name: 'vantage_stoch_rsi',
+    label: 'Stochastic RSI',
+    category: 'oscillator',
+    code: `//@version=5
+indicator("Stochastic RSI", overlay=false)
+[k, d] = ta.stochrsi(close, 14, 14, 3, 3)
+plot(k, "%K", color=color.blue)
+plot(d, "%D", color=color.orange)
+hline(80, "Overbought", color=color.red)
+hline(20, "Oversold", color=color.green)`,
+  },
+  {
+    name: 'vantage_keltner',
+    label: 'Keltner Channels',
+    category: 'overlay',
+    code: `//@version=5
+indicator("Keltner Channels", overlay=true)
+[basis, upper, lower] = ta.kc(close, 20, 1.5)
+plot(basis, "Basis", color=color.blue)
+plot(upper, "Upper", color=color.red)
+plot(lower, "Lower", color=color.green)`,
+  },
+  {
+    name: 'vantage_fib_retracement',
+    label: 'Fibonacci Retracement',
+    category: 'overlay',
+    code: `//@version=5
+indicator("Fibonacci Retracement", overlay=true)
+lookback = input.int(50, "Lookback")
+plot(ta.fib(0.236, lookback), "23.6%", color=color.gray)
+plot(ta.fib(0.382, lookback), "38.2%", color=color.orange)
+plot(ta.fib(0.5, lookback), "50%", color=color.yellow)
+plot(ta.fib(0.618, lookback), "61.8%", color=color.green)
+plot(ta.fib(0.786, lookback), "78.6%", color=color.red)`,
+  },
+  {
+    name: 'vantage_fvg',
+    label: 'Fair Value Gap',
+    category: 'alert',
+    code: `//@version=5
+indicator("Fair Value Gap", overlay=true)
+minGapPct = input.float(0.1, "Min Gap %")
+plotshape(ta.fvgbull(minGapPct), "Bullish FVG", shape.triangleup, location.belowbar, color=color.green)
+plotshape(ta.fvgbear(minGapPct), "Bearish FVG", shape.triangledown, location.abovebar, color=color.red)`,
+  },
+  {
+    name: 'vantage_money_flow',
+    label: 'MFI + OBV + Williams %R',
+    category: 'volume',
+    code: `//@version=5
+indicator("MFI + OBV + Williams %R", overlay=false)
+plot(ta.mfi(close, 14), "MFI", color=color.blue)
+plot(ta.wpr(14), "Williams %R", color=color.orange)
+hline(80, "MFI Overbought", color=color.red)
+hline(20, "MFI Oversold", color=color.green)`,
+  },
+  {
+    name: 'vantage_parabolic_sar',
+    label: 'Parabolic SAR',
+    category: 'trend',
+    code: `//@version=5
+indicator("Parabolic SAR", overlay=true)
+plot(ta.sar(0.02, 0.02, 0.2), "SAR", color=color.yellow, style=plot.style_circles)`,
   },
 ]
 

@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, Waypoints, ListOrdered, Share2, Flame, Brain, Scale } from 'lucide-react'
+import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, Waypoints, ListOrdered, Share2, Flame, Brain, Scale, UserCog } from 'lucide-react'
 import Top5Degen from './Top5Degen'
 import MoneyFlowGraph from '../MoneyFlowGraph'
 import CouncilSection from '../CouncilSection'
+import ShadowAccountSection from '../ShadowAccountSection'
 import { TokenLink, WalletLink } from './EntityProfileCard'
 import AgentIntel from './AgentIntel'
 
@@ -854,6 +855,7 @@ const INTEL_TABS = [
   { id: 'intel',     label: 'Raw Intel', icon: BarChart3 },
   { id: 'agent-intel', label: 'Agent Intel', icon: Brain },
   { id: 'council', label: 'Council', icon: Scale },
+  { id: 'shadow-account', label: 'Shadow Account', icon: UserCog },
 ]
 
 export default function MarketIntel() {
@@ -885,6 +887,7 @@ export default function MarketIntel() {
       {tab === 'intel' && <AresIntel />}
       {tab === 'agent-intel' && <AgentIntel />}
       {tab === 'council' && <CouncilSection />}
+      {tab === 'shadow-account' && <ShadowAccountSection />}
     </div>
   )
 }
