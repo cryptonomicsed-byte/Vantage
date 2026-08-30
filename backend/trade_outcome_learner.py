@@ -30,14 +30,26 @@ even though no actual double-write had occurred in practice (confirmed via
 no code-enforced guarantee that would stay true if the order lifecycle
 ever grew a submitted->filled transition later.
 
+While implementing the fix, live production data surfaced a THIRD real
+order-execution path with the identical gap, which the original
+consolidation plan (and the standalone daemon it replaces) both missed
+entirely: /opt/ares/vantage_execution_engine.py, a separate background
+poller (backend/execution_engine.py's real companion, not the same code as
+execute_live_order) that sets status='confirmed' -- also never sets
+avg_fill_price. Confirmed live: production currently has ZERO orders in
+'submitted'/'filled' but 23 real ones in 'confirmed' -- it is currently
+the DOMINANT real order population, and neither pre-existing
+implementation covered it at all. See NO_FILL_PRICE_STATUSES below.
+
 Fixed by consolidation, not by adding a lock or a "documented boundary"
-comment on top of two implementations: this module now ALSO covers
-status='submitted' orders, via snapshot_submitted_entries() (ported from
-the standalone daemon's own snapshot_new_entries(), same real reasoning --
-no fill price exists to read directly, so the live quote at first
-observation is recorded as an honest proxy for entry) using this module's
-own richer price source (routers/trading._fetch_quote's real multi-source
-fallback chain: Pyth -> CoinGecko -> RPC proxy, vs the standalone daemon's
+comment on top of two implementations: this module now ALSO covers every
+status in NO_FILL_PRICE_STATUSES ('submitted' AND 'confirmed'), via
+snapshot_submitted_entries() (ported from the standalone daemon's own
+snapshot_new_entries(), same real reasoning -- no fill price exists to
+read directly, so the live quote at first observation is recorded as an
+honest proxy for entry) using this module's own richer price source
+(routers/trading._fetch_quote's real multi-source fallback chain: Pyth ->
+CoinGecko -> RPC proxy, vs the standalone daemon's
 DexScreener-only call). The standalone daemon (ares-trade-outcome-
 learner.service) is retired -- see ops/README or the deploy commit for the
 disable step; its source file is kept on disk (renamed .retired) rather
@@ -87,6 +99,20 @@ WINDOWS: tuple[tuple[str, str, float], ...] = (("1h", "1h", 1.0), ("24h", "24h",
 
 LOOP_INTERVAL_S = 600  # 10 minutes -- marks don't need to be real-time
 
+# Real terminal BUY-order statuses that never get avg_fill_price populated,
+# so need the snapshot-then-evaluate path (see snapshot_submitted_entries):
+#   'submitted' -- routers/trading.py's execute_live_order (on-demand HTTP,
+#     live-execution). tx_hash/executed_at set, avg_fill_price never is.
+#   'confirmed' -- /opt/ares/vantage_execution_engine.py's background
+#     execution-engine poller (a SEPARATE real execution path from the one
+#     above -- confirmed live 2026-08-30: this is currently the DOMINANT
+#     real order population in production, 23 real confirmed orders vs
+#     zero currently in 'submitted'/'filled'). Same gap, same fix applies.
+# 'filled' (strategy_bots.py's own fills, and paper_fill_order) DOES set
+# avg_fill_price directly and is handled by record_outcomes_once()'s
+# original, unchanged direct-entry path -- not in this set.
+NO_FILL_PRICE_STATUSES: tuple[str, ...] = ("submitted", "confirmed")
+
 
 async def init_outcome_tables() -> None:
     """CREATE TABLE IF NOT EXISTS -- a no-op against the real production
@@ -131,30 +157,32 @@ def _source_for_order(order: dict) -> str:
 
 
 async def snapshot_submitted_entries(db: aiosqlite.Connection) -> int:
-    """Real on-chain BUY orders (status='submitted', set by
-    routers/trading.py's execute_live_order) never get avg_fill_price
-    populated -- there is no real broadcast fill price tracked separately
-    in this schema, only tx_hash + executed_at (the broadcast moment, not
-    a priced fill). Consolidated in from the now-retired standalone
-    /opt/ares/trade_outcome_learner.py daemon (2026-08-30): the first time
-    we observe such an order with no existing outcomes row yet, snapshot a
-    live quote NOW as an honest proxy for entry price -- same real
-    limitation the retired daemon already carried (the live price at first
-    OBSERVATION, not the exact broadcast fill price), now sourced from this
-    module's own richer _fetch_quote fallback chain instead of a
-    DexScreener-only call.
+    """Real BUY orders whose terminal status never gets avg_fill_price
+    populated (see NO_FILL_PRICE_STATUSES -- both 'submitted' and
+    'confirmed' real execution paths, no real broadcast fill price is
+    tracked separately in this schema for either, only tx_hash +
+    executed_at, the broadcast moment, not a priced fill). Consolidated in
+    from the now-retired standalone /opt/ares/trade_outcome_learner.py
+    daemon (2026-08-30): the first time we observe such an order with no
+    existing outcomes row yet, snapshot a live quote NOW as an honest
+    proxy for entry price -- same real limitation the retired daemon
+    already carried (the live price at first OBSERVATION, not the exact
+    broadcast fill price), now sourced from this module's own richer
+    _fetch_quote fallback chain instead of a DexScreener-only call.
 
     Returns the real count of orders snapshotted this call. Never raises
     -- a symbol with no live quote right now is simply retried next cycle."""
     from .routers.trading import _fetch_quote
 
     snapshotted = 0
+    placeholders = ",".join("?" * len(NO_FILL_PRICE_STATUSES))
     rows = await (await db.execute(
-        """SELECT o.id, o.symbol, o.agent_id, o.side, o.trigger_reason, o.strategy_id
-           FROM trading_orders o
-           WHERE o.side='BUY' AND o.status='submitted' AND o.executed_at IS NOT NULL
-             AND NOT EXISTS (SELECT 1 FROM trading_order_outcomes t WHERE t.order_id = o.id)
-           LIMIT 50"""
+        f"""SELECT o.id, o.symbol, o.agent_id, o.side, o.trigger_reason, o.strategy_id
+            FROM trading_orders o
+            WHERE o.side='BUY' AND o.status IN ({placeholders}) AND o.executed_at IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM trading_order_outcomes t WHERE t.order_id = o.id)
+            LIMIT 50""",
+        NO_FILL_PRICE_STATUSES,
     )).fetchall()
     for row in rows:
         order = dict(row)
@@ -179,18 +207,20 @@ async def record_outcomes_once() -> dict[str, int]:
     """Mark every eligible BUY order's real pnl_pct for each window that
     has come due, across BOTH real order populations this module now
     covers (see module docstring's Consolidation section):
-      - status='filled' (paper-fills): entry = avg_fill_price (the real,
-        exact fill price), clock starts at executed_at (the real fill
-        moment).
-      - status='submitted' (real on-chain): entry = the snapshot
-        snapshot_submitted_entries() already recorded, clock starts at
-        that snapshot's own entry_recorded_at (the real limitation noted
-        there -- no better real "entry moment" exists in this schema for
-        on-chain orders).
+      - status='filled' (paper-fills, strategy_bots.py's own fills): entry
+        = avg_fill_price (the real, exact fill price), clock starts at
+        executed_at (the real fill moment).
+      - status IN NO_FILL_PRICE_STATUSES ('submitted'/'confirmed', real
+        on-chain execution via either routers/trading.py's
+        execute_live_order or vantage_execution_engine.py's background
+        poller): entry = the snapshot snapshot_submitted_entries() already
+        recorded, clock starts at that snapshot's own entry_recorded_at
+        (the real limitation noted there -- no better real "entry moment"
+        exists in this schema for either on-chain path).
     One row per order (matches the real production schema): first eligible
     window INSERTs the row (only ever reached by the filled-order branch --
-    submitted orders already have their row from the snapshot step above),
-    the second UPDATEs the same row's other window columns.
+    submitted/confirmed orders already have their row from the snapshot
+    step above), the second UPDATEs the same row's other window columns.
     Returns {window: count marked}."""
     from .routers.trading import _fetch_quote  # local import: avoid a top-level
     # circular import (routers.trading imports nothing from this module, but
@@ -204,6 +234,7 @@ async def record_outcomes_once() -> dict[str, int]:
         if snapshotted:
             await db.commit()
 
+        no_fill_placeholders = ",".join("?" * len(NO_FILL_PRICE_STATUSES))
         for window_label, col_suffix, hours in WINDOWS:
             rows = await (await db.execute(
                 f"""SELECT o.id, o.symbol, o.avg_fill_price, o.trigger_reason,
@@ -224,13 +255,13 @@ async def record_outcomes_once() -> dict[str, int]:
                            o.strategy_id, o.agent_id, o.side
                     FROM trading_orders o
                     JOIN trading_order_outcomes t ON t.order_id = o.id
-                    WHERE o.side='BUY' AND o.status='submitted'
+                    WHERE o.side='BUY' AND o.status IN ({no_fill_placeholders})
                       AND t.entry_price_usd IS NOT NULL
                       AND datetime(t.entry_recorded_at, ? || ' hours') <= datetime('now')
                       AND t.evaluated_{col_suffix}_at IS NULL
 
                     LIMIT 200""",
-                (hours, hours),
+                (hours, *NO_FILL_PRICE_STATUSES, hours),
             )).fetchall()
 
             for row in rows:

@@ -390,3 +390,104 @@ async def test_snapshot_is_idempotent_no_duplicate_row_on_second_cycle(db_env, m
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute("SELECT COUNT(*) AS c FROM trading_order_outcomes")).fetchall()
     assert dict(rows[0])["c"] == 1
+
+
+# ── status='confirmed': a THIRD real execution path, found live while ──
+# implementing the fix (/opt/ares/vantage_execution_engine.py's background
+# poller -- currently the DOMINANT real order population in production,
+# 23 real 'confirmed' orders vs zero in 'submitted'/'filled' at audit time).
+
+@pytest.mark.asyncio
+async def test_snapshot_covers_confirmed_status_too(db_env, monkeypatch):
+    await _seed_agent_and_orders(db_env, [
+        {"id": 1, "side": "BUY", "symbol": "BTC", "status": "confirmed", "hours_ago": 0.01,
+         "trigger_reason": "vantage_execution_engine"},
+    ])
+    import backend.routers.trading as trading_mod
+    async def fake_quote(symbol):
+        return 60000.0
+    monkeypatch.setattr(trading_mod, "_fetch_quote", fake_quote)
+
+    await init_outcome_tables()
+    async with db_env.get_db() as db:
+        db.row_factory = aiosqlite.Row
+        snapshotted = await snapshot_submitted_entries(db)
+        await db.commit()
+    assert snapshotted == 1
+
+    async with db_env.get_db() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute("SELECT * FROM trading_order_outcomes")).fetchall()
+    row = dict(rows[0])
+    assert row["entry_price_usd"] == pytest.approx(60000.0)
+    assert row["source"] == "vantage_execution_engine"
+
+
+@pytest.mark.asyncio
+async def test_confirmed_order_evaluated_once_aged_past_window(db_env, monkeypatch):
+    await _seed_agent_and_orders(db_env, [
+        {"id": 1, "side": "BUY", "symbol": "BTC", "status": "confirmed", "hours_ago": 30},
+    ])
+    import backend.routers.trading as trading_mod
+    async def fake_quote(symbol):
+        return 60000.0
+    monkeypatch.setattr(trading_mod, "_fetch_quote", fake_quote)
+
+    await init_outcome_tables()
+    async with db_env.get_db() as db:
+        db.row_factory = aiosqlite.Row
+        await snapshot_submitted_entries(db)
+        await db.execute(
+            "UPDATE trading_order_outcomes SET entry_recorded_at = datetime('now', '-30 hours') WHERE order_id = 1"
+        )
+        await db.commit()
+
+    async def rising_quote(symbol):
+        return 63000.0  # +5%
+    monkeypatch.setattr(trading_mod, "_fetch_quote", rising_quote)
+
+    marked = await record_outcomes_once()
+    assert marked["1h"] == 1
+    assert marked["24h"] == 1
+
+    async with db_env.get_db() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute("SELECT * FROM trading_order_outcomes WHERE order_id=1")).fetchall()
+    assert dict(rows[0])["pnl_pct_1h"] == pytest.approx(5.0)
+
+
+@pytest.mark.asyncio
+async def test_filled_submitted_and_confirmed_all_marked_correctly_in_one_cycle(db_env, monkeypatch):
+    """All three real terminal execution paths this module now covers, in
+    a single cycle, each with its own correct independent entry price."""
+    await _seed_agent_and_orders(db_env, [
+        {"id": 1, "side": "BUY", "symbol": "BTC", "avg_fill_price": 50000, "status": "filled", "hours_ago": 30},
+        {"id": 2, "side": "BUY", "symbol": "ETH", "status": "submitted", "hours_ago": 30},
+        {"id": 3, "side": "BUY", "symbol": "SOL", "status": "confirmed", "hours_ago": 30},
+    ])
+    import backend.routers.trading as trading_mod
+    await init_outcome_tables()
+
+    async def snapshot_quote(symbol):
+        return {"ETH": 3000.0, "SOL": 100.0}.get(symbol)
+    monkeypatch.setattr(trading_mod, "_fetch_quote", snapshot_quote)
+    async with db_env.get_db() as db:
+        db.row_factory = aiosqlite.Row
+        await snapshot_submitted_entries(db)
+        await db.execute("UPDATE trading_order_outcomes SET entry_recorded_at = datetime('now', '-30 hours')")
+        await db.commit()
+
+    async def eval_quote(symbol):
+        return {"BTC": 55000.0, "ETH": 3300.0, "SOL": 105.0}.get(symbol)
+    monkeypatch.setattr(trading_mod, "_fetch_quote", eval_quote)
+
+    marked = await record_outcomes_once()
+    assert marked["1h"] == 3
+    assert marked["24h"] == 3
+
+    async with db_env.get_db() as db:
+        db.row_factory = aiosqlite.Row
+        rows = {r["order_id"]: dict(r) for r in await (await db.execute("SELECT * FROM trading_order_outcomes")).fetchall()}
+    assert rows[1]["pnl_pct_1h"] == pytest.approx(10.0)   # BTC: (55000-50000)/50000
+    assert rows[2]["pnl_pct_1h"] == pytest.approx(10.0)   # ETH: (3300-3000)/3000
+    assert rows[3]["pnl_pct_1h"] == pytest.approx(5.0)    # SOL: (105-100)/100
