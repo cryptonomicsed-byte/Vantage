@@ -32,3 +32,4 @@ backend/data/*.db*
 ops/dashboards/mirror/
 # backup suffixes
 *.bak-*
+.DS_Store
