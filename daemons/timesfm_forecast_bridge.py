@@ -65,16 +65,16 @@ picking one.
   activity volume trend," matching the task's own suggested framing.
 
 STORAGE: emits the real forecast as a Mycelium observation trace
-(agent="timesfm_forecast_bridge", action="forecast") -- this satisfies
-the task's own explicit requirement regardless of the predictions-table
-question. Checked for w0:p1's real predictions table (id, source,
-question, probability, resolution_date, resolution_criterion, status,
-outcome) before writing anything: as of this build it does not exist
-yet in the real schema (no migration, no branch, no coordination
-channel visible from this session) -- so this file does NOT invent a
-competing table. See emit_to_predictions_table() below: a clearly
-marked, currently-inert adapter seam to wire in once that table is
-real, rather than a second parallel storage mechanism.
+(agent="timesfm_forecast_bridge", action="forecast") -- the raw record of
+what was forecast. Also logs a real, dated, gradeable prediction (2026-08-31,
+now that mycelium/core.py's predictions table + add_prediction() +
+resolver.py are live): resolution_criterion uses the new 'volume_range'
+method, resolving against whether the real observed wallet_buy+wallet_sell
+count in the specific future bucket the forecast targets falls within a
+real tolerance band of the forecasted point value -- graded entirely from
+real substrate trace counts by the shared resolver, not by this file.
+See emit_to_predictions_table() below: was a deliberately inert adapter
+seam until this table existed; now the real wiring point.
 """
 from __future__ import annotations
 
@@ -142,13 +142,17 @@ def _resources_available() -> tuple:
 # Real historical series -- pulled live from Mycelium's own trace API.
 # ---------------------------------------------------------------------------
 
-def fetch_wallet_activity_series(lookback_hours: int = LOOKBACK_HOURS, bucket_minutes: int = BUCKET_MINUTES) -> list:
+def fetch_wallet_activity_series(lookback_hours: int = LOOKBACK_HOURS, bucket_minutes: int = BUCKET_MINUTES):
     """Real wallet_buy+wallet_sell event COUNT per bucket_minutes window,
     over the real last lookback_hours of Mycelium trace history. Returns
-    an ordered list of floats (oldest bucket first, one entry per bucket,
-    zero-filled for buckets with no real events -- a real zero, not a
-    missing point, since TimesFM needs a regular-interval series).
-    Returns [] on any fetch failure -- fail-soft, never raises."""
+    (series, last_bucket_end) -- series is an ordered list of floats
+    (oldest bucket first, zero-filled for buckets with no real events --
+    a real zero, not a missing point, since TimesFM needs a regular-
+    interval series); last_bucket_end is the real wall-clock boundary the
+    last bucket's data extends to (2026-08-31: now also the real anchor
+    emit_to_predictions_table() needs to know exactly which future bucket
+    each forecast horizon step targets, not implied/guessed from "now").
+    Returns ([], None) on any fetch failure -- fail-soft, never raises."""
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=lookback_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
     counts = defaultdict(int)
     for action in ("wallet_buy", "wallet_sell"):
@@ -158,7 +162,7 @@ def fetch_wallet_activity_series(lookback_hours: int = LOOKBACK_HOURS, bucket_mi
                 data = json.loads(resp.read().decode())
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as e:
             logger.warning("timesfm_forecast_bridge: trace fetch failed for %s: %s", action, e)
-            return []
+            return [], None
         for t in data.get("traces", []):
             ts = t.get("ts", "")
             try:
@@ -171,17 +175,17 @@ def fetch_wallet_activity_series(lookback_hours: int = LOOKBACK_HOURS, bucket_mi
             counts[bucket_start] += 1
 
     if not counts:
-        return []
+        return [], None
 
     start = min(counts.keys())
     end = max(counts.keys())
+    step = timedelta(minutes=bucket_minutes)
     series = []
     cursor = start
-    step = timedelta(minutes=bucket_minutes)
     while cursor <= end:
         series.append(float(counts.get(cursor, 0)))
         cursor += step
-    return series
+    return series, end + step
 
 
 # ---------------------------------------------------------------------------
@@ -268,17 +272,89 @@ def emit_forecast_trace(series_name: str, series: list, forecast: dict) -> bool:
         return False
 
 
-def emit_to_predictions_table(series_name: str, forecast: dict) -> None:
-    """INERT ADAPTER SEAM, not yet wired to anything. w0:p1's real
-    predictions table (id, source, question, probability, resolution_date,
-    resolution_criterion, status, outcome) does not exist in the real
-    schema as of this build (checked: no migration, no branch, no
-    reachable coordination channel from this session). This function is
-    a deliberate no-op placeholder so the real wiring point is obvious
-    and singular once that table lands, rather than this bridge
-    inventing a second, competing storage mechanism in the meantime.
-    Do not remove this function when the table exists -- fill it in."""
-    pass
+# Real, deliberately loose tolerance for a zero-shot COUNT forecast --
+# this is not a price target, it's "how many discrete wallet events land
+# in one 15-minute bucket," a noisier real quantity than dollar-volume.
+# 50% keeps the grading meaningful (a 2x miss is a real miss) without
+# holding a 200M-param zero-shot model to a precision it was never
+# claimed to have.
+VOLUME_FORECAST_TOLERANCE_PCT = float(os.environ.get("TIMESFM_TOLERANCE_PCT", "0.5"))
+
+
+def emit_to_predictions_table(series_name: str, forecast: dict, last_bucket_end) -> bool:
+    """Real wiring (2026-08-31): mycelium/core.py's predictions table +
+    add_prediction() + resolver.py are live now. Logs ONE real, dated,
+    gradeable prediction per forecast run -- the FINAL horizon step (the
+    "N hours later" point the task asked for: FORECAST_HORIZON buckets
+    ahead, 2h at the real default config), not one prediction per bucket.
+    resolution_criterion uses the new 'volume_range' method (resolver.py,
+    2026-08-31): resolves 'correct' if the real observed wallet_buy+
+    wallet_sell count in that specific future bucket falls within
+    VOLUME_FORECAST_TOLERANCE_PCT of the forecasted point value, graded
+    entirely from real substrate trace counts -- no external price
+    oracle, same discipline as every other real signal in this codebase.
+    Posts to the gateway's real POST /api/predictions (never touches the
+    predictions table/SQLite file directly -- same "emit over HTTP" rule
+    every other bridge in this codebase already follows for traces, so
+    this bridge stays decoupled from Mycelium's own storage internals).
+    Fail-soft: returns False on any POST failure, never raises."""
+    horizon = len(forecast["point_forecast"])
+    if horizon == 0 or last_bucket_end is None:
+        return False
+    final_point = forecast["point_forecast"][-1]
+    target_bucket_start = last_bucket_end + timedelta(minutes=BUCKET_MINUTES * (horizon - 1))
+    target_bucket_end = target_bucket_start + timedelta(minutes=BUCKET_MINUTES)
+    resolution_date = target_bucket_end.strftime("%Y-%m-%dT%H:%M:%SZ")
+    hours_ahead = BUCKET_MINUTES * horizon / 60.0
+
+    body = {
+        "source": "timesfm",
+        "question": (
+            f"Will real {series_name} land within "
+            f"{VOLUME_FORECAST_TOLERANCE_PCT:.0%} of the {final_point:.1f}-event zero-shot "
+            f"forecast {hours_ahead:.1f}h from now?"
+        ),
+        # 0.5, deliberately: TimesFM's point forecast alone carries no real
+        # calibrated uncertainty here (use_continuous_quantile_head=False --
+        # no quantile/interval output captured), and there is no resolved
+        # 'timesfm'+'volume_range' history yet to derive a real rate from.
+        # 0.5 is the honest maximally-noncommittal prior, not a fabricated
+        # confidence -- once real outcomes accumulate, a calibration layer
+        # (same shape cross_domain_signal.py's own already uses) can start
+        # adjusting this instead of every call hardcoding a guess.
+        "probability": 0.5,
+        "resolution_date": resolution_date,
+        "resolution_criterion": {
+            "method": "volume_range",
+            "description": (
+                f"Resolves 'correct' if the real wallet_buy+wallet_sell count in the "
+                f"[{target_bucket_start.strftime('%Y-%m-%dT%H:%M:%SZ')}, {resolution_date}) bucket "
+                f"is within {VOLUME_FORECAST_TOLERANCE_PCT:.0%} (or +/-2 events, whichever is larger) "
+                f"of the forecasted {final_point:.2f}; 'incorrect' otherwise."
+            ),
+            "target_bucket_start": target_bucket_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "bucket_minutes": BUCKET_MINUTES,
+            "point_forecast": final_point,
+            "tolerance_pct": VOLUME_FORECAST_TOLERANCE_PCT,
+        },
+        "symbol": series_name,
+        "payload": {
+            "model": forecast["model"],
+            "context_points": forecast["context_points"],
+            "full_point_forecast": forecast["point_forecast"],
+        },
+    }
+    try:
+        req = urllib.request.Request(
+            f"{MYCELIUM_URL}/api/predictions",
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status in (200, 201)
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        logger.warning("timesfm_forecast_bridge: prediction emit failed: %s", e)
+        return False
 
 
 def main():
@@ -290,7 +366,7 @@ def main():
         print("timesfm_forecast_bridge: skipping this cycle -- see resource check above", flush=True)
         return
 
-    series = fetch_wallet_activity_series()
+    series, last_bucket_end = fetch_wallet_activity_series()
     print(f"real series: {len(series)} points ({BUCKET_MINUTES}-min buckets, {LOOKBACK_HOURS}h lookback)", flush=True)
     if len(series) < MIN_CONTEXT_POINTS:
         print(
@@ -314,6 +390,8 @@ def main():
     print(f"real forecast in {elapsed:.1f}s: {forecast['point_forecast']}", flush=True)
     sent = emit_forecast_trace("wallet_activity_volume", series, forecast)
     print(f"trace emitted: {sent}", flush=True)
+    logged = emit_to_predictions_table("wallet_activity_volume", forecast, last_bucket_end)
+    print(f"prediction logged: {logged}", flush=True)
 
 
 if __name__ == "__main__":
