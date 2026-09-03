@@ -502,6 +502,8 @@ async def lifespan(app: FastAPI):
     await init_scoring_db()
     from .sovereignty import init_sovereignty_db
     await init_sovereignty_db()
+    from .intel_exchange import init_intel_exchange_db
+    await init_intel_exchange_db()
     from .routers.wallets import init_wallet_tables
     await init_wallet_tables()
     from .routers.degen import ensure_degen_indexes
@@ -791,6 +793,10 @@ app.include_router(conductor_router)
 # Key custody: an account taking ownership of its own identity.
 from .routers.sovereignty import router as sovereignty_router
 app.include_router(sovereignty_router)
+
+# Opt-in intel exchange between sovereign instances.
+from .routers.intel_exchange import router as intel_exchange_router
+app.include_router(intel_exchange_router)
 from .routers.analytics import router as analytics_router
 app.include_router(analytics_router)
 from .routers.identity import router as identity_router
