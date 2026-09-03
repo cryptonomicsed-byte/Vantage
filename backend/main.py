@@ -494,6 +494,8 @@ async def lifespan(app: FastAPI):
     await init_collectives_db()
     from .coordination import init_coordination_db
     await init_coordination_db()
+    from .coordination_join import init_join_db
+    await init_join_db()
     from .routers.wallets import init_wallet_tables
     await init_wallet_tables()
     from .routers.degen import ensure_degen_indexes

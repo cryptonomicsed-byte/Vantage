@@ -11,6 +11,7 @@ indexed once it accepts them. See backend/coordination.py for why that
 ordering is not negotiable.
 """
 import hashlib as _hlib
+import json as _json
 import logging
 import re
 from typing import Optional
@@ -21,8 +22,9 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from .. import coordination as coord
+from .. import coordination_join as join_mod
 from ..db import get_db
-from ..deps import get_human_optional
+from ..deps import _parse_body, get_human_optional
 from ..utils import _broadcast_gossip
 
 logger = logging.getLogger(__name__)
@@ -342,7 +344,6 @@ async def update_channel(
         raise HTTPException(403, "Only guild staff can edit channels")
     channel = await _channel_or_404(guild, channel_slug)
 
-    from ..deps import _parse_body
     body = await _parse_body(request)
     updates: list[str] = []
     params: list = []
@@ -491,4 +492,124 @@ async def post_channel_message(
         "guild": slug, "channel": channel_slug, "event_id": event["id"],
         "msg_type": msg_type, "thread_root_event_id": root_event_id,
         "created_at": event["created_at"],
+    }
+
+
+# ── external agent join handshake (Phase 1) ──────────────────────────────────
+#
+# The keypair boundary. An outside framework proves control of a pubkey and
+# is enrolled; its private key never reaches Vantage. See
+# backend/coordination_join.py for the verification rules.
+
+@router.post("/{slug}/join-request")
+@_limiter.limit("10/minute")
+async def join_request(
+    request: Request,
+    slug: str,
+    pubkey: str = Form(..., min_length=64, max_length=64),
+    display_name: str = Form(..., min_length=1, max_length=80),
+    framework: str = Form("", max_length=40),
+    capabilities: str = Form("[]"),
+):
+    """Step 1: ask to join, get a challenge to sign.
+
+    Deliberately unauthenticated — the whole point is that the caller has no
+    Vantage credential yet, only a keypair. The challenge is what turns that
+    keypair into a proof.
+    """
+    guild = await _guild(slug)
+    try:
+        caps = _json.loads(capabilities) if capabilities else []
+        if not isinstance(caps, list):
+            raise ValueError("capabilities must be a JSON array")
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, f"capabilities must be a JSON array of strings: {exc}") from exc
+
+    try:
+        challenge = await join_mod.issue_challenge(
+            guild_id=guild["id"], pubkey=pubkey, display_name=display_name,
+            framework=framework, capabilities=caps[:20],
+        )
+    except join_mod.JoinRejected as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"guild": slug, **challenge}
+
+
+@router.post("/{slug}/join-confirm")
+@_limiter.limit("10/minute")
+async def join_confirm(request: Request, slug: str):
+    """Step 2: present the signed challenge; get enrolled.
+
+    On success the agent has everything it needs to work independently: the
+    relay URL, its channel list, and the relay ids to subscribe to. It should
+    not need to call this backend again.
+    """
+    guild = await _guild(slug)
+    body = await _parse_body(request)
+    signed = body.get("signed_event")
+    if isinstance(signed, str):
+        try:
+            signed = _json.loads(signed)
+        except ValueError as exc:
+            raise HTTPException(422, f"signed_event is not valid JSON: {exc}") from exc
+    if not isinstance(signed, dict):
+        raise HTTPException(422, "signed_event (a kind 22242 Nostr event) is required")
+
+    challenge_value = join_mod._challenge_tag(signed) or ""
+    if not challenge_value:
+        raise HTTPException(422, 'signed_event has no ["challenge", ...] tag')
+
+    try:
+        pending = await join_mod.consume_challenge(challenge_value, guild["id"])
+        join_mod.check_proof(signed, pending["pubkey"], challenge_value)
+    except join_mod.JoinRejected as exc:
+        raise HTTPException(401, str(exc)) from exc
+
+    principal = await coord.get_or_create_external_principal(
+        pubkey=pending["pubkey"], display_name=pending["display_name"],
+        framework=pending["framework"] or "", capabilities=_json.loads(pending["capabilities"] or "[]"),
+    )
+
+    existing = await coord.get_membership(guild["id"], principal["id"])
+    if existing and existing.get("banned_at"):
+        raise HTTPException(403, "This identity is banned from the guild")
+    await coord.add_membership(guild["id"], principal, role="member")
+
+    relay_registered = await join_mod.register_pubkey_on_relay(pending["pubkey"])
+
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """SELECT slug, name, channel_kind, flow_mode, visibility, buzz_channel_id
+                 FROM guild_channels WHERE guild_id=? ORDER BY created_at""",
+            (guild["id"],),
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+    channels = [c for c in rows if await coord.can_read_channel(
+        {**c, "guild_id": guild["id"]}, principal)]
+
+    await _broadcast_gossip(f"guild.{slug}", {
+        "type": "external_agent_joined",
+        "principal": principal["display_name"], "framework": principal["framework"],
+    })
+
+    return {
+        "guild": slug,
+        "principal_id": principal["id"],
+        "pubkey": principal["pubkey"],
+        "role": "member",
+        "relay_ws_url": join_mod.RELAY_WS_URL,
+        "relay_registered": relay_registered,
+        # Phase 2 will serve this; declared now so a client can be written
+        # once against the full handshake rather than twice.
+        "conductor_ws_url": None,
+        "channels": channels,
+        "next": (
+            "Connect to relay_ws_url, authenticate with NIP-42 using your own key, "
+            "and subscribe to the buzz_channel_id values above with an 'h' tag filter. "
+            "Publish kind 9 events with the same 'h' tag to post."
+        ) if relay_registered else (
+            "You are a guild member, but relay registration did not complete. "
+            "Ask a guild admin to register your pubkey before connecting."
+        ),
     }

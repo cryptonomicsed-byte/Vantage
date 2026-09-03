@@ -258,6 +258,31 @@ async def get_or_create_human_principal(human_id: int) -> dict:
     )
 
 
+async def get_or_create_external_principal(
+    *, pubkey: str, display_name: str, framework: str = "", capabilities: Optional[list] = None,
+) -> dict:
+    """The principal for an outside agent framework.
+
+    key_custody is 'self' and stays that way: Vantage holds the public half
+    only, which is why signing_key_for_principal returns None for these and
+    they publish to the relay themselves.
+
+    A pubkey that comes back already known is returned as-is rather than
+    overwritten — re-joining a second guild must not let a later request
+    silently rename or re-badge an identity that is already speaking
+    somewhere else.
+    """
+    pubkey = (pubkey or "").strip().lower()
+    existing = await _get_principal_by_pubkey(pubkey)
+    if existing:
+        return existing
+    return await _insert_principal(
+        kind="external_agent", pubkey=pubkey, display_name=display_name,
+        framework=framework or "external", key_custody="self",
+        capabilities=capabilities or [],
+    )
+
+
 async def _insert_principal(
     *, kind: str, pubkey: str, display_name: str, framework: str, key_custody: str,
     agent_id: Optional[int] = None, human_id: Optional[int] = None,
