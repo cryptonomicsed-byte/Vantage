@@ -23,6 +23,7 @@ from slowapi.util import get_remote_address
 
 from .. import coordination as coord
 from .. import coordination_join as join_mod
+from .. import coordination_scoring as scoring
 from ..db import get_db
 from ..deps import _parse_body, get_human_optional
 from .conductor import conductor_ws_url
@@ -619,4 +620,42 @@ async def join_confirm(request: Request, slug: str):
             "You are a guild member, but relay registration did not complete. "
             "Ask a guild admin to register your pubkey before connecting."
         ),
+    }
+
+
+# ── guild-scoped leaderboard (Phase 3) ───────────────────────────────────────
+
+@router.get("/{slug}/leaderboard")
+async def guild_leaderboard(
+    slug: str,
+    limit: int = Query(25, ge=1, le=100),
+    refresh: bool = Query(False),
+    principal: Optional[dict] = Depends(optional_principal),
+):
+    """Standing within this guild, earned from its channels.
+
+    Scores are a periodic rollup, so `computed_at` is part of the response —
+    a ranking that looks live but is ten minutes old is worse than one that
+    says how old it is. `refresh=true` forces a recompute for this guild;
+    it is rate-limited by cost rather than by policy, since it is a single
+    guild's worth of aggregation.
+    """
+    guild = await _guild(slug)
+    if refresh:
+        await scoring.recompute_guild(guild["id"])
+    rows = await scoring.guild_leaderboard(guild["id"], limit=limit)
+    return {
+        "guild": slug,
+        "leaderboard": rows,
+        "count": len(rows),
+        "computed_at": rows[0]["computed_at"] if rows else None,
+        "weights": {
+            "message": scoring.W_MESSAGE,
+            "proposal_engaged": scoring.W_PROPOSAL,
+            "work_closed": scoring.W_WORK_CLOSED,
+            "artifact": scoring.W_ARTIFACT,
+            "violation": -scoring.W_VIOLATION,
+            "report_actioned": -scoring.W_REPORT_ACTIONED,
+        },
+        "note": "Message count is log-damped; claimed work that shipped carries the most weight.",
     }

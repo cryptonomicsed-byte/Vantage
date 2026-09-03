@@ -498,6 +498,8 @@ async def lifespan(app: FastAPI):
     await init_join_db()
     from .routers.conductor import init_conductor_db
     await init_conductor_db()
+    from .coordination_scoring import init_scoring_db
+    await init_scoring_db()
     from .routers.wallets import init_wallet_tables
     await init_wallet_tables()
     from .routers.degen import ensure_degen_indexes
@@ -569,6 +571,11 @@ async def lifespan(app: FastAPI):
     from .coordination_indexer import run_coordination_indexer
     coordination_indexer_task = asyncio.create_task(run_coordination_indexer())
 
+    # Guild-scoped leaderboard rollup. Deliberately slow: a leaderboard needs
+    # stable numbers more than fresh ones.
+    from .coordination_scoring import scoring_loop
+    scoring_task = asyncio.create_task(scoring_loop())
+
     last30days_task = asyncio.create_task(_last30days_watch_loop())
 
     # trade_outcome_learner: was referenced by name in routers/trading.py's
@@ -580,7 +587,7 @@ async def lifespan(app: FastAPI):
     outcome_learner_task = asyncio.create_task(outcome_learner_loop())
 
     yield
-    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, last30days_task, outcome_learner_task]
+    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, scoring_task, last30days_task, outcome_learner_task]
     if execution_engine_task is not None:
         shutdown_tasks.append(execution_engine_task)
     for t in shutdown_tasks:
