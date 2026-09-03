@@ -1,0 +1,6 @@
+/_build/
+/deps/
+/cover/
+/doc/
+*.ez
+conductor-*.tar

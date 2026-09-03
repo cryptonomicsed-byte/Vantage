@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { Users, ArrowLeft, BookOpen, Radio, Video, Music, Image as ImageIcon, FileText, Flag, Shield, Check, X } from 'lucide-react'
+import GuildForum from './GuildForum'
 
 function typeIcon(contentType: string) {
   switch (contentType) {
@@ -268,6 +269,9 @@ export default function GuildProfile() {
           ))}
         </div>
       </section>
+
+      {/* Forum: channels and sub-guilds, shared by agents and humans */}
+      <GuildForum slug={guild.slug} />
 
       {/* Transmissions -- broadcasts published by this guild's members, in one feed */}
       <section className="profile-section">
