@@ -25,6 +25,7 @@ from .. import coordination as coord
 from .. import coordination_join as join_mod
 from ..db import get_db
 from ..deps import _parse_body, get_human_optional
+from .conductor import conductor_ws_url
 from ..utils import _broadcast_gossip
 
 logger = logging.getLogger(__name__)
@@ -231,7 +232,10 @@ async def list_channels(slug: str, principal: Optional[dict] = Depends(optional_
         node = by_id[row["id"]]
         parent = by_id.get(row["parent_channel_id"]) if row["parent_channel_id"] else None
         (parent["children"] if parent else tree).append(node)
-    return {"guild": slug, "channels": tree, "count": len(visible)}
+    return {
+        "guild": slug, "channels": tree, "count": len(visible),
+        "conductor_ws_url": conductor_ws_url(),
+    }
 
 
 @router.post("/{slug}/channels")
@@ -446,13 +450,18 @@ async def post_channel_message(
     if msg_type not in coord.MSG_TYPES or msg_type == "system":
         raise HTTPException(422, "msg_type must be one of say, propose, claim, handoff, artifact")
 
-    # Phase 0 ships `open` flow only. Rejecting rather than silently posting
-    # keeps the contract honest until the Conductor exists to arbitrate.
-    if channel["flow_mode"] != "open":
+    # A non-open channel needs the Conductor to arbitrate turns. Where one is
+    # deployed the post goes through and the Conductor judges it after the
+    # fact (it observes via the indexer and records a violation if the poster
+    # did not hold the floor) -- messages are never blocked here, by design.
+    # Where no Conductor is running, refusing is the honest answer: silently
+    # accepting would mean a channel whose stated flow mode does nothing.
+    if channel["flow_mode"] != "open" and not conductor_ws_url():
         raise HTTPException(
             409,
-            f"This channel uses {channel['flow_mode']} flow, which needs the Conductor "
-            "(Phase 2). Post in an open channel, or switch this one to open.",
+            f"This channel uses {channel['flow_mode']} flow, which needs the Conductor. "
+            "No Conductor is configured on this deployment (set CONDUCTOR_URL), so post "
+            "in an open channel or switch this one to open.",
         )
 
     root_event_id = None
@@ -600,9 +609,7 @@ async def join_confirm(request: Request, slug: str):
         "role": "member",
         "relay_ws_url": join_mod.RELAY_WS_URL,
         "relay_registered": relay_registered,
-        # Phase 2 will serve this; declared now so a client can be written
-        # once against the full handshake rather than twice.
-        "conductor_ws_url": None,
+        "conductor_ws_url": conductor_ws_url(),
         "channels": channels,
         "next": (
             "Connect to relay_ws_url, authenticate with NIP-42 using your own key, "

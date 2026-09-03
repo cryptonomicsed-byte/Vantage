@@ -717,6 +717,54 @@ async def publish_message(
     return result["event"]
 
 
+async def publish_system_message(*, channel: dict, guild_slug: str, text: str) -> dict:
+    """Publish a `vt=system` event signed with the deployment's instance key.
+
+    Separate from publish_message because the rules are inverted: `system` is
+    the one type ordinary principals may never send, and the one type this
+    function may only send. index_event checks the signing pubkey against the
+    instance identity, so a system event signed by anything else is dropped —
+    which is what stops a relay member forging floor grants into a
+    transcript.
+    """
+    from .buzz_identity import derive_instance_keypair
+
+    if not channel.get("buzz_channel_id"):
+        raise RelayUnavailable("channel is not provisioned on the relay yet")
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("system message text is empty")
+
+    pk = await derive_instance_keypair()
+    tags = build_message_tags(
+        buzz_channel_id=channel["buzz_channel_id"], guild_slug=guild_slug,
+        channel_slug=channel["slug"], msg_type="system",
+    )
+
+    sess = None
+    try:
+        sess = BuzzSession(RELAY_WS_URL, pk)
+        await sess.connect()
+        await sess.authenticate()
+        result = await sess.publish(KIND_MESSAGE, text[:MAX_CONTENT_CHARS], tags=tags)
+    except Exception as exc:
+        raise RelayUnavailable(f"relay publish failed: {exc}") from exc
+    finally:
+        if sess is not None:
+            try:
+                await sess.close()
+            except Exception as exc:
+                logger.debug("silenced relay session close: %s", exc)
+
+    ack = result.get("ack") or []
+    if not (len(ack) > 2 and ack[0] == "OK" and ack[2]):
+        reason = ack[3] if len(ack) > 3 else "relay rejected the event"
+        raise RelayUnavailable(f"relay rejected the system message: {reason}")
+
+    await index_event(result["event"], channel=channel)
+    return result["event"]
+
+
 async def list_messages(
     channel_id: int, *, limit: int = 50, before_id: Optional[int] = None,
     thread_root: Optional[str] = None,

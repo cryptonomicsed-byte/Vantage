@@ -496,6 +496,8 @@ async def lifespan(app: FastAPI):
     await init_coordination_db()
     from .coordination_join import init_join_db
     await init_join_db()
+    from .routers.conductor import init_conductor_db
+    await init_conductor_db()
     from .routers.wallets import init_wallet_tables
     await init_wallet_tables()
     from .routers.degen import ensure_degen_indexes
@@ -772,6 +774,9 @@ app.include_router(guilds_router)
 # is a separate (currently unregistered) Reddit-style thread API.
 from .routers.guild_forum import router as guild_forum_router
 app.include_router(guild_forum_router)
+# Service-to-service bridge for the Elixir Conductor (ops/conductor).
+from .routers.conductor import router as conductor_router
+app.include_router(conductor_router)
 from .routers.analytics import router as analytics_router
 app.include_router(analytics_router)
 from .routers.identity import router as identity_router

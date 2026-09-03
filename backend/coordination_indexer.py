@@ -78,12 +78,38 @@ async def _consume(sess: BuzzSession, sub_id: str) -> None:
     """Index everything the relay sends until the stream ends."""
     async for event in sess.stream_events(sub_id):
         try:
-            await index_event(event)
+            row_id = await index_event(event)
+            if row_id is not None:
+                await _tell_conductor(event)
         except Exception as exc:
             # One malformed or unexpected event must never kill the listener;
             # the next one may be perfectly good.
             logger.warning("coordination_indexer: failed to index event %s: %s",
                            (event or {}).get("id", "?")[:8], exc)
+
+
+async def _tell_conductor(event: dict) -> None:
+    """Hand a newly-indexed event to the Conductor so it can judge the turn.
+
+    This is the observation path the spec drew as Conductor->relay: the
+    Conductor cannot subscribe to the relay itself (NIP-42 needs a schnorr
+    signature the BEAM cannot produce here), so the tier that already reads
+    every event forwards it. No-op when no Conductor is configured, which is
+    what keeps pre-Phase-2 deployments unchanged.
+    """
+    from .coordination import get_channel_by_buzz_id, parse_message_event
+    from .routers.conductor import notify_observed
+
+    parsed = parse_message_event(event)
+    channel = await get_channel_by_buzz_id(parsed["buzz_channel_id"])
+    if channel is None:
+        return
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT principal_id FROM channel_messages WHERE event_id=?", (parsed["event_id"],)
+        )
+        row = await cur.fetchone()
+    await notify_observed(channel["id"], row[0] if row else None, parsed["msg_type"])
 
 
 async def _watch_channel_set(initial: list[str]) -> None:
