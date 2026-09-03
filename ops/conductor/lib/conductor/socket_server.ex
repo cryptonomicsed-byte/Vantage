@@ -15,7 +15,7 @@ defmodule Conductor.SocketServer do
   """
   require Logger
 
-  alias Conductor.{Backend, ChannelServer, JSON, WS}
+  alias Conductor.{Backend, ChannelServer, JSON, PubSub, WS}
 
   @acceptors 8
 
@@ -107,7 +107,8 @@ defmodule Conductor.SocketServer do
     respond_and_close(socket, 200, ~s({"status":"ok","service":"conductor"}))
   end
 
-  defp route(socket, "POST", path, headers, rest) when path in ["/observed", "/invalidate"] do
+  defp route(socket, "POST", path, headers, rest)
+       when path in ["/observed", "/invalidate", "/broadcast"] do
     if authorized?(headers) do
       body = read_body(socket, headers, rest)
       handle_backend_post(socket, path, body)
@@ -157,6 +158,18 @@ defmodule Conductor.SocketServer do
       respond_and_close(socket, 200, ~s({"ok":true}))
     else
       _ -> respond_and_close(socket, 400, ~s({"error":"channel_id and principal_id required"}))
+    end
+  end
+
+  defp handle_backend_post(socket, "/broadcast", body) do
+    case JSON.decode(body) do
+      {:ok, %{"topic" => topic} = payload} ->
+        event = Map.get(payload, "event", %{})
+        delivered = PubSub.broadcast(topic, event)
+        respond_and_close(socket, 200, JSON.encode(%{ok: true, delivered: delivered}))
+
+      _ ->
+        respond_and_close(socket, 400, ~s({"error":"topic required"}))
     end
   end
 
@@ -260,6 +273,18 @@ defmodule Conductor.SocketServer do
         send_json(socket, %{type: "error", error: "not authorized for this channel"})
         session
     end
+  end
+
+  defp handle_op(socket, "subscribe", %{"topic" => topic}, session) when is_binary(topic) do
+    PubSub.subscribe(topic)
+    send_json(socket, %{type: "subscribed", topic: topic})
+    session
+  end
+
+  defp handle_op(socket, "unsubscribe", %{"topic" => topic}, session) when is_binary(topic) do
+    PubSub.unsubscribe(topic)
+    send_json(socket, %{type: "unsubscribed", topic: topic})
+    session
   end
 
   defp handle_op(socket, _op, _message, %{principal_id: nil} = session) do

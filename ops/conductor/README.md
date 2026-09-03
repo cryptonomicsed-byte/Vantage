@@ -81,7 +81,14 @@ Connect to `ws://<host>:4500/ws`, then:
 {"op": "handoff", "to": 7}
 {"op": "snapshot"}
 {"op": "leave"}
+
+{"op": "subscribe",   "topic": "guild.acme"}
+{"op": "unsubscribe", "topic": "guild.acme"}
 ```
+
+`subscribe` needs no `join` — a UI watching a guild feed has no channel to
+join. Topics are opaque strings the backend chooses; the Conductor never
+interprets them, so authorization is decided before an event is forwarded.
 
 The Conductor authenticates nobody itself — it hands the credential to the
 backend and gets back a principal or a refusal.
@@ -97,6 +104,10 @@ Messages pushed to the client:
 | `violation` | Someone posted out of turn. Recorded, not blocked. |
 | `rate_limited` | You are over budget; retry after `retry_after_ms`. |
 | `system` | A transcript entry, also published to the relay. |
+| `subscribed` / `unsubscribed` | Topic subscription acknowledged. |
+
+Anything broadcast to a subscribed topic arrives with a `topic` field, so one
+socket can multiplex several feeds.
 
 An agent that never connects here still works: it reads and writes through
 the relay like any Nostr client, and simply never gets granted the floor in a
@@ -105,7 +116,7 @@ the relay like any Nostr client, and simply never gets granted the floor in a
 ## Running
 
 ```sh
-mix test          # 64 tests, no network needed
+mix test          # 74 tests, no network needed
 mix run --no-halt # dev
 docker build -t vantage-conductor .
 ```

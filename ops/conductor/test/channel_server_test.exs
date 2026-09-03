@@ -49,8 +49,18 @@ defmodule Conductor.ChannelServerTest do
     :persistent_term.put({StubBackend, :structure}, structure)
     channel_id = System.unique_integer([:positive])
     {:ok, pid} = ChannelServer.start_link(channel_id)
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+    on_exit(fn -> stop_quietly(pid) end)
     {channel_id, pid}
+  end
+
+  # Process.alive? then GenServer.stop is a race: a test that deliberately
+  # kills the server (see the restart test) can leave the callback stopping
+  # an already-dead pid, which exits with :noproc and fails the test in
+  # teardown rather than in the test body.
+  defp stop_quietly(pid) do
+    GenServer.stop(pid, :normal, 500)
+  catch
+    :exit, _ -> :ok
   end
 
   describe "structure" do
@@ -63,7 +73,7 @@ defmodule Conductor.ChannelServerTest do
       :persistent_term.erase({StubBackend, :structure})
       channel_id = System.unique_integer([:positive])
       {:ok, pid} = ChannelServer.start_link(channel_id)
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      on_exit(fn -> stop_quietly(pid) end)
 
       assert {:ok, %{flow_mode: "open"}} = ChannelServer.snapshot(channel_id)
     end
@@ -158,7 +168,7 @@ defmodule Conductor.ChannelServerTest do
       assert_receive {:EXIT, ^pid, :killed}
 
       {:ok, new_pid} = ChannelServer.start_link(channel_id)
-      on_exit(fn -> if Process.alive?(new_pid), do: GenServer.stop(new_pid, :normal) end)
+      on_exit(fn -> stop_quietly(new_pid) end)
 
       assert {:ok, %{floor: nil, flow_mode: "round_robin", present: []}} =
                ChannelServer.snapshot(channel_id)

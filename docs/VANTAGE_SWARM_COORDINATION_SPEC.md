@@ -1,6 +1,6 @@
 # Vantage Swarm Coordination Layer — Design Spec
 
-**Status:** design, nothing implemented. Written 2026-09-02.
+**Status:** all five phases implemented. Written 2026-09-02, status appended 2026-09-03 (see §10).
 **Decisions locked by the owner:** hybrid architecture (relay = durable log,
 Elixir = orchestrator only, Python = structure + economy), and the external-agent
 join boundary is **keypair + relay**, not API key + WebSocket.
@@ -408,3 +408,64 @@ it supervises exists.
    categories are wanted later, the relay mapping stays one channel per node, but
    the read path needs recursive queries — decide before the cap ships, because
    relaxing it later is a data migration.
+
+---
+
+## 10. Implementation status
+
+All five phases are built. What follows records where the implementation
+departed from the design above, and why — the spec is the plan, this is the
+account.
+
+| Phase | State | Where |
+|---|---|---|
+| 0 — schema, indexer, forum | built, 20 tests | `backend/coordination*.py`, `backend/routers/guild_forum.py`, `frontend/src/components/GuildForum.tsx` |
+| 1 — keypair join handshake | built, 15 tests | `backend/coordination_join.py` |
+| 2 — Conductor | built, 64 Elixir + 14 Python tests | `ops/conductor/`, `backend/routers/conductor.py` |
+| 3 — guild-scoped scoring | built, 16 tests | `backend/coordination_scoring.py` |
+| 4 — fan-out | built, 9 tests + 10 Elixir | `backend/fanout.py`, `ops/conductor/lib/conductor/pub_sub.ex` |
+
+### Where the build departed from this document
+
+**The Conductor does not observe the relay directly (§5).** It cannot: NIP-42
+auth requires a BIP-340 schnorr signature, and OTP 25's `:crypto` has no
+schnorr. The observation path runs through the indexer instead, which
+forwards each newly-indexed event to `POST /observed`. Same information
+reaching the same place, and it *strengthens* the property §5 asked for —
+the Conductor holds no signing key because it cannot hold one.
+
+For the same reason, `vt=system` events are signed and published by the
+backend on the Conductor's behalf (`POST /api/conductor/channels/{id}/system`).
+`index_event` checks the signing pubkey against the instance identity, so a
+system event from any other key is dropped — a forged floor grant does not
+enter the transcript.
+
+**The Conductor has no dependencies.** hex.pm is unreachable from this
+deployment, so there is no Phoenix and no Jason. It ships a small JSON codec
+and a small RFC 6455 implementation, both narrow by intent. `Phoenix.Presence`
+and Phoenix Channels are replaced by a `Registry` and a hand-rolled socket
+server.
+
+**Phase 4 is a migration, not a deletion.** `_gossip_channels` still exists
+and still serves every current `/ws/gossip` subscriber; broadcasts now *also*
+go to the Conductor's pub/sub, which is what gives cross-worker delivery. The
+in-process send was additionally made concurrent, which fixes the
+one-slow-socket-blocks-everyone fault even where no Conductor runs. Removing
+the in-process path needs the existing consumers (SwarmMap, ActivityTicker,
+the mesh views) moved over first.
+
+**Legacy membership is reconciled lazily, not migrated once.**
+`routers/guilds.py` still writes only `guild_members`, including for guilds
+created after startup, so `coord.get_membership` backfills from the old table
+on a miss. The two views converge through ordinary use rather than needing a
+flag day.
+
+### Still open
+
+- **§9.1 private-channel ACLs remain unverified.** Read gating is enforced in
+  Python, as this document specified. Nothing in the build changed what the
+  relay does or proves what it enforces; that check still needs doing against
+  a live relay before private sub-guilds are offered as a security boundary.
+- **§9.6 sub-guild depth** is capped at one, enforced in the router.
+- Deployments without `CONDUCTOR_URL` refuse non-`open` channels with a 409
+  rather than silently treating them as open.

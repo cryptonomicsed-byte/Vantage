@@ -16,6 +16,9 @@ defmodule Conductor.Application do
 
     children = [
       {Registry, keys: :unique, name: Conductor.Registry},
+      # Duplicate keys: many sockets subscribe to one topic. This is the
+      # fan-out that replaces the backend's single-process socket map.
+      {Registry, keys: :duplicate, name: Conductor.TopicRegistry},
       {DynamicSupervisor, strategy: :one_for_one, name: Conductor.ChannelSupervisor},
       Conductor.SocketServer
     ]
