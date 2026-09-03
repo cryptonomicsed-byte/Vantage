@@ -492,6 +492,8 @@ async def lifespan(app: FastAPI):
     await _init_genesis_db()
     from .routers.collectives import init_collectives_db
     await init_collectives_db()
+    from .coordination import init_coordination_db
+    await init_coordination_db()
     from .routers.wallets import init_wallet_tables
     await init_wallet_tables()
     from .routers.degen import ensure_degen_indexes
@@ -557,6 +559,12 @@ async def lifespan(app: FastAPI):
     from .buzz_inbound import run_inbound_listener
     buzz_inbound_task = asyncio.create_task(run_inbound_listener())
 
+    # Mirrors guild-channel messages from the relay into the index. Without
+    # it, messages an external agent publishes with its own key never reach
+    # Vantage at all -- see backend/coordination_indexer.py.
+    from .coordination_indexer import run_coordination_indexer
+    coordination_indexer_task = asyncio.create_task(run_coordination_indexer())
+
     last30days_task = asyncio.create_task(_last30days_watch_loop())
 
     # trade_outcome_learner: was referenced by name in routers/trading.py's
@@ -568,7 +576,7 @@ async def lifespan(app: FastAPI):
     outcome_learner_task = asyncio.create_task(outcome_learner_loop())
 
     yield
-    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, last30days_task, outcome_learner_task]
+    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, last30days_task, outcome_learner_task]
     if execution_engine_task is not None:
         shutdown_tasks.append(execution_engine_task)
     for t in shutdown_tasks:
@@ -624,6 +632,7 @@ app = FastAPI(
         {"name": "playlists", "description": "Cross-surface saved queue/playlist -- Cinema titles, Audio tracks, Live TV channels, anything else stored"},
         {"name": "swarm", "description": "Agent-population constellation graph, live task-flow particles, and the activity/intent heatmap"},
         {"name": "workspace", "description": "Ephemeral multi-agent collaboration rooms -- shared scratchpad, commit-to-draft-broadcast"},
+        {"name": "guild-forum", "description": "Guild forums: channels and sub-guilds, and the relay-backed message log agents and humans share"},
         {"name": "guilds", "description": "Persistent named collectives -- membership, aggregate reputation, shared vault, guild-authored content/TROs"},
         {"name": "publish", "description": "Create broadcasts: video, text, audio, image, graph, debate"},
         {"name": "feed", "description": "The social feed only (surface='feed' by default) -- global, trending, personalized, recommended"},
@@ -755,6 +764,12 @@ from .routers.workspace import router as workspace_router
 app.include_router(workspace_router)
 from .routers.guilds import router as guilds_router
 app.include_router(guilds_router)
+# Guild forum/channel routes share the /api/guilds prefix but live in their
+# own module: guilds.py is already large, and these authenticate a principal
+# (agent OR human) rather than an agent. Unrelated to routers/forum.py, which
+# is a separate (currently unregistered) Reddit-style thread API.
+from .routers.guild_forum import router as guild_forum_router
+app.include_router(guild_forum_router)
 from .routers.analytics import router as analytics_router
 app.include_router(analytics_router)
 from .routers.identity import router as identity_router
