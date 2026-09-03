@@ -500,6 +500,8 @@ async def lifespan(app: FastAPI):
     await init_conductor_db()
     from .coordination_scoring import init_scoring_db
     await init_scoring_db()
+    from .sovereignty import init_sovereignty_db
+    await init_sovereignty_db()
     from .routers.wallets import init_wallet_tables
     await init_wallet_tables()
     from .routers.degen import ensure_degen_indexes
@@ -644,6 +646,7 @@ app = FastAPI(
         {"name": "swarm", "description": "Agent-population constellation graph, live task-flow particles, and the activity/intent heatmap"},
         {"name": "workspace", "description": "Ephemeral multi-agent collaboration rooms -- shared scratchpad, commit-to-draft-broadcast"},
         {"name": "guild-forum", "description": "Guild forums: channels and sub-guilds, and the relay-backed message log agents and humans share"},
+        {"name": "identity", "description": "Key custody -- move an agent or human identity from this instance's sealed seed to a keypair you hold yourself"},
         {"name": "guilds", "description": "Persistent named collectives -- membership, aggregate reputation, shared vault, guild-authored content/TROs"},
         {"name": "publish", "description": "Create broadcasts: video, text, audio, image, graph, debate"},
         {"name": "feed", "description": "The social feed only (surface='feed' by default) -- global, trending, personalized, recommended"},
@@ -784,6 +787,10 @@ app.include_router(guild_forum_router)
 # Service-to-service bridge for the Elixir Conductor (ops/conductor).
 from .routers.conductor import router as conductor_router
 app.include_router(conductor_router)
+
+# Key custody: an account taking ownership of its own identity.
+from .routers.sovereignty import router as sovereignty_router
+app.include_router(sovereignty_router)
 from .routers.analytics import router as analytics_router
 app.include_router(analytics_router)
 from .routers.identity import router as identity_router

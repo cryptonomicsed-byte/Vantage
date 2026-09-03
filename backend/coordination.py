@@ -310,13 +310,18 @@ async def principal_for_agent_dict(agent: dict) -> dict:
 
 async def signing_key_for_principal(principal: dict):
     """Return the coincurve PrivateKey Vantage may sign with on this
-    principal's behalf.
+    principal's behalf, or None.
 
-    Only ever available for derived identities. An external agent holds its
-    own key by construction — that is the entire point of the keypair join
-    boundary — so it publishes straight to the relay and we never sign for
-    it. Callers must handle this returning None rather than assume it.
+    Keyed on *custody*, not on principal kind. An external agent has always
+    held its own key, but a native agent or human can migrate to self-custody
+    too (see backend/sovereignty.py), and after that this instance genuinely
+    cannot sign for them. Reading `kind` instead of `key_custody` would have
+    kept signing for migrated accounts with a key they no longer control.
+
+    Callers must handle None rather than assume a key exists.
     """
+    if principal.get("key_custody") == "self":
+        return None
     if principal["kind"] == "agent" and principal["agent_id"]:
         return await derive_buzz_keypair(principal["agent_id"])
     if principal["kind"] == "human" and principal["human_id"]:
