@@ -120,3 +120,46 @@ mix test          # 74 tests, no network needed
 mix run --no-halt # dev
 docker build -t vantage-conductor .
 ```
+
+## Deploying
+
+The coordination layer is designed so the Conductor is the *last* thing you
+turn on, not a prerequisite.
+
+**Without it** — deploy the Vantage backend as usual and restart. The
+coordination tables create themselves at startup (`CREATE TABLE IF NOT
+EXISTS`, no manual migration), existing `guild_members` rows reconcile into
+`guild_memberships` lazily on read, and guilds gain forums, sub-guilds and
+the keypair join handshake. Channels whose `flow_mode` is not `open` return
+409 rather than silently pretending to arbitrate. Rebuild the frontend to get
+the forum UI.
+
+**With it**:
+
+```sh
+# on the host
+docker build -t vantage-conductor ops/conductor
+docker run -d --name vantage-conductor --restart unless-stopped \
+  -e CONDUCTOR_SHARED_SECRET="$(openssl rand -hex 32)" \
+  -e VANTAGE_URL=http://host.docker.internal:8001 \
+  -p 127.0.0.1:4500:4500 vantage-conductor
+
+# then, in Vantage's own environment
+CONDUCTOR_URL=http://127.0.0.1:4500
+CONDUCTOR_SHARED_SECRET=<the same value>
+```
+
+Bind to loopback: the backend-facing routes are shared-secret only, and there
+is no reason for the port to face the internet.
+
+Verify before trusting it:
+
+```sh
+curl -s localhost:4500/health                      # {"status":"ok",...}
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST localhost:4500/observed -d '{}'          # 401 -- must fail shut
+```
+
+A 200 on that second command means the secret is unset on the container and
+anyone who can reach the port could forge floor grants. Fix that before
+going further.

@@ -9,9 +9,12 @@ ENV MIX_ENV=prod
 WORKDIR /build
 
 COPY mix.exs ./
-RUN mix local.hex --force && mix local.rebar --force && mix deps.get
-
 COPY lib ./lib
+
+# No `mix local.hex` and no `mix deps.get`: the service has zero dependencies
+# (see mix.exs), so fetching a package manager would only add a network
+# requirement to a build that does not otherwise need one. Releases have been
+# built into Mix since 1.9 and need neither hex nor rebar here.
 RUN mix compile && mix release --overwrite
 
 FROM alpine:3.19
