@@ -212,3 +212,31 @@ def test_the_frame_never_claims_to_prove_a_route():
     the path could have rewritten."""
     frame = mf.decode_frame(build_packet())
     assert mf.check_against_event(frame, _event())["route_proven"] is False
+
+
+# ── cross-repo agreement ─────────────────────────────────────────────────────
+
+#: Emitted by omokoda-mesh's C++ `meshtasticEncode` -- an independent
+#: implementation of the same six fields, compiled and run. Two decoders
+#: written from one spec agree until one of them quietly stops agreeing, and
+#: this is where that shows up.
+FIRMWARE_FRAME_HEX = "0defbeadde15ffffffff220e0801120a63726f7373207265706f354d3c2b1a3d006faa6848037805"
+
+
+def test_this_decoder_agrees_with_the_firmware_encoder():
+    frame = mf.decode_frame(bytes.fromhex(FIRMWARE_FRAME_HEX))
+    assert frame.packet_ref == "!1a2b3c4d"
+    assert frame.node_id == "!deadbeef"
+    assert frame.hops_taken == 2
+    assert frame.payload == b"cross repo"
+    assert frame.portnum == 1
+
+
+def test_a_firmware_frame_binds_to_a_matching_event():
+    """The end-to-end shape: firmware encodes, a gateway signs tags about it,
+    and this instance checks the two against each other."""
+    frame = mf.decode_frame(bytes.fromhex(FIRMWARE_FRAME_HEX))
+    detail = mf.check_against_event(
+        frame, {"network": "meshtastic", "hop_count": 2, "origin_id": "!1a2b3c4d"}
+    )
+    assert detail["payload_bytes"] == len(b"cross repo")
