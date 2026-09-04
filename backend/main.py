@@ -496,15 +496,23 @@ async def lifespan(app: FastAPI):
     await init_coordination_db()
     from .work_refs import init_work_ref_db
     await init_work_ref_db()
-    from .workspace_roles import init_workspace_roles_db, seed_builtin_templates
+    from .workspace_roles import (
+        deduplicate_builtin_templates, init_workspace_roles_db, seed_builtin_templates,
+    )
     await init_workspace_roles_db()
+    await deduplicate_builtin_templates()
     await seed_builtin_templates()
     from .presence import init_presence_db
     await init_presence_db()
     from .receipts import init_receipts_db
     await init_receipts_db()
-    from .mesh_gateway import init_mesh_db
-    await init_mesh_db()
+    # Aliased: backend/mesh_store.py already exports init_mesh_db for the
+    # Block Mesh coordination tables and main.py imports it at module level.
+    # A bare `from ... import init_mesh_db` here rebinds the name for the
+    # whole function, so the module-level one becomes an UnboundLocalError at
+    # its own call site further up -- which takes the service down at boot.
+    from .mesh_gateway import init_mesh_db as init_meshnet_db
+    await init_meshnet_db()
     from .coordination_join import init_join_db
     await init_join_db()
     from .routers.conductor import init_conductor_db

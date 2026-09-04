@@ -218,9 +218,50 @@ async def test_an_unknown_template_is_refused(client, workspace, principal_maker
 
 @pytest.mark.asyncio
 async def test_seeding_templates_twice_installs_them_once(client):
+    """Counted in the table, not through list_templates.
+
+    The first version of this asserted on list_templates(), which
+    deduplicates by name in Python -- so it passed happily while every
+    restart added four more rows to the table underneath it. A read path
+    that hides the duplicates is exactly why this has to count the rows.
+    """
     await wsr.seed_builtin_templates()
-    names = [t["name"] for t in await wsr.list_templates()]
-    assert len(names) == len(set(names))
+    await wsr.seed_builtin_templates()
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM role_templates WHERE guild_id IS NULL"
+        )
+        rows = (await cur.fetchone())[0]
+    assert rows == len(wsr.BUILTIN_TEMPLATES), (
+        "guild_id is NULL here, and SQLite does not treat NULL as equal to "
+        "NULL in a UNIQUE index -- so INSERT OR IGNORE never fires and every "
+        "restart reinstalls the whole set"
+    )
+
+
+@pytest.mark.asyncio
+async def test_templates_duplicated_by_the_old_bug_are_repaired(client):
+    """Databases seeded before the fix gained four rows per restart. The
+    repair keeps the earliest of each name and drops the rest."""
+    async with get_db() as db:
+        for _ in range(3):
+            await db.execute(
+                """INSERT INTO role_templates
+                     (guild_id, name, description, workspace_role, skills,
+                      allowed_tools, budget_usdc)
+                   VALUES (NULL,'engineer','dupe','operator','[]','[]',0)"""
+            )
+        await db.commit()
+
+    removed = await wsr.deduplicate_builtin_templates()
+    assert removed >= 3
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM role_templates WHERE guild_id IS NULL AND name='engineer'"
+        )
+        assert (await cur.fetchone())[0] == 1
+    # and the survivor is still the real one, not a duplicate
+    assert (await wsr.get_template("engineer", None))["workspace_role"] == "operator"
 
 
 @pytest.mark.asyncio

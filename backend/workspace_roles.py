@@ -285,17 +285,52 @@ async def seed_builtin_templates() -> int:
     """
     installed = 0
     async with get_db() as db:
+        # `INSERT OR IGNORE` cannot carry this. The UNIQUE constraint is on
+        # (guild_id, name) and guild_id is NULL for an instance-wide
+        # template -- and SQLite does not treat NULL as equal to NULL in a
+        # UNIQUE index, so the conflict never fires and every restart
+        # installs four more copies. Checking first is the portable way to
+        # say what is meant.
         for tpl in BUILTIN_TEMPLATES:
             cur = await db.execute(
-                """INSERT OR IGNORE INTO role_templates
+                "SELECT 1 FROM role_templates WHERE guild_id IS NULL AND name=?",
+                (tpl["name"],),
+            )
+            if await cur.fetchone():
+                continue
+            await db.execute(
+                """INSERT INTO role_templates
                      (guild_id, name, description, workspace_role, skills, allowed_tools, budget_usdc)
                    VALUES (NULL,?,?,?,?,?,?)""",
                 (tpl["name"], tpl["description"], tpl["workspace_role"],
                  json.dumps(tpl["skills"]), json.dumps(tpl["allowed_tools"]), tpl["budget_usdc"]),
             )
-            installed += cur.rowcount or 0
+            installed += 1
         await db.commit()
     return installed
+
+
+async def deduplicate_builtin_templates() -> int:
+    """Remove duplicate instance-wide templates, keeping the earliest of each.
+
+    A repair for databases seeded before the NULL-key bug above was fixed:
+    those gained four extra rows per restart. Runs at startup, costs one
+    query when there is nothing to do.
+    """
+    async with get_db() as db:
+        cur = await db.execute(
+            """DELETE FROM role_templates
+                WHERE guild_id IS NULL
+                  AND id NOT IN (
+                      SELECT MIN(id) FROM role_templates
+                       WHERE guild_id IS NULL GROUP BY name
+                  )"""
+        )
+        await db.commit()
+        removed = cur.rowcount or 0
+    if removed:
+        logger.info("workspace_roles: removed %d duplicate builtin templates", removed)
+    return removed
 
 
 async def get_template(name: str, guild_id: Optional[int] = None) -> Optional[dict]:
