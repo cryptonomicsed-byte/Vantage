@@ -503,6 +503,8 @@ async def lifespan(app: FastAPI):
     await init_presence_db()
     from .receipts import init_receipts_db
     await init_receipts_db()
+    from .mesh_gateway import init_mesh_db
+    await init_mesh_db()
     from .coordination_join import init_join_db
     await init_join_db()
     from .routers.conductor import init_conductor_db
@@ -907,6 +909,12 @@ app.include_router(omokoda_cognition_proxy_router)
 
 from .routers.vantage_anvil import router as vantage_anvil_router
 app.include_router(vantage_anvil_router)
+
+# The radio mesh gateway. Separate from routers/mesh.py's /api/mesh, which
+# is the Block Mesh coordination API -- two different things that share a
+# word, so they get two prefixes.
+from .routers.meshnet import router as meshnet_router
+app.include_router(meshnet_router)
 
 # MCP server — exposes all Vantage routes as MCP tools for Claude/GPT/OpenCode agents.
 # Mount the modern streamable-HTTP transport at /mcp (what current MCP clients expect),
