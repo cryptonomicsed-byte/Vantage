@@ -24,6 +24,7 @@ from slowapi.util import get_remote_address
 from .. import coordination as coord
 from .. import coordination_join as join_mod
 from .. import coordination_scoring as scoring
+from .. import guild_chat
 from ..db import get_db
 from ..deps import _parse_body, get_human_optional
 from .conductor import conductor_ws_url
@@ -479,12 +480,23 @@ async def post_channel_message(
         parent = dict(parent)
         root_event_id = parent["thread_root_event_id"] or parent["event_id"]
 
+    # Every @name in the message becomes a `p` tag, so a room where
+    # "@alice @bob" only reaches alice is not possible. Resolution is scoped
+    # to guild members, so a mention cannot page an agent into a room it is
+    # not in.
+    mentioned = await guild_chat.resolve_mentions(
+        guild["id"], guild_chat.parse_mentions(content)
+    )
+    addressees = [p["pubkey"] for p in mentioned]
+    if addressed_to:
+        addressees.append(addressed_to)
+
     try:
         event = await coord.publish_message(
             channel=channel, guild_slug=slug, principal=principal, content=content,
             msg_type=msg_type, root_event_id=root_event_id,
             reply_to_event_id=reply_to or None,
-            addressed_to=addressed_to or None, work_ref=work_ref or None,
+            addressed_to=addressees or None, work_ref=work_ref or None,
         )
     except coord.RelayUnavailable as exc:
         # Same stance as routers/workspace.py's sandbox: no host-side
@@ -498,10 +510,21 @@ async def post_channel_message(
         "type": "channel_message", "channel": channel_slug,
         "event_id": event["id"], "author": principal["display_name"], "msg_type": msg_type,
     })
+
+    # Mentioned agents answer in the room, as themselves. Depth-guarded, so
+    # agents talking to agents converges instead of looping forever.
+    replies = await guild_chat.dispatch_to_mentioned(
+        channel=channel, guild_slug=slug, content=content,
+        author_principal=principal, mentioned=mentioned,
+        depth=0, root_event_id=root_event_id or event["id"],
+    )
+
     return {
         "guild": slug, "channel": channel_slug, "event_id": event["id"],
         "msg_type": msg_type, "thread_root_event_id": root_event_id,
         "created_at": event["created_at"],
+        "mentioned": [p["display_name"] for p in mentioned],
+        "replies": replies,
     }
 
 
@@ -658,4 +681,27 @@ async def guild_leaderboard(
             "report_actioned": -scoring.W_REPORT_ACTIONED,
         },
         "note": "Message count is log-damped; claimed work that shipped carries the most weight.",
+    }
+
+
+# Deliberately NOT under /api/guilds: any single segment there is captured by
+# /api/guilds/{slug}, so `/api/guilds/commands` resolves as a guild named
+# "commands". The palette is instance-wide rather than guild-scoped anyway.
+chat_router = APIRouter(prefix="/api/chat", tags=["guild-forum"])
+
+
+@chat_router.get("/commands")
+async def chat_commands(request: Request, principal: dict = Depends(current_principal)):
+    """Slash commands available in a chat composer.
+
+    Derived from the live route registry rather than a hand-kept list, so a
+    new router shows up here on its own. Irreversible and spend-money
+    operations are excluded — those deserve a deliberate surface, not a
+    slash typed mid-sentence.
+    """
+    commands = guild_chat.build_command_palette(request.app)
+    return {
+        "commands": commands,
+        "count": len(commands),
+        "excluded": list(guild_chat.BLOCKED_COMMAND_PREFIXES),
     }

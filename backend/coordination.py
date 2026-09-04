@@ -523,8 +523,8 @@ async def can_read_channel(channel: dict, principal: Optional[dict]) -> bool:
 def build_message_tags(
     *, buzz_channel_id: str, guild_slug: str, channel_slug: str,
     msg_type: str = "say", root_event_id: Optional[str] = None,
-    reply_to_event_id: Optional[str] = None, addressed_to: Optional[str] = None,
-    work_ref: Optional[str] = None,
+    reply_to_event_id: Optional[str] = None, addressed_to=None,
+    work_ref: Optional[str] = None, extra_tags: Optional[list] = None,
 ) -> list:
     """The wire format from spec §6.
 
@@ -537,12 +537,18 @@ def build_message_tags(
         tags.append(["e", root_event_id, "", "root"])
     if reply_to_event_id:
         tags.append(["e", reply_to_event_id, "", "reply"])
+    # One `p` tag per addressee. A room where "@alice @bob" only reaches
+    # alice is not a room, so this takes a list as readily as a string.
     if addressed_to:
-        tags.append(["p", addressed_to])
+        for pubkey in ([addressed_to] if isinstance(addressed_to, str) else addressed_to):
+            if pubkey:
+                tags.append(["p", pubkey])
     tags.append(["vg", guild_slug, channel_slug])
     tags.append(["vt", msg_type])
     if work_ref:
         tags.append(["vw", work_ref])
+    for tag in extra_tags or []:
+        tags.append(tag)
     return tags
 
 
@@ -670,8 +676,8 @@ class RelayUnavailable(RuntimeError):
 async def publish_message(
     *, channel: dict, guild_slug: str, principal: dict, content: str,
     msg_type: str = "say", root_event_id: Optional[str] = None,
-    reply_to_event_id: Optional[str] = None, addressed_to: Optional[str] = None,
-    work_ref: Optional[str] = None,
+    reply_to_event_id: Optional[str] = None, addressed_to=None,
+    work_ref: Optional[str] = None, extra_tags: Optional[list] = None,
 ) -> dict:
     """Sign, publish to the relay, then index. In that order, always.
 
@@ -696,6 +702,7 @@ async def publish_message(
         buzz_channel_id=channel["buzz_channel_id"], guild_slug=guild_slug,
         channel_slug=channel["slug"], msg_type=msg_type, root_event_id=root_event_id,
         reply_to_event_id=reply_to_event_id, addressed_to=addressed_to, work_ref=work_ref,
+        extra_tags=extra_tags,
     )
 
     sess = None
