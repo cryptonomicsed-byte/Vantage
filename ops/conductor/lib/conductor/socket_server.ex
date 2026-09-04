@@ -15,7 +15,7 @@ defmodule Conductor.SocketServer do
   """
   require Logger
 
-  alias Conductor.{Backend, ChannelServer, JSON, PubSub, WS}
+  alias Conductor.{Backend, ChannelServer, Flow, JSON, PubSub, WS}
 
   @acceptors 8
 
@@ -302,6 +302,24 @@ defmodule Conductor.SocketServer do
       socket,
       ChannelServer.handoff(session.channel_id, session.principal_id, message["to"])
     )
+
+    session
+  end
+
+  defp handle_op(socket, "state", message, session) do
+    case ChannelServer.set_work_state(session.channel_id, session.principal_id, message["state"]) do
+      {:ok, snapshot} ->
+        send_json(socket, Map.put(snapshot, :type, "state"))
+
+      {:error, :unknown_state} ->
+        send_json(socket, %{
+          type: "error",
+          error: "unknown state; use one of #{Enum.map_join(Flow.work_states(), ", ", &Atom.to_string/1)}"
+        })
+
+      {:error, reason} ->
+        send_json(socket, %{type: "error", error: inspect(reason)})
+    end
 
     session
   end

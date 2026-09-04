@@ -289,4 +289,80 @@ defmodule Conductor.FlowTest do
       refute Enum.any?(effects, &match?({:violation, _, _}, &1))
     end
   end
+
+  describe "work state" do
+    test "a principal starts available" do
+      state = joined(:open, [1])
+      assert Flow.work_state(state, 1) == :available
+    end
+
+    test "declaring a state announces it once" do
+      state = joined(:open, [1])
+      {state, effects} = Flow.set_work_state(state, 1, :working, @t0)
+      assert effects == [{:presence, :state, 1}]
+      assert Flow.work_state(state, 1) == :working
+    end
+
+    test "re-declaring the same state says nothing" do
+      # A runtime that heartbeats its status must not flood the channel.
+      state = joined(:open, [1])
+      {state, _} = Flow.set_work_state(state, 1, :working, @t0)
+      {_state, effects} = Flow.set_work_state(state, 1, :working, @t0 + 100)
+      assert effects == []
+    end
+
+    test "a principal that is not present cannot declare anything" do
+      # Otherwise a state is a claim nobody in the room can contradict.
+      state = joined(:open, [1])
+      {state, effects} = Flow.set_work_state(state, 99, :working, @t0)
+      assert effects == []
+      assert Flow.work_state(state, 99) == nil
+    end
+
+    test "an unknown state changes nothing" do
+      state = joined(:open, [1])
+      {state, effects} = Flow.set_work_state(state, 1, :vibing, @t0)
+      assert effects == []
+      assert Flow.work_state(state, 1) == :available
+    end
+
+    test "the vocabulary is closed and parses only its own members" do
+      assert Flow.parse_work_state("needs_review") == {:ok, :needs_review}
+      assert Flow.parse_work_state("almost done") == :error
+      assert Flow.parse_work_state(nil) == :error
+      assert Flow.parse_work_state(:blocked) == {:ok, :blocked}
+    end
+
+    test "a reconnect keeps the declared state" do
+      # A dropped socket is not evidence that an agent stopped working.
+      state = joined(:open, [1])
+      {state, _} = Flow.set_work_state(state, 1, :working, @t0)
+      {state, effects} = Flow.join(state, 1, %{name: "p1"}, @t0 + 500)
+      assert effects == []
+      assert Flow.work_state(state, 1) == :working
+    end
+
+    test "leaving clears the state entirely" do
+      state = joined(:open, [1])
+      {state, _} = Flow.set_work_state(state, 1, :working, @t0)
+      {state, _} = Flow.leave(state, 1, @t0 + 10)
+      assert Flow.work_state(state, 1) == nil
+    end
+
+    test "blocked and needs_review are not available for work" do
+      # The reason the vocabulary exists: handing more work to a principal
+      # waiting on someone else is how a queue silently stalls.
+      state = joined(:open, [1, 2, 3, 4])
+      {state, _} = Flow.set_work_state(state, 2, :working, @t0)
+      {state, _} = Flow.set_work_state(state, 3, :blocked, @t0)
+      {state, _} = Flow.set_work_state(state, 4, :needs_review, @t0)
+      assert Flow.available(state) == [1]
+    end
+
+    test "thinking still counts as available" do
+      state = joined(:open, [1, 2])
+      {state, _} = Flow.set_work_state(state, 2, :thinking, @t0)
+      assert Flow.available(state) == [1, 2]
+    end
+  end
 end

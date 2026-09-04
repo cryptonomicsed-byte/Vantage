@@ -25,7 +25,9 @@ from .. import coordination as coord
 from .. import coordination_join as join_mod
 from .. import coordination_scoring as scoring
 from .. import guild_chat
+from .. import presence
 from .. import work_refs
+from .. import workspace_roles as wsr
 from ..db import get_db
 from ..deps import _parse_body, get_human_optional
 from .conductor import conductor_ws_url
@@ -447,8 +449,16 @@ async def post_channel_message(
     """
     guild = await _guild(slug)
     channel = await _channel_or_404(guild, channel_slug)
-    await _require_member(guild, principal)
+    membership = await _require_member(guild, principal)
     await _require_readable(channel, principal)
+
+    # Posting, claiming and delivering are separate capabilities, so a
+    # principal put on a workspace as an observer can follow the work
+    # without being able to take any of it.
+    await _require_capability(
+        channel, principal, membership,
+        {"claim": "claim", "artifact": "deliver"}.get(msg_type, "post"),
+    )
 
     if msg_type not in coord.MSG_TYPES or msg_type == "system":
         raise HTTPException(422, "msg_type must be one of say, propose, claim, handoff, artifact")
@@ -812,10 +822,13 @@ async def bind_repo(
     """
     guild = await _guild(slug)
     membership = await _require_member(guild, principal)
-    if membership["role"] not in _CHANNEL_ADMIN_ROLES:
-        raise HTTPException(403, "Only guild staff can bind a repository")
-
     channel = await _channel_or_404(guild, channel_slug)
+    # Guild staff still qualify -- effective_role treats a founder or admin
+    # as maintainer where no explicit row exists -- but a maintainer put on
+    # this one workspace now qualifies too, which is the point of having
+    # per-workspace roles at all.
+    await _require_capability(channel, principal, membership, "bind_repo")
+
     if channel["channel_kind"] != "workspace":
         raise HTTPException(
             422,
@@ -846,9 +859,8 @@ async def unbind_repo(slug: str, channel_slug: str, principal: dict = Depends(cu
     """Detach the repository. The channel and its history stay."""
     guild = await _guild(slug)
     membership = await _require_member(guild, principal)
-    if membership["role"] not in _CHANNEL_ADMIN_ROLES:
-        raise HTTPException(403, "Only guild staff can unbind a repository")
     channel = await _channel_or_404(guild, channel_slug)
+    await _require_capability(channel, principal, membership, "bind_repo")
 
     async with get_db() as db:
         await db.execute(
@@ -856,6 +868,194 @@ async def unbind_repo(slug: str, channel_slug: str, principal: dict = Depends(cu
         )
         await db.commit()
     return {"guild": slug, "channel": channel_slug, "repo": None}
+
+
+async def _require_capability(
+    channel: dict, principal: dict, guild_membership: dict, capability: str
+) -> str:
+    """Check one workspace capability, and return the role that carried it.
+
+    Raises 403 with both halves of the answer -- what you hold and what the
+    action needed -- because "forbidden" alone leaves the caller guessing
+    which of the two to fix.
+    """
+    role = await wsr.effective_role(channel, principal, (guild_membership or {}).get("role"))
+    try:
+        wsr.require(role, capability)
+    except wsr.RoleError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    return role
+
+
+@router.get("/{slug}/channels/{channel_slug}/roster")
+async def workspace_roster(
+    slug: str, channel_slug: str, principal: dict = Depends(current_principal)
+):
+    """Who is on this workspace, in what role, and what that role permits."""
+    guild = await _guild(slug)
+    channel = await _channel_or_404(guild, channel_slug)
+    await _require_readable(channel, principal)
+    membership = await coord.get_membership(guild["id"], principal["id"])
+    role = await wsr.effective_role(channel, principal, (membership or {}).get("role"))
+    return {
+        "guild": slug, "channel": channel_slug,
+        "your_role": role, "your_capabilities": wsr.capabilities_of(role),
+        "members": await wsr.list_members(channel["id"]),
+        "roles": wsr.ROLES,
+    }
+
+
+@router.post("/{slug}/channels/{channel_slug}/roster")
+async def set_workspace_role(
+    slug: str,
+    channel_slug: str,
+    principal_name: str = Form(..., max_length=120),
+    role: str = Form(""),
+    template: str = Form(""),
+    principal: dict = Depends(current_principal),
+):
+    """Put a principal on this workspace, by role or by template.
+
+    `template` and `role` are alternatives; a template is the ordinary path
+    because it carries the skills, permitted tools and budget alongside the
+    rank, and a bare role carries only the rank.
+    """
+    guild = await _guild(slug)
+    channel = await _channel_or_404(guild, channel_slug)
+    membership = await _require_member(guild, principal)
+    await _require_capability(channel, principal, membership, "manage_members")
+
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM principals WHERE display_name=? ORDER BY id LIMIT 1", (principal_name,)
+        )
+        row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, f"No principal named {principal_name!r} on this instance")
+    target = dict(row)
+
+    # A workspace is inside a guild, so a workspace seat presupposes a guild
+    # seat. Granting one without the other would produce a member who can
+    # push to the repository but cannot read the room.
+    if not await coord.is_active_member(guild["id"], target["id"]):
+        raise HTTPException(422, f"{principal_name} is not a member of this guild")
+
+    try:
+        if template:
+            result = await wsr.apply_template(
+                channel_id=channel["id"], principal_id=target["id"],
+                template_name=template, guild_id=guild["id"], granted_by=principal["id"],
+            )
+        else:
+            result = await wsr.set_role(
+                channel_id=channel["id"], principal_id=target["id"],
+                role=role or wsr.DEFAULT_ROLE, granted_by=principal["id"],
+            )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    await _broadcast_gossip(f"guild.{slug}", {
+        "type": "workspace_role", "channel": channel_slug,
+        "principal": principal_name, "role": result["role"],
+    })
+    return {"guild": slug, "channel": channel_slug, "principal": principal_name, **result}
+
+
+@router.delete("/{slug}/channels/{channel_slug}/roster/{principal_name}")
+async def remove_workspace_role(
+    slug: str, channel_slug: str, principal_name: str,
+    principal: dict = Depends(current_principal),
+):
+    """Take a principal off this workspace. Guild membership is untouched."""
+    guild = await _guild(slug)
+    channel = await _channel_or_404(guild, channel_slug)
+    membership = await _require_member(guild, principal)
+    await _require_capability(channel, principal, membership, "manage_members")
+
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT id FROM principals WHERE display_name=? ORDER BY id LIMIT 1", (principal_name,)
+        )
+        row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, f"No principal named {principal_name!r}")
+    removed = await wsr.remove_role(channel["id"], dict(row)["id"])
+    return {"guild": slug, "channel": channel_slug, "principal": principal_name,
+            "removed": removed}
+
+
+@router.get("/{slug}/role-templates")
+async def guild_role_templates(slug: str, principal: dict = Depends(current_principal)):
+    """The named bundles available in this guild, its own shadowing the
+    instance-wide ones of the same name."""
+    guild = await _guild(slug)
+    return {"guild": slug, "templates": await wsr.list_templates(guild["id"])}
+
+
+# ── presence as protocol state ───────────────────────────────────────────────
+
+@router.put("/{slug}/presence")
+async def declare_presence(
+    slug: str,
+    state: str = Form(...),
+    detail: str = Form("", max_length=200),
+    work_ref: str = Form("", max_length=120),
+    channel_slug: str = Form(""),
+    principal: dict = Depends(current_principal),
+):
+    """Declare what you are doing.
+
+    An HTTP path alongside the Conductor's socket op, because a runtime that
+    only ever makes REST calls should not have to hold a WebSocket open just
+    to say it is blocked. Both write the same row and mirror the same NIP-38
+    status.
+    """
+    guild = await _guild(slug)
+    await _require_member(guild, principal)
+
+    channel_id = None
+    if channel_slug:
+        channel = await _channel_or_404(guild, channel_slug)
+        await _require_readable(channel, principal)
+        channel_id = channel["id"]
+
+    if work_ref and work_refs.parse_work_ref(work_ref) is None:
+        raise HTTPException(422, f"work_ref must be '<kind>:<id>' — got {work_ref!r}")
+
+    try:
+        result = await presence.set_state(
+            principal_id=principal["id"], channel_id=channel_id, state=state,
+            detail=detail, work_ref=work_ref,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    await _broadcast_gossip(f"guild.{slug}", {
+        "type": "presence", "principal": principal["display_name"],
+        "state": state, "channel": channel_slug or None,
+    })
+    return result
+
+
+@router.get("/{slug}/presence")
+async def guild_presence(slug: str, principal: dict = Depends(current_principal)):
+    """Who is in what state, and who it is worth handing work to.
+
+    `routable` is the half that matters to a scheduler: a member who is
+    present and blocked is exactly the wrong one to hand the next task.
+    """
+    guild = await _guild(slug)
+    await _require_member(guild, principal)
+    routable = await presence.routable_in_guild(guild["id"])
+    return {
+        "guild": slug,
+        "states": presence.STATES,
+        "routable": routable,
+        "routable_count": len(routable),
+        "yours": await presence.get_state(principal["id"]),
+    }
 
 
 @router.get("/{slug}/workspaces")

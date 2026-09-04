@@ -36,10 +36,21 @@ defmodule Conductor.Flow do
           | {:system, String.t()}
           | {:violation, principal_id, reason :: String.t()}
           | {:rate_limited, principal_id, retry_after_ms :: integer()}
-          | {:presence, :joined | :left, principal_id}
+          | {:presence, :joined | :left | :state, principal_id}
           | {:queued, principal_id, position :: pos_integer()}
 
   @default_floor_ttl_ms 90_000
+
+  # What a connected principal is *doing*, as distinct from whether its
+  # socket is open. Socket liveness answers "is it there"; this answers "is
+  # it worth waiting for", which is the question a room full of agents
+  # actually needs answered before it hands anyone the floor.
+  #
+  # Closed vocabulary on purpose. Free-text status is unroutable: a
+  # scheduler cannot act on "thinking really hard about the parser", and once
+  # arbitrary strings are accepted they can never be taken back.
+  @work_states ~w(available thinking working blocked needs_review offline)a
+  @default_work_state :available
 
   # A token bucket that refills at `rate` per window. Generous enough that a
   # conversing agent never notices, tight enough that a runaway loop is
@@ -78,17 +89,102 @@ defmodule Conductor.Flow do
   def queue(%__MODULE__{queue: q}), do: q
 
   # ── presence ───────────────────────────────────────────────────────────────
+  @doc "The states a principal may declare. Anything else is refused."
+  @spec work_states() :: [atom()]
+  def work_states, do: @work_states
+
+  @doc "Parse a client-supplied state, or `:error`."
+  @spec parse_work_state(term()) :: {:ok, atom()} | :error
+  def parse_work_state(value) when is_binary(value) do
+    case Enum.find(@work_states, &(Atom.to_string(&1) == value)) do
+      nil -> :error
+      state -> {:ok, state}
+    end
+  end
+
+  def parse_work_state(value) when is_atom(value) do
+    if value in @work_states, do: {:ok, value}, else: :error
+  end
+
+  def parse_work_state(_), do: :error
+
 
   @spec join(t(), principal_id(), map(), integer()) :: {t(), [effect()]}
   def join(%__MODULE__{} = state, principal_id, meta, now) do
     if present?(state, principal_id) do
       # A reconnect, not a new arrival. Refresh the metadata and say nothing:
       # announcing a join the channel never saw a leave for reads as noise.
-      {put_in(state.presence[principal_id], Map.put(meta, :joined_at, now)), []}
+      # The declared work state survives it — a dropped socket is not
+      # evidence that an agent stopped working, and treating it as such would
+      # make every network blip look like an abandoned task.
+      kept = Map.get(state.presence[principal_id], :work_state, @default_work_state)
+      meta = meta |> Map.put(:joined_at, now) |> Map.put(:work_state, kept)
+      {put_in(state.presence[principal_id], meta), []}
     else
-      state = put_in(state.presence[principal_id], Map.put(meta, :joined_at, now))
+      meta =
+        meta
+        |> Map.put(:joined_at, now)
+        |> Map.put_new(:work_state, @default_work_state)
+        |> Map.put(:state_changed_at, now)
+
+      state = put_in(state.presence[principal_id], meta)
       {state, [{:presence, :joined, principal_id}]}
     end
+  end
+
+  @doc """
+  Declare what a principal is doing. Only a present principal may — a state
+  for a socket that is not connected is a claim nobody can contradict.
+
+  Returns `{state, []}` unchanged when the state is already what it was, so
+  a runtime that heartbeats its status does not flood the channel.
+  """
+  @spec set_work_state(t(), principal_id(), atom(), integer()) :: {t(), [effect()]}
+  def set_work_state(%__MODULE__{} = state, principal_id, work_state, now) do
+    cond do
+      work_state not in @work_states ->
+        {state, []}
+
+      not present?(state, principal_id) ->
+        {state, []}
+
+      Map.get(state.presence[principal_id], :work_state) == work_state ->
+        {state, []}
+
+      true ->
+        meta =
+          state.presence[principal_id]
+          |> Map.put(:work_state, work_state)
+          |> Map.put(:state_changed_at, now)
+
+        {put_in(state.presence[principal_id], meta), [{:presence, :state, principal_id}]}
+    end
+  end
+
+  @doc "A principal's declared work state, or nil if it is not present."
+  @spec work_state(t(), principal_id()) :: atom() | nil
+  def work_state(%__MODULE__{presence: p}, principal_id) do
+    case Map.get(p, principal_id) do
+      nil -> nil
+      meta -> Map.get(meta, :work_state, @default_work_state)
+    end
+  end
+
+  @doc """
+  Present principals that are in a state worth routing work to.
+
+  `blocked` and `needs_review` are deliberately excluded: both mean a human
+  or another agent has to move first, and handing more work to a principal
+  in either state is how a queue silently stalls.
+  """
+  @spec available(t()) :: [principal_id()]
+  def available(%__MODULE__{presence: p}) do
+    p
+    |> Enum.filter(fn {_id, meta} ->
+      Map.get(meta, :work_state, @default_work_state) in [:available, :thinking]
+    end)
+    |> Enum.map(&elem(&1, 0))
+    |> Enum.sort()
   end
 
   @spec leave(t(), principal_id(), integer()) :: {t(), [effect()]}

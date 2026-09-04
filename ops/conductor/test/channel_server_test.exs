@@ -30,6 +30,11 @@ defmodule Conductor.ChannelServerTest do
       :ok
     end
 
+    def report_work_state(channel_id, principal_id, work_state) do
+      send(owner(), {:backend, :work_state, channel_id, principal_id, work_state})
+      :ok
+    end
+
     defp owner, do: :persistent_term.get({__MODULE__, :owner})
   end
 
@@ -178,6 +183,39 @@ defmodule Conductor.ChannelServerTest do
   describe "unknown channels" do
     test "calls to a channel that is not running are refused cleanly" do
       assert {:error, :no_channel} = ChannelServer.snapshot(999_999_999)
+    end
+  end
+
+  describe "work state" do
+    test "a declared state is broadcast, handed to the backend, and in the snapshot" do
+      {channel_id, _} = start_channel(%{"flow_mode" => "open"})
+      {:ok, _} = ChannelServer.join(channel_id, 1, %{name: "one"})
+
+      assert {:ok, snapshot} = ChannelServer.set_work_state(channel_id, 1, "working")
+      assert snapshot.states == %{1 => "working"}
+      assert snapshot.available == []
+
+      assert_receive {:conductor, %{type: "presence", event: "state", work_state: "working"}}
+      assert_receive {:backend, :work_state, ^channel_id, 1, "working"}
+    end
+
+    test "an unknown state is refused rather than coerced to a default" do
+      # A runtime sending a state this Conductor does not know should learn
+      # that, not silently appear available while it is blocked.
+      {channel_id, _} = start_channel(%{"flow_mode" => "open"})
+      {:ok, _} = ChannelServer.join(channel_id, 1, %{name: "one"})
+
+      assert {:error, :unknown_state} = ChannelServer.set_work_state(channel_id, 1, "vibing")
+      refute_receive {:backend, :work_state, _, _, _}, 50
+    end
+
+    test "the snapshot still reports who is merely connected" do
+      # `present` predates `states`; an older client reading it keeps working.
+      {channel_id, _} = start_channel(%{"flow_mode" => "open"})
+      {:ok, _} = ChannelServer.join(channel_id, 1, %{name: "one"})
+      {:ok, _} = ChannelServer.set_work_state(channel_id, 1, "blocked")
+
+      assert {:ok, %{present: [1], available: []}} = ChannelServer.snapshot(channel_id)
     end
   end
 end

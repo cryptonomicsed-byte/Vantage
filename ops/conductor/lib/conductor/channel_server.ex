@@ -59,6 +59,20 @@ defmodule Conductor.ChannelServer do
 
   def snapshot(channel_id), do: call(channel_id, :snapshot)
 
+  @doc """
+  Declare what a principal is doing in this channel.
+
+  Rejected as `{:error, :unknown_state}` rather than coerced to a default:
+  a runtime that sends a state this Conductor does not know should learn
+  that, not silently appear available while it is blocked.
+  """
+  def set_work_state(channel_id, principal_id, work_state) do
+    case Flow.parse_work_state(work_state) do
+      {:ok, parsed} -> call(channel_id, {:set_work_state, principal_id, parsed})
+      :error -> {:error, :unknown_state}
+    end
+  end
+
   defp call(channel_id, message) do
     GenServer.call(via(channel_id), message)
   catch
@@ -136,6 +150,16 @@ defmodule Conductor.ChannelServer do
     {:reply, :ok, state}
   end
 
+  def handle_call({:set_work_state, principal_id, work_state}, _from, state) do
+    {flow, effects} = Flow.set_work_state(state.flow, principal_id, work_state, now_ms())
+    state = dispatch(%{state | flow: flow, last_active: now_ms()}, effects)
+    # The backend keeps the durable copy and mirrors it to the relay as a
+    # NIP-38 status; the Conductor holds only the live one. A failure there
+    # must not take the channel down, so it is fire-and-forget.
+    backend().report_work_state(state.channel_id, principal_id, Atom.to_string(work_state))
+    {:reply, {:ok, snapshot_of(state)}, state}
+  end
+
   def handle_call(:snapshot, _from, state) do
     {:reply, {:ok, snapshot_of(state)}, state}
   end
@@ -203,7 +227,8 @@ defmodule Conductor.ChannelServer do
       type: "presence",
       channel_id: state.channel_id,
       event: Atom.to_string(event),
-      principal_id: principal_id
+      principal_id: principal_id,
+      work_state: work_state_string(state.flow, principal_id)
     })
   end
 
@@ -243,8 +268,24 @@ defmodule Conductor.ChannelServer do
       flow_mode: Atom.to_string(state.flow.mode),
       floor: Flow.floor_holder(state.flow),
       queue: Flow.queue(state.flow),
-      present: Map.keys(state.flow.presence)
+      present: Map.keys(state.flow.presence),
+      # `present` is who is connected; `states` is what each of them is
+      # doing, and `available` is the subset it is worth handing work to.
+      # Both are kept alongside `present` rather than replacing it so an
+      # older client reading the snapshot keeps working.
+      states:
+        Map.new(state.flow.presence, fn {id, meta} ->
+          {id, Atom.to_string(Map.get(meta, :work_state, :available))}
+        end),
+      available: Flow.available(state.flow)
     }
+  end
+
+  defp work_state_string(flow, principal_id) do
+    case Flow.work_state(flow, principal_id) do
+      nil -> nil
+      state -> Atom.to_string(state)
+    end
   end
 
   defp now_ms, do: System.system_time(:millisecond)

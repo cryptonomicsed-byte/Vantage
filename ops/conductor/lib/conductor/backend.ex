@@ -104,6 +104,24 @@ defmodule Conductor.Backend do
   end
 
   @doc """
+  Record a principal's declared work state.
+
+  The Conductor holds the live copy; this is the durable one, and the
+  backend is also what mirrors it onto the relay as a NIP-38 status — the
+  Conductor cannot, because it holds no signing key.
+  """
+  @spec report_work_state(integer(), integer(), String.t()) :: :ok
+  def report_work_state(channel_id, principal_id, work_state) do
+    post("/api/conductor/presence", %{
+      channel_id: channel_id,
+      principal_id: principal_id,
+      work_state: work_state
+    })
+
+    :ok
+  end
+
+  @doc """
   Resolve a client's credential to a principal for a channel.
 
   The Conductor never inspects an agent key itself — it hands the credential

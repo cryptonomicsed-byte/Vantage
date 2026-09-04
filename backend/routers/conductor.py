@@ -35,6 +35,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from .. import coordination as coord
 from ..db import get_db
+from .. import presence
 from ..deps import _parse_body
 
 logger = logging.getLogger(__name__)
@@ -196,6 +197,30 @@ async def record_violation(request: Request, _: bool = Depends(require_conductor
         )
         await db.commit()
     return {"recorded": True}
+
+
+@router.post("/presence")
+async def record_work_state(request: Request, _: bool = Depends(require_conductor)):
+    """Durably record a work state the Conductor accepted over its socket.
+
+    The Conductor validated the vocabulary already; this validates it again
+    rather than trusting the caller, because the two lists live in different
+    languages and drifting apart silently is exactly how a closed vocabulary
+    stops being closed.
+    """
+    body = await _parse_body(request)
+    channel_id = body.get("channel_id")
+    principal_id = body.get("principal_id")
+    state = (body.get("work_state") or "").strip()
+    if not channel_id or not principal_id:
+        raise HTTPException(422, "channel_id and principal_id are required")
+    if not presence.is_valid(state):
+        raise HTTPException(422, f"unknown work_state {state!r}")
+
+    await presence.set_state(
+        principal_id=int(principal_id), channel_id=int(channel_id), state=state,
+    )
+    return {"recorded": True, "state": state}
 
 
 # ── outbound: telling the Conductor what the relay saw ───────────────────────
