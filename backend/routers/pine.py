@@ -15,6 +15,7 @@ from backend.db import DB_PATH
 from backend.deps import get_agent, _parse_body
 from backend import market_sources as ms
 from ..db import get_db
+from backend.pine_validate import validate_pine, annotate
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/pine", tags=["pine"])
@@ -69,6 +70,11 @@ async def run_pine(request: Request, agent: dict = Depends(get_agent)):
     if len(script) > 8000:
         raise HTTPException(400, "script too long (max 8000 chars)")
 
+    compile_result = await validate_pine(script)
+    if not compile_result["valid"]:
+        annotated = annotate(script, compile_result["errors"])
+        raise HTTPException(422, {"error": "Pine compile error", "errors": compile_result["errors"], "annotated_source": annotated})
+
     verdict = await _review(script, agent)
     if verdict["block"]:
         raise HTTPException(403, f"Script blocked by governance: {verdict['reason']}")
@@ -100,6 +106,11 @@ async def save_indicator(request: Request, agent: dict = Depends(get_agent)):
         raise HTTPException(400, "name and script are required")
     if len(script) > 8000:
         raise HTTPException(400, "script too long (max 8000 chars)")
+
+    compile_result = await validate_pine(script)
+    if not compile_result["valid"]:
+        annotated = annotate(script, compile_result["errors"])
+        raise HTTPException(422, {"error": "Pine compile error", "errors": compile_result["errors"], "annotated_source": annotated})
 
     verdict = await _review(script, agent)
     if verdict["block"]:
@@ -430,6 +441,16 @@ plot(slowEMA, "Slow EMA", color=color.red)
 bullish = ta.crossover(fastEMA, slowEMA)
 bearish = ta.crossunder(fastEMA, slowEMA)
 bgcolor(bullish ? color.new(color.green, 90) : bearish ? color.new(color.red, 90) : na)"""
+
+    compile_result = await validate_pine(script)
+    if not compile_result["valid"]:
+        logger.warning("generate_pine: template produced invalid Pine: %s", compile_result.get("errors"))
+        return {
+            "script": script,
+            "method": "template",
+            "message": "Template generated (LLM not configured). Review before running.",
+            "compile_warning": compile_result.get("errors"),
+        }
 
     return {
         "script": script,
