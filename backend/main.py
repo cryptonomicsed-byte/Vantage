@@ -501,6 +501,8 @@ async def lifespan(app: FastAPI):
     await seed_builtin_templates()
     from .presence import init_presence_db
     await init_presence_db()
+    from .receipts import init_receipts_db
+    await init_receipts_db()
     from .coordination_join import init_join_db
     await init_join_db()
     from .routers.conductor import init_conductor_db

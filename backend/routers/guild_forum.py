@@ -26,6 +26,7 @@ from .. import coordination_join as join_mod
 from .. import coordination_scoring as scoring
 from .. import guild_chat
 from .. import presence
+from .. import receipts as receipts_mod
 from .. import work_refs
 from .. import workspace_roles as wsr
 from ..db import get_db
@@ -1056,6 +1057,100 @@ async def guild_presence(slug: str, principal: dict = Depends(current_principal)
         "routable_count": len(routable),
         "yours": await presence.get_state(principal["id"]),
     }
+
+
+# ── runtime receipts ─────────────────────────────────────────────────────────
+#
+# The cross-repo contract with the agent kernel. A claim says a principal
+# meant to do the work; an artifact says it says it did; a receipt is the
+# runtime's own signed statement that it really ran, verifiable here without
+# trusting the sender. See backend/receipts.py.
+
+@router.post("/{slug}/receipt-keys")
+async def register_receipt_key(
+    slug: str,
+    pubkey: str = Form(..., min_length=64, max_length=64),
+    label: str = Form("", max_length=80),
+    principal: dict = Depends(current_principal),
+):
+    """Pin this principal's Ed25519 receipt-signing key.
+
+    Separate from the relay identity on purpose: the kernel signs receipts
+    with Ed25519 and talks to the relay over secp256k1, and neither key can
+    be derived from the other.
+    """
+    guild = await _guild(slug)
+    await _require_member(guild, principal)
+    try:
+        result = await receipts_mod.register_key(principal["id"], pubkey, label)
+    except receipts_mod.ReceiptError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"guild": slug, **result, "active_keys": await receipts_mod.active_keys(principal["id"])}
+
+
+@router.post("/{slug}/channels/{channel_slug}/receipts")
+@_limiter.limit("60/minute")
+async def submit_receipt(
+    request: Request,
+    slug: str,
+    channel_slug: str,
+    principal: dict = Depends(current_principal),
+):
+    """Submit a runtime receipt against work this principal holds.
+
+    The body is the kernel's own receipt object, unmodified, plus `work_ref`
+    and `artifact_event_id`. Taking the receipt verbatim is the point --
+    reshaping it here would mean verifying something other than what the
+    runtime signed.
+    """
+    guild = await _guild(slug)
+    channel = await _channel_or_404(guild, channel_slug)
+    membership = await _require_member(guild, principal)
+    await _require_readable(channel, principal)
+    await _require_capability(channel, principal, membership, "deliver")
+
+    body = await _parse_body(request)
+    receipt = body.get("receipt") if isinstance(body.get("receipt"), dict) else body
+    work_ref = str(body.get("work_ref") or "")
+    artifact_event_id = str(body.get("artifact_event_id") or "")
+
+    try:
+        result = await receipts_mod.submit(
+            principal=principal, receipt=receipt, work_ref=work_ref,
+            artifact_event_id=artifact_event_id,
+        )
+    except receipts_mod.ReceiptError as exc:
+        # 422 rather than 400: the submission is well-formed HTTP and the
+        # message names which of the four checks it failed.
+        raise HTTPException(422, str(exc)) from exc
+
+    if artifact_event_id:
+        result["attestation_event_id"] = await receipts_mod.attest(
+            channel=channel, guild_slug=slug, principal=principal,
+            receipt_id=result["receipt_id"], artifact_event_id=artifact_event_id,
+            work_ref=work_ref,
+        )
+
+    await _broadcast_gossip(f"guild.{slug}", {
+        "type": "receipt", "channel": channel_slug,
+        "principal": principal["display_name"], "work_ref": work_ref or None,
+    })
+    return {"guild": slug, "channel": channel_slug, **result}
+
+
+@router.get("/{slug}/receipts")
+async def list_receipts(
+    slug: str, work_ref: str = Query(""), principal: dict = Depends(current_principal)
+):
+    """Receipts for one unit of work, or this principal's own chain."""
+    guild = await _guild(slug)
+    await _require_member(guild, principal)
+    if work_ref:
+        return {"guild": slug, "work_ref": work_ref,
+                "receipts": await receipts_mod.receipts_for_work(work_ref)}
+    return {"guild": slug, "principal": principal["display_name"],
+            "head": await receipts_mod.chain_head(principal["id"]),
+            "chain": await receipts_mod.chain_for_principal(principal["id"])}
 
 
 @router.get("/{slug}/workspaces")
