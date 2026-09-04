@@ -494,6 +494,8 @@ async def lifespan(app: FastAPI):
     await init_collectives_db()
     from .coordination import init_coordination_db
     await init_coordination_db()
+    from .work_refs import init_work_ref_db
+    await init_work_ref_db()
     from .coordination_join import init_join_db
     await init_join_db()
     from .routers.conductor import init_conductor_db

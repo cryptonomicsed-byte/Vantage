@@ -25,6 +25,7 @@ from .. import coordination as coord
 from .. import coordination_join as join_mod
 from .. import coordination_scoring as scoring
 from .. import guild_chat
+from .. import work_refs
 from ..db import get_db
 from ..deps import _parse_body, get_human_optional
 from .conductor import conductor_ws_url
@@ -452,6 +453,22 @@ async def post_channel_message(
     if msg_type not in coord.MSG_TYPES or msg_type == "system":
         raise HTTPException(422, "msg_type must be one of say, propose, claim, handoff, artifact")
 
+    # A work reference is checked before the event is signed, not after it is
+    # indexed. Publishing a claim on a task that does not exist would put an
+    # unfixable message in the log -- the relay is the log, so there is no
+    # edit -- and the old free-text field let exactly that through.
+    if work_ref:
+        parsed_ref = work_refs.parse_work_ref(work_ref)
+        if parsed_ref is None:
+            raise HTTPException(
+                422,
+                f"work_ref must be '<kind>:<id>' where kind is one of "
+                f"{', '.join(sorted(work_refs.KINDS))} — got {work_ref!r}",
+            )
+        resolved = await work_refs.resolve(work_ref)
+        if resolved is None:
+            raise HTTPException(404, f"{work_ref} does not point at anything on this instance")
+
     # A non-open channel needs the Conductor to arbitrate turns. Where one is
     # deployed the post goes through and the Conductor judges it after the
     # fact (it observes via the indexer and records a violation if the poster
@@ -519,12 +536,77 @@ async def post_channel_message(
         depth=0, root_event_id=root_event_id or event["id"],
     )
 
+    # index_event already resolved the reference and applied whatever
+    # transition it earned; read the outcome back so the caller learns that
+    # its artifact did not close the task, rather than assuming it did.
+    link = None
+    if work_ref:
+        links = await work_refs.links_for_ref(*work_refs.parse_work_ref(work_ref))
+        match = [row for row in links if row["event_id"] == event["id"]]
+        if match:
+            link = {
+                "work_ref": work_ref, "verified": bool(match[0]["verified"]),
+                "transitioned": bool(match[0]["transitioned"]), "note": match[0]["note"],
+            }
+
     return {
         "guild": slug, "channel": channel_slug, "event_id": event["id"],
         "msg_type": msg_type, "thread_root_event_id": root_event_id,
         "created_at": event["created_at"],
         "mentioned": [p["display_name"] for p in mentioned],
         "replies": replies,
+        "work_ref_link": link,
+    }
+
+
+@router.get("/work/{ref_kind}/{ref_id}")
+async def work_reference_ledger(
+    ref_kind: str, ref_id: str, principal: dict = Depends(current_principal)
+):
+    """Everything the coordination log has said about one unit of work.
+
+    This is the view that did not exist before references were typed: the
+    task row on one side, and on the other every claim and delivery that
+    named it, whichever guild or workspace they were posted in.
+    """
+    resolved = await work_refs.resolve(f"{ref_kind}:{ref_id}")
+    if resolved is None:
+        raise HTTPException(404, f"{ref_kind}:{ref_id} does not resolve on this instance")
+    links = await work_refs.links_for_ref(ref_kind, ref_id)
+    return {
+        "work_ref": resolved.work_ref,
+        "verified": resolved.verified,
+        "title": resolved.title,
+        "status": resolved.status,
+        "owner": resolved.owner,
+        "claimant": resolved.claimant,
+        "links": [
+            {
+                "event_id": row["event_id"], "link_type": row["link_type"],
+                "principal": row["display_name"], "principal_kind": row["principal_kind"],
+                "transitioned": bool(row["transitioned"]), "note": row["note"],
+                "created_at": row["created_at"],
+            }
+            for row in links
+        ],
+    }
+
+
+@router.get("/work/kinds")
+async def work_reference_kinds(principal: dict = Depends(current_principal)):
+    """What a client may put in a work_ref field, and what each kind does."""
+    return {
+        "grammar": "<kind>:<id>",
+        "kinds": [
+            {
+                "kind": spec.name,
+                "verifiable": not spec.external,
+                "claimable": spec.claimable,
+                "closeable": spec.closeable,
+                "backs": spec.table or "an object outside this instance",
+            }
+            for spec in work_refs.KINDS.values()
+        ],
     }
 
 

@@ -33,6 +33,7 @@ from .buzz_identity import (
 )
 from .buzz_registration import RELAY_WS_URL
 from .db import get_db
+from . import work_refs
 
 logger = logging.getLogger(__name__)
 
@@ -658,6 +659,13 @@ async def index_event(event: dict, channel: Optional[dict] = None) -> Optional[i
         await db.commit()
         row_id = cur.lastrowid
 
+    # The work reference is resolved *after* the message is indexed, never
+    # before: the relay accepted the event, so the message is part of the log
+    # whether or not it happened to name a task that exists. Only a new row
+    # drives a transition -- replaying the relay must not re-close anything.
+    if row_id:
+        await _link_work_ref(parsed, channel, principal, row_id)
+
     if principal_id is not None:
         async with get_db() as db:
             await db.execute(
@@ -665,6 +673,32 @@ async def index_event(event: dict, channel: Optional[dict] = None) -> Optional[i
             )
             await db.commit()
     return row_id or None
+
+
+async def _link_work_ref(parsed: dict, channel: dict, principal: Optional[dict],
+                         row_id: int) -> None:
+    """Bind a claim/artifact/proposal message to the task it names.
+
+    Isolated behind its own try: a task system this instance never enabled,
+    or a reference to a row that has since been deleted, must not stop a
+    message from being indexed. The message is the log; the link is an index
+    on top of it.
+    """
+    link_type = parsed["msg_type"]
+    if link_type not in work_refs.LINK_TYPES or not parsed.get("work_ref"):
+        return
+    try:
+        result = await work_refs.record_link(
+            event_id=parsed["event_id"], channel_id=channel["id"], principal=principal,
+            link_type=link_type, raw_work_ref=parsed["work_ref"],
+        )
+    except Exception as exc:
+        logger.warning("coordination: work_ref link failed for %s: %s",
+                       parsed["event_id"][:8], exc)
+        return
+    if result and result.get("transitioned"):
+        logger.info("coordination: %s %s by %s", link_type, result["work_ref"],
+                    (principal or {}).get("display_name", "?"))
 
 
 async def _is_system_publisher(pubkey: str) -> bool:

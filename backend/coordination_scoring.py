@@ -34,6 +34,7 @@ W_MESSAGE = 4.0        # per log2(1 + count) -- participation, damped
 W_PROPOSAL = 12.0      # a proposal others engaged with
 W_WORK_CLOSED = 40.0   # claimed work that actually shipped
 W_ARTIFACT = 25.0      # a produced artifact with a reference
+W_VERIFIED_CLOSE = 55.0   # an artifact that actually closed a real task row
 W_VIOLATION = 15.0     # posting out of turn
 W_REPORT_ACTIONED = 60.0  # a moderation report upheld against you
 
@@ -150,6 +151,28 @@ async def collect_components(guild_id: int) -> dict[int, dict]:
         for row in await cur.fetchall():
             bucket(row["principal_id"])["work_closed"] = row["n"]
 
+        # The same thing, but proven. `work_closed` above pairs two messages
+        # a principal wrote itself, which is cheap; this counts references
+        # that resolved to a real row and whose state transition the
+        # resolver actually applied. A task the marketplace never saw close
+        # does not appear here, and that is the point.
+        try:
+            cur = await db.execute(
+                f"""SELECT l.principal_id, COUNT(DISTINCT l.ref_kind || ':' || l.ref_id) AS n
+                      FROM work_ref_links l
+                      JOIN channel_messages m ON m.event_id = l.event_id
+                     WHERE m.channel_id IN ({placeholders})
+                       AND l.link_type='artifact' AND l.verified=1 AND l.transitioned=1
+                       AND l.principal_id IS NOT NULL
+                     GROUP BY l.principal_id""",
+                tuple(channels),
+            )
+            for row in await cur.fetchall():
+                bucket(row["principal_id"])["verified_closes"] = row["n"]
+        except Exception as exc:
+            # An instance that has not migrated yet simply scores without it.
+            logger.debug("scoring: work_ref_links unavailable: %s", exc)
+
         # Flow violations recorded by the Conductor.
         try:
             cur = await db.execute(
@@ -188,6 +211,7 @@ def score_of(components: dict) -> float:
         W_MESSAGE * math.log2(1 + components.get("messages", 0))
         + W_PROPOSAL * components.get("proposals_engaged", 0)
         + W_WORK_CLOSED * components.get("work_closed", 0)
+        + W_VERIFIED_CLOSE * components.get("verified_closes", 0)
         + W_ARTIFACT * components.get("artifacts", 0)
         - W_VIOLATION * components.get("violations", 0)
         - W_REPORT_ACTIONED * components.get("reports_actioned", 0)
