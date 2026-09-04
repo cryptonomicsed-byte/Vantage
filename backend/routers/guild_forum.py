@@ -705,3 +705,97 @@ async def chat_commands(request: Request, principal: dict = Depends(current_prin
         "count": len(commands),
         "excluded": list(guild_chat.BLOCKED_COMMAND_PREFIXES),
     }
+
+
+# ── workspace channels: binding to a code repository ─────────────────────────
+
+@router.post("/{slug}/channels/{channel_slug}/repo")
+async def bind_repo(
+    slug: str,
+    channel_slug: str,
+    repo_owner: str = Form(..., max_length=100),
+    repo_name: str = Form(..., max_length=100),
+    repo_branch: str = Form("main", max_length=100),
+    principal: dict = Depends(current_principal),
+):
+    """Bind a workspace channel to a Gitea repository.
+
+    This is what separates a workspace from an ordinary room: the
+    conversation, the sandbox and the repository are the same place, so
+    "clone it, run the tests, change a file, push" happens where the
+    discussion is rather than in a different tab.
+
+    Only workspace channels can be bound — a forum channel with a repo
+    attached would imply an execution surface it does not have.
+    """
+    guild = await _guild(slug)
+    membership = await _require_member(guild, principal)
+    if membership["role"] not in _CHANNEL_ADMIN_ROLES:
+        raise HTTPException(403, "Only guild staff can bind a repository")
+
+    channel = await _channel_or_404(guild, channel_slug)
+    if channel["channel_kind"] != "workspace":
+        raise HTTPException(
+            422,
+            "Only a workspace channel can be bound to a repository. Create one with "
+            "channel_kind=workspace, or convert this channel first.",
+        )
+
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE guild_channels SET repo_owner=?, repo_name=?, repo_branch=? WHERE id=?",
+            (repo_owner.strip(), repo_name.strip(), (repo_branch or "main").strip(), channel["id"]),
+        )
+        await db.commit()
+
+    await _broadcast_gossip(f"guild.{slug}", {
+        "type": "repo_bound", "channel": channel_slug,
+        "repo": f"{repo_owner}/{repo_name}", "branch": repo_branch,
+    })
+    return {
+        "guild": slug, "channel": channel_slug,
+        "repo": f"{repo_owner}/{repo_name}", "branch": repo_branch,
+        "sandbox_bound": bool(channel["sandbox_bound"]),
+    }
+
+
+@router.delete("/{slug}/channels/{channel_slug}/repo")
+async def unbind_repo(slug: str, channel_slug: str, principal: dict = Depends(current_principal)):
+    """Detach the repository. The channel and its history stay."""
+    guild = await _guild(slug)
+    membership = await _require_member(guild, principal)
+    if membership["role"] not in _CHANNEL_ADMIN_ROLES:
+        raise HTTPException(403, "Only guild staff can unbind a repository")
+    channel = await _channel_or_404(guild, channel_slug)
+
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE guild_channels SET repo_owner=NULL, repo_name=NULL WHERE id=?", (channel["id"],)
+        )
+        await db.commit()
+    return {"guild": slug, "channel": channel_slug, "repo": None}
+
+
+@router.get("/{slug}/workspaces")
+async def list_workspaces(slug: str, principal: Optional[dict] = Depends(optional_principal)):
+    """Every workspace channel in this guild, with its repository binding.
+
+    The code surface reads this rather than the full channel tree: a code
+    collaborator wants the rooms that have a repo, not every room.
+    """
+    guild = await _guild(slug)
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """SELECT * FROM guild_channels
+                WHERE guild_id=? AND channel_kind='workspace'
+                ORDER BY created_at""",
+            (guild["id"],),
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+
+    visible = [r for r in rows if await coord.can_read_channel(r, principal)]
+    for row in visible:
+        owner, name = row.get("repo_owner"), row.get("repo_name")
+        row["repo"] = f"{owner}/{name}" if owner and name else None
+    return {"guild": slug, "workspaces": visible, "count": len(visible)}

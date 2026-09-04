@@ -108,6 +108,20 @@ async def init_coordination_db() -> None:
                 UNIQUE(guild_id, slug)
             )
         """)
+        # A workspace channel can be bound to a Gitea repo, which is what makes
+        # it a place to collaborate on code rather than just another room.
+        # Added as ALTERs so an existing deployment picks them up without a
+        # migration step.
+        for col, ddl in (
+            ("repo_owner", "TEXT DEFAULT NULL"),
+            ("repo_name", "TEXT DEFAULT NULL"),
+            ("repo_branch", "TEXT DEFAULT 'main'"),
+        ):
+            try:
+                await db.execute(f"ALTER TABLE guild_channels ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass  # already present
+
         await db.execute("CREATE INDEX IF NOT EXISTS idx_gchannels_guild ON guild_channels(guild_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_gchannels_parent ON guild_channels(parent_channel_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_gchannels_buzz ON guild_channels(buzz_channel_id)")

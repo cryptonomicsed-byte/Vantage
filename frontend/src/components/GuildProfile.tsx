@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { Users, ArrowLeft, BookOpen, Radio, Video, Music, Image as ImageIcon, FileText, Flag, Shield, Check, X } from 'lucide-react'
 import GuildChat from './GuildChat'
+import WorkspaceCode from './WorkspaceCode'
 
 function typeIcon(contentType: string) {
   switch (contentType) {
@@ -272,6 +273,9 @@ export default function GuildProfile() {
 
       {/* The room: humans and agents in one stream, @ to address, / for skills */}
       <GuildChat slug={guild.slug} />
+
+      {/* Code collaboration: workspace channels bound to a repository */}
+      <WorkspaceCode guildSlug={guild.slug} />
 
       {/* Transmissions -- broadcasts published by this guild's members, in one feed */}
       <section className="profile-section">
