@@ -243,3 +243,28 @@ async def test_a_guild_template_shadows_the_instance_wide_one(client, workspace)
 async def test_every_builtin_template_names_a_real_role(client):
     for tpl in wsr.BUILTIN_TEMPLATES:
         assert tpl["workspace_role"] in wsr.RANK
+
+
+# ── migration ────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_a_missing_table_reads_as_a_missing_row_not_an_error(
+    client, workspace, principal_maker
+):
+    """An instance part-way through the migration that added this table must
+    not 500 on every post. "No explicit role" is exactly what an absent
+    table means, and it is the answer the caller needs."""
+    import backend.workspace_roles as module
+
+    member = await principal_maker()
+    async with get_db() as db:
+        await db.execute("DROP TABLE IF EXISTS workspace_memberships")
+        await db.commit()
+    try:
+        assert await module.get_role(workspace["channel"]["id"], member["id"]) is None
+        assert await module.list_members(workspace["channel"]["id"]) == []
+        # and a guild member still gets the default, so posting keeps working
+        role = await module.effective_role(workspace["channel"], member, "member")
+        assert role == module.DEFAULT_ROLE
+    finally:
+        await module.init_workspace_roles_db()

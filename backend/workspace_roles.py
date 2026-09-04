@@ -128,13 +128,24 @@ async def init_workspace_roles_db() -> None:
 # ── memberships ──────────────────────────────────────────────────────────────
 
 async def get_role(channel_id: int, principal_id: int) -> Optional[str]:
+    """The explicit role, or None where there is no row.
+
+    A missing table is treated as a missing row rather than an error. An
+    instance part-way through the migration that added this table would
+    otherwise 500 on every post -- and the answer it needs, "this principal
+    has no explicit role", is exactly what an absent table means.
+    """
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
-        cur = await db.execute(
-            "SELECT role FROM workspace_memberships WHERE channel_id=? AND principal_id=?",
-            (channel_id, principal_id),
-        )
-        row = await cur.fetchone()
+        try:
+            cur = await db.execute(
+                "SELECT role FROM workspace_memberships WHERE channel_id=? AND principal_id=?",
+                (channel_id, principal_id),
+            )
+            row = await cur.fetchone()
+        except Exception as exc:
+            logger.debug("workspace_roles: memberships unavailable: %s", exc)
+            return None
     return dict(row)["role"] if row else None
 
 
@@ -207,16 +218,19 @@ async def remove_role(channel_id: int, principal_id: int) -> bool:
 async def list_members(channel_id: int) -> list[dict]:
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
-        cur = await db.execute(
-            """SELECT w.*, p.display_name, p.kind AS principal_kind, p.framework,
-                      p.pubkey, p.key_custody
-                 FROM workspace_memberships w
-                 JOIN principals p ON p.id = w.principal_id
-                WHERE w.channel_id=?
-                ORDER BY w.role DESC, p.display_name""",
-            (channel_id,),
-        )
-        rows = [dict(r) for r in await cur.fetchall()]
+        try:
+            cur = await db.execute(
+                """SELECT w.*, p.display_name, p.kind AS principal_kind, p.framework,
+                          p.pubkey, p.key_custody
+                     FROM workspace_memberships w
+                     JOIN principals p ON p.id = w.principal_id
+                    WHERE w.channel_id=?""",
+                (channel_id,),
+            )
+            rows = [dict(r) for r in await cur.fetchall()]
+        except Exception as exc:
+            logger.debug("workspace_roles: memberships unavailable: %s", exc)
+            return []
     for row in rows:
         row["capabilities"] = capabilities_of(row["role"])
     # Sort by actual rank, not by the string -- 'observer' > 'lead'

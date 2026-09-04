@@ -25,6 +25,7 @@ from .. import coordination as coord
 from .. import coordination_join as join_mod
 from .. import coordination_scoring as scoring
 from .. import guild_chat
+from .. import channel_transport
 from .. import presence
 from .. import receipts as receipts_mod
 from .. import work_refs
@@ -599,6 +600,26 @@ async def work_reference_ledger(
                 "created_at": row["created_at"],
             }
             for row in links
+        ],
+    }
+
+
+@router.get("/transports")
+async def list_transports(principal: dict = Depends(current_principal)):
+    """What ways a message can travel on this instance, and which of them
+    have actually been proven end to end.
+
+    `proven` is the field that matters: an unproven transport is one nobody
+    has run a real round trip over, and reading this is how a client learns
+    that before depending on it.
+    """
+    infos = channel_transport.available()
+    return {
+        "default": channel_transport.default_name(),
+        "transports": [
+            {"name": i.name, "can_publish": i.can_publish, "can_receive": i.can_receive,
+             "configured": i.configured, "proven": i.proven, "detail": i.detail}
+            for i in infos
         ],
     }
 
