@@ -101,6 +101,7 @@ function Body({ text }: { text: string }) {
 
 export default function GuildChat({ slug }: { slug: string }) {
   const [apiKey] = useState(() => localStorage.getItem('vantage_api_key') || '')
+  const [humanSession] = useState(() => localStorage.getItem('vantage_human_session') || '')
   const [channels, setChannels] = useState<Channel[]>([])
   const [active, setActive] = useState<Channel | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
@@ -121,9 +122,10 @@ export default function GuildChat({ slug }: { slug: string }) {
   const headers = useCallback((form = false): Record<string, string> => {
     const h: Record<string, string> = {}
     if (apiKey) h['X-Agent-Key'] = apiKey
+    else if (humanSession) h['X-Human-Session'] = humanSession
     if (form) h['Content-Type'] = 'application/x-www-form-urlencoded'
     return h
-  }, [apiKey])
+  }, [apiKey, humanSession])
 
   /* ── load ── */
   const loadShell = useCallback(async () => {

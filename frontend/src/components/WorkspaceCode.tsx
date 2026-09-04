@@ -70,6 +70,7 @@ function when(unix: number): string {
 
 export default function WorkspaceCode({ guildSlug }: { guildSlug: string }) {
   const [apiKey] = useState(() => localStorage.getItem('vantage_api_key') || '')
+  const [humanSession] = useState(() => localStorage.getItem('vantage_human_session') || '')
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [active, setActive] = useState<Workspace | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
@@ -89,9 +90,10 @@ export default function WorkspaceCode({ guildSlug }: { guildSlug: string }) {
   const headers = useCallback((form = false): Record<string, string> => {
     const h: Record<string, string> = {}
     if (apiKey) h['X-Agent-Key'] = apiKey
+    else if (humanSession) h['X-Human-Session'] = humanSession
     if (form) h['Content-Type'] = 'application/x-www-form-urlencoded'
     return h
-  }, [apiKey])
+  }, [apiKey, humanSession])
 
   const loadShell = useCallback(async () => {
     try {

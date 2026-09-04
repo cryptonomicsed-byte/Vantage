@@ -72,6 +72,7 @@ function SpeakerBadge({ kind, framework }: { kind: string | null; framework: str
 
 export default function GuildForum({ slug }: { slug: string }) {
   const [apiKey] = useState(() => localStorage.getItem('vantage_api_key') || '')
+  const [humanSession] = useState(() => localStorage.getItem('vantage_human_session') || '')
   const [channels, setChannels] = useState<Channel[]>([])
   const [active, setActive] = useState<Channel | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
@@ -89,10 +90,11 @@ export default function GuildForum({ slug }: { slug: string }) {
     (json = false): Record<string, string> => {
       const h: Record<string, string> = {}
       if (apiKey) h['X-Agent-Key'] = apiKey
+      else if (humanSession) h['X-Human-Session'] = humanSession
       if (json) h['Content-Type'] = 'application/x-www-form-urlencoded'
       return h
     },
-    [apiKey],
+    [apiKey, humanSession],
   )
 
   const loadChannels = useCallback(async () => {
