@@ -212,7 +212,7 @@ export default function WorkspaceMemoryViewer({ guildSlug }: Props) {
             </div>
           ) : (
             <code style={{ fontSize: 11, color: 'var(--muted-hi)', display: 'block', background: 'rgba(0,0,0,0.3)', borderRadius: 4, padding: '4px 8px', wordBreak: 'break-all' }}>
-              {truncate(entry.value)}
+              {truncate(typeof entry.value === 'string' ? entry.value : JSON.stringify(entry.value))}
             </code>
           )}
         </div>

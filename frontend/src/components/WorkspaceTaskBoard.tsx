@@ -320,7 +320,7 @@ export default function WorkspaceTaskBoard({ guildSlug }: Props) {
               Created by <strong>{selectedTask.created_by_name}</strong>
               {selectedTask.claimed_by_name && <> · Claimed by <strong>{selectedTask.claimed_by_name}</strong></>}
             </div>
-            {taskDetail && taskDetail.artifacts.length > 0 && (
+            {taskDetail && (taskDetail.artifacts?.length ?? 0) > 0 && (
               <>
                 <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', color: 'var(--muted)', marginBottom: 8 }}>Artifacts</div>
                 {taskDetail.artifacts.map(a => (
