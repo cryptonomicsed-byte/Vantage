@@ -14,6 +14,7 @@ export default defineConfig({
       'lightweight-charts': path.resolve(__dirname, 'src/stubs/lightweight-charts.js'),
       'react-markdown': path.resolve(__dirname, 'src/stubs/react-markdown.jsx'),
       'remark-gfm': path.resolve(__dirname, 'src/stubs/remark-gfm.js'),
+      'video.js/dist/video-js.css': path.resolve(__dirname, 'src/stubs/video-js.css'),
       'qrcode': path.resolve(__dirname, 'src/stubs/qrcode.js'),
       '@videojs/http-streaming': path.resolve(__dirname, 'src/stubs/videojs-http-streaming.js'),
     },
