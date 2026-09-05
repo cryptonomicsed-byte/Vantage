@@ -637,12 +637,35 @@ const COSMETIC_NAMESPACES = new Set([
   'scale', 'font', 'text', 'xloc', 'yloc', 'extend', 'display', 'format',
 ])
 
+
+// Pine v5/v6 declarations carry an optional storage qualifier and an optional
+// type before the name: `var`, `varip`, `const`, `simple`, `series`, and
+// `int`/`float`/`bool`/`string`/`color`/... This engine is untyped and
+// evaluates whole series at once, so the annotations carry no information it
+// can use, and it strips them to reach the assignment underneath.
+//
+// Stripping `var` is safe here *because* `:=` reassignment is unsupported.
+// `var x = expr` differs from `x = expr` only when x is later reassigned — the
+// accumulator pattern — and any script doing that fails on the `:=` line
+// instead. So a script either behaves identically or refuses to run; it never
+// runs and quietly produces the wrong numbers. Add `:=` and this comment stops
+// being true.
+const DECL_PREFIX = /^(?:(?:var|varip)\s+)?(?:(?:simple|series|const)\s+)?(?:(?:int|float|bool|string|color|line|label|box|table)\s+)?(?=[A-Za-z_][A-Za-z0-9_]*\s*=(?!=))/
+
+function stripDeclaration(line) {
+  return line.replace(DECL_PREFIX, '')
+}
+
 // ── tokenizer ──
 function tokenize(src) {
   const toks = []
   // Multi-char operators must be tried before the single-char class so
   // ">=" doesn't get split into ">" + "=".
-  const re = /\s+|\/\/[^\n]*|("(?:[^"\\]|\\.)*")|([A-Za-z_][A-Za-z0-9_.]*)|(\d+\.?\d*)|(>=|<=|==|!=|[()[\]+\-*/,=?:<>])/g
+  // Pine accepts both quote styles for strings, and real-world scripts use
+  // both freely. Handling only double quotes made every script with a
+  // single-quoted title unparseable — 13 of the 15 v5/v6 scripts in a
+  // 210-script public corpus failed on exactly this and nothing else.
+  const re = /\s+|\/\/[^\n]*|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|([A-Za-z_][A-Za-z0-9_.]*)|(\d+\.?\d*)|(>=|<=|==|!=|[()[\]+\-*/,=?:<>])/g
   let m, last = 0
   while ((m = re.exec(src)) !== null) {
     if (m.index !== last) throw new Error('Unexpected character: ' + src.slice(last, m.index))
@@ -731,6 +754,18 @@ function evaluatePine(script, candles) {
       return { __tuple: [macdLine, signalLine, hist] }
     },
     'input.int': (a) => a[0],
+    // Pine's source picker. The chosen series IS the first argument, so
+    // returning it is the whole implementation.
+    'input.source': (a) => a[0],
+    // nz(x) / nz(x, replacement): substitute for na. Without it any script
+    // guarding an indicator's warm-up period fails, which is most of them.
+    'nz': (a) => {
+      const fill = a[1] == null ? 0 : a[1]
+      const src = a[0]
+      if (!Array.isArray(src)) return src == null ? fill : src
+      const rep = Array.isArray(fill) ? fill : null
+      return src.map((v, i) => (v == null || !isFinite(v)) ? (rep ? rep[i] : fill) : v)
+    },
     'input.float': (a) => a[0],
     'input.bool': (a) => a[0],
     'input.string': (a) => a[0],
@@ -835,7 +870,20 @@ function evaluatePine(script, candles) {
         if (peek() && peek().v === '(') {
           next() // (
           const args = []
-          if (peek() && peek().v !== ')') { args.push(ternaryExpr()); while (peek() && peek().v === ',') { next(); args.push(ternaryExpr()) } }
+          // Pine allows named arguments — `input.int(20, "Len", minval=1)`.
+          // The name is dropped and the value parsed positionally: every
+          // function here either ignores extra arguments or reads only the
+          // ones that come before the named block, so the name carries no
+          // information this engine acts on. Without this, `minval` parsed as
+          // an identifier and the whole call failed as an unknown one.
+          const parseArg = () => {
+            const a = toks[pos], b = toks[pos + 1]
+            // `=` is its own token; `==` tokenizes separately, so there is no
+            // ambiguity with a comparison here.
+            if (a && a.t === 'id' && b && b.t === 'op' && b.v === '=') { pos += 2 }
+            return ternaryExpr()
+          }
+          if (peek() && peek().v !== ')') { args.push(parseArg()); while (peek() && peek().v === ',') { next(); args.push(parseArg()) } }
           const c = next(); if (!c || c.v !== ')') throw new Error('Expected ) after args')
           const fn = FUNCS[tk.v]
           if (fn) return fn(args)
@@ -895,8 +943,9 @@ function evaluatePine(script, candles) {
   const _srcLines = script.split('\n')
   for (let _ln = 0; _ln < _srcLines.length; _ln++) {
     const rawLine = _srcLines[_ln]
-    const line = rawLine.replace(/\/\/.*$/, '').trim()
+    let line = rawLine.replace(/\/\/.*$/, '').trim()
     if (!line) continue
+    line = stripDeclaration(line)
     try {
     const toks = tokenize(line)
     if (toks.length === 0) continue
