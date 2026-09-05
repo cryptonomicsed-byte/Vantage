@@ -619,8 +619,8 @@ function WorkspaceFederation({
     },
     {
       scope: 'DECENTRALIZED', label: 'Freenet', addr: '',
-      statusDot: freenetStatus === 'active' ? 'green' : 'dim',
-      statusText: freenetStatus === 'active' ? 'active' : 'Phase F3 (not yet active)',
+      statusDot: freenetStatus === 'connected' ? 'green' : 'dim',
+      statusText: freenetStatus === 'connected' ? 'connected' : `Phase F1 (${freenetStatus})`,
     },
     { scope: 'CODE', label: 'Gitea', addr: 'localhost:3001', statusDot: 'green', statusText: 'localhost:3001' },
     { scope: 'SOVEREIGN', label: 'Ọmọ Kọ́dà2', addr: 'localhost:7777', statusDot: 'green', statusText: 'localhost:7777' },

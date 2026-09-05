@@ -608,3 +608,155 @@ async def resolve_guild_report(slug: str, report_id: int, request: Request, agen
         await db.commit()
 
     return {"ok": True, "status": new_status, "action": action}
+
+
+# ── Guild-level artifact / receipt / activity endpoints ───────────────────────
+# These aggregate across all tasks in a guild for the WorkspaceShell tabs.
+
+@router.get("/{slug}/artifacts", summary="List all guild artifacts")
+async def list_guild_artifacts(
+    slug: str,
+    limit: int = Query(50, ge=1, le=200),
+    agent: dict = Depends(get_agent),
+):
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id FROM guilds WHERE slug=?", (slug,)
+        ) as cur:
+            g = await cur.fetchone()
+    if not g:
+        raise HTTPException(404, "Guild not found")
+    guild_id = g["id"]
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT ga.id AS artifact_id, ga.task_id, ga.agent_id, ga.agent_name,
+                      ga.kind AS type, ga.title, ga.content_text, ga.content_hash AS hash,
+                      ga.status, ga.created_at
+               FROM guild_artifacts ga
+               WHERE ga.guild_id=?
+               ORDER BY ga.created_at DESC LIMIT ?""",
+            (guild_id, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+    return {"artifacts": [dict(r) for r in rows]}
+
+
+@router.get("/{slug}/receipts", summary="List all guild execution receipts")
+async def list_guild_receipts(
+    slug: str,
+    limit: int = Query(50, ge=1, le=200),
+    agent: dict = Depends(get_agent),
+):
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id FROM guilds WHERE slug=?", (slug,)
+        ) as cur:
+            g = await cur.fetchone()
+    if not g:
+        raise HTTPException(404, "Guild not found")
+    guild_id = g["id"]
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        # Check if sui columns exist yet (added via ALTER TABLE at runtime)
+        try:
+            async with db.execute(
+                """SELECT ger.id AS receipt_id, ger.task_id, ger.agent_id,
+                          a.name AS agent_name, ger.artifact_id,
+                          ger.verified, ger.created_at,
+                          ger.sui_tx_digest, ger.settled_at
+                   FROM guild_execution_receipts ger
+                   JOIN guild_artifacts ga ON ga.id=ger.artifact_id
+                   LEFT JOIN agents a ON a.id=ger.agent_id
+                   WHERE ga.guild_id=?
+                   ORDER BY ger.created_at DESC LIMIT ?""",
+                (guild_id, limit),
+            ) as cur:
+                rows = await cur.fetchall()
+        except Exception:
+            # Fallback without sui columns if migration hasn't run yet
+            async with db.execute(
+                """SELECT ger.id AS receipt_id, ger.task_id, ger.agent_id,
+                          a.name AS agent_name, ger.artifact_id,
+                          ger.verified, ger.created_at
+                   FROM guild_execution_receipts ger
+                   JOIN guild_artifacts ga ON ga.id=ger.artifact_id
+                   LEFT JOIN agents a ON a.id=ger.agent_id
+                   WHERE ga.guild_id=?
+                   ORDER BY ger.created_at DESC LIMIT ?""",
+                (guild_id, limit),
+            ) as cur:
+                rows = await cur.fetchall()
+    return {"receipts": [dict(r) for r in rows]}
+
+
+@router.get("/{slug}/activity", summary="Guild activity feed")
+async def list_guild_activity(
+    slug: str,
+    limit: int = Query(50, ge=1, le=200),
+    agent: dict = Depends(get_agent),
+):
+    """Merged activity stream: task events + artifact submissions + receipt attachments."""
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id FROM guilds WHERE slug=?", (slug,)
+        ) as cur:
+            g = await cur.fetchone()
+    if not g:
+        raise HTTPException(404, "Guild not found")
+    guild_id = g["id"]
+
+    events: list[dict] = []
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+
+        # Task claim/status changes
+        async with db.execute(
+            """SELECT gtc.created_at, gtc.action AS event_type,
+                      gtc.agent_name, gt.title AS subject, gtc.task_id AS entity_id
+               FROM guild_task_claims gtc
+               JOIN guild_tasks gt ON gt.id=gtc.task_id
+               WHERE gt.guild_id=?
+               ORDER BY gtc.created_at DESC LIMIT ?""",
+            (guild_id, limit),
+        ) as cur:
+            for r in await cur.fetchall():
+                d = dict(r)
+                d["category"] = "task"
+                events.append(d)
+
+        # Artifact submissions
+        async with db.execute(
+            """SELECT created_at, 'artifact_submitted' AS event_type,
+                      agent_name, title AS subject, id AS entity_id
+               FROM guild_artifacts WHERE guild_id=?
+               ORDER BY created_at DESC LIMIT ?""",
+            (guild_id, limit),
+        ) as cur:
+            for r in await cur.fetchall():
+                d = dict(r)
+                d["category"] = "artifact"
+                events.append(d)
+
+        # Receipt attachments
+        async with db.execute(
+            """SELECT ger.created_at, 'receipt_attached' AS event_type,
+                      a.name AS agent_name, gt.title AS subject, ger.id AS entity_id
+               FROM guild_execution_receipts ger
+               JOIN guild_artifacts ga ON ga.id=ger.artifact_id
+               JOIN guild_tasks gt ON gt.id=ger.task_id
+               LEFT JOIN agents a ON a.id=ger.agent_id
+               WHERE ga.guild_id=?
+               ORDER BY ger.created_at DESC LIMIT ?""",
+            (guild_id, limit),
+        ) as cur:
+            for r in await cur.fetchall():
+                d = dict(r)
+                d["category"] = "receipt"
+                events.append(d)
+
+    events.sort(key=lambda e: e.get("created_at", ""), reverse=True)
+    return {"events": events[:limit]}
