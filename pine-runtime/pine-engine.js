@@ -133,14 +133,20 @@ function rsi(src, len) {
   }
   return out
 }
-function stdev(src, len) {
+// Population variance (divide by len), matching what stdev already computed.
+// stdev is now defined as its square root rather than repeating the loop, so
+// the two cannot drift apart.
+function variance(src, len) {
   const out = new Array(src.length).fill(null)
   for (let i = len - 1; i < src.length; i++) {
     let m = 0; for (let j = i - len + 1; j <= i; j++) m += src[j]; m /= len
     let v = 0; for (let j = i - len + 1; j <= i; j++) v += (src[j] - m) ** 2
-    out[i] = Math.sqrt(v / len)
+    out[i] = v / len
   }
   return out
+}
+function stdev(src, len) {
+  return variance(src, len).map((v) => (v == null ? null : Math.sqrt(v)))
 }
 function rolling(src, len, fn) {
   const out = new Array(src.length).fill(null)
@@ -656,6 +662,53 @@ function stripDeclaration(line) {
   return line.replace(DECL_PREFIX, '')
 }
 
+
+// Pine lets a call span several lines while its parentheses are open, and
+// real scripts use that constantly for long argument lists. The evaluator
+// works one statement at a time, so continuation lines are joined before
+// anything tries to parse them.
+//
+// Depth is counted outside string literals: a bracket inside a title like
+// "Length (bars)" is text, not structure, and counting it would swallow the
+// following line into the statement.
+function bracketDelta(line) {
+  let depth = 0, quote = null
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]
+    if (quote) {
+      if (c === '\\') { i++; continue }
+      if (c === quote) quote = null
+      continue
+    }
+    if (c === '"' || c === "'") { quote = c; continue }
+    if (c === '(' || c === '[') depth++
+    else if (c === ')' || c === ']') depth--
+  }
+  return depth
+}
+
+
+// Lift a scalar function over a series (or a plain number), keeping null as
+// null. Silently turning a warm-up null into 0 would draw a real line through
+// a period where the indicator has no value.
+function lift1(a, fn) {
+  if (!Array.isArray(a)) return a == null ? null : fn(a)
+  return a.map((v) => (v == null || !isFinite(v) ? null : fn(v)))
+}
+
+// Same, for functions of several arguments where any argument may be a series.
+function liftN(args, fn) {
+  const n = args.reduce((m, a) => (Array.isArray(a) ? Math.max(m, a.length) : m), 0)
+  if (n === 0) return args.some((a) => a == null) ? null : fn(args)
+  const out = new Array(n).fill(null)
+  for (let i = 0; i < n; i++) {
+    const xs = args.map((a) => (Array.isArray(a) ? a[i] : a))
+    if (xs.some((v) => v == null || typeof v !== 'number' || !isFinite(v))) continue
+    out[i] = fn(xs)
+  }
+  return out
+}
+
 // ── tokenizer ──
 function tokenize(src) {
   const toks = []
@@ -665,16 +718,20 @@ function tokenize(src) {
   // both freely. Handling only double quotes made every script with a
   // single-quoted title unparseable — 13 of the 15 v5/v6 scripts in a
   // 210-script public corpus failed on exactly this and nothing else.
-  const re = /\s+|\/\/[^\n]*|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|([A-Za-z_][A-Za-z0-9_.]*)|(\d+\.?\d*)|(>=|<=|==|!=|[()[\]+\-*/,=?:<>])/g
+  // `#RRGGBB` / `#RRGGBBAA` literals are colour, i.e. cosmetic. They tokenize
+  // as strings so they can be passed around and ignored, exactly like the
+  // color.* namespace, rather than stopping the parse on '#'.
+  const re = /\s+|\/\/[^\n]*|(#[0-9a-fA-F]{6,8})|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|([A-Za-z_][A-Za-z0-9_.]*)|(\d+\.?\d*)|(>=|<=|==|!=|[()[\]+\-*/,=?:<>])/g
   let m, last = 0
   while ((m = re.exec(src)) !== null) {
     if (m.index !== last) throw new Error('Unexpected character: ' + src.slice(last, m.index))
     last = re.lastIndex
     if (m[0].trim() === '' || m[0].startsWith('//')) continue
-    if (m[1]) toks.push({ t: 'str', v: m[1].slice(1, -1) })
-    else if (m[2]) toks.push({ t: 'id', v: m[2] })
-    else if (m[3]) toks.push({ t: 'num', v: parseFloat(m[3]) })
-    else toks.push({ t: 'op', v: m[4] })
+    if (m[1]) toks.push({ t: 'str', v: m[1] })
+    else if (m[2]) toks.push({ t: 'str', v: m[2].slice(1, -1) })
+    else if (m[3]) toks.push({ t: 'id', v: m[3] })
+    else if (m[4]) toks.push({ t: 'num', v: parseFloat(m[4]) })
+    else toks.push({ t: 'op', v: m[5] })
   }
   if (last !== src.length) throw new Error('Unexpected character near: ' + src.slice(last))
   return toks
@@ -739,6 +796,22 @@ function evaluatePine(script, candles) {
     'ta.pivothigh': (a) => pivot(a[0], int(a[1]), int(a[2]), true),
     'ta.pivotlow': (a) => pivot(a[0], int(a[1]), int(a[2]), false),
     'ta.rsi': (a) => rsi(a[0], int(a[1])),
+    // Pine's math namespace. Each lifts a scalar operation over a series,
+    // preserving null so a warm-up gap stays a gap rather than becoming 0.
+    'math.abs': (a) => lift1(a[0], Math.abs),
+    'math.sqrt': (a) => lift1(a[0], Math.sqrt),
+    'math.log': (a) => lift1(a[0], Math.log),
+    'math.log10': (a) => lift1(a[0], Math.log10),
+    'math.exp': (a) => lift1(a[0], Math.exp),
+    'math.sign': (a) => lift1(a[0], Math.sign),
+    'math.floor': (a) => lift1(a[0], Math.floor),
+    'math.ceil': (a) => lift1(a[0], Math.ceil),
+    'math.round': (a) => lift1(a[0], Math.round),
+    'math.max': (a) => liftN(a, (xs) => Math.max(...xs)),
+    'math.min': (a) => liftN(a, (xs) => Math.min(...xs)),
+    'math.pow': (a) => liftN(a, (xs) => Math.pow(xs[0], xs[1])),
+    'math.avg': (a) => liftN(a, (xs) => xs.reduce((p, c) => p + c, 0) / xs.length),
+    'ta.variance': (a) => variance(a[0], int(a[1])),
     'ta.stdev': (a) => stdev(a[0], int(a[1])),
     'ta.highest': (a) => rolling(a[0], int(a[1]), (w) => Math.max(...w)),
     'ta.lowest': (a) => rolling(a[0], int(a[1]), (w) => Math.min(...w)),
@@ -945,6 +1018,19 @@ function evaluatePine(script, candles) {
     const rawLine = _srcLines[_ln]
     let line = rawLine.replace(/\/\/.*$/, '').trim()
     if (!line) continue
+
+    // Join continuation lines while brackets stay open. The error line stays
+    // the statement's first line, which is where an author looks.
+    const _startLn = _ln
+    let _depth = bracketDelta(line)
+    while (_depth > 0 && _ln + 1 < _srcLines.length) {
+      _ln++
+      const cont = _srcLines[_ln].replace(/\/\/.*$/, '').trim()
+      if (!cont) continue
+      line += ' ' + cont
+      _depth += bracketDelta(cont)
+    }
+
     line = stripDeclaration(line)
     try {
     const toks = tokenize(line)
@@ -1042,7 +1128,7 @@ function evaluatePine(script, candles) {
     } catch (e) {
       // Attach the source line to anything thrown above. Without it an error
       // says what went wrong but not where, and the author has to hunt.
-      if (e && e.line == null) { e.line = _ln + 1; e.source = rawLine.trim() }
+      if (e && e.line == null) { e.line = _startLn + 1; e.source = rawLine.trim() }
       throw e
     }
   }

@@ -404,6 +404,61 @@ plotshape(ta.fvgbear(0.1), "FVG Bear")`,
     assert(r.plots.t[0].value === null, 'index 0 must be null, got ' + r.plots.t[0].value)
   })
 
+  // ── multi-line statements, math namespace, variance ──
+
+  await t('a call may span several lines while its brackets are open', () => {
+    const r = validatePine('indicator("x")\nlen = input.int(20,\n  "Length",\n  minval=1)\nplot(ta.sma(close, len))')
+    assert(r.valid === true, JSON.stringify(r))
+  })
+
+  await t('a bracket inside a string does not swallow the next line', () => {
+    // "Length (bars)" is text, not structure. Counting it would join the
+    // following line into this statement and break the parse.
+    const r = validatePine('indicator("x")\nlen = input.int(20, "Length (bars)")\nplot(ta.sma(close, len))')
+    assert(r.valid === true, JSON.stringify(r))
+  })
+
+  await t('an unterminated call reports the line the statement started on', () => {
+    const r = validatePine('indicator("x")\nplot(ta.sma(\n  close,\n  20)')
+    assert(r.valid === false)
+    assert(r.errors[0].line === 2, 'expected the opening line, got ' + r.errors[0].line)
+  })
+
+  await t('ta.variance is exactly ta.stdev squared', () => {
+    // They share one implementation now, so this can only break deliberately.
+    const r = evaluatePine('plot(ta.variance(close,20),"v")\nplot(ta.stdev(close,20),"s")', rc)
+    const v = r.plots.v[40].value, sd = r.plots.s[40].value
+    approxEqual(v, sd * sd, 1e-6)
+  })
+
+  await t('math.max lifts over two series', () => {
+    const r = evaluatePine('plot(math.max(close, open), "m")', rc)
+    approxEqual(r.plots.m[10].value, Math.max(rc[10].close, rc[10].open), 1e-6)
+  })
+
+  await t('math.abs and math.pow work on a series', () => {
+    const r = evaluatePine('plot(math.abs(close - open), "a")\nplot(math.pow(close, 2), "p")', rc)
+    approxEqual(r.plots.a[10].value, Math.abs(rc[10].close - rc[10].open), 1e-6)
+    approxEqual(r.plots.p[10].value, Math.pow(rc[10].close, 2), 1e-6)
+  })
+
+  await t('math functions keep a warm-up null as null', () => {
+    // Turning it into 0 would draw a real line through a period where the
+    // indicator has no value.
+    const r = evaluatePine('plot(math.abs(ta.sma(close, 20)), "a")', rc)
+    assert(r.plots.a[0].value === null, 'expected null at bar 0, got ' + r.plots.a[0].value)
+  })
+
+  await t('hex colour literals parse instead of stopping on #', () => {
+    assert(validatePine('indicator("x")\nplot(close, color=#FF0000)').valid === true)
+    assert(validatePine('indicator("x")\nplot(close, color=#FF0000AA)').valid === true)
+  })
+
+  await t('quoted strings still parse after the hex-colour change', () => {
+    assert(validatePine('indicator("x")\nplot(close, "Title")').valid === true)
+    assert(validatePine("indicator('x')\nplot(close, 'Title')").valid === true)
+  })
+
   console.log(`\n${passed} pine-runtime checks passed`)
   process.exit(0)
 })().catch((e) => { console.error('FAILED:', e); process.exit(1) })
