@@ -47,7 +47,7 @@ async def list_tasks(
     agent: dict = Depends(get_agent),
 ):
     guild = await _get_guild(guild_slug)
-    query = "SELECT * FROM vantage_tasks WHERE guild_id=?"
+    query = "SELECT * FROM guild_tasks WHERE guild_id=?"
     params: list = [guild["id"]]
     if status:
         statuses = [s.strip() for s in status.split(",") if s.strip()]
@@ -82,7 +82,7 @@ async def create_task(
     task_id = secrets.token_hex(16)
     async with get_db() as db:
         await db.execute(
-            """INSERT INTO vantage_tasks
+            """INSERT INTO guild_tasks
                (id, guild_id, guild_slug, title, description, priority, kind_tag, created_by_id, created_by_name)
                VALUES (?,?,?,?,?,?,?,?,?)""",
             (task_id, guild["id"], guild_slug, title, description, priority, kind_tag,
@@ -91,7 +91,7 @@ async def create_task(
         await db.commit()
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM vantage_tasks WHERE id=?", (task_id,)) as cur:
+        async with db.execute("SELECT * FROM guild_tasks WHERE id=?", (task_id,)) as cur:
             row = await cur.fetchone()
     return {"task": dict(row)}
 
@@ -106,13 +106,13 @@ async def get_task(guild_slug: str, task_id: str, agent: dict = Depends(get_agen
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM vantage_tasks WHERE id=? AND guild_id=?", (task_id, guild["id"])
+            "SELECT * FROM guild_tasks WHERE id=? AND guild_id=?", (task_id, guild["id"])
         ) as cur:
             task_row = await cur.fetchone()
         if not task_row:
             raise HTTPException(404, "Task not found")
         async with db.execute(
-            "SELECT * FROM artifacts WHERE task_id=? ORDER BY created_at DESC", (task_id,)
+            "SELECT * FROM guild_artifacts WHERE task_id=? ORDER BY created_at DESC", (task_id,)
         ) as cur:
             artifact_rows = await cur.fetchall()
     return {"task": dict(task_row), "artifacts": [dict(r) for r in artifact_rows]}
@@ -129,7 +129,7 @@ async def claim_task(guild_slug: str, task_id: str, agent: dict = Depends(get_ag
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM vantage_tasks WHERE id=? AND guild_id=?", (task_id, guild["id"])
+            "SELECT * FROM guild_tasks WHERE id=? AND guild_id=?", (task_id, guild["id"])
         ) as cur:
             task = await cur.fetchone()
         if not task:
@@ -138,14 +138,14 @@ async def claim_task(guild_slug: str, task_id: str, agent: dict = Depends(get_ag
         if task["status"] != "proposed":
             raise HTTPException(409, f"Task is not claimable (status={task['status']})")
         await db.execute(
-            """UPDATE vantage_tasks
+            """UPDATE guild_tasks
                SET status='claimed', claimed_by_id=?, claimed_by_name=?, updated_at=datetime('now')
                WHERE id=?""",
             (agent["id"], agent["name"], task_id),
         )
         claim_id = secrets.token_hex(16)
         await db.execute(
-            "INSERT INTO task_claims (id, task_id, agent_id, agent_name, action) VALUES (?,?,?,?,'claimed')",
+            "INSERT INTO guild_task_claims (id, task_id, agent_id, agent_name, action) VALUES (?,?,?,?,'claimed')",
             (claim_id, task_id, agent["id"], agent["name"]),
         )
         await db.commit()
@@ -167,7 +167,7 @@ async def release_task(
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM vantage_tasks WHERE id=? AND guild_id=?", (task_id, guild["id"])
+            "SELECT * FROM guild_tasks WHERE id=? AND guild_id=?", (task_id, guild["id"])
         ) as cur:
             task = await cur.fetchone()
         if not task:
@@ -176,14 +176,14 @@ async def release_task(
         if task["claimed_by_id"] != agent["id"]:
             raise HTTPException(403, "You did not claim this task")
         await db.execute(
-            """UPDATE vantage_tasks
+            """UPDATE guild_tasks
                SET status='proposed', claimed_by_id=NULL, claimed_by_name=NULL, updated_at=datetime('now')
                WHERE id=?""",
             (task_id,),
         )
         claim_id = secrets.token_hex(16)
         await db.execute(
-            "INSERT INTO task_claims (id, task_id, agent_id, agent_name, action, note) VALUES (?,?,?,?,'released',?)",
+            "INSERT INTO guild_task_claims (id, task_id, agent_id, agent_name, action, note) VALUES (?,?,?,?,'released',?)",
             (claim_id, task_id, agent["id"], agent["name"], note),
         )
         await db.commit()
@@ -208,7 +208,7 @@ async def submit_artifact(
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM vantage_tasks WHERE id=? AND guild_id=?", (task_id, guild["id"])
+            "SELECT * FROM guild_tasks WHERE id=? AND guild_id=?", (task_id, guild["id"])
         ) as cur:
             task = await cur.fetchone()
         if not task:
@@ -220,13 +220,13 @@ async def submit_artifact(
             raise HTTPException(409, f"Task cannot be submitted from status={task['status']}")
         artifact_id = secrets.token_hex(16)
         await db.execute(
-            """INSERT INTO artifacts (id, task_id, guild_id, agent_id, agent_name, kind, title, content_text, content_hash)
+            """INSERT INTO guild_artifacts (id, task_id, guild_id, agent_id, agent_name, kind, title, content_text, content_hash)
                VALUES (?,?,?,?,?,?,?,?,?)""",
             (artifact_id, task_id, guild["id"], agent["id"], agent["name"],
              artifact_kind, artifact_title, content_text, content_hash),
         )
         await db.execute(
-            "UPDATE vantage_tasks SET status='review', updated_at=datetime('now') WHERE id=?",
+            "UPDATE guild_tasks SET status='review', updated_at=datetime('now') WHERE id=?",
             (task_id,),
         )
         await db.commit()
@@ -249,7 +249,7 @@ async def accept_task(
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM vantage_tasks WHERE id=? AND guild_id=?", (task_id, guild["id"])
+            "SELECT * FROM guild_tasks WHERE id=? AND guild_id=?", (task_id, guild["id"])
         ) as cur:
             task = await cur.fetchone()
         if not task:
@@ -260,17 +260,17 @@ async def accept_task(
         if task["status"] != "review":
             raise HTTPException(409, "Task is not in review")
         await db.execute(
-            """UPDATE artifacts SET status='accepted', review_note=?, updated_at=datetime('now')
+            """UPDATE guild_artifacts SET status='accepted', review_note=?, updated_at=datetime('now')
                WHERE task_id=? AND status='submitted'""",
             (review_note, task_id),
         )
         await db.execute(
-            "UPDATE vantage_tasks SET status='accepted', updated_at=datetime('now') WHERE id=?",
+            "UPDATE guild_tasks SET status='accepted', updated_at=datetime('now') WHERE id=?",
             (task_id,),
         )
         claim_id = secrets.token_hex(16)
         await db.execute(
-            "INSERT INTO task_claims (id, task_id, agent_id, agent_name, action, note) VALUES (?,?,?,?,'accepted',?)",
+            "INSERT INTO guild_task_claims (id, task_id, agent_id, agent_name, action, note) VALUES (?,?,?,?,'accepted',?)",
             (claim_id, task_id, agent["id"], agent["name"], review_note),
         )
         await db.commit()
@@ -293,7 +293,7 @@ async def reject_task(
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM vantage_tasks WHERE id=? AND guild_id=?", (task_id, guild["id"])
+            "SELECT * FROM guild_tasks WHERE id=? AND guild_id=?", (task_id, guild["id"])
         ) as cur:
             task = await cur.fetchone()
         if not task:
@@ -304,19 +304,19 @@ async def reject_task(
         if task["status"] != "review":
             raise HTTPException(409, "Task is not in review")
         await db.execute(
-            """UPDATE artifacts SET status='rejected', review_note=?, updated_at=datetime('now')
+            """UPDATE guild_artifacts SET status='rejected', review_note=?, updated_at=datetime('now')
                WHERE task_id=? AND status='submitted'""",
             (review_note, task_id),
         )
         await db.execute(
-            """UPDATE vantage_tasks
+            """UPDATE guild_tasks
                SET status='proposed', claimed_by_id=NULL, claimed_by_name=NULL, updated_at=datetime('now')
                WHERE id=?""",
             (task_id,),
         )
         claim_id = secrets.token_hex(16)
         await db.execute(
-            "INSERT INTO task_claims (id, task_id, agent_id, agent_name, action, note) VALUES (?,?,?,?,'rejected',?)",
+            "INSERT INTO guild_task_claims (id, task_id, agent_id, agent_name, action, note) VALUES (?,?,?,?,'rejected',?)",
             (claim_id, task_id, agent["id"], agent["name"], review_note),
         )
         await db.commit()
@@ -339,7 +339,7 @@ async def attach_receipt(
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM artifacts WHERE task_id=? AND agent_id=? ORDER BY created_at DESC LIMIT 1",
+            "SELECT * FROM guild_artifacts WHERE task_id=? AND agent_id=? ORDER BY created_at DESC LIMIT 1",
             (task_id, agent["id"]),
         ) as cur:
             artifact = await cur.fetchone()
@@ -349,7 +349,7 @@ async def attach_receipt(
         receipt_id = secrets.token_hex(16)
         omokoda_id = omokoda_receipt_id if omokoda_receipt_id else None
         await db.execute(
-            """INSERT OR IGNORE INTO execution_receipts
+            """INSERT OR IGNORE INTO guild_execution_receipts
                (id, artifact_id, task_id, agent_id, omokoda_receipt_id, receipt_body)
                VALUES (?,?,?,?,?,?)""",
             (receipt_id, artifact["id"], task_id, agent["id"], omokoda_id, receipt_body),
