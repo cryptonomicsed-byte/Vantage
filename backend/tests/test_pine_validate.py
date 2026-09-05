@@ -217,6 +217,27 @@ async def test_disabled_returns_unavailable(monkeypatch):
     assert "disabled" in v["reason"]
 
 
+def _stub_native(monkeypatch, *, payload=None, status=200, raise_exc=None):
+    class FakeResp:
+        status_code = status
+        def json(self):
+            return payload
+
+    async def fake_post(code):
+        if raise_exc is not None:
+            raise raise_exc
+        return FakeResp()
+
+    monkeypatch.setattr(pv, "_post_native", fake_post)
+    monkeypatch.setattr(pv, "NATIVE_ENABLED", True)
+
+
+NATIVE_OK = {"valid": True, "errors": []}
+NATIVE_BAD = {"valid": False, "errors": [
+    {"message": "Unknown function: ta.percentrank", "line": 3, "source": "plot(ta.percentrank(close,20))"}
+]}
+
+
 # --- route wiring ------------------------------------------------------------
 
 def _h(agent):
@@ -261,7 +282,13 @@ async def test_run_proceeds_when_the_compiler_is_unreachable(client, monkeypatch
     """An outage must not start rejecting every agent's work."""
     import httpx
     a = await fresh_agent()
+    # BOTH validators unreachable. The native seam has to be stubbed explicitly:
+    # the SandboxClient below replaces httpx.AsyncClient for the Pine sandbox,
+    # and pine_validate would otherwise pick that up and read a sandbox reply as
+    # a compile verdict. That is exactly what the _post/_post_native seams exist
+    # to keep apart.
     _stub_facade(monkeypatch, raise_exc=httpx.ConnectError("down"))
+    _stub_native(monkeypatch, raise_exc=httpx.ConnectError("sidecar down"))
 
     async def no_review(script, agent):
         return {"block": False, "reason": ""}
@@ -316,27 +343,6 @@ async def test_valid_script_still_saves(client, monkeypatch, fresh_agent, _init_
 # The question behind these: if TradingView goes away, does the gate still
 # work? And does the gate catch scripts TradingView accepts but our own
 # sandbox cannot run?
-
-def _stub_native(monkeypatch, *, payload=None, status=200, raise_exc=None):
-    class FakeResp:
-        status_code = status
-        def json(self):
-            return payload
-
-    async def fake_post(code):
-        if raise_exc is not None:
-            raise raise_exc
-        return FakeResp()
-
-    monkeypatch.setattr(pv, "_post_native", fake_post)
-    monkeypatch.setattr(pv, "NATIVE_ENABLED", True)
-
-
-NATIVE_OK = {"valid": True, "errors": []}
-NATIVE_BAD = {"valid": False, "errors": [
-    {"message": "Unknown function: ta.percentrank", "line": 3, "source": "plot(ta.percentrank(close,20))"}
-]}
-
 
 @pytest.mark.asyncio
 async def test_native_validator_alone_still_gates_when_tradingview_is_down(monkeypatch):

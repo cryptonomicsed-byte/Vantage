@@ -113,7 +113,7 @@ async def fresh_agent(client):
 
 @pytest.fixture(autouse=True)
 def _pine_compile_gate_off(monkeypatch):
-    """Keep the Pine compile gate out of tests that are not about it.
+    """Keep the Pine compile gates out of tests that are not about them.
 
     `routers/pine.py` compile-checks scripts against TradingView before running
     or saving them. Left live, every test that posts a script would reach for
@@ -122,4 +122,9 @@ def _pine_compile_gate_off(monkeypatch):
     are specifically about the gate.
     """
     from backend import pine_validate as pv
+    # Both validators, not just the remote one. The native validator talks to
+    # the pine-runtime sidecar over httpx, and tests that swap
+    # httpx.AsyncClient to stand in for that sandbox would otherwise have their
+    # stub answer a compile check as well.
     monkeypatch.setattr(pv, "ENABLED", False)
+    monkeypatch.setattr(pv, "NATIVE_ENABLED", False)
