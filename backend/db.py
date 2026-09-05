@@ -2148,6 +2148,105 @@ CREATE TABLE IF NOT EXISTS external_iranti_memories (
         await db.execute("CREATE INDEX IF NOT EXISTS idx_voice_toolcalls_agent ON voice_session_tool_calls(agent_id, tool_name)")
         await db.commit()
 
+
+
+async def init_workspace_tasks_db() -> None:
+    """Create workspace task tables idempotently."""
+    async with get_db() as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS vantage_tasks (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                guild_slug TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'proposed',
+                priority INTEGER NOT NULL DEFAULT 50,
+                created_by_agent_id INTEGER,
+                claimed_by_agent_id INTEGER,
+                parent_task_id TEXT,
+                due_ts INTEGER,
+                kind_tag TEXT DEFAULT '',
+                nostr_event_id TEXT DEFAULT '',
+                created_ts INTEGER NOT NULL DEFAULT (unixepoch()),
+                updated_ts INTEGER NOT NULL DEFAULT (unixepoch())
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_workspace ON vantage_tasks(workspace_id, status)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_claimed ON vantage_tasks(claimed_by_agent_id, status)")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS task_claims (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                agent_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                note TEXT DEFAULT '',
+                ts INTEGER NOT NULL DEFAULT (unixepoch())
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS artifacts (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                agent_id INTEGER NOT NULL,
+                workspace_id TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'other',
+                title TEXT NOT NULL,
+                content_uri TEXT DEFAULT '',
+                content_hash TEXT DEFAULT '',
+                content_text TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'draft',
+                review_note TEXT DEFAULT '',
+                nostr_event_id TEXT DEFAULT '',
+                created_ts INTEGER NOT NULL DEFAULT (unixepoch()),
+                updated_ts INTEGER NOT NULL DEFAULT (unixepoch())
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS execution_receipts (
+                id TEXT PRIMARY KEY,
+                artifact_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                agent_id INTEGER NOT NULL,
+                omokoda_receipt_id TEXT UNIQUE,
+                kernel_pubkey TEXT DEFAULT '',
+                receipt_body TEXT NOT NULL,
+                verified INTEGER NOT NULL DEFAULT 0,
+                verify_error TEXT DEFAULT '',
+                created_ts INTEGER NOT NULL DEFAULT (unixepoch())
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS workspace_memory (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                agent_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'agent',
+                created_ts INTEGER NOT NULL DEFAULT (unixepoch()),
+                updated_ts INTEGER NOT NULL DEFAULT (unixepoch()),
+                UNIQUE(workspace_id, agent_id, key)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS scheduled_dispatches (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                guild_slug TEXT NOT NULL,
+                title TEXT NOT NULL,
+                cron_expr TEXT NOT NULL,
+                task_template TEXT NOT NULL DEFAULT '{}',
+                target_role TEXT DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                last_run_ts INTEGER,
+                next_run_ts INTEGER,
+                created_by_agent_id INTEGER NOT NULL
+            )
+        """)
+        await db.commit()
+
+
     # One-time migration: hash any plaintext API keys still stored as "vantage_..." (idempotent)
     import hashlib as _hlib_key
     async with get_db() as db:
