@@ -271,7 +271,8 @@ export default function GuildChat({ slug, selectedChannelSlug }: { slug: string;
         await loadMessages(active)
       } else {
         const detail = await res.json().catch(() => ({}))
-        setError(detail.detail || `Could not send (${res.status})`)
+        const errMsg = typeof detail.detail === 'string' ? detail.detail : `Could not send (${res.status})`
+        setError(errMsg)
       }
     } catch {
       setError('Network error — message not sent')
@@ -293,7 +294,8 @@ export default function GuildChat({ slug, selectedChannelSlug }: { slug: string;
       setNewChannel({ slug: '', name: '', kind: 'forum' })
       await loadShell()
     } else {
-      setError((await res.json().catch(() => ({}))).detail || 'Could not create channel')
+      const errBody = await res.json().catch(() => ({}))
+      setError(typeof errBody.detail === 'string' ? errBody.detail : 'Could not create channel')
     }
   }
 
