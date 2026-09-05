@@ -33,3 +33,11 @@ ops/dashboards/mirror/
 # backup suffixes
 *.bak-*
 .DS_Store
+
+# Embedded third-party git repos — tracked by reference only
+Hyperliquid-Data-Layer-API/
+Limitless-Prediction-Market-Bots/
+Moon-Dev-AI-Trading-Battles/
+Polymarket-Trading-Bot-Examples-By-Moon-Dev/
+third_party/freenet-core/
+third_party/river/

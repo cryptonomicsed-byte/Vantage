@@ -11,6 +11,7 @@ import {
   Activity, ArrowLeft, BookOpen, Check, Flag, Hash, Menu,
   Radio, Shield, Terminal, Users, X, Zap, Database, Eye,
   GitBranch, Clock, Star, ChevronRight, LayoutGrid,
+  CheckSquare, Package, Scale,
 } from 'lucide-react'
 import GuildChat from './GuildChat'
 import GuildForum from './GuildForum'
@@ -56,6 +57,37 @@ interface WorkspaceItem {
   topic: string; message_count: number
 }
 interface TaskSummary { total: number; proposed: number; active: number; review: number }
+
+interface GuildTask {
+  task_id: number
+  title: string
+  description?: string
+  status: 'open' | 'claimed' | 'executing' | 'review' | 'done' | 'aborted'
+  agent_id?: number
+  agent_name?: string
+  required_capabilities?: string[]
+  created_at: string
+  updated_at?: string
+}
+
+interface GuildArtifact {
+  artifact_id: string
+  type: string
+  agent_name?: string
+  created_at: string
+  hash?: string
+  metadata?: Record<string, unknown>
+}
+
+interface ActivityEvent {
+  id?: number | string
+  agent_name?: string
+  action?: string
+  description?: string
+  event_type?: string
+  type?: string
+  created_at: string
+}
 
 // ── presence vocabulary (Ọmọ Kọ́dà2 states) ────────────────────────────────────
 
@@ -127,6 +159,356 @@ function NavItem({
         </span>
       )}
     </button>
+  )
+}
+
+// ── task status helpers ────────────────────────────────────────────────────────
+
+const TASK_STATUS_COLOR: Record<string, string> = {
+  open: 'var(--cyan)',
+  claimed: '#f59e0b',
+  executing: '#3cc878',
+  review: '#a78bfa',
+  done: 'rgba(255,255,255,0.3)',
+  aborted: 'rgba(255,255,255,0.2)',
+}
+
+function StatusPill({ status }: { status: string }) {
+  return (
+    <span style={{
+      fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em',
+      background: `${TASK_STATUS_COLOR[status] || 'rgba(255,255,255,0.1)'}22`,
+      color: TASK_STATUS_COLOR[status] || 'rgba(255,255,255,0.4)',
+      border: `1px solid ${TASK_STATUS_COLOR[status] || 'rgba(255,255,255,0.15)'}44`,
+      padding: '2px 6px', borderRadius: 4, flexShrink: 0,
+    }}>
+      {status}
+    </span>
+  )
+}
+
+// ── GuildTasksView ─────────────────────────────────────────────────────────────
+
+function GuildTasksView({ guildSlug, authHeaders }: { guildSlug: string; authHeaders: () => Record<string, string> }) {
+  const [tasks, setTasks] = useState<GuildTask[]>([])
+  const [loading, setLoading] = useState(true)
+  const [claiming, setClaiming] = useState<number | null>(null)
+
+  useEffect(() => {
+    fetch(`/api/guilds/${encodeURIComponent(guildSlug)}/tasks?limit=50`, { headers: authHeaders() })
+      .then(r => r.ok ? r.json() : { tasks: [] })
+      .then(d => setTasks(d.tasks || []))
+      .catch(() => setTasks([]))
+      .finally(() => setLoading(false))
+  }, [guildSlug]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function claimTask(taskId: number) {
+    setClaiming(taskId)
+    try {
+      const r = await fetch(`/api/guilds/${encodeURIComponent(guildSlug)}/tasks/${taskId}/claim`, {
+        method: 'POST', headers: authHeaders(),
+      })
+      if (r.ok) {
+        setTasks(prev => prev.map(t => t.task_id === taskId ? { ...t, status: 'claimed' } : t))
+      }
+    } finally {
+      setClaiming(null)
+    }
+  }
+
+  const STATUS_ORDER: GuildTask['status'][] = ['open', 'claimed', 'executing', 'review', 'done']
+  const grouped = STATUS_ORDER.reduce<Record<string, GuildTask[]>>((acc, s) => {
+    acc[s] = tasks.filter(t => t.status === s)
+    return acc
+  }, {} as Record<string, GuildTask[]>)
+
+  if (loading) return (
+    <div style={{ padding: 32, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>Loading tasks…</div>
+  )
+
+  if (tasks.length === 0) return (
+    <div style={{ padding: 48, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>
+      <CheckSquare size={28} style={{ opacity: 0.3, marginBottom: 12, display: 'block', margin: '0 auto 12px' }} />
+      No tasks yet — create the first one.
+    </div>
+  )
+
+  return (
+    <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 24, overflowY: 'auto', height: '100%', boxSizing: 'border-box' }}>
+      {STATUS_ORDER.map(status => {
+        const group = grouped[status]
+        if (group.length === 0) return null
+        return (
+          <div key={status}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+              {status === 'executing' && (
+                <span className="presence-pulse-green" style={{ width: 7, height: 7, borderRadius: '50%', background: '#3cc878', display: 'inline-block', flexShrink: 0 }} />
+              )}
+              <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em', color: TASK_STATUS_COLOR[status] || 'var(--muted)' }}>
+                {status} — {group.length}
+              </span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {group.map(task => (
+                <div key={task.task_id} style={{ padding: '12px 14px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: 8, display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>{task.title}</span>
+                      <StatusPill status={task.status} />
+                    </div>
+                    {task.description && (
+                      <div style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.5, marginBottom: 6 }}>
+                        {task.description.slice(0, 120)}{task.description.length > 120 ? '…' : ''}
+                      </div>
+                    )}
+                    <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+                      {task.agent_name && (
+                        <span style={{ fontSize: 10, color: 'var(--muted)' }}>
+                          Agent: <span style={{ color: 'var(--cyan)' }}>{task.agent_name}</span>
+                        </span>
+                      )}
+                      {task.required_capabilities && task.required_capabilities.length > 0 && (
+                        <span style={{ fontSize: 10, color: 'var(--muted)' }}>
+                          Needs: {task.required_capabilities.join(', ')}
+                        </span>
+                      )}
+                      <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)' }}>
+                        {new Date(task.created_at).toLocaleDateString()}
+                      </span>
+                    </div>
+                  </div>
+                  {task.status === 'open' && (
+                    <button
+                      onClick={() => claimTask(task.task_id)}
+                      disabled={claiming === task.task_id}
+                      style={{ fontSize: 11, fontWeight: 600, color: 'var(--cyan)', background: 'rgba(0,200,255,0.08)', border: '1px solid rgba(0,200,255,0.2)', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', flexShrink: 0, whiteSpace: 'nowrap' }}
+                    >
+                      {claiming === task.task_id ? '…' : 'Claim'}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// ── GuildArtifactsView ─────────────────────────────────────────────────────────
+
+const ARTIFACT_TYPE_COLOR: Record<string, string> = {
+  git_commit: '#a78bfa',
+  file: 'var(--cyan)',
+  build: '#3cc878',
+  research: 'var(--cyan)',
+  nostr_event: '#f59e0b',
+  sui_transaction: '#f97316',
+}
+
+function ArtifactTypeBadge({ type }: { type: string }) {
+  const color = ARTIFACT_TYPE_COLOR[type] || 'rgba(255,255,255,0.4)'
+  return (
+    <span style={{
+      fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em',
+      background: `${color}22`, color, border: `1px solid ${color}44`,
+      padding: '2px 6px', borderRadius: 4, flexShrink: 0,
+    }}>
+      {type.replace('_', ' ')}
+    </span>
+  )
+}
+
+function GuildArtifactsView({ guildSlug, authHeaders }: { guildSlug: string; authHeaders: () => Record<string, string> }) {
+  const [artifacts, setArtifacts] = useState<GuildArtifact[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    fetch(`/api/guilds/${encodeURIComponent(guildSlug)}/artifacts?limit=50`, { headers: authHeaders() })
+      .then(r => r.ok ? r.json() : { artifacts: [] })
+      .then(d => setArtifacts(d.artifacts || []))
+      .catch(() => setArtifacts([]))
+      .finally(() => setLoading(false))
+  }, [guildSlug]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (loading) return (
+    <div style={{ padding: 32, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>Loading artifacts…</div>
+  )
+
+  if (artifacts.length === 0) return (
+    <div style={{ padding: 48, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>
+      <Package size={28} style={{ opacity: 0.3, display: 'block', margin: '0 auto 12px' }} />
+      No artifacts yet — work in progress.
+    </div>
+  )
+
+  return (
+    <div style={{ padding: 24, overflowY: 'auto', height: '100%', boxSizing: 'border-box' }}>
+      <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 14 }}>
+        {artifacts.length} Artifacts
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 10 }}>
+        {artifacts.map(a => (
+          <div key={a.artifact_id} style={{ padding: '12px 14px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+              <ArtifactTypeBadge type={a.type} />
+              <span style={{ fontFamily: 'monospace', fontSize: 11, color: 'rgba(255,255,255,0.5)' }}>
+                {String(a.artifact_id).slice(0, 8)}
+              </span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+              {a.agent_name && (
+                <div style={{ fontSize: 11, color: 'var(--muted)' }}>
+                  Agent: <span style={{ color: 'var(--cyan)' }}>{a.agent_name}</span>
+                </div>
+              )}
+              {a.hash && (
+                <div style={{ fontSize: 10, fontFamily: 'monospace', color: 'rgba(255,255,255,0.3)' }}>
+                  {a.hash.slice(0, 12)}
+                </div>
+              )}
+              <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)' }}>
+                {new Date(a.created_at).toLocaleString()}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ── GuildActivityView ──────────────────────────────────────────────────────────
+
+const ACTIVITY_TYPE_COLOR: Record<string, string> = {
+  task: 'var(--cyan)',
+  artifact: '#3cc878',
+  message: '#a78bfa',
+  join: '#f59e0b',
+  leave: 'rgba(255,255,255,0.3)',
+}
+
+function GuildActivityView({ guildSlug, authHeaders }: { guildSlug: string; authHeaders: () => Record<string, string> }) {
+  const [events, setEvents] = useState<ActivityEvent[]>([])
+  const [loading, setLoading] = useState(true)
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  function fetchActivity() {
+    fetch(`/api/guilds/${encodeURIComponent(guildSlug)}/activity`, { headers: authHeaders() })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (d) setEvents((d.events || d.activity || []).slice(0, 50))
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }
+
+  useEffect(() => {
+    fetchActivity()
+    timerRef.current = setInterval(fetchActivity, 15000)
+    return () => { if (timerRef.current) clearInterval(timerRef.current) }
+  }, [guildSlug]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (loading) return (
+    <div style={{ padding: 32, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>Loading activity…</div>
+  )
+
+  if (events.length === 0) return (
+    <div style={{ padding: 48, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>
+      <Activity size={28} style={{ opacity: 0.3, display: 'block', margin: '0 auto 12px' }} />
+      No recent activity.
+    </div>
+  )
+
+  return (
+    <div style={{ padding: 24, overflowY: 'auto', height: '100%', boxSizing: 'border-box' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+        <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+          Activity Stream
+        </div>
+        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)' }}>auto-refreshes 15s</span>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {events.map((ev, i) => {
+          const evType = ev.event_type || ev.type || 'message'
+          const dotColor = ACTIVITY_TYPE_COLOR[evType] || 'rgba(255,255,255,0.3)'
+          const description = ev.description || ev.action || evType
+          return (
+            <div key={ev.id ?? i} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 12px', background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border)', borderRadius: 7 }}>
+              <span style={{ width: 7, height: 7, borderRadius: '50%', background: dotColor, display: 'inline-block', flexShrink: 0, marginTop: 4 }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                {ev.agent_name && (
+                  <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--cyan)', marginRight: 6 }}>{ev.agent_name}</span>
+                )}
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>{description}</span>
+                <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', marginTop: 2 }}>
+                  {new Date(ev.created_at).toLocaleTimeString()}
+                </div>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ── GuildGovernanceView ────────────────────────────────────────────────────────
+
+function GuildGovernanceView({ guild }: { guild: GuildData }) {
+  const TRUST_HIERARCHY = [
+    { role: 'Admin', color: '#f59e0b', desc: 'can do everything' },
+    { role: 'Moderator', color: '#a78bfa', desc: 'can moderate channels' },
+    { role: 'Agent', color: 'var(--cyan)', desc: 'can claim tasks' },
+    { role: 'Viewer', color: 'rgba(255,255,255,0.4)', desc: 'read-only' },
+  ]
+
+  return (
+    <div style={{ padding: 32, overflowY: 'auto', height: '100%', boxSizing: 'border-box', maxWidth: 560 }}>
+      <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--purple)', textTransform: 'uppercase', letterSpacing: '0.14em', marginBottom: 24 }}>
+        Guild Constitution
+      </div>
+
+      {/* Guild properties */}
+      <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: 10, padding: '16px 18px', marginBottom: 18 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {[
+            { label: 'Membership', value: guild.is_accepting_tros ? 'Open' : 'Invite-only', color: guild.is_accepting_tros ? '#3cc878' : '#f59e0b' },
+            { label: 'Treasury', value: 'not configured', color: 'rgba(255,255,255,0.35)' },
+            { label: 'Reputation', value: 'Local', color: 'var(--cyan)' },
+          ].map(row => (
+            <div key={row.label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: 12, color: 'var(--muted)' }}>{row.label}</span>
+              <span style={{ fontSize: 12, fontWeight: 600, color: row.color }}>{row.value}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Trust hierarchy */}
+      <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 10 }}>
+        Trust Hierarchy
+      </div>
+      <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: 10, overflow: 'hidden', marginBottom: 18 }}>
+        {TRUST_HIERARCHY.map((tier, i) => (
+          <div key={tier.role} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 16px', borderBottom: i < TRUST_HIERARCHY.length - 1 ? '1px solid var(--border)' : 'none' }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: tier.color, minWidth: 80 }}>{tier.role}</span>
+            <span style={{ fontSize: 12, color: 'var(--muted)' }}>{tier.desc}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* Active policies */}
+      <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 10 }}>
+        Active Policies
+      </div>
+      <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(138,75,255,0.15)', borderRadius: 10, padding: '14px 16px' }}>
+        <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.3)', fontStyle: 'italic' }}>
+          Governance system — Phase P3 (coming soon)
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -583,7 +965,10 @@ export default function GuildShell() {
 
   // main content
   function renderMain() {
-    if (selectedView === 'tasks') return <WorkspaceTaskBoard guildSlug={slug!} />
+    if (selectedView === 'tasks') return <GuildTasksView guildSlug={slug!} authHeaders={headers} />
+    if (selectedView === 'artifacts') return <GuildArtifactsView guildSlug={slug!} authHeaders={headers} />
+    if (selectedView === 'activity') return <GuildActivityView guildSlug={slug!} authHeaders={headers} />
+    if (selectedView === 'governance') return <GuildGovernanceView guild={guild!} />
     if (selectedView === 'memory') return <WorkspaceMemoryViewer guildSlug={slug!} />
     if (selectedView === 'workspace' && selectedWorkspace) {
       const ch = channels.find(c => c.id === selectedWorkspace.id)
@@ -610,7 +995,10 @@ export default function GuildShell() {
   }
 
   const channelHeader =
-    selectedView === 'tasks' ? 'Task Board'
+    selectedView === 'tasks' ? 'Tasks'
+    : selectedView === 'artifacts' ? 'Artifacts'
+    : selectedView === 'activity' ? 'Activity'
+    : selectedView === 'governance' ? 'Governance'
     : selectedView === 'memory' ? 'Memory'
     : selectedView === 'workspace' && selectedWorkspace ? selectedWorkspace.name
     : selectedChannel ? selectedChannel.name
@@ -685,7 +1073,6 @@ export default function GuildShell() {
             {/* Zone 2: Command */}
             <NavSection label="Command" />
             <NavItem icon={<LayoutGrid size={12} />} label="Command Center" active={!selectedChannel && !selectedView} onClick={() => { setSelectedChannel(null); setSelectedView(null); setSelectedWorkspace(null); setSidebarOpen(false) }} />
-            <NavItem icon={<Activity size={12} />} label="Task Board" active={selectedView === 'tasks'} count={taskSummary.total || undefined} onClick={() => selectView('tasks')} />
             {apiKey && <NavItem icon={<Database size={12} />} label="Memory" active={selectedView === 'memory'} onClick={() => selectView('memory')} />}
 
             {/* Zone 3: Channels */}
@@ -746,6 +1133,13 @@ export default function GuildShell() {
                 ))}
               </>
             )}
+
+            {/* Zone 6: Operations */}
+            <NavSection label="Operations" />
+            <NavItem icon={<CheckSquare size={12} />} label="Tasks" active={selectedView === 'tasks'} count={taskSummary.total || undefined} onClick={() => selectView('tasks')} />
+            <NavItem icon={<Package size={12} />} label="Artifacts" active={selectedView === 'artifacts'} onClick={() => selectView('artifacts')} />
+            <NavItem icon={<Activity size={12} />} label="Activity" active={selectedView === 'activity'} onClick={() => selectView('activity')} />
+            <NavItem icon={<Scale size={12} />} label="Governance" active={selectedView === 'governance'} onClick={() => selectView('governance')} />
           </div>
 
           {/* Footer */}
@@ -762,7 +1156,10 @@ export default function GuildShell() {
         <main className="guild-main">
           <div style={{ padding: '9px 16px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
             {selectedView === 'workspace' ? <Terminal size={13} style={{ color: 'var(--cyan)', flexShrink: 0 }} />
-              : selectedView === 'tasks' ? <Activity size={13} style={{ color: 'var(--purple)', flexShrink: 0 }} />
+              : selectedView === 'tasks' ? <CheckSquare size={13} style={{ color: 'var(--cyan)', flexShrink: 0 }} />
+              : selectedView === 'artifacts' ? <Package size={13} style={{ color: '#a78bfa', flexShrink: 0 }} />
+              : selectedView === 'activity' ? <Activity size={13} style={{ color: '#3cc878', flexShrink: 0 }} />
+              : selectedView === 'governance' ? <Scale size={13} style={{ color: '#f59e0b', flexShrink: 0 }} />
               : selectedView === 'memory' ? <Database size={13} style={{ color: 'var(--cyan)', flexShrink: 0 }} />
               : selectedChannel ? <Hash size={13} style={{ color: 'var(--muted)', flexShrink: 0 }} />
               : <Zap size={13} style={{ color: '#f59e0b', flexShrink: 0 }} />}

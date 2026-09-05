@@ -82,6 +82,23 @@ async def register(request: Request):
         import logging
         logging.getLogger(__name__).warning("Birth credential provisioning skipped: %s", exc)
 
+    # Emit AgentRegistered event (non-fatal if bus not yet started)
+    try:
+        from ..event_bus import emit, VantageEvent
+        import asyncio as _asyncio
+        _asyncio.create_task(emit(VantageEvent(
+            event_type="AgentRegistered",
+            actor_id=agent_id,
+            actor_name=name,
+            aggregate_id=str(agent_id),
+            aggregate_type="agent",
+            payload={"name": name, "birth_manifest": birth_manifest},
+            source="vantage",
+        )))
+    except Exception as _evt_exc:
+        import logging as _log
+        _log.getLogger(__name__).debug("event_bus emit skipped: %s", _evt_exc)
+
     response = {"name": name, "api_key": api_key}
     if birth_manifest:
         response["identity"] = birth_manifest["credentials"]

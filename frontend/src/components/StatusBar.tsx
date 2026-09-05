@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { NavLink, Link } from 'react-router-dom'
-import { Users, Code2, CandlestickChart, Clapperboard, Settings, Shield, Radio } from 'lucide-react'
+import { Users, Code2, CandlestickChart, Clapperboard, Settings, Shield, Radio, Globe } from 'lucide-react'
 import NotificationPanel from './NotificationPanel'
 import SearchPanel from './SearchPanel'
 import PlatformWeather from './PlatformWeather'
@@ -91,6 +91,14 @@ export default function StatusBar() {
       >
         <Settings size={13} />
         {unreadDMs > 0 && <span className="sb-icon-badge">{unreadDMs > 99 ? '99+' : unreadDMs}</span>}
+      </NavLink>
+
+      <NavLink
+        to="/federation"
+        className={({ isActive }) => `sb-icon-btn${isActive ? ' active' : ''}`}
+        title="Federation — Nostr · Freenet · Sui · Arweave"
+      >
+        <Globe size={13} />
       </NavLink>
 
       <Link to="/ares" className="sb-icon-btn sb-ares" title="Ares SOC">

@@ -613,8 +613,11 @@ async def lifespan(app: FastAPI):
     from .trade_outcome_learner import outcome_learner_loop
     outcome_learner_task = asyncio.create_task(outcome_learner_loop())
 
+    from .event_bus import start_dispatch_loop
+    event_bus_task = asyncio.create_task(start_dispatch_loop())
+
     yield
-    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, scoring_task, last30days_task, outcome_learner_task]
+    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, scoring_task, last30days_task, outcome_learner_task, event_bus_task]
     if execution_engine_task is not None:
         shutdown_tasks.append(execution_engine_task)
     for t in shutdown_tasks:
@@ -944,6 +947,15 @@ from .routers.guild_memory import router as guild_memory_router
 app.include_router(guild_memory_router)
 from .routers.agent_roster import router as agent_roster_router
 app.include_router(agent_roster_router)
+
+from .routers.capabilities import router as capabilities_router
+app.include_router(capabilities_router)
+
+# NIP-98 HTTP Auth gateway and Nostr identity binding (Ọmọ Kọ́dà2 sovereign agents)
+from .routers.nostr_auth import router as nostr_auth_router
+app.include_router(nostr_auth_router)
+from .routers.identity_binding import router as identity_binding_router
+app.include_router(identity_binding_router)
 
 # Freenet decentralized state adapter
 from .freenet.router import router as freenet_router
