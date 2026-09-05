@@ -109,3 +109,17 @@ async def fresh_agent(client):
         return {"name": name, "api_key": raw}
 
     return _make
+
+
+@pytest.fixture(autouse=True)
+def _pine_compile_gate_off(monkeypatch):
+    """Keep the Pine compile gate out of tests that are not about it.
+
+    `routers/pine.py` compile-checks scripts against TradingView before running
+    or saving them. Left live, every test that posts a script would reach for
+    the network and get a verdict that depends on the machine running the suite.
+    Off by default; `test_pine_validate.py` turns it back on for the cases that
+    are specifically about the gate.
+    """
+    from backend import pine_validate as pv
+    monkeypatch.setattr(pv, "ENABLED", False)
