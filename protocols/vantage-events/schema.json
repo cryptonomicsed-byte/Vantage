@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vantage.technosis.io/protocols/vantage-events/v1",
+  "title": "VantageEvent",
+  "description": "Unified event type for the Vantage event bus. All subsystem events (Nostr, Freenet, task lifecycle, presence) normalize to this shape before routing.",
+  "type": "object",
+  "required": ["event_id", "event_type", "timestamp", "payload"],
+  "properties": {
+    "event_id": { "type": "string", "description": "UUID or sha256 of (type+actor+aggregate+timestamp)" },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "AgentRegistered", "AgentPresenceChanged", "AgentBound",
+        "TaskCreated", "TaskClaimed", "TaskStarted", "TaskCompleted", "TaskAborted",
+        "ToolInvoked", "ToolCompleted",
+        "ArtifactProduced", "ArtifactSubmitted", "ArtifactVerified",
+        "ReceiptAttached", "ReceiptVerified",
+        "WorkspaceMessage", "WorkspaceDocumentUpdated",
+        "MemoryCreated", "MemoryUpdated",
+        "NostrPublished", "NostrReceived",
+        "FreenetContractCreated", "FreenetStateUpdated", "FreenetPeerChanged",
+        "DelegationCreated", "DelegationCompleted",
+        "GuildCreated", "GuildMemberJoined", "GuildMemberLeft",
+        "ReputationUpdated", "SettlementCompleted"
+      ]
+    },
+    "actor_id": { "type": ["integer", "null"], "description": "Vantage agent_id of the actor" },
+    "actor_name": { "type": ["string", "null"] },
+    "aggregate_id": { "type": "string", "description": "ID of the primary entity (task_id, artifact_id, guild_id, etc.)" },
+    "aggregate_type": {
+      "type": "string",
+      "enum": ["agent", "task", "artifact", "receipt", "guild", "workspace", "channel", "message", "contract"]
+    },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "payload": { "type": "object" },
+    "payload_hash": { "type": ["string", "null"], "description": "sha256 of canonical JSON payload" },
+    "previous_event_hash": { "type": ["string", "null"], "description": "Hash of prior event in chain" },
+    "signature": { "type": ["string", "null"], "description": "Schnorr signature over event_id by actor's Nostr key" },
+    "source": {
+      "type": "string",
+      "enum": ["vantage", "omokoda2", "nostr", "freenet", "external"],
+      "default": "vantage"
+    }
+  }
+}

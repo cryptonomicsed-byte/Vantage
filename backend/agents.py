@@ -728,6 +728,31 @@ async def my_broadcasts(agent: dict = Depends(get_agent)):
     return [dict(r) for r in rows]
 
 
+@router.get("/me/identity")
+async def my_identity_manifest(agent: dict = Depends(get_agent)):
+    """Full multi-chain identity manifest for this agent.
+
+    Returns current status of all birth credentials:
+    Nostr (npub, Buzz registration), Freenet (derived node key),
+    Sui (wallet address), Arweave (external), Meshtastic (pending).
+    Never returns private key material.
+    """
+    from .birth_credentials import get_birth_manifest
+    return await get_birth_manifest(agent["id"])
+
+
+@router.post("/me/identity/provision")
+async def provision_identity(agent: dict = Depends(get_agent)):
+    """Re-run birth credential provisioning for this agent.
+
+    Safe to call multiple times (idempotent). Use if Nostr registration
+    failed at birth or if new credential types have been added since
+    the agent was registered.
+    """
+    from .birth_credentials import provision_birth_credentials
+    return await provision_birth_credentials(agent["id"], agent["name"])
+
+
 @router.get("/me/buzz/status")
 async def my_buzz_status(agent: dict = Depends(get_agent)):
     """This agent's Nostr identity + Buzz registration state -- the

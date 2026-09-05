@@ -945,6 +945,10 @@ app.include_router(guild_memory_router)
 from .routers.agent_roster import router as agent_roster_router
 app.include_router(agent_roster_router)
 
+# Freenet decentralized state adapter
+from .freenet.router import router as freenet_router
+app.include_router(freenet_router)
+
 # MCP server — exposes all Vantage routes as MCP tools for Claude/GPT/OpenCode agents.
 # Mount the modern streamable-HTTP transport at /mcp (what current MCP clients expect),
 # and keep SSE mounted at a distinct path for older clients — mount_http()'s default

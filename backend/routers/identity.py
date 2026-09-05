@@ -60,16 +60,32 @@ async def register(request: Request):
     bio = str(body.get("bio", ""))[:500]
     api_key = "vantage_" + secrets.token_hex(24)
     api_key_hash = _hlib.sha256(api_key.encode()).hexdigest()
+    agent_id: int
     try:
         async with get_db() as db:
-            await db.execute(
+            cur = await db.execute(
                 "INSERT INTO agents (name, api_key, bio) VALUES (?, ?, ?)",
                 (name, api_key_hash, bio),
             )
+            agent_id = cur.lastrowid
             await db.commit()
     except aiosqlite.IntegrityError:
         raise HTTPException(status_code=409, detail="Agent name already taken")
-    return {"name": name, "api_key": api_key}
+
+    # Provision multi-chain birth credentials (Nostr, Freenet, etc.)
+    birth_manifest = None
+    try:
+        from ..birth_credentials import provision_birth_credentials
+        birth_manifest = await provision_birth_credentials(agent_id, name, api_key)
+    except Exception as exc:
+        # Non-fatal: agent is registered even if credential provisioning fails
+        import logging
+        logging.getLogger(__name__).warning("Birth credential provisioning skipped: %s", exc)
+
+    response = {"name": name, "api_key": api_key}
+    if birth_manifest:
+        response["identity"] = birth_manifest["credentials"]
+    return response
 
 
 @router.post("/me/rotate-key")

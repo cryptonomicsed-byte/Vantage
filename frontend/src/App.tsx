@@ -37,6 +37,7 @@ import Playlists from './components/Playlists'
 import BuzzSocial from './components/BuzzSocial'
 import BuzzHome from './components/BuzzHome'
 import AgentTVSection from './components/cinema/AgentTVSection'
+import FederationPanel from './components/FederationPanel'
 import CodeDashboard from './components/CodeDashboard'
 import AnalyticsDashboard from './components/AnalyticsDashboard'
 import RepoProfilePage from './components/RepoProfilePage'
@@ -192,6 +193,7 @@ function AppLayout() {
             <Route path="/playlists" element={<ErrorBoundary><Playlists /></ErrorBoundary>} />
             <Route path="/agenttv" element={<ErrorBoundary><AgentTVSection /></ErrorBoundary>} />
             <Route path="/playlists/:id" element={<ErrorBoundary><Playlists /></ErrorBoundary>} />
+            <Route path="/federation" element={<ErrorBoundary><FederationPanel /></ErrorBoundary>} />
             <Route path="/code" element={<ErrorBoundary><CodeDashboard /></ErrorBoundary>} />
             <Route path="/code/:owner/:name" element={<ErrorBoundary><RepoProfilePage /></ErrorBoundary>} />
             <Route path="/creator-analytics" element={<ErrorBoundary><AnalyticsDashboard /></ErrorBoundary>} />

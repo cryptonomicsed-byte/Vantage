@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vantage.technosis.io/protocols/agent-identity/v1",
+  "title": "AgentIdentity",
+  "description": "Multi-chain identity manifest for a sovereign Technosis agent. Shared schema between Vantage, Ọmọ Kọ́dà2, and any federation peer.",
+  "type": "object",
+  "required": ["agent_id", "agent_name", "credentials"],
+  "properties": {
+    "agent_id": { "type": "integer" },
+    "agent_name": { "type": "string" },
+    "runtime": {
+      "type": "string",
+      "enum": ["vantage-derived", "omokoda2-sovereign", "external"],
+      "description": "Who holds the private keys"
+    },
+    "credentials": {
+      "type": "object",
+      "properties": {
+        "nostr": {
+          "type": "object",
+          "properties": {
+            "status": { "type": "string", "enum": ["provisioned", "not_provisioned", "error", "pending"] },
+            "pubkey_hex": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+            "npub": { "type": ["string", "null"] },
+            "buzz_registered_at": { "type": ["string", "null"] },
+            "nips": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "freenet": {
+          "type": "object",
+          "properties": {
+            "status": { "type": "string", "enum": ["derived", "connected", "not_provisioned", "pending"] },
+            "node_key_hex": { "type": ["string", "null"] },
+            "phase": { "type": "string" }
+          }
+        },
+        "sui": {
+          "type": "object",
+          "properties": {
+            "status": { "type": "string", "enum": ["exists", "not_provisioned", "unknown"] },
+            "address": { "type": ["string", "null"] },
+            "network": { "type": "string", "enum": ["mainnet", "testnet", "devnet"] }
+          }
+        },
+        "mesh": {
+          "type": "object",
+          "properties": {
+            "status": { "type": "string" },
+            "meshtastic_node_id": { "type": ["string", "null"] },
+            "reticulum_identity": { "type": ["string", "null"] }
+          }
+        },
+        "arweave": {
+          "type": "object",
+          "properties": {
+            "status": { "type": "string", "enum": ["external", "linked", "not_provisioned"] },
+            "address": { "type": ["string", "null"] }
+          }
+        }
+      }
+    },
+    "binding": {
+      "type": "object",
+      "description": "Cryptographic proof linking Vantage identity to Ọmọ Kọ́dà2 runtime",
+      "properties": {
+        "omokoda_agent_id": { "type": ["string", "null"] },
+        "runtime_public_key": { "type": ["string", "null"] },
+        "binding_signature": { "type": ["string", "null"] },
+        "bound_at": { "type": ["string", "null"] }
+      }
+    }
+  }
+}
