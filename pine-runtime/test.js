@@ -2,7 +2,7 @@
 // Sandbox safety + correctness tests. Run: node test.js
 const assert = require('assert')
 const { runPine } = require('./runner')
-const { evaluatePine } = require('./pine-engine')
+const { evaluatePine, validatePine } = require('./pine-engine')
 
 function candles(n) {
   const out = []
@@ -306,6 +306,157 @@ plotshape(ta.fvgbear(0.1), "FVG Bear")`,
     const r0 = evaluatePine('plot(ta.linreg(close, 14, 0), "lr")', rc)
     const r1 = evaluatePine('plot(ta.linreg(close, 14, 1), "lr")', rc)
     assert.notStrictEqual(r0.plots.lr[50].value, r1.plots.lr[50].value, 'offset=0 and offset=1 must give different values')
+  })
+
+  // ── validatePine: the local gate ──
+  //
+  // These matter because an external compiler accepts the whole Pine language
+  // while this engine implements a subset. A script that compiles at
+  // TradingView and cannot run here must be caught before it reaches the
+  // sandbox, not after.
+
+  await t('validatePine accepts a script this engine can run', () => {
+    const r = validatePine('indicator("x")\nplot(ta.sma(close, 20))')
+    assert(r.valid === true, JSON.stringify(r))
+  })
+
+  await t('validatePine rejects a function this engine lacks, with a line number', () => {
+    const r = validatePine('indicator("x")\nplot(close)\nplot(ta.percentrank(close, 20))')
+    assert(r.valid === false)
+    assert(r.errors[0].line === 3, 'expected line 3, got ' + r.errors[0].line)
+    assert(/percentrank/.test(r.errors[0].message))
+  })
+
+  await t('validatePine reports the offending source line', () => {
+    const r = validatePine('indicator("x")\nplot(ta.nope(close))')
+    assert(r.errors[0].source === 'plot(ta.nope(close))', r.errors[0].source)
+  })
+
+  await t('validatePine catches a syntax error with its line', () => {
+    const r = validatePine('indicator("x")\nplot(ta.sma(close, 20)')
+    assert(r.valid === false && r.errors[0].line === 2)
+  })
+
+  await t('validatePine needs no candles from the caller', () => {
+    // The whole point of the endpoint: validation must work before any market
+    // data has been fetched.
+    assert(validatePine('plot(ta.ema(close, 9))').valid === true)
+  })
+
+  // ── functions added so TradingView-valid scripts run here too ──
+
+  await t('ta.change defaults to a one-bar difference', () => {
+    const r = evaluatePine('plot(ta.change(close), "d")', rc)
+    approxEqual(r.plots.d[5].value, rc[5].close - rc[4].close, 1e-6)
+  })
+
+  await t('ta.roc is a percentage, not a ratio', () => {
+    const r = evaluatePine('plot(ta.roc(close, 10), "r")', rc)
+    approxEqual(r.plots.r[20].value, ((rc[20].close - rc[10].close) / rc[10].close) * 100, 1e-6)
+  })
+
+  await t('ta.vwma weights by volume, so it differs from ta.sma', () => {
+    const r = evaluatePine('plot(ta.vwma(close, 20), "v")\nplot(ta.sma(close, 20), "s")', rc)
+    assert(r.plots.v[50].value !== r.plots.s[50].value, 'vwma must not equal sma on varying volume')
+  })
+
+  await t('ta.barssince is null before the condition has ever held', () => {
+    // Zero would claim "it just happened", which is a different statement.
+    const r = evaluatePine('plot(ta.barssince(close > 1000000), "b")', rc)
+    assert(r.plots.b[50].value === null, 'expected null, got ' + r.plots.b[50].value)
+  })
+
+  await t('ta.barssince counts bars back to the last true', () => {
+    const r = evaluatePine('plot(ta.barssince(close > 0), "b")', rc)
+    assert(r.plots.b[50].value === 0, 'always-true condition should read 0')
+  })
+
+  await t('ta.pivothigh publishes at the confirming bar, not the extreme', () => {
+    // A pivot is not knowable until `right` more bars exist; backdating it
+    // would let a script see the future.
+    const c = realisticCandles(60)
+    const r = evaluatePine('plot(ta.pivothigh(high, 2, 2), "p")', c)
+    const firstIdx = r.plots.p.findIndex((x) => x.value != null)
+    assert(firstIdx >= 4, 'a 2/2 pivot cannot be confirmed before bar 4, got ' + firstIdx)
+  })
+
+  await t('ta.cum accumulates', () => {
+    const r = evaluatePine('plot(ta.cum(volume), "c")', rc)
+    let s = 0
+    for (let i = 0; i <= 10; i++) s += rc[i].volume
+    approxEqual(r.plots.c[10].value, s, 1e-6)
+  })
+
+  await t('ta.valuewhen holds the value from the last matching bar', () => {
+    const r = evaluatePine('plot(ta.valuewhen(close > open, close, 0), "v")', rc)
+    assert(r.plots.v.some((x) => x.value != null), 'expected some values')
+  })
+
+  await t('ta.hma responds faster than ta.sma of the same length', () => {
+    const r = evaluatePine('plot(ta.hma(close, 20), "h")\nplot(ta.sma(close, 20), "s")', rc)
+    assert(r.plots.h[80].value !== r.plots.s[80].value)
+  })
+
+  await t('ta.tr still leaves index 0 undefined (no prior close exists)', () => {
+    // Regression: an added helper once redefined trueRange to fabricate
+    // high[0]-low[0] here, reintroducing the TA-Lib drift ta.atr had fixed.
+    const r = evaluatePine('plot(ta.tr, "t")', rc)
+    assert(r.plots.t[0].value === null, 'index 0 must be null, got ' + r.plots.t[0].value)
+  })
+
+  // ── multi-line statements, math namespace, variance ──
+
+  await t('a call may span several lines while its brackets are open', () => {
+    const r = validatePine('indicator("x")\nlen = input.int(20,\n  "Length",\n  minval=1)\nplot(ta.sma(close, len))')
+    assert(r.valid === true, JSON.stringify(r))
+  })
+
+  await t('a bracket inside a string does not swallow the next line', () => {
+    // "Length (bars)" is text, not structure. Counting it would join the
+    // following line into this statement and break the parse.
+    const r = validatePine('indicator("x")\nlen = input.int(20, "Length (bars)")\nplot(ta.sma(close, len))')
+    assert(r.valid === true, JSON.stringify(r))
+  })
+
+  await t('an unterminated call reports the line the statement started on', () => {
+    const r = validatePine('indicator("x")\nplot(ta.sma(\n  close,\n  20)')
+    assert(r.valid === false)
+    assert(r.errors[0].line === 2, 'expected the opening line, got ' + r.errors[0].line)
+  })
+
+  await t('ta.variance is exactly ta.stdev squared', () => {
+    // They share one implementation now, so this can only break deliberately.
+    const r = evaluatePine('plot(ta.variance(close,20),"v")\nplot(ta.stdev(close,20),"s")', rc)
+    const v = r.plots.v[40].value, sd = r.plots.s[40].value
+    approxEqual(v, sd * sd, 1e-6)
+  })
+
+  await t('math.max lifts over two series', () => {
+    const r = evaluatePine('plot(math.max(close, open), "m")', rc)
+    approxEqual(r.plots.m[10].value, Math.max(rc[10].close, rc[10].open), 1e-6)
+  })
+
+  await t('math.abs and math.pow work on a series', () => {
+    const r = evaluatePine('plot(math.abs(close - open), "a")\nplot(math.pow(close, 2), "p")', rc)
+    approxEqual(r.plots.a[10].value, Math.abs(rc[10].close - rc[10].open), 1e-6)
+    approxEqual(r.plots.p[10].value, Math.pow(rc[10].close, 2), 1e-6)
+  })
+
+  await t('math functions keep a warm-up null as null', () => {
+    // Turning it into 0 would draw a real line through a period where the
+    // indicator has no value.
+    const r = evaluatePine('plot(math.abs(ta.sma(close, 20)), "a")', rc)
+    assert(r.plots.a[0].value === null, 'expected null at bar 0, got ' + r.plots.a[0].value)
+  })
+
+  await t('hex colour literals parse instead of stopping on #', () => {
+    assert(validatePine('indicator("x")\nplot(close, color=#FF0000)').valid === true)
+    assert(validatePine('indicator("x")\nplot(close, color=#FF0000AA)').valid === true)
+  })
+
+  await t('quoted strings still parse after the hex-colour change', () => {
+    assert(validatePine('indicator("x")\nplot(close, "Title")').valid === true)
+    assert(validatePine("indicator('x')\nplot(close, 'Title')").valid === true)
   })
 
   console.log(`\n${passed} pine-runtime checks passed`)

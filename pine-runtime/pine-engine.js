@@ -133,14 +133,20 @@ function rsi(src, len) {
   }
   return out
 }
-function stdev(src, len) {
+// Population variance (divide by len), matching what stdev already computed.
+// stdev is now defined as its square root rather than repeating the loop, so
+// the two cannot drift apart.
+function variance(src, len) {
   const out = new Array(src.length).fill(null)
   for (let i = len - 1; i < src.length; i++) {
     let m = 0; for (let j = i - len + 1; j <= i; j++) m += src[j]; m /= len
     let v = 0; for (let j = i - len + 1; j <= i; j++) v += (src[j] - m) ** 2
-    out[i] = Math.sqrt(v / len)
+    out[i] = v / len
   }
   return out
+}
+function stdev(src, len) {
+  return variance(src, len).map((v) => (v == null ? null : Math.sqrt(v)))
 }
 function rolling(src, len, fn) {
   const out = new Array(src.length).fill(null)
@@ -530,26 +536,202 @@ function intOffset(series) {
   return Math.round(series)
 }
 
+
+// ── additions: functions TradingView accepts that this engine previously did
+// not, so a script could pass an external compile check and still fail here ──
+
+function change(src, len) {
+  const n = len == null ? 1 : len
+  const out = new Array(src.length).fill(null)
+  for (let i = n; i < src.length; i++) {
+    if (src[i] == null || src[i - n] == null) continue
+    out[i] = src[i] - src[i - n]
+  }
+  return out
+}
+
+function roc(src, len) {
+  const out = new Array(src.length).fill(null)
+  for (let i = len; i < src.length; i++) {
+    const prev = src[i - len]
+    if (src[i] == null || prev == null || prev === 0) continue
+    out[i] = ((src[i] - prev) / prev) * 100
+  }
+  return out
+}
+
+function vwma(src, vol, len) {
+  const out = new Array(src.length).fill(null)
+  for (let i = len - 1; i < src.length; i++) {
+    let num = 0, den = 0, ok = true
+    for (let j = i - len + 1; j <= i; j++) {
+      if (src[j] == null || vol[j] == null) { ok = false; break }
+      num += src[j] * vol[j]; den += vol[j]
+    }
+    out[i] = ok && den !== 0 ? num / den : null
+  }
+  return out
+}
+
+// Hull MA: wma(2*wma(n/2) - wma(n), sqrt(n)).
+function hma(src, len) {
+  const half = Math.max(1, Math.floor(len / 2))
+  const sq = Math.max(1, Math.round(Math.sqrt(len)))
+  const a = wma(src, half), b = wma(src, len)
+  const diff = src.map((_, i) => (a[i] == null || b[i] == null ? null : 2 * a[i] - b[i]))
+  return wma(diff, sq)
+}
+
+// Bars since the condition was last true. Null until it has been true once —
+// zero would claim "it just happened", which is a different statement.
+function barssince(cond) {
+  const out = new Array(cond.length).fill(null)
+  let last = null
+  for (let i = 0; i < cond.length; i++) {
+    if (cond[i]) last = i
+    out[i] = last == null ? null : i - last
+  }
+  return out
+}
+
+// Value of `src` when `cond` was true, counting back `occ` occurrences.
+function valuewhen(cond, src, occ) {
+  const out = new Array(src.length).fill(null)
+  const hits = []
+  for (let i = 0; i < src.length; i++) {
+    if (cond[i]) hits.push(i)
+    const idx = hits.length - 1 - (occ || 0)
+    out[i] = idx >= 0 ? src[hits[idx]] : null
+  }
+  return out
+}
+
+function cum(src) {
+  const out = new Array(src.length).fill(null)
+  let acc = 0
+  for (let i = 0; i < src.length; i++) {
+    if (src[i] == null) { out[i] = acc; continue }
+    acc += src[i]; out[i] = acc
+  }
+  return out
+}
+
+// A pivot is only confirmed once `right` more bars exist, so the value is
+// published at the confirming bar rather than backdated to the extreme.
+function pivot(src, left, right, isHigh) {
+  const out = new Array(src.length).fill(null)
+  for (let i = left; i + right < src.length; i++) {
+    const v = src[i]
+    if (v == null) continue
+    let ok = true
+    for (let j = i - left; j <= i + right; j++) {
+      if (j === i || src[j] == null) continue
+      if (isHigh ? src[j] > v : src[j] < v) { ok = false; break }
+    }
+    if (ok) out[i + right] = v
+  }
+  return out
+}
+
+// NOTE: no trueRange here. One already exists above, and it deliberately leaves
+// index 0 null because no prior close exists there. An earlier draft of this
+// block redefined it to fabricate high[0]-low[0] at index 0 — reintroducing the
+// exact TA-Lib drift its comment records fixing, and silently breaking ta.atr.
+
 const COSMETIC_NAMESPACES = new Set([
   'color', 'shape', 'location', 'plot', 'size', 'line', 'label',
   'scale', 'font', 'text', 'xloc', 'yloc', 'extend', 'display', 'format',
 ])
+
+
+// Pine v5/v6 declarations carry an optional storage qualifier and an optional
+// type before the name: `var`, `varip`, `const`, `simple`, `series`, and
+// `int`/`float`/`bool`/`string`/`color`/... This engine is untyped and
+// evaluates whole series at once, so the annotations carry no information it
+// can use, and it strips them to reach the assignment underneath.
+//
+// Stripping `var` is safe here *because* `:=` reassignment is unsupported.
+// `var x = expr` differs from `x = expr` only when x is later reassigned — the
+// accumulator pattern — and any script doing that fails on the `:=` line
+// instead. So a script either behaves identically or refuses to run; it never
+// runs and quietly produces the wrong numbers. Add `:=` and this comment stops
+// being true.
+const DECL_PREFIX = /^(?:(?:var|varip)\s+)?(?:(?:simple|series|const)\s+)?(?:(?:int|float|bool|string|color|line|label|box|table)\s+)?(?=[A-Za-z_][A-Za-z0-9_]*\s*=(?!=))/
+
+function stripDeclaration(line) {
+  return line.replace(DECL_PREFIX, '')
+}
+
+
+// Pine lets a call span several lines while its parentheses are open, and
+// real scripts use that constantly for long argument lists. The evaluator
+// works one statement at a time, so continuation lines are joined before
+// anything tries to parse them.
+//
+// Depth is counted outside string literals: a bracket inside a title like
+// "Length (bars)" is text, not structure, and counting it would swallow the
+// following line into the statement.
+function bracketDelta(line) {
+  let depth = 0, quote = null
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]
+    if (quote) {
+      if (c === '\\') { i++; continue }
+      if (c === quote) quote = null
+      continue
+    }
+    if (c === '"' || c === "'") { quote = c; continue }
+    if (c === '(' || c === '[') depth++
+    else if (c === ')' || c === ']') depth--
+  }
+  return depth
+}
+
+
+// Lift a scalar function over a series (or a plain number), keeping null as
+// null. Silently turning a warm-up null into 0 would draw a real line through
+// a period where the indicator has no value.
+function lift1(a, fn) {
+  if (!Array.isArray(a)) return a == null ? null : fn(a)
+  return a.map((v) => (v == null || !isFinite(v) ? null : fn(v)))
+}
+
+// Same, for functions of several arguments where any argument may be a series.
+function liftN(args, fn) {
+  const n = args.reduce((m, a) => (Array.isArray(a) ? Math.max(m, a.length) : m), 0)
+  if (n === 0) return args.some((a) => a == null) ? null : fn(args)
+  const out = new Array(n).fill(null)
+  for (let i = 0; i < n; i++) {
+    const xs = args.map((a) => (Array.isArray(a) ? a[i] : a))
+    if (xs.some((v) => v == null || typeof v !== 'number' || !isFinite(v))) continue
+    out[i] = fn(xs)
+  }
+  return out
+}
 
 // ── tokenizer ──
 function tokenize(src) {
   const toks = []
   // Multi-char operators must be tried before the single-char class so
   // ">=" doesn't get split into ">" + "=".
-  const re = /\s+|\/\/[^\n]*|("(?:[^"\\]|\\.)*")|([A-Za-z_][A-Za-z0-9_.]*)|(\d+\.?\d*)|(>=|<=|==|!=|[()[\]+\-*/,=?:<>])/g
+  // Pine accepts both quote styles for strings, and real-world scripts use
+  // both freely. Handling only double quotes made every script with a
+  // single-quoted title unparseable — 13 of the 15 v5/v6 scripts in a
+  // 210-script public corpus failed on exactly this and nothing else.
+  // `#RRGGBB` / `#RRGGBBAA` literals are colour, i.e. cosmetic. They tokenize
+  // as strings so they can be passed around and ignored, exactly like the
+  // color.* namespace, rather than stopping the parse on '#'.
+  const re = /\s+|\/\/[^\n]*|(#[0-9a-fA-F]{6,8})|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|([A-Za-z_][A-Za-z0-9_.]*)|(\d+\.?\d*)|(>=|<=|==|!=|[()[\]+\-*/,=?:<>])/g
   let m, last = 0
   while ((m = re.exec(src)) !== null) {
     if (m.index !== last) throw new Error('Unexpected character: ' + src.slice(last, m.index))
     last = re.lastIndex
     if (m[0].trim() === '' || m[0].startsWith('//')) continue
-    if (m[1]) toks.push({ t: 'str', v: m[1].slice(1, -1) })
-    else if (m[2]) toks.push({ t: 'id', v: m[2] })
-    else if (m[3]) toks.push({ t: 'num', v: parseFloat(m[3]) })
-    else toks.push({ t: 'op', v: m[4] })
+    if (m[1]) toks.push({ t: 'str', v: m[1] })
+    else if (m[2]) toks.push({ t: 'str', v: m[2].slice(1, -1) })
+    else if (m[3]) toks.push({ t: 'id', v: m[3] })
+    else if (m[4]) toks.push({ t: 'num', v: parseFloat(m[4]) })
+    else toks.push({ t: 'op', v: m[5] })
   }
   if (last !== src.length) throw new Error('Unexpected character near: ' + src.slice(last))
   return toks
@@ -589,6 +771,9 @@ function evaluatePine(script, candles) {
     hlc3: candles.map((c) => (Number(c.high) + Number(c.low) + Number(c.close)) / 3),
     ohlc4: candles.map((c) => (Number(c.open) + Number(c.high) + Number(c.low) + Number(c.close)) / 4),
   }
+  // Pine exposes ta.tr as a built-in *variable*, not a call, so it has to
+  // resolve through the identifier path. `ta.tr()` still works via FUNCS.
+  SOURCES['ta.tr'] = trueRange(SOURCES.high, SOURCES.low, SOURCES.close)
   const vars = {}
   const plots = {}
   const markers = {}
@@ -599,7 +784,34 @@ function evaluatePine(script, candles) {
     'ta.sma': (a) => sma(a[0], int(a[1])),
     'ta.ema': (a) => ema(a[0], int(a[1])),
     'ta.wma': (a) => wma(a[0], int(a[1])),
+    'ta.hma': (a) => hma(a[0], int(a[1])),
+    'ta.vwma': (a) => vwma(a[0], SOURCES.volume, int(a[1])),
+    'ta.change': (a) => change(a[0], a[1] == null ? 1 : int(a[1])),
+    'ta.roc': (a) => roc(a[0], int(a[1])),
+    'ta.mom': (a) => change(a[0], int(a[1])),
+    'ta.cum': (a) => cum(a[0]),
+    'ta.tr': () => trueRange(SOURCES.high, SOURCES.low, SOURCES.close),
+    'ta.barssince': (a) => barssince(a[0]),
+    'ta.valuewhen': (a) => valuewhen(a[0], a[1], a[2] == null ? 0 : int(a[2])),
+    'ta.pivothigh': (a) => pivot(a[0], int(a[1]), int(a[2]), true),
+    'ta.pivotlow': (a) => pivot(a[0], int(a[1]), int(a[2]), false),
     'ta.rsi': (a) => rsi(a[0], int(a[1])),
+    // Pine's math namespace. Each lifts a scalar operation over a series,
+    // preserving null so a warm-up gap stays a gap rather than becoming 0.
+    'math.abs': (a) => lift1(a[0], Math.abs),
+    'math.sqrt': (a) => lift1(a[0], Math.sqrt),
+    'math.log': (a) => lift1(a[0], Math.log),
+    'math.log10': (a) => lift1(a[0], Math.log10),
+    'math.exp': (a) => lift1(a[0], Math.exp),
+    'math.sign': (a) => lift1(a[0], Math.sign),
+    'math.floor': (a) => lift1(a[0], Math.floor),
+    'math.ceil': (a) => lift1(a[0], Math.ceil),
+    'math.round': (a) => lift1(a[0], Math.round),
+    'math.max': (a) => liftN(a, (xs) => Math.max(...xs)),
+    'math.min': (a) => liftN(a, (xs) => Math.min(...xs)),
+    'math.pow': (a) => liftN(a, (xs) => Math.pow(xs[0], xs[1])),
+    'math.avg': (a) => liftN(a, (xs) => xs.reduce((p, c) => p + c, 0) / xs.length),
+    'ta.variance': (a) => variance(a[0], int(a[1])),
     'ta.stdev': (a) => stdev(a[0], int(a[1])),
     'ta.highest': (a) => rolling(a[0], int(a[1]), (w) => Math.max(...w)),
     'ta.lowest': (a) => rolling(a[0], int(a[1]), (w) => Math.min(...w)),
@@ -615,6 +827,18 @@ function evaluatePine(script, candles) {
       return { __tuple: [macdLine, signalLine, hist] }
     },
     'input.int': (a) => a[0],
+    // Pine's source picker. The chosen series IS the first argument, so
+    // returning it is the whole implementation.
+    'input.source': (a) => a[0],
+    // nz(x) / nz(x, replacement): substitute for na. Without it any script
+    // guarding an indicator's warm-up period fails, which is most of them.
+    'nz': (a) => {
+      const fill = a[1] == null ? 0 : a[1]
+      const src = a[0]
+      if (!Array.isArray(src)) return src == null ? fill : src
+      const rep = Array.isArray(fill) ? fill : null
+      return src.map((v, i) => (v == null || !isFinite(v)) ? (rep ? rep[i] : fill) : v)
+    },
     'input.float': (a) => a[0],
     'input.bool': (a) => a[0],
     'input.string': (a) => a[0],
@@ -719,7 +943,20 @@ function evaluatePine(script, candles) {
         if (peek() && peek().v === '(') {
           next() // (
           const args = []
-          if (peek() && peek().v !== ')') { args.push(ternaryExpr()); while (peek() && peek().v === ',') { next(); args.push(ternaryExpr()) } }
+          // Pine allows named arguments — `input.int(20, "Len", minval=1)`.
+          // The name is dropped and the value parsed positionally: every
+          // function here either ignores extra arguments or reads only the
+          // ones that come before the named block, so the name carries no
+          // information this engine acts on. Without this, `minval` parsed as
+          // an identifier and the whole call failed as an unknown one.
+          const parseArg = () => {
+            const a = toks[pos], b = toks[pos + 1]
+            // `=` is its own token; `==` tokenizes separately, so there is no
+            // ambiguity with a comparison here.
+            if (a && a.t === 'id' && b && b.t === 'op' && b.v === '=') { pos += 2 }
+            return ternaryExpr()
+          }
+          if (peek() && peek().v !== ')') { args.push(parseArg()); while (peek() && peek().v === ',') { next(); args.push(parseArg()) } }
           const c = next(); if (!c || c.v !== ')') throw new Error('Expected ) after args')
           const fn = FUNCS[tk.v]
           if (fn) return fn(args)
@@ -776,9 +1013,26 @@ function evaluatePine(script, candles) {
   }
 
   // statements: split by newline
-  for (const rawLine of script.split('\n')) {
-    const line = rawLine.replace(/\/\/.*$/, '').trim()
+  const _srcLines = script.split('\n')
+  for (let _ln = 0; _ln < _srcLines.length; _ln++) {
+    const rawLine = _srcLines[_ln]
+    let line = rawLine.replace(/\/\/.*$/, '').trim()
     if (!line) continue
+
+    // Join continuation lines while brackets stay open. The error line stays
+    // the statement's first line, which is where an author looks.
+    const _startLn = _ln
+    let _depth = bracketDelta(line)
+    while (_depth > 0 && _ln + 1 < _srcLines.length) {
+      _ln++
+      const cont = _srcLines[_ln].replace(/\/\/.*$/, '').trim()
+      if (!cont) continue
+      line += ' ' + cont
+      _depth += bracketDelta(cont)
+    }
+
+    line = stripDeclaration(line)
+    try {
     const toks = tokenize(line)
     if (toks.length === 0) continue
 
@@ -871,6 +1125,12 @@ function evaluatePine(script, candles) {
     }
 
     throw new Error('Unsupported statement: ' + line)
+    } catch (e) {
+      // Attach the source line to anything thrown above. Without it an error
+      // says what went wrong but not where, and the author has to hunt.
+      if (e && e.line == null) { e.line = _startLn + 1; e.source = rawLine.trim() }
+      throw e
+    }
   }
 
   if (Object.keys(plots).length === 0 && Object.keys(markers).length === 0) {
@@ -879,4 +1139,35 @@ function evaluatePine(script, candles) {
   return { plots, markers, alerts: [], title: scriptTitle }
 }
 
-module.exports = { evaluatePine }
+
+
+// ── validation ──
+//
+// Answers a question the external TradingView compiler cannot: *can this engine
+// actually run the script?* TradingView accepts the whole Pine language; this
+// engine implements a subset, so a script can compile there and still fail
+// here. For Vantage's purposes that makes this the more relevant check, and it
+// needs no network at all.
+//
+// Runs against synthetic candles rather than parsing separately, so there is
+// exactly one code path and validation cannot drift away from execution.
+function validatePine(script) {
+  const N = 60
+  const candles = Array.from({ length: N }, (_, i) => {
+    // Gently varying and strictly positive, so an indicator that divides by a
+    // previous value does not fail on the fixture rather than the script.
+    const base = 100 + Math.sin(i / 5) * 5 + i * 0.1
+    return { time: i, open: base, high: base + 1, low: base - 1, close: base, volume: 1000 + i }
+  })
+  try {
+    evaluatePine(script, candles)
+    return { valid: true, errors: [] }
+  } catch (e) {
+    const err = { message: String((e && e.message) || e) }
+    if (e && e.line != null) err.line = e.line
+    if (e && e.source) err.source = e.source
+    return { valid: false, errors: [err] }
+  }
+}
+
+module.exports = { evaluatePine, validatePine }

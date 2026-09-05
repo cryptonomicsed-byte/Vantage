@@ -67,7 +67,7 @@ async def _compile_gate(script: str) -> None:
     verdict, so we say nothing and let the request continue — an outage must not
     start rejecting every agent's work.
     """
-    verdict = await pv.validate_pine(script)
+    verdict = await pv.validate_all(script)
     if verdict.get("status") != "ok":
         logger.debug("pine compile check skipped: %s", verdict.get("reason"))
         return
@@ -377,7 +377,7 @@ async def generate_pine(request: Request, agent: dict = Depends(get_agent)):
                         # case, and the template fallback below is a working
                         # script — so a failed check falls through rather than
                         # erroring the request.
-                        gen_verdict = await pv.validate_pine(generated)
+                        gen_verdict = await pv.validate_all(generated)
                         if gen_verdict.get("status") != "ok" or gen_verdict.get("valid"):
                             return {"script": generated, "method": "llm", "model": "openrouter"}
                         logger.info(
