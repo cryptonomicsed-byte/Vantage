@@ -70,7 +70,7 @@ function SpeakerBadge({ kind, framework }: { kind: string | null; framework: str
   return null
 }
 
-export default function GuildForum({ slug }: { slug: string }) {
+export default function GuildForum({ slug, selectedChannelSlug }: { slug: string; selectedChannelSlug?: string }) {
   const [apiKey] = useState(() => localStorage.getItem('vantage_api_key') || '')
   const [humanSession] = useState(() => localStorage.getItem('vantage_human_session') || '')
   const [channels, setChannels] = useState<Channel[]>([])
@@ -105,16 +105,33 @@ export default function GuildForum({ slug }: { slug: string }) {
       ])
       if (chRes.ok) {
         const data = await chRes.json()
-        setChannels(data.channels || [])
-        setActive(prev => prev || data.channels?.[0] || null)
+        const list: Channel[] = data.channels || []
+        setChannels(list)
+        // When embedded (selectedChannelSlug prop set), honour that slug; otherwise
+        // fall back to the previously active channel or the first one.
+        if (selectedChannelSlug) {
+          const flat = list.flatMap(c => [c, ...(c.children || [])])
+          const match = flat.find(c => c.slug === selectedChannelSlug)
+          setActive(match || list[0] || null)
+        } else {
+          setActive(prev => prev || list[0] || null)
+        }
       }
       if (memRes.ok) setMembership(await memRes.json())
     } finally {
       setLoading(false)
     }
-  }, [slug, headers])
+  }, [slug, selectedChannelSlug, headers])
 
   useEffect(() => { loadChannels() }, [loadChannels])
+
+  // When parent changes which channel is selected (shell nav), sync active.
+  useEffect(() => {
+    if (!selectedChannelSlug || channels.length === 0) return
+    const flat = channels.flatMap(c => [c, ...(c.children || [])])
+    const match = flat.find(c => c.slug === selectedChannelSlug)
+    if (match) setActive(match)
+  }, [selectedChannelSlug, channels])
 
   const loadMessages = useCallback(async (channel: Channel) => {
     setThread(null)
@@ -194,10 +211,13 @@ export default function GuildForum({ slug }: { slug: string }) {
   const isStaff = membership?.role === 'founder' || membership?.role === 'admin' || membership?.role === 'moderator'
   const view = thread ? thread.messages : messages
 
+  // When embedded in the shell, the sidebar handles channel navigation.
+  const isEmbedded = !!selectedChannelSlug
+
   if (loading) {
     return (
       <section className="profile-section">
-        <h3 className="section-title"><MessageSquare size={14} /> Forum</h3>
+        {!isEmbedded && <h3 className="section-title"><MessageSquare size={14} /> Forum</h3>}
         <p className="muted-text"><Loader2 size={12} className="spin" /> Loading channels…</p>
       </section>
     )
@@ -205,24 +225,26 @@ export default function GuildForum({ slug }: { slug: string }) {
 
   return (
     <section className="profile-section">
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
-        <h3 className="section-title" style={{ margin: 0 }}>
-          <MessageSquare size={14} /> Forum
-          {channels.length > 0 && <span className="muted-text" style={{ fontSize: 11, marginLeft: 8 }}>{channels.length} channels</span>}
-        </h3>
-        <div style={{ display: 'flex', gap: 8 }}>
-          {membership?.authenticated && !membership.member && (
-            <button className="btn btn-sm btn-primary" onClick={join}>Join to post</button>
-          )}
-          {isStaff && (
-            <button className="btn btn-sm" onClick={() => setShowNewChannel(s => !s)}>
-              <Plus size={12} /> Channel
-            </button>
-          )}
+      {!isEmbedded && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+          <h3 className="section-title" style={{ margin: 0 }}>
+            <MessageSquare size={14} /> Forum
+            {channels.length > 0 && <span className="muted-text" style={{ fontSize: 11, marginLeft: 8 }}>{channels.length} channels</span>}
+          </h3>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {membership?.authenticated && !membership.member && (
+              <button className="btn btn-sm btn-primary" onClick={join}>Join to post</button>
+            )}
+            {isStaff && (
+              <button className="btn btn-sm" onClick={() => setShowNewChannel(s => !s)}>
+                <Plus size={12} /> Channel
+              </button>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
-      {showNewChannel && (
+      {!isEmbedded && showNewChannel && (
         <div className="glass" style={{ padding: 12, marginTop: 12, display: 'grid', gap: 8 }}>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <input
@@ -260,36 +282,38 @@ export default function GuildForum({ slug }: { slug: string }) {
           No channels yet. {isStaff ? 'Create one to start the forum.' : 'A guild admin can create the first one.'}
         </p>
       ) : (
-        <div className="guild-forum-layout" style={{ display: 'grid', gridTemplateColumns: 'minmax(160px, 220px) minmax(0, 1fr)', gap: 16, marginTop: 14 }}>
-          {/* Channel tree */}
-          <nav style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-            {channels.map(channel => (
-              <div key={channel.id}>
-                <button
-                  className={`btn btn-sm${active?.id === channel.id ? ' btn-primary' : ''}`}
-                  onClick={() => setActive(channel)}
-                  style={{ width: '100%', justifyContent: 'flex-start', gap: 6, textAlign: 'left' }}
-                >
-                  {channel.channel_kind === 'workspace' ? <Terminal size={11} /> : <Hash size={11} />}
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{channel.name}</span>
-                  {channel.message_count > 0 && (
-                    <span className="muted-text" style={{ fontSize: 10, marginLeft: 'auto' }}>{channel.message_count}</span>
-                  )}
-                </button>
-                {(channel.children || []).map(child => (
+        <div className="guild-forum-layout" style={{ display: 'grid', gridTemplateColumns: isEmbedded ? '1fr' : 'minmax(160px, 220px) minmax(0, 1fr)', gap: 16, marginTop: isEmbedded ? 0 : 14 }}>
+          {/* Channel tree — hidden when GuildProfile shell owns the sidebar */}
+          {!isEmbedded && (
+            <nav style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+              {channels.map(channel => (
+                <div key={channel.id}>
                   <button
-                    key={child.id}
-                    className={`btn btn-sm${active?.id === child.id ? ' btn-primary' : ''}`}
-                    onClick={() => setActive(child)}
-                    style={{ width: '100%', justifyContent: 'flex-start', gap: 6, paddingLeft: 20, textAlign: 'left' }}
+                    className={`btn btn-sm${active?.id === channel.id ? ' btn-primary' : ''}`}
+                    onClick={() => setActive(channel)}
+                    style={{ width: '100%', justifyContent: 'flex-start', gap: 6, textAlign: 'left' }}
                   >
-                    <CornerDownRight size={10} />
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{child.name}</span>
+                    {channel.channel_kind === 'workspace' ? <Terminal size={11} /> : <Hash size={11} />}
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{channel.name}</span>
+                    {channel.message_count > 0 && (
+                      <span className="muted-text" style={{ fontSize: 10, marginLeft: 'auto' }}>{channel.message_count}</span>
+                    )}
                   </button>
-                ))}
-              </div>
-            ))}
-          </nav>
+                  {(channel.children || []).map(child => (
+                    <button
+                      key={child.id}
+                      className={`btn btn-sm${active?.id === child.id ? ' btn-primary' : ''}`}
+                      onClick={() => setActive(child)}
+                      style={{ width: '100%', justifyContent: 'flex-start', gap: 6, paddingLeft: 20, textAlign: 'left' }}
+                    >
+                      <CornerDownRight size={10} />
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{child.name}</span>
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </nav>
+          )}
 
           {/* Message pane */}
           <div style={{ minWidth: 0 }}>

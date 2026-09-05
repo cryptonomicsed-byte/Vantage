@@ -68,7 +68,7 @@ function when(unix: number): string {
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
 }
 
-export default function WorkspaceCode({ guildSlug }: { guildSlug: string }) {
+export default function WorkspaceCode({ guildSlug, selectedSlug }: { guildSlug: string; selectedSlug?: string }) {
   const [apiKey] = useState(() => localStorage.getItem('vantage_api_key') || '')
   const [humanSession] = useState(() => localStorage.getItem('vantage_human_session') || '')
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
@@ -105,8 +105,15 @@ export default function WorkspaceCode({ guildSlug }: { guildSlug: string }) {
       ])
       if (ws.ok) {
         const data = await ws.json()
-        setWorkspaces(data.workspaces || [])
-        setActive(prev => prev || data.workspaces?.[0] || null)
+        const list: Workspace[] = data.workspaces || []
+        setWorkspaces(list)
+        // When embedded, honour the selectedSlug passed from the shell.
+        if (selectedSlug) {
+          const match = list.find(w => w.slug === selectedSlug)
+          setActive(match || list[0] || null)
+        } else {
+          setActive(prev => prev || list[0] || null)
+        }
       }
       if (mem.ok) setRole((await mem.json()).role)
       if (rp.ok) {
@@ -121,9 +128,16 @@ export default function WorkspaceCode({ guildSlug }: { guildSlug: string }) {
     } finally {
       setLoading(false)
     }
-  }, [guildSlug, headers])
+  }, [guildSlug, selectedSlug, headers])
 
   useEffect(() => { loadShell() }, [loadShell])
+
+  // Sync active workspace when the shell sidebar changes selection.
+  useEffect(() => {
+    if (!selectedSlug || workspaces.length === 0) return
+    const match = workspaces.find(w => w.slug === selectedSlug)
+    if (match) setActive(match)
+  }, [selectedSlug, workspaces])
 
   const loadMessages = useCallback(async (ws: Workspace) => {
     const res = await fetch(`/api/guilds/${guildSlug}/channels/${ws.slug}/messages?limit=100`, {
@@ -189,11 +203,13 @@ export default function WorkspaceCode({ guildSlug }: { guildSlug: string }) {
 
   const isStaff = ['founder', 'admin', 'moderator'].includes(role || '')
   const needsRef = workType === 'claim' || workType === 'artifact'
+  // When embedded in the shell, the shell sidebar handles workspace selection.
+  const isEmbedded = !!selectedSlug
 
   if (loading) {
     return (
       <section className="profile-section">
-        <h3 className="section-title"><Terminal size={14} /> Workspace</h3>
+        {!isEmbedded && <h3 className="section-title"><Terminal size={14} /> Workspace</h3>}
         <p className="muted-text"><Loader2 size={12} className="spin" /> Loading workspaces…</p>
       </section>
     )
@@ -201,12 +217,14 @@ export default function WorkspaceCode({ guildSlug }: { guildSlug: string }) {
 
   return (
     <section className="profile-section">
-      <h3 className="section-title" style={{ marginBottom: 4 }}>
-        <Terminal size={14} /> Workspace
-        <span className="muted-text" style={{ fontSize: 11, marginLeft: 8 }}>
-          code collaboration
-        </span>
-      </h3>
+      {!isEmbedded && (
+        <h3 className="section-title" style={{ marginBottom: 4 }}>
+          <Terminal size={14} /> Workspace
+          <span className="muted-text" style={{ fontSize: 11, marginLeft: 8 }}>
+            code collaboration
+          </span>
+        </h3>
+      )}
 
       {sandbox && !sandbox.ok && (
         <div className="glass" style={{ padding: 10, margin: '10px 0', display: 'flex', gap: 8 }}>
@@ -221,22 +239,25 @@ export default function WorkspaceCode({ guildSlug }: { guildSlug: string }) {
       {workspaces.length === 0 ? (
         <p className="muted-text" style={{ marginTop: 12 }}>
           No workspace channels yet. {isStaff
-            ? 'Create a channel with kind “workspace” in the guild room, then bind a repository to it.'
+            ? 'Create a channel with kind "workspace" in the guild room, then bind a repository to it.'
             : 'A guild admin can create one.'}
         </p>
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(150px, 200px) minmax(0, 1fr)', gap: 14, marginTop: 12 }}>
-          <nav style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-            {workspaces.map(ws => (
-              <button key={ws.id}
-                className={`btn btn-sm${active?.id === ws.id ? ' btn-primary' : ''}`}
-                onClick={() => setActive(ws)}
-                style={{ width: '100%', justifyContent: 'flex-start', gap: 6, textAlign: 'left' }}>
-                <Box size={11} />
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ws.name}</span>
-              </button>
-            ))}
-          </nav>
+        <div style={{ display: 'grid', gridTemplateColumns: isEmbedded ? '1fr' : 'minmax(150px, 200px) minmax(0, 1fr)', gap: 14, marginTop: isEmbedded ? 0 : 12 }}>
+          {/* workspace nav — hidden when GuildProfile shell owns the sidebar */}
+          {!isEmbedded && (
+            <nav style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+              {workspaces.map(ws => (
+                <button key={ws.id}
+                  className={`btn btn-sm${active?.id === ws.id ? ' btn-primary' : ''}`}
+                  onClick={() => setActive(ws)}
+                  style={{ width: '100%', justifyContent: 'flex-start', gap: 6, textAlign: 'left' }}>
+                  <Box size={11} />
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ws.name}</span>
+                </button>
+              ))}
+            </nav>
+          )}
 
           <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column' }}>
             {active && (

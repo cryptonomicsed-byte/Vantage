@@ -99,7 +99,7 @@ function Body({ text }: { text: string }) {
   )
 }
 
-export default function GuildChat({ slug }: { slug: string }) {
+export default function GuildChat({ slug, selectedChannelSlug }: { slug: string; selectedChannelSlug?: string }) {
   const [apiKey] = useState(() => localStorage.getItem('vantage_api_key') || '')
   const [humanSession] = useState(() => localStorage.getItem('vantage_human_session') || '')
   const [channels, setChannels] = useState<Channel[]>([])
@@ -138,8 +138,16 @@ export default function GuildChat({ slug }: { slug: string }) {
       ])
       if (ch.ok) {
         const data = await ch.json()
-        setChannels(data.channels || [])
-        setActive(prev => prev || data.channels?.[0] || null)
+        const list: Channel[] = data.channels || []
+        setChannels(list)
+        // When embedded, honour selectedChannelSlug; otherwise first channel.
+        if (selectedChannelSlug) {
+          const flat = list.flatMap(c => [c, ...(c.children || [])])
+          const match = flat.find(c => c.slug === selectedChannelSlug)
+          setActive(match || list[0] || null)
+        } else {
+          setActive(prev => prev || list[0] || null)
+        }
       }
       if (mem.ok) setMembership(await mem.json())
       if (ppl.ok) setPrincipals((await ppl.json()).principals || [])
@@ -147,9 +155,17 @@ export default function GuildChat({ slug }: { slug: string }) {
     } finally {
       setLoading(false)
     }
-  }, [slug, headers])
+  }, [slug, selectedChannelSlug, headers])
 
   useEffect(() => { loadShell() }, [loadShell])
+
+  // Sync active channel when the shell sidebar changes selection.
+  useEffect(() => {
+    if (!selectedChannelSlug || channels.length === 0) return
+    const flat = channels.flatMap(c => [c, ...(c.children || [])])
+    const match = flat.find(c => c.slug === selectedChannelSlug)
+    if (match) setActive(match)
+  }, [selectedChannelSlug, channels])
 
   const loadMessages = useCallback(async (channel: Channel) => {
     const res = await fetch(`/api/guilds/${slug}/channels/${channel.slug}/messages?limit=100`, {
@@ -288,11 +304,13 @@ export default function GuildChat({ slug }: { slug: string }) {
 
   const isStaff = ['founder', 'admin', 'moderator'].includes(membership?.role || '')
   const flatChannels = channels.flatMap(c => [c, ...(c.children || [])])
+  // When embedded in the shell, the shell sidebar handles channel navigation.
+  const isEmbedded = !!selectedChannelSlug
 
   if (loading) {
     return (
       <section className="profile-section">
-        <h3 className="section-title"><Users size={14} /> Guild Chat</h3>
+        {!isEmbedded && <h3 className="section-title"><Users size={14} /> Guild Chat</h3>}
         <p className="muted-text"><Loader2 size={12} className="spin" /> Loading room…</p>
       </section>
     )
@@ -300,26 +318,28 @@ export default function GuildChat({ slug }: { slug: string }) {
 
   return (
     <section className="profile-section">
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
-        <h3 className="section-title" style={{ margin: 0 }}>
-          <Users size={14} /> Guild Chat
-          <span className="muted-text" style={{ fontSize: 11, marginLeft: 8 }}>
-            {principals.length} members · {flatChannels.length} channels
-          </span>
-        </h3>
-        <div style={{ display: 'flex', gap: 8 }}>
-          {membership?.authenticated && !membership.member && (
-            <button className="btn btn-sm btn-primary" onClick={join}>Join to chat</button>
-          )}
-          {isStaff && (
-            <button className="btn btn-sm" onClick={() => setShowNewChannel(s => !s)}>
-              <Plus size={12} /> Channel
-            </button>
-          )}
+      {!isEmbedded && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+          <h3 className="section-title" style={{ margin: 0 }}>
+            <Users size={14} /> Guild Chat
+            <span className="muted-text" style={{ fontSize: 11, marginLeft: 8 }}>
+              {principals.length} members · {flatChannels.length} channels
+            </span>
+          </h3>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {membership?.authenticated && !membership.member && (
+              <button className="btn btn-sm btn-primary" onClick={join}>Join to chat</button>
+            )}
+            {isStaff && (
+              <button className="btn btn-sm" onClick={() => setShowNewChannel(s => !s)}>
+                <Plus size={12} /> Channel
+              </button>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
-      {showNewChannel && (
+      {!isEmbedded && showNewChannel && (
         <div className="glass" style={{ padding: 12, marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <input className="input" placeholder="channel-slug" value={newChannel.slug} style={{ flex: '1 1 140px' }}
             onChange={e => setNewChannel(c => ({ ...c, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-') }))} />
@@ -339,31 +359,33 @@ export default function GuildChat({ slug }: { slug: string }) {
           No channels yet. {isStaff ? 'Create one to open the room.' : 'A guild admin can create the first one.'}
         </p>
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(140px, 190px) minmax(0, 1fr)', gap: 14, marginTop: 14 }}>
-          {/* channels */}
-          <nav style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-            {channels.map(c => (
-              <div key={c.id}>
-                <button
-                  className={`btn btn-sm${active?.id === c.id ? ' btn-primary' : ''}`}
-                  onClick={() => setActive(c)}
-                  style={{ width: '100%', justifyContent: 'flex-start', gap: 6, textAlign: 'left' }}
-                >
-                  {c.channel_kind === 'workspace' ? <Terminal size={11} /> : <Hash size={11} />}
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</span>
-                </button>
-                {(c.children || []).map(child => (
-                  <button key={child.id}
-                    className={`btn btn-sm${active?.id === child.id ? ' btn-primary' : ''}`}
-                    onClick={() => setActive(child)}
-                    style={{ width: '100%', justifyContent: 'flex-start', gap: 6, paddingLeft: 20, textAlign: 'left' }}>
-                    <CornerDownRight size={10} />
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{child.name}</span>
+        <div style={{ display: 'grid', gridTemplateColumns: isEmbedded ? '1fr' : 'minmax(140px, 190px) minmax(0, 1fr)', gap: 14, marginTop: isEmbedded ? 0 : 14 }}>
+          {/* channels — hidden when GuildProfile shell owns the sidebar */}
+          {!isEmbedded && (
+            <nav style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+              {channels.map(c => (
+                <div key={c.id}>
+                  <button
+                    className={`btn btn-sm${active?.id === c.id ? ' btn-primary' : ''}`}
+                    onClick={() => setActive(c)}
+                    style={{ width: '100%', justifyContent: 'flex-start', gap: 6, textAlign: 'left' }}
+                  >
+                    {c.channel_kind === 'workspace' ? <Terminal size={11} /> : <Hash size={11} />}
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</span>
                   </button>
-                ))}
-              </div>
-            ))}
-          </nav>
+                  {(c.children || []).map(child => (
+                    <button key={child.id}
+                      className={`btn btn-sm${active?.id === child.id ? ' btn-primary' : ''}`}
+                      onClick={() => setActive(child)}
+                      style={{ width: '100%', justifyContent: 'flex-start', gap: 6, paddingLeft: 20, textAlign: 'left' }}>
+                      <CornerDownRight size={10} />
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{child.name}</span>
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </nav>
+          )}
 
           {/* the room */}
           <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column' }}>
