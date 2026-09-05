@@ -16,7 +16,7 @@ Usage:
   python3 signal_aggregator.py --daemon 120  # continuous
 """
 
-import json, os, sys, time, logging, argparse, re
+import json, os, sys, time, logging, argparse, re, asyncio
 from datetime import datetime, timezone
 from typing import Optional
 import urllib.request
@@ -385,6 +385,84 @@ def price_mover_scan():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 4. HYPERLIQUID INGESTOR — Direct order-flow + whale positioning signals
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _run_async(coro):
+    """Run an async coroutine from synchronous code. Fail-soft: returns None on any error."""
+    try:
+        return asyncio.run(coro)
+    except Exception as e:
+        log.debug(f"HL async call failed: {e}")
+        return None
+
+
+def scan_hyperliquid():
+    """Scan Hyperliquid for order-flow imbalances and whale positioning signals.
+
+    Uses market_sources async functions via asyncio.run() wrappers so they
+    integrate cleanly with the rest of the synchronous aggregator. A Hyperliquid
+    outage or any exception is caught and logged — it never crashes the aggregator.
+    """
+    # -- Import here to keep the import isolated and fail gracefully if the
+    #    module path is not on sys.path at runtime.
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        from backend.market_sources import hl_orderflow_delta, hl_whale_positions
+    except ImportError as e:
+        log.warning(f"Hyperliquid ingestor: could not import market_sources: {e}")
+        return
+
+    # 1. Order-flow delta for BTC, ETH, SOL
+    for coin in ("BTC", "ETH", "SOL"):
+        try:
+            of = _run_async(hl_orderflow_delta(coin))
+            if not of:
+                continue
+            imb = of.get("imbalance_pct", 0.0)
+            delta = of.get("delta", 0.0)
+            if abs(imb) > 15:
+                direction = "up" if delta > 0 else "down"
+                conviction = min(5.0, abs(imb) / 20)
+                post_signal(
+                    symbol=coin,
+                    source="hyperliquid_orderflow",
+                    stype="orderflow",
+                    conviction=conviction,
+                    direction=direction,
+                    detail=f"HL order flow delta {delta:+.0f}",
+                )
+                log.info(f"HL orderflow {coin}: imbalance={imb:+.1f}% delta={delta:+.0f}")
+        except Exception as e:
+            log.debug(f"HL orderflow scan {coin} failed: {e}")
+
+    # 2. Whale positioning — assets with large open-interest notional
+    try:
+        positions = _run_async(hl_whale_positions(min_notional_usd=100_000))
+        if positions:
+            for pos in positions:
+                notional = pos.get("notional_usd", 0.0)
+                if notional > 500_000:
+                    symbol = pos.get("symbol", "UNKNOWN")
+                    long_oi = pos.get("long_oi", 0.0)
+                    short_oi = pos.get("short_oi", 0.0)
+                    # Direction: skewed long if long_oi > short_oi, else down
+                    direction = "up" if long_oi >= short_oi else "down"
+                    conviction = min(5.0, notional / 10_000_000)
+                    post_signal(
+                        symbol=symbol,
+                        source="hyperliquid_whale",
+                        stype="whale",
+                        conviction=conviction,
+                        direction=direction,
+                        detail=f"HL OI ${notional:,.0f} long={long_oi:.1f} short={short_oi:.1f}",
+                    )
+                    log.info(f"HL whale {symbol}: notional=${notional:,.0f}")
+    except Exception as e:
+        log.debug(f"HL whale scan failed: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -459,11 +537,19 @@ def run_scan():
     except Exception as e:
         log.error(f"Price scan failed: {e}")
 
-    # 4. Hyperliquid positioning
+    # 4. Hyperliquid order flow and whale positioning (market_sources ingestor)
+    try:
+        scan_hyperliquid()
+    except Exception as e:
+        log.error(f"Hyperliquid orderflow scan failed: {e}")
+
+    # 5. Hyperliquid funding crowding. Separate from the scan above: that one
+    # reads order flow and whale size, this one reads who is paying to hold a
+    # position. Different facts, so a failure in one must not hide the other.
     try:
         hyperliquid_scan()
     except Exception as e:
-        log.error(f"Hyperliquid scan failed: {e}")
+        log.error(f"Hyperliquid funding scan failed: {e}")
 
 
 if __name__ == "__main__":

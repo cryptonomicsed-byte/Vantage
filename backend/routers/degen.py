@@ -1,13 +1,25 @@
 """Degen Alpha Router — Ultra-degen signals: early calls, smart wallets, volume surges, rug checks.
 Uses existing keys: Helius RPC, Birdeye, GeckoTerminal.
 """
-import json, os, urllib.request, hashlib, time
+import asyncio, json, logging, os, urllib.request, hashlib, time
 from pathlib import Path
+from typing import Optional
 from fastapi import APIRouter, Query, HTTPException, Header
 from backend.wallet_blacklist import sql_label_exclusions
+from backend.db import get_db
+from backend.routers.alpha import _dexscreener_mcap
+from backend import market_sources as ms
+from backend import moonshot_client
+from backend.insightx_client import scanner_for_token, scanner_risk_flags
+from backend.degen_filters import (
+    passes_all_filters, is_major_or_stable, pumpfun_token_is_alive,
+    PUMPFUN_MIN_MARKET_CAP_USD, PUMPFUN_MAX_MARKET_CAP_USD,
+)
+from contextlib import asynccontextmanager
 import aiosqlite
 
 router = APIRouter(prefix="/api/intel/degen", tags=["degen"])
+logger = logging.getLogger(__name__)
 DB = Path("/opt/ares/Vantage/data/vantage.db")
 HELIUS = os.environ.get("HELIUS_API_KEY", "")
 BIRDEYE = os.environ.get("BIRDEYE_KEY", "")
@@ -42,35 +54,36 @@ def _cache_put(key: str, val: dict):
     _CACHE[key] = (time.time(), val)
     return val
 
-def _fetch(url, headers=None, timeout=10):
+def _fetch_sync(url, headers=None, timeout=10):
     h = headers or {}; h['User-Agent'] = 'curl/8.0'
     req = urllib.request.Request(url, headers=h)
     return json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode())
 
+async def _fetch(url, headers=None, timeout=10):
+    """Runs the blocking urlopen off the event loop -- calling it directly
+    from an async handler used to freeze every other in-flight request
+    (DB ops included) for the full duration of each upstream call, since
+    GeckoTerminal/Birdeye are noted above as rate-limited/flaky and this
+    ran synchronously inside the single asyncio event loop."""
+    return await asyncio.to_thread(_fetch_sync, url, headers, timeout)
+
+@asynccontextmanager
 async def _db():
-    """Real async connection with busy_timeout -- every endpoint in this
-    router used to open a blocking sqlite3.connect() (no busy_timeout) on
-    the shared DB from inside an `async def` handler, stalling the whole
-    event loop for every other in-flight request and failing outright with
-    "database is locked" under any real write concurrency."""
-    conn = await aiosqlite.connect(str(DB))
-    await conn.execute("PRAGMA busy_timeout=20000")
-    # dict rows (not aiosqlite.Row) -- matches the original hand-rolled
-    # row_factory exactly, since downstream code calls .get() on rows,
-    # which sqlite3.Row/aiosqlite.Row doesn't support.
-    conn.row_factory = lambda cur, row: dict(zip([c[0] for c in cur.description], row))
-    return conn
+    """Pooled connection via get_db() -- bounded by the shared semaphore
+    with busy_timeout=30000, and carrying the dict row_factory every
+    endpoint here expects (downstream code calls .get() on rows, which
+    sqlite3.Row/aiosqlite.Row doesn't support)."""
+    async with get_db() as conn:
+        conn.row_factory = lambda cur, row: dict(zip([c[0] for c in cur.description], row))
+        yield conn
 
 
 async def get_agent(key):
     h = hashlib.sha256(key.encode()).hexdigest()
-    db = await _db()
-    try:
+    async with _db() as db:
         cur = await db.execute("SELECT id, name FROM agents WHERE api_key=?", (h,))
         r = await cur.fetchone()
         return dict(r) if r else None
-    finally:
-        await db.close()
 
 
 async def ensure_degen_indexes():
@@ -83,17 +96,14 @@ async def ensure_degen_indexes():
     SCAN, not SEARCH; fixed query dropped from timeout to 8ms after adding
     these). Idempotent, safe to call on every startup."""
     try:
-        db = await _db()
-        try:
+        async with _db() as db:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_twr_wallet_role ON token_wallet_roles(wallet_address, role)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_twr_role_discovered ON token_wallet_roles(role, discovered_at DESC)")
             await db.commit()
-        finally:
-            await db.close()
     except Exception as e:
         print(f"degen index init skipped (table may not exist yet): {e}")
 
-def _trending_pools_cached():
+async def _trending_pools_cached():
     """The one upstream call every endpoint here shares — fetch once, cache,
     reuse. Cuts GeckoTerminal call volume ~5x and is the actual fix for the
     rate-limit-triggered empty flashes."""
@@ -101,7 +111,7 @@ def _trending_pools_cached():
     if fresh is not None:
         return fresh, True
     try:
-        d = _fetch("https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1", {"accept": "application/json"})
+        d = await _fetch("https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=1", {"accept": "application/json"})
         pools = d.get("data", [])
         _cache_put("trending_pools", pools)
         return pools, False
@@ -126,7 +136,7 @@ def _mint_from_pool(p: dict) -> str:
 @router.get("/early-calls")
 async def early_calls(limit: int=20, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
-    pools, from_cache = _trending_pools_cached()
+    pools, from_cache = await _trending_pools_cached()
     try:
         now = time.time()
         results = []
@@ -166,8 +176,7 @@ async def early_calls(limit: int=20, x_agent_key: str=Header(...)):
 @router.get("/smart-wallets")
 async def smart_wallets(limit: int=20, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
-    db = await _db()
-    try:
+    async with _db() as db:
         # address_type='exchange' is the authoritative tag, but daemons that add
         # wallets don't always set it correctly (found 15 mistagged Binance/
         # Coinbase/Alameda/etc wallets live — fixed in the DB, but new ones can
@@ -182,12 +191,11 @@ async def smart_wallets(limit: int=20, x_agent_key: str=Header(...)):
             FROM tracked_wallets w
             WHERE w.chain IN ('solana','pumpfun')
               AND w.address_type != 'exchange'
+              AND w.archived_at IS NULL
               AND {label_exclusions}
             ORDER BY edge_count DESC LIMIT ?
         """, (limit,))
         rows = await cur.fetchall()
-    finally:
-        await db.close()
     now = time.time()
     results = []
     for r in rows:
@@ -211,10 +219,16 @@ async def smart_wallets(limit: int=20, x_agent_key: str=Header(...)):
 @router.get("/volume-surge")
 async def volume_surge(limit: int=20, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
-    pools, from_cache = _trending_pools_cached()
+    pools, from_cache = await _trending_pools_cached()
     try:
         results = []
-        for p in pools[:limit]:
+        # Was `pools[:limit]` here -- slicing to `limit` BEFORE filtering by
+        # surge_ratio, so a caller passing limit=5 only ever scanned the
+        # first 5 raw pools for surges, silently missing real surges further
+        # down GeckoTerminal's list. `limit` is meant to bound the RESULT
+        # count, not the scan -- scan every cached pool, filter, sort, then
+        # slice.
+        for p in pools:
             attrs = p.get("attributes",{})
             vol = attrs.get("volume_usd",{})
             vol_5m = float(str(vol.get("m5",0))) if isinstance(vol,dict) else 0
@@ -230,6 +244,19 @@ async def volume_surge(limit: int=20, x_agent_key: str=Header(...)):
             if surge_ratio > 1.4:
                 results.append({"symbol":sym,"name":name,"address":_mint_from_pool(p),"volume_5m":vol_5m,"volume_1h":vol_1h,"surge_ratio":round(surge_ratio,1),"signal":"🔥 SURGE" if surge_ratio>3 else "⚡ SPIKE"})
         results.sort(key=lambda x:-x.get("surge_ratio",0))
+        results = results[:limit]
+
+        # Real market cap, bounded to just the results actually returned --
+        # same labeled pattern as /top5 (a raw volume figure isn't market
+        # cap, and a "3.2x surge" on a $2K pool reads very differently from
+        # one on a $2M pool).
+        mcaps = await asyncio.gather(
+            *[_dexscreener_mcap(r["address"]) if r["address"] else asyncio.sleep(0, result=None) for r in results],
+            return_exceptions=True,
+        )
+        for r, snap in zip(results, mcaps):
+            r["market_cap"] = snap.get("market_cap") if isinstance(snap, dict) else None
+
         resp = {"volume_surges":results,"count":len(results),"source":"GeckoTerminal","cached":from_cache}
         return _cache_put("volume_surge", resp) if results else (_cache_get_stale("volume_surge") or resp)
     except Exception:
@@ -241,7 +268,7 @@ async def volume_surge(limit: int=20, x_agent_key: str=Header(...)):
 @router.get("/top5")
 async def top5_degen(limit: int=5, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
-    pools, from_cache = _trending_pools_cached()
+    pools, from_cache = await _trending_pools_cached()
     try:
         graduated = []
         for p in pools[:25]:
@@ -263,10 +290,35 @@ async def top5_degen(limit: int=5, x_agent_key: str=Header(...)):
             if pc_24h > 10: score += 20
             if buys_24h > sells_24h: score += 15
             if graduated_bool: score += 15
-            graduated.append(dict(symbol=symbol,name=name,address=addr,volume_24h=vol_24h,price_change_24h=pc_24h,buys_24h=buys_24h,sells_24h=sells_24h,graduated=graduated_bool,score=score,reason=f"{'🎓 ' if graduated_bool else ''}${vol_24h:,.0f}"))
+            graduated.append(dict(symbol=symbol,name=name,address=addr,volume_24h=vol_24h,price_change_24h=pc_24h,buys_24h=buys_24h,sells_24h=sells_24h,graduated=graduated_bool,score=score,reason=f"{'🎓 ' if graduated_bool else ''}Vol ${vol_24h:,.0f}"))
 
         graduated.sort(key=lambda x:-x["score"])
-        resp = {"top_5":graduated[:limit],"total_scanned":len(pools),"source":"GeckoTerminal","cached":from_cache}
+        top = graduated[:limit]
+
+        # Real market cap + a fuller reason string -- bounded to just the
+        # final top N shown (not all 25 scanned) so this stays cheap. Vol
+        # alone was getting misread as marketCap (a real token showed $51M
+        # vol / $26M actual mcap and looked like a $50M market cap at a
+        # glance) -- showing both, explicitly labeled, removes that.
+        mcaps = await asyncio.gather(
+            *[_dexscreener_mcap(t["address"]) for t in top], return_exceptions=True
+        )
+        for t, snap in zip(top, mcaps):
+            # _dexscreener_mcap returns a dict ({market_cap, price_usd, ...})
+            # or None, never a bare number -- `isinstance(mc, (int, float))`
+            # was always False for the successful case too, so market_cap
+            # silently stayed None on every single row despite this being
+            # the fix meant to surface it. Unpack the dict instead.
+            mc = snap.get("market_cap") if isinstance(snap, dict) else None
+            t["market_cap"] = mc
+            buy_sell = f"{t['buys_24h']}/{t['sells_24h']}" if (t['buys_24h'] or t['sells_24h']) else "0/0"
+            mc_part = f"MC ${mc:,.0f}" if mc else "MC n/a"
+            t["reason"] = (
+                f"{'🎓 ' if t['graduated'] else ''}{mc_part} · Vol ${t['volume_24h']:,.0f} "
+                f"· {t['price_change_24h']:+.1f}% · {buy_sell} buys/sells"
+            )
+
+        resp = {"top_5":top,"total_scanned":len(pools),"source":"GeckoTerminal","cached":from_cache}
         return _cache_put("top5", resp) if graduated else (_cache_get_stale("top5") or resp)
     except Exception:
         return _cache_get_stale("top5") or {"top_5":[],"total_scanned":0,"source":"offline"}
@@ -280,7 +332,7 @@ async def rug_check(mint: str=Query(...), x_agent_key: str=Header(...)):
     try:
         payload = json.dumps({"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":[mint,{"encoding":"jsonParsed"}]}).encode()
         req = urllib.request.Request(f"https://mainnet.helius-rpc.com/?api-key={HELIUS}",data=payload,headers={"Content-Type":"application/json"})
-        info = json.loads(urllib.request.urlopen(req,timeout=10).read().decode()).get("result",{}).get("value",{})
+        info = (await asyncio.to_thread(lambda: json.loads(urllib.request.urlopen(req,timeout=10).read().decode()))).get("result",{}).get("value",{})
         if not info:
             return {"mint":mint,"found":False,"detail":"Account not found — may not exist"}
         data = info.get("data",{}).get("parsed",{}).get("info",{}) if info else {}
@@ -289,7 +341,7 @@ async def rug_check(mint: str=Query(...), x_agent_key: str=Header(...)):
         supply = int(data.get("supply","0")) / (10**int(data.get("decimals","0") or "1"))
         # Get price from Birdeye
         try:
-            pd = _fetch(f"https://public-api.birdeye.so/defi/price?address={mint}",{"X-API-KEY":BIRDEYE},timeout=5)
+            pd = await _fetch(f"https://public-api.birdeye.so/defi/price?address={mint}",{"X-API-KEY":BIRDEYE},timeout=5)
             price = float(pd.get("data",{}).get("value",0))
         except:
             price = 0
@@ -313,6 +365,27 @@ async def rug_check(mint: str=Query(...), x_agent_key: str=Header(...)):
             risk_score += 10
         else:
             checks.append({"check":"PRICE","status":"PASS","detail":f"${price:.8f}"})
+        # InsightX Scanner -- real, independently-sourced ADDITIONAL check
+        # (backend/insightx_client.py), appended alongside the existing
+        # Helius mint/freeze + Birdeye price checks above, never replacing
+        # them. This endpoint is already one-mint-per-request (agent-
+        # triggered, not a hot per-candidate loop), which is exactly the
+        # real usage pattern InsightX's tight per-minute/monthly quota can
+        # sustain -- see that module's docstring for the confirmed-live
+        # rate-limit numbers driving this design. has_data=False (no
+        # InsightX data / budget exhausted this minute / unconfigured)
+        # adds no check at all, same "no signal, no verdict" discipline as
+        # the rest of this file.
+        scan = await scanner_for_token(mint)
+        flags = scanner_risk_flags(scan)
+        if flags["has_data"]:
+            if flags["drainable"]:
+                checks.append({"check":"INSIGHTX_DRAINABLE","status":"FAIL","detail":"InsightX Scanner flags this token as drainable/honeypot risk"})
+                risk_score += 40
+            else:
+                checks.append({"check":"INSIGHTX_DRAINABLE","status":"PASS","detail":"InsightX Scanner: no drainable/honeypot flag"})
+            if flags["score"] is not None:
+                checks.append({"check":"INSIGHTX_SCORE","status":"PASS" if flags["score"] >= 50 else "WARN","detail":f"InsightX safety score: {flags['score']}/100"})
         safe = risk_score <= 20
         return {"mint":mint,"checks":checks,"risk_score":risk_score,"safe":safe,"supply":supply}
     except Exception as e:
@@ -321,7 +394,7 @@ async def rug_check(mint: str=Query(...), x_agent_key: str=Header(...)):
 @router.get('/sell-rotations')
 async def sell_rotations(limit: int=5, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
-    pools, from_cache = _trending_pools_cached()
+    pools, from_cache = await _trending_pools_cached()
     try:
         rotations = []
         for p in pools[:25]:
@@ -335,10 +408,33 @@ async def sell_rotations(limit: int=5, x_agent_key: str=Header(...)):
             pc = attrs.get('price_change_percentage',{})
             pc_24h = float(str(pc.get('h24',0))) if isinstance(pc,dict) else 0
             symbol = name.split(' / ')[0][:12] if ' / ' in name else name[:12]
+            # address was never set here -- TokenLink's CA prop (and thus
+            # its trade panel) had nothing to point at for every rotation
+            # card. Same _mint_from_pool used by every other endpoint here.
             if sells_24h > buys_24h and vol_24h > 10000:
-                rotations.append(dict(symbol=symbol,name=name,sell_buy_ratio=round(sells_24h/max(1,buys_24h),1),volume_24h=vol_24h,price_change_24h=pc_24h))
+                rotations.append(dict(symbol=symbol,name=name,address=_mint_from_pool(p),sell_buy_ratio=round(sells_24h/max(1,buys_24h),1),volume_24h=vol_24h,price_change_24h=pc_24h,buys_24h=buys_24h,sells_24h=sells_24h))
         rotations.sort(key=lambda x:-x['sell_buy_ratio'])
-        resp = {'rotations':rotations[:limit],'count':len(rotations[:limit]),'source':'GeckoTerminal','cached':from_cache}
+        top = rotations[:limit]
+
+        # Real market cap, bounded to just the top N shown -- same labeled
+        # pattern as /top5: a sell/buy ratio and a bare volume figure don't
+        # tell you if this is a $500 rug or a $5M token rotating out, mcap
+        # does.
+        mcaps = await asyncio.gather(
+            *[_dexscreener_mcap(t["address"]) if t["address"] else asyncio.sleep(0, result=None) for t in top],
+            return_exceptions=True,
+        )
+        for t, snap in zip(top, mcaps):
+            # Same dict-vs-number bug as /top5 -- see comment there.
+            mc = snap.get("market_cap") if isinstance(snap, dict) else None
+            t["market_cap"] = mc
+            mc_part = f"MC ${mc:,.0f}" if mc else "MC n/a"
+            t["reason"] = (
+                f"{mc_part} · Sell/Buy {t['sell_buy_ratio']}x ({t['sells_24h']}/{t['buys_24h']}) "
+                f"· Vol ${t['volume_24h']:,.0f} · {t['price_change_24h']:+.1f}%"
+            )
+
+        resp = {'rotations':top,'count':len(top),'source':'GeckoTerminal','cached':from_cache}
         return _cache_put("sell_rotations", resp) if rotations else (_cache_get_stale("sell_rotations") or resp)
     except Exception:
         return _cache_get_stale("sell_rotations") or {'rotations':[],'count':0}
@@ -354,10 +450,11 @@ async def sell_rotations(limit: int=5, x_agent_key: str=Header(...)):
 # raw volume — a token mentioned bullishly on social AND trending AND with a
 # real trading signal ranks above one that's only trending.
 # ════════════════════════════════════════════════════════════════
-@router.get("/must-buy-20")
-async def must_buy_20(limit: int=20, hours: int=24, x_agent_key: str=Header(...)):
-    if not await get_agent(x_agent_key): raise HTTPException(401)
-    pools, _ = _trending_pools_cached()
+async def _must_buy_20_core(limit: int = 20, hours: int = 24) -> dict:
+    """The real fusion logic, callable without an agent-key header --
+    shared by the /must-buy-20 endpoint and the aggregate-score candidate
+    assembler, which needs this same cross-source list internally."""
+    pools, _ = await _trending_pools_cached()
 
     candidates: dict[str, dict] = {}  # key: symbol.upper()
 
@@ -390,8 +487,7 @@ async def must_buy_20(limit: int=20, hours: int=24, x_agent_key: str=Header(...)
         c["sources"].append("trending")
         c["score"] += min(30, vol_24h / 10000) + (10 if pc_24h > 10 else 0)
 
-    db = await _db()
-    try:
+    async with _db() as db:
         # 2. Persisted trading signals — direction-aware, conviction-weighted.
         try:
             cur = await db.execute(
@@ -425,8 +521,6 @@ async def must_buy_20(limit: int=20, hours: int=24, x_agent_key: str=Header(...)
                 c["score"] += 15 * float(r.get("confidence") or 0.5)
         except Exception:
             pass
-    finally:
-        await db.close()
 
     # 4. In-memory signal pool (predictor/degen fusion/telegram alpha ingest).
     try:
@@ -454,8 +548,32 @@ async def must_buy_20(limit: int=20, hours: int=24, x_agent_key: str=Header(...)
         c["score"] = round(c["score"], 1)
         out.append(c)
 
+    # Real market cap, bounded to just the `limit` items actually returned
+    # (not all `candidates` scanned) -- same fix as /top5's market_cap: a
+    # bare $ volume figure reads as market cap at a glance, this makes both
+    # explicit. Only fetched for candidates with a known contract address.
+    mcaps = await asyncio.gather(
+        *[_dexscreener_mcap(c["ca"]) if c["ca"] else asyncio.sleep(0, result=None) for c in out],
+        return_exceptions=True,
+    )
+    for c, snap in zip(out, mcaps):
+        # Same dict-vs-number bug as /top5 -- see comment there.
+        mc = snap.get("market_cap") if isinstance(snap, dict) else None
+        c["market_cap"] = mc
+        mc_part = f"MC ${mc:,.0f}" if mc else "MC n/a"
+        c["summary"] = (
+            f"{mc_part} · Vol ${c['volume_24h']:,.0f} · {c['price_change_24h']:+.1f}% "
+            f"· {c['source_count']} source{'s' if c['source_count'] != 1 else ''}"
+        )
+
     resp = {"must_buy": out, "count": len(out), "candidates_scanned": len(candidates), "window_hours": hours}
     return _cache_put("must_buy_20", resp) if out else (_cache_get_stale("must_buy_20") or resp)
+
+
+@router.get("/must-buy-20")
+async def must_buy_20(limit: int=20, hours: int=24, x_agent_key: str=Header(...)):
+    if not await get_agent(x_agent_key): raise HTTPException(401)
+    return await _must_buy_20_core(limit, hours)
 
 # ════════════════════════════════════════════════════════════════
 # FRESH DEPLOYERS — recently-discovered token deployers, from
@@ -467,8 +585,7 @@ async def must_buy_20(limit: int=20, hours: int=24, x_agent_key: str=Header(...)
 @router.get("/fresh-deployers")
 async def fresh_deployers(limit: int=20, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
-    db = await _db()
-    try:
+    async with _db() as db:
         label_exclusions = sql_label_exclusions("tw.label")
         cur = await db.execute(f"""
             SELECT r.mint, r.symbol, r.wallet_address, r.discovered_at,
@@ -479,8 +596,20 @@ async def fresh_deployers(limit: int=20, x_agent_key: str=Header(...)):
             ORDER BY r.discovered_at DESC LIMIT ?
         """, (limit,))
         rows = await cur.fetchall()
-    finally:
-        await db.close()
+    rows = [dict(r) for r in rows]
+
+    # Real market cap of the token each row's `mint` is for, bounded to just
+    # the rows returned. A repeat-launcher flag alone doesn't say whether
+    # their latest launch is a $2K ghost pool or a $2M real token -- this
+    # gives that context without an extra scan (still one lookup per shown
+    # row, not per deployer's full launch history).
+    mcaps = await asyncio.gather(
+        *[_dexscreener_mcap(r["mint"]) if r["mint"] else asyncio.sleep(0, result=None) for r in rows],
+        return_exceptions=True,
+    )
+    for r, snap in zip(rows, mcaps):
+        r["market_cap"] = snap.get("market_cap") if isinstance(snap, dict) else None
+
     return {"deployers": rows, "count": len(rows)}
 
 # ════════════════════════════════════════════════════════════════
@@ -493,16 +622,13 @@ async def fresh_deployers(limit: int=20, x_agent_key: str=Header(...)):
 @router.get("/top-wallets-to-copy")
 async def top_wallets_to_copy(limit: int=20, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
-    db = await _db()
-    try:
+    async with _db() as db:
         cur = await db.execute("""
             SELECT * FROM wallet_reputation
             WHERE copy_trade_score > 0
             ORDER BY copy_trade_score DESC LIMIT ?
         """, (limit,))
         rows = await cur.fetchall()
-    finally:
-        await db.close()
     return {"wallets": rows, "count": len(rows)}
 
 # ════════════════════════════════════════════════════════════════
@@ -536,11 +662,8 @@ async def _token_conviction(db, mint: str) -> dict:
 @router.get("/conviction/{mint}")
 async def token_conviction(mint: str, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
-    db = await _db()
-    try:
+    async with _db() as db:
         result = await _token_conviction(db, mint)
-    finally:
-        await db.close()
     return {"mint": mint, **result}
 
 @router.get("/high-conviction")
@@ -558,8 +681,7 @@ async def high_conviction_tokens(limit: int=20, x_agent_key: str=Header(...)):
     as broken). Rewritten to rank with ONE aggregate query, then only call
     _token_conviction() for the `limit` tokens actually being returned."""
     if not await get_agent(x_agent_key): raise HTTPException(401)
-    db = await _db()
-    try:
+    async with _db() as db:
         cur = await db.execute("""
             WITH per_wallet AS (
                 SELECT DISTINCT twr.mint, twr.symbol, twr.wallet_address, wr.copy_trade_score
@@ -579,7 +701,425 @@ async def high_conviction_tokens(limit: int=20, x_agent_key: str=Header(...)):
         for t in top:
             conv = await _token_conviction(db, t["mint"])
             ranked.append({"mint": t["mint"], "symbol": t["symbol"], **conv})
-    finally:
-        await db.close()
     ranked.sort(key=lambda t: -t["conviction_score"])
-    return {"tokens": ranked[:limit], "count": len(ranked[:limit])}
+    out = ranked[:limit]
+
+    # Real market cap, bounded to just the `limit` tokens returned (not the
+    # full ranked pool) -- same labeled-figure pattern as /top5 and
+    # /must-buy-20, so "conviction_score" (a wallet-overlap sum) is never
+    # confused for a dollar figure.
+    mcaps = await asyncio.gather(
+        *[_dexscreener_mcap(t["mint"]) for t in out], return_exceptions=True
+    )
+    for t, snap in zip(out, mcaps):
+        # Same dict-vs-number bug as /top5 -- see comment there.
+        t["market_cap"] = snap.get("market_cap") if isinstance(snap, dict) else None
+
+    return {"tokens": out, "count": len(out)}
+
+
+# ════════════════════════════════════════════════════════════════
+# PLATFORM LEADERS — the #1 token by each of the 6 real platforms Vantage
+# gathers token intel from, one row per platform, each using THAT
+# platform's own native ranking (not a Vantage-invented cross-platform
+# score -- that's the separate aggregate-score endpoint below). Every
+# value here is either read directly off that platform's own response, or
+# (for pump.fun / Vantage-conviction) computed from data that platform/
+# Vantage subsystem already owns and persists.
+# ════════════════════════════════════════════════════════════════
+
+async def _geckoterminal_leader() -> Optional[dict]:
+    """GeckoTerminal's own trending-pools order -- walked in that real
+    order (not re-sorted) until the first candidate clears the major/
+    stablecoin exclusion + dust floor (see degen_filters.py). GeckoTerminal
+    pool payloads have no direct market-cap field, so the dust floor here
+    uses real pool liquidity (reserve_in_usd) as the proof-of-life proxy."""
+    pools, _ = await _trending_pools_cached()
+    for p in pools:
+        attrs = p.get("attributes", {})
+        name = attrs.get("name", "")
+        symbol = name.split(" / ")[0][:12] if " / " in name else name[:12]
+        address = _mint_from_pool(p)
+        liquidity = attrs.get("reserve_in_usd")
+        liquidity = float(liquidity) if liquidity is not None else None
+        if not passes_all_filters(symbol, address, market_cap=None, liquidity_usd=liquidity):
+            continue
+        vol = attrs.get("volume_usd", {})
+        vol_24h = float(str(vol.get("h24", 0))) if isinstance(vol, dict) else 0
+        return {
+            "platform": "GeckoTerminal", "symbol": symbol, "name": name,
+            "address": address,
+            "metric_label": "24h volume", "metric_value": vol_24h,
+            "market_cap": None,  # GeckoTerminal pool payload has no direct mcap field
+            "liquidity_usd": liquidity,
+        }
+    return None
+
+
+async def _dexscreener_leader() -> Optional[dict]:
+    """DexScreener's own real native ranking: /token-boosts/top/v1, sorted
+    by totalAmount (boost spend) -- DexScreener's own promotion mechanism,
+    a genuinely DexScreener-native signal distinct from GeckoTerminal or
+    any Vantage-derived score. Walked in that real order until the first
+    candidate clears the major/stablecoin exclusion + dust floor (see
+    degen_filters.py) -- major tokens are rarely boosted (no need to pay
+    to promote BTC) but checked for consistency/safety regardless."""
+    boosts = await ms._get_json("https://api.dexscreener.com/token-boosts/top/v1", timeout=8.0)
+    if not isinstance(boosts, list):
+        return None
+    for top in boosts:
+        address = top.get("tokenAddress")
+        snap = await _dexscreener_mcap(address) if address else None
+        snap = snap if isinstance(snap, dict) else {}
+        if not passes_all_filters(None, address, snap.get("market_cap"), snap.get("liquidity_usd")):
+            continue
+        return {
+            "platform": "DexScreener", "symbol": None, "name": top.get("description"),
+            "address": address,
+            "metric_label": "boost amount", "metric_value": top.get("totalAmount"),
+            "market_cap": snap.get("market_cap"),
+            "price_usd": snap.get("price_usd"),
+            "dexscreener_url": top.get("url") or snap.get("dexscreener_url"),
+        }
+    return None
+
+
+async def _coingecko_leader() -> Optional[dict]:
+    """CoinGecko's real /search/trending -- coins people are actively
+    searching for right now, genuinely biased toward small/mid-cap movers
+    (confirmed live: top trending result had market_cap_rank ~870).
+
+    Was coingecko_markets()[0] (order=market_cap_desc) -- a REAL BUG: that
+    endpoint is BY DEFINITION always market-cap-ranked, so "top by market
+    cap" showed BTC every single time. Not a missing filter, the wrong
+    data source entirely for a degen-plays feature -- switched to
+    coingecko_trending(), still walked until the first candidate clears
+    the major/stablecoin exclusion + dust floor as defense-in-depth (a
+    real major occasionally trends too, e.g. during a big news event)."""
+    trending = await ms.coingecko_trending(15)
+    for m in trending:
+        symbol = m.get("symbol")
+        mc = m.get("market_cap_usd")
+        if not passes_all_filters(symbol, None, mc):
+            continue
+        return {
+            "platform": "CoinGecko", "symbol": symbol, "name": m.get("name"),
+            "address": None,  # CoinGecko's trending endpoint is symbol-based, not a Solana mint
+            "metric_label": "market cap rank", "metric_value": m.get("market_cap_rank"),
+            "market_cap": mc,
+            "price_usd": m.get("price_usd"),
+        }
+    return None
+
+
+async def _pumpfun_leader() -> Optional[dict]:
+    """Top of pumpfun_tier_scanner.py's own composite score (real volume +
+    trade count + participant diversity, wash-trading-penalized -- see
+    that daemon's score_tokens() for the exact formula), among currently
+    live (not evicted/migrated) tracked tokens that are genuinely ALIVE
+    right now -- see degen_filters.pumpfun_token_is_alive() for the full
+    real screening (owner-specified $14k-$32k lifecycle band + distinct
+    participants + total trades + last-trade freshness + real curve
+    liquidity, refined 2026-08-28 after the earlier flat $500 floor still
+    let dead/frozen tokens through). Major-token exclusion checked too for
+    consistency even though pump.fun mints are never real majors in
+    practice.
+
+    Market-cap band applied directly in SQL (real, efficient pre-filter
+    on an indexed-ish column, not fetched-then-discarded) -- the
+    remaining real activity criteria need buy_count/sell_count/
+    unique_buyers/unique_sellers/last_trade_at/v_sol_in_curve, checked in
+    Python per-candidate via pumpfun_token_is_alive()."""
+    async with _db() as db:
+        cur = await db.execute(
+            """SELECT mint, symbol, market_cap_usd, score, manipulation_flags,
+                      buy_count, sell_count, unique_buyers, unique_sellers,
+                      last_trade_at, v_sol_in_curve
+               FROM pumpfun_premigration_tokens
+               WHERE evicted=0 AND migrated=0
+                 AND market_cap_usd BETWEEN ? AND ?
+               ORDER BY score DESC LIMIT 50""",
+            (PUMPFUN_MIN_MARKET_CAP_USD, PUMPFUN_MAX_MARKET_CAP_USD),
+        )
+        rows = await cur.fetchall()
+    for row in rows:
+        if is_major_or_stable(row.get("symbol"), row.get("mint")):
+            continue
+        if not pumpfun_token_is_alive(
+            market_cap_usd=row.get("market_cap_usd"),
+            buy_count=row.get("buy_count") or 0,
+            sell_count=row.get("sell_count") or 0,
+            unique_buyers_json=row.get("unique_buyers"),
+            unique_sellers_json=row.get("unique_sellers"),
+            last_trade_at=row.get("last_trade_at"),
+            v_sol_in_curve=row.get("v_sol_in_curve"),
+        ):
+            continue
+        return {
+            "platform": "pump.fun", "symbol": row.get("symbol"), "name": None,
+            "address": row.get("mint"),
+            "metric_label": "activity score", "metric_value": row.get("score"),
+            "market_cap": row.get("market_cap_usd"),
+            "manipulation_flags": json.loads(row.get("manipulation_flags") or "[]"),
+        }
+    return None
+
+
+async def _vantage_conviction_leader() -> Optional[dict]:
+    """Top of Vantage's own smart-wallet conviction score (real overlap
+    between token_wallet_roles and wallet_reputation.copy_trade_score,
+    see _token_conviction) -- this platform's own signal, not derived from
+    any of the other 5.
+
+    REAL BUG FOUND live: this slot showed a token labeled "penny" that was
+    actually USDC's real Solana mint (EPjFWdd5...). Root cause is a
+    separate, serious upstream data-quality bug: token_wallet_roles has
+    DOZENS of unrelated symbols (STEVE, TRUMP, PUMP, penny, ...) all
+    mapped to USDC's one real address -- some wallet-role daemon (outside
+    this repo) is confusing quote/base tokens when a wallet trades through
+    USDC. Not fixable here at the source, but address-based exclusion
+    (degen_filters.is_major_or_stable checks address BEFORE symbol) catches
+    it correctly regardless of which garbage symbol shows up for that
+    address. Walks the real conviction-ranked order (not just row #1) so
+    a major sitting at the top doesn't just return nothing."""
+    async with _db() as db:
+        cur = await db.execute(
+            """WITH per_wallet AS (
+                SELECT DISTINCT twr.mint, twr.symbol, twr.wallet_address, wr.copy_trade_score
+                FROM token_wallet_roles twr
+                JOIN wallet_reputation wr ON wr.wallet_address = twr.wallet_address
+                WHERE wr.copy_trade_score > 0
+            )
+            SELECT mint, MAX(symbol) as symbol, COUNT(*) as smart_wallet_count,
+                   SUM(copy_trade_score) as conviction_score
+            FROM per_wallet GROUP BY mint ORDER BY conviction_score DESC LIMIT 20"""
+        )
+        rows = await cur.fetchall()
+    for row in rows:
+        mc = await _dexscreener_mcap(row["mint"])
+        mc = mc if isinstance(mc, dict) else {}
+        if not passes_all_filters(row.get("symbol"), row.get("mint"), mc.get("market_cap"), mc.get("liquidity_usd")):
+            continue
+        return {
+            "platform": "Vantage Conviction", "symbol": row.get("symbol"), "name": None,
+            "address": row.get("mint"),
+            "metric_label": "conviction score", "metric_value": row.get("conviction_score"),
+            "market_cap": mc.get("market_cap"),
+            "smart_wallet_count": row.get("smart_wallet_count"),
+        }
+    return None
+
+
+async def _moonshot_leader() -> Optional[dict]:
+    """Moonshot's own 'top' view -- see backend/moonshot_client.py for the
+    real endpoint + a documented, currently-unreachable-host caveat
+    (api.moonshot.cc NXDOMAIN as of this build). Returns None (not an
+    error) when unreachable, same as every other platform here on a
+    genuine miss. Walks the real ranked list (not just [0]) for the
+    major/dust filters -- Moonshot mints are its own bonding-curve
+    launches, never real majors, but checked for consistency."""
+    tokens = await moonshot_client.moonshot_tokens("top", "solana")
+    for t in tokens:
+        if not passes_all_filters(t.get("symbol"), t.get("address"), t.get("market_cap"), t.get("liquidity_usd")):
+            continue
+        return {
+            "platform": "Moonshot", "symbol": t.get("symbol"), "name": t.get("name"),
+            "address": t.get("address"),
+            "metric_label": "curve progress", "metric_value": t.get("curve_progress_pct"),
+            "market_cap": t.get("market_cap"),
+            "price_usd": t.get("price_usd"),
+        }
+    return None
+
+
+async def _gather_platform_leaders() -> list[dict]:
+    """The real gather logic shared by /platform-leaders and the aggregate
+    scorer's candidate-pool assembly (task (b) reuses task (a)'s output
+    directly rather than re-deriving it)."""
+    from backend.narrative_detection import mint_combo_flag
+
+    leaders = await asyncio.gather(
+        _geckoterminal_leader(), _dexscreener_leader(), _coingecko_leader(),
+        _pumpfun_leader(), _vantage_conviction_leader(), _moonshot_leader(),
+        return_exceptions=True,
+    )
+    results = []
+    for leader in leaders:
+        if isinstance(leader, dict):
+            leader["available"] = True
+            results.append(leader)
+        elif isinstance(leader, Exception):
+            logger.debug("platform-leaders: a source raised: %s", leader)
+
+    # Narrative combo flag (backend/narrative_detection.py) applies to any
+    # platform's pick, keyed by real mint address -- not just pump.fun's,
+    # since a token that combined two hot narratives can go on to surface
+    # via GeckoTerminal/DexScreener trending too.
+    addrs = [r["address"] for r in results if r.get("address")]
+    if addrs:
+        flags = await asyncio.gather(*[mint_combo_flag(a) for a in addrs], return_exceptions=True)
+        flag_by_addr = {a: f for a, f in zip(addrs, flags) if isinstance(f, dict)}
+        for r in results:
+            r["narrative_flag"] = flag_by_addr.get(r.get("address"))
+    return results
+
+
+@router.get("/platform-leaders")
+async def platform_leaders(x_agent_key: str = Header(...)):
+    """The #1 top-ranked token from each of the 6 real platforms Vantage
+    gathers token intel from -- one row per platform, each platform's own
+    native ranking metric (not a Vantage cross-platform score; see
+    /aggregate-score for that). A platform showing null/`available: false`
+    means that source was genuinely unreachable or had no data at request
+    time -- never a fabricated placeholder row."""
+    if not await get_agent(x_agent_key):
+        raise HTTPException(401)
+
+    results = await _gather_platform_leaders()
+    # Sources that returned None (genuinely no data, not an error) get an
+    # explicit unavailable row instead of silently vanishing from the list
+    # -- the frontend needs to show all 6 platforms, including misses.
+    seen_platforms = {r["platform"] for r in results}
+    platform_names = ["GeckoTerminal", "DexScreener", "CoinGecko", "pump.fun", "Vantage Conviction", "Moonshot"]
+    for name in platform_names:
+        if name not in seen_platforms:
+            results.append({"platform": name, "available": False})
+    # Stable display order matching the task's platform inventory order.
+    order = {name: i for i, name in enumerate(platform_names)}
+    results.sort(key=lambda r: order.get(r["platform"], 99))
+
+    # Real observation traces into Mycelium's substrate (2026-08-30 audit --
+    # each platform's own #1 pick was computed fresh every call and never
+    # persisted/observable anywhere else). Fail-soft, deduped per platform
+    # -- see mycelium_bridge.emit_platform_leader_traces's own docstring.
+    try:
+        from backend.mycelium_bridge import emit_platform_leader_traces
+        emit_platform_leader_traces(results)
+    except Exception as e:
+        logger.debug("platform_leaders: mycelium trace emit failed: %s", e)
+
+    return {"leaders": results, "count": len(results), "generated_at": int(time.time())}
+
+
+# ════════════════════════════════════════════════════════════════
+# AGGREGATE SCORE — task (b): a genuinely whole-app score per token,
+# distinct from platform_leaders above. Full methodology documented in
+# backend/aggregate_score.py's module docstring (weights, normalization,
+# disqualification rules) -- this endpoint only assembles the candidate
+# pool and calls that module's compute_aggregate_scores().
+# ════════════════════════════════════════════════════════════════
+
+async def _assemble_aggregate_candidates() -> list[dict]:
+    """Union of addresses from platform-leaders (task a) + must-buy-20 +
+    high-conviction, deduped by address, with a real platform_breadth
+    count per candidate (how many independent sources/signal-types
+    surfaced this exact address) -- the raw input to aggregate_score.py's
+    'platform breadth' component.
+
+    Major/stablecoin exclusion applied here (cheap, address+symbol are
+    already known, no network call needed) -- real bug found live: the
+    Aggregate Winner banner scored USDC #1 (huge real volume/liquidity/
+    conviction, mathematically correct, but useless for a degen-plays
+    feature). The dust floor (market-cap/liquidity minimum) is applied
+    later in aggregate_score.compute_aggregate_scores(), where real
+    market-cap data is already being fetched per candidate anyway."""
+    breadth: dict[str, int] = {}
+    symbol_by_addr: dict[str, Optional[str]] = {}
+
+    def touch(addr: Optional[str], symbol: Optional[str] = None):
+        if not addr or is_major_or_stable(symbol, addr):
+            return
+        breadth[addr] = breadth.get(addr, 0) + 1
+        if symbol and not symbol_by_addr.get(addr):
+            symbol_by_addr[addr] = symbol
+
+    # Real latency fix, found live 2026-08-28: these 3 sources were each
+    # `await`ed one after another -- confirmed live that platform-leaders
+    # alone can take ~38s (6 platforms, some individually slow/unreachable)
+    # and high-conviction ~14s, summing to the dominant share of the whole
+    # aggregate-score endpoint's latency even after batching every DB/
+    # network call *inside* compute_aggregate_scores. None of these 3
+    # depend on each other's output, so there's no reason to run them
+    # sequentially -- gathered concurrently instead, total wall time
+    # becomes the slowest of the 3 rather than the sum of all 3.
+    async def _high_conviction_source() -> list[dict]:
+        async with _db() as db:
+            try:
+                cur = await db.execute(
+                    """WITH per_wallet AS (
+                        SELECT DISTINCT twr.mint, twr.symbol, twr.wallet_address, wr.copy_trade_score
+                        FROM token_wallet_roles twr
+                        JOIN wallet_reputation wr ON wr.wallet_address = twr.wallet_address
+                        WHERE wr.copy_trade_score > 0
+                    )
+                    SELECT mint, MAX(symbol) as symbol, SUM(copy_trade_score) as conviction_score
+                    FROM per_wallet GROUP BY mint ORDER BY conviction_score DESC LIMIT 20"""
+                )
+                return [dict(r) for r in await cur.fetchall()]
+            except Exception as e:
+                logger.debug("aggregate candidates: high-conviction source failed: %s", e)
+                return []
+
+    async def _must_buy_20_source() -> dict:
+        try:
+            return await _must_buy_20_core(limit=20, hours=24)
+        except Exception as e:
+            logger.debug("aggregate candidates: must-buy-20 source failed: %s", e)
+            return {"must_buy": []}
+
+    leaders, conviction_rows, mb20 = await asyncio.gather(
+        _gather_platform_leaders(), _high_conviction_source(), _must_buy_20_source(),
+    )
+
+    for leader in leaders:
+        if leader.get("available"):
+            touch(leader.get("address"), leader.get("symbol"))
+
+    for row in conviction_rows:
+        touch(row.get("mint"), row.get("symbol"))
+
+    # must-buy-20 candidates carry a symbol + ca, not always both real --
+    # only usable here when a real contract address is present (an
+    # aggregate score needs an address to check manipulation flags/whale
+    # overlap against; a symbol-only entry can't be scored on those axes).
+    for c in mb20.get("must_buy", []):
+        if c.get("ca"):
+            touch(c["ca"], c.get("symbol"))
+
+    return [
+        {"address": addr, "symbol": symbol_by_addr.get(addr), "platform_breadth": count}
+        for addr, count in breadth.items()
+    ]
+
+
+@router.get("/aggregate-score")
+async def aggregate_score(x_agent_key: str = Header(...)):
+    """Task (b): a genuinely whole-app aggregate score per token, pulling
+    from every real signal source in the backend (not just each
+    platform's own top pick -- see /platform-leaders for that). Full
+    weighting/scoring methodology documented in
+    backend/aggregate_score.py's module docstring -- every number here is
+    traceable to a real upstream source, weights are fixed and disclosed
+    in the response, and any manipulation/rug-flagged token is
+    disqualified regardless of score. ranked[0] (if present) is the
+    'ultimate winner' this response's caller should flash app-wide."""
+    if not await get_agent(x_agent_key):
+        raise HTTPException(401)
+
+    from backend.aggregate_score import compute_aggregate_scores
+
+    candidates = await _assemble_aggregate_candidates()
+    result = await compute_aggregate_scores(candidates, helius_key=HELIUS)
+    result["candidates_considered"] = len(candidates)
+    result["generated_at"] = int(time.time())
+
+    # Real observation trace into Mycelium's substrate (2026-08-30 audit --
+    # this "ultimate winner" score was computed fresh every call and never
+    # persisted/observable anywhere else). Fail-soft, deduped -- see
+    # mycelium_bridge.emit_aggregate_score_trace's own docstring.
+    try:
+        from backend.mycelium_bridge import emit_aggregate_score_trace
+        emit_aggregate_score_trace(result.get("ranked") or [], result.get("disqualified") or [])
+    except Exception as e:
+        logger.debug("aggregate_score: mycelium trace emit failed: %s", e)
+    return result

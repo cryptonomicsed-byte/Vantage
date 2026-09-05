@@ -100,7 +100,35 @@ def _decrypt_seed(principal: str, enc_b64: str, legacy_agent_id: Optional[int] =
         return AESGCM(legacy_key).decrypt(nonce, ct, associated_data=str(legacy_agent_id).encode())
 
 
+async def _assert_derivable(subject_kind: str, subject_id: int) -> None:
+    """Refuse to derive a key for an account that holds its own.
+
+    Imported lazily: backend.sovereignty imports coordination, which imports
+    this module, so a top-level import would be circular.
+    """
+    try:
+        from .sovereignty import CUSTODY_SELF, SelfCustodyError, agent_custody, human_custody
+    except Exception:  # pragma: no cover - sovereignty module absent
+        return
+
+    custody = await (agent_custody(subject_id) if subject_kind == "agent"
+                     else human_custody(subject_id))
+    if custody == CUSTODY_SELF:
+        raise SelfCustodyError(
+            f"{subject_kind} {subject_id} holds its own key; this instance cannot sign "
+            f"for it. Have the account sign for itself instead of deriving a key."
+        )
+
+
 async def get_or_create_sealed_seed(agent_id: int) -> bytes:
+    # Self-custody chokepoint. ~18 modules call derive_buzz_keypair() directly;
+    # for a migrated account the derived key is NO LONGER its identity, so
+    # returning one here would let any of them sign as a phantom pubkey the
+    # account does not control -- silently, and publish as if it were them.
+    # Raising makes an untaught feature fail visibly instead, which is the
+    # only safe default for a security boundary.
+    await _assert_derivable("agent", agent_id)
+
     principal = f"agent:{agent_id}"
     async with get_db() as db:
         cur = await db.execute(
@@ -195,6 +223,8 @@ async def get_or_create_human_sealed_seed(human_id: int) -> bytes:
     Section 1.4 of the buzz_vantage_blueprint. Humans get their own real
     Buzz/Nostr identity, distinct from any agent they're granted access
     to (a human never "borrows" an agent's key)."""
+    await _assert_derivable("human", human_id)
+
     principal = f"human:{human_id}"
     async with get_db() as db:
         cur = await db.execute(

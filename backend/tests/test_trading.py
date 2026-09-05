@@ -24,11 +24,14 @@ def _h(agent):
 @pytest.mark.asyncio
 async def test_paper_fill_marks_order_filled(client, registered_agent):
     # Log a pending order with a limit price (fallback fill price).
+    # Notional kept under the  no-strategy fallback risk cap
+    # (Hermes audit P1, f656dc8) -- this test exercises paper-fill
+    # mechanics, not risk limits, so it must stay within-cap.
     r = await client.post(
         "/api/trading/orders",
         headers=_h(registered_agent),
         json={"symbol": "SOL", "side": "buy", "chain": "solana",
-              "quantity": 3, "price": 150.0, "order_type": "limit",
+              "quantity": 0.3, "price": 150.0, "order_type": "limit",
               "trigger_reason": "unit-test"},
     )
     assert r.status_code == 200, r.text
@@ -39,7 +42,7 @@ async def test_paper_fill_marks_order_filled(client, registered_agent):
     assert r.status_code == 200, r.text
     filled = r.json()
     assert filled["status"] == "filled"
-    assert filled["filled_quantity"] == 3
+    assert filled["filled_quantity"] == 0.3
     assert filled["avg_fill_price"] == 150.0
     assert str(filled["tx_hash"]).startswith("paper:")
 
@@ -53,12 +56,16 @@ async def test_paper_fill_marks_order_filled(client, registered_agent):
 
 @pytest.mark.asyncio
 async def test_paper_fill_rejects_non_pending(client, registered_agent):
+    # Notional kept under the  no-strategy fallback risk cap
+    # (Hermes audit P1, f656dc8) -- this test exercises the
+    # non-pending-rejects-refill path, not risk limits.
     r = await client.post(
         "/api/trading/orders",
         headers=_h(registered_agent),
         json={"symbol": "ETH", "side": "buy", "chain": "base",
-              "quantity": 1, "price": 3000.0, "order_type": "limit"},
+              "quantity": 0.01, "price": 3000.0, "order_type": "limit"},
     )
+    assert r.status_code == 200, r.text
     order_id = r.json()["id"]
 
     # First fill succeeds.

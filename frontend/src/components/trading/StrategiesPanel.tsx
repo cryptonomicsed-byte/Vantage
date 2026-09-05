@@ -21,7 +21,7 @@ const LIVE_TYPES = new Set(['scalper_5020', 'bighit_40_800', 'accumulator_tiered
 // cycle, so a change here takes effect within one cycle — no SSH, no
 // systemd restart, no env file editing.
 const DAEMON_SETTINGS = [
-  { key: 'pumpfun_trader_wallet_id', label: 'Pumpfun Trader', desc: 'ares_pumpfun_trader.py — auto-buys pump.fun tokens flagged safe by degen_alpha_fusion/ogun_multiscan' },
+  { key: 'pumpfun_trader_wallet_id', label: 'Pumpfun Trader', desc: 'ares_pumpfun_trader.py — auto-buys pump.fun tokens flagged safe by degen_alpha_fusion/the Forge scanner' },
   { key: 'snipe_wallet_id', label: 'Degen Snipe', desc: "degen_alpha_fusion.py's moonshot auto-snipe (score > 60)" },
 ]
 

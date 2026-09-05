@@ -24,7 +24,9 @@ from solders.pubkey import Pubkey
 from solders.signature import Signature
 
 from ..config import settings
+from ..db import connect_bounded
 from ..crypto_utils import encrypt_key_for_agent, decrypt_key_for_agent
+from ..hd_wallet import derive_multichain_wallet, generate_mnemonic
 
 router = APIRouter(prefix="/api/agents", tags=["wallets"])
 # Was defaulting to a relative "backend/data/vantage.db" -- under this
@@ -51,14 +53,12 @@ class SignTransactionRequest(BaseModel):
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 async def _db():
-    """Real async connection with busy_timeout -- every endpoint in this
-    router used to open a blocking sqlite3.connect() (no busy_timeout at
-    all) inside an `async def` handler, stalling the whole event loop for
-    every other in-flight request while it ran, and failing outright with
-    "database is locked" under any real write concurrency."""
-    conn = await aiosqlite.connect(DB_PATH)
-    await conn.execute("PRAGMA busy_timeout=20000")
-    return conn
+    """Pooled connection via db.connect_bounded() -- bounded by the shared
+    semaphore with busy_timeout=30000 (was a raw aiosqlite.connect with
+    busy_timeout=20000 and no concurrency bound). Callers keep their
+    existing try/finally + await db.close() shape; close() releases the
+    pool slot."""
+    return await connect_bounded()
 
 
 async def get_agent_id(x_agent_key: str) -> Optional[int]:
@@ -109,6 +109,22 @@ async def init_wallet_tables():
                     FOREIGN KEY (agent_id) REFERENCES agents(id)
                 )
             """)
+            # New wallets get a real BIP-39 mnemonic (sealed the same
+            # AES-256-GCM way private_key_encrypted always was) plus
+            # derived addresses for the other chains vanity-cloakseed's
+            # scheme covers. Additive-only migration -- existing rows are
+            # never touched; they just keep derivation_scheme='legacy'
+            # (no mnemonic, single Solana-only random keypair, exactly as
+            # before) since there's no mnemonic to recover them from.
+            for col, ddl in [
+                ("mnemonic_encrypted", "TEXT"),
+                ("derivation_scheme", "TEXT DEFAULT 'legacy'"),
+                ("chain_addresses", "TEXT DEFAULT '{}'"),
+            ]:
+                try:
+                    await db.execute(f"ALTER TABLE agent_wallets ADD COLUMN {col} {ddl}")
+                except Exception:
+                    pass
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS agent_wallet_signatures (
                     id TEXT PRIMARY KEY,
@@ -172,37 +188,50 @@ async def create_wallet(
 
     try:
         if request.type == "custom":
-            # Real ed25519 keypair (matches the `network DEFAULT 'solana'`
-            # column this table already had) -- was previously two
-            # independently-random hex strings with no cryptographic
-            # relationship, so nothing could ever sign with this "wallet".
-            # solders.Keypair() is a real Solana/ed25519 keypair; the
-            # secret is stored base58-encoded (Solana convention) before
-            # AES-256-GCM encryption, and the address is the real derived
-            # base58 pubkey -- verifiable against signatures this wallet
-            # produces later, not a cosmetic placeholder.
-            keypair = Keypair()
+            # Real BIP-39 mnemonic -> BIP-32/SLIP-0010 derivation (same
+            # scheme as ~/vanity-cloakseed/src/utils/hdWallet.ts +
+            # chains.ts -- see backend/hd_wallet.py for the exact paths
+            # and the one deliberate deviation: real ed25519 SLIP-0010 for
+            # Solana instead of that reference tool's secp256k1-for-
+            # everything shortcut, since this wallet actually custodies
+            # funds). Was previously a bare, unrecoverable solders.Keypair()
+            # -- no mnemonic, no recovery, Solana-only. The mnemonic is the
+            # one secret that can regenerate every chain's key later; it's
+            # sealed the same AES-256-GCM way the Solana private key
+            # always was.
+            mnemonic = generate_mnemonic()
+            wallet = derive_multichain_wallet(mnemonic)
+            keypair = wallet.solana_keypair
             private_key = base58.b58encode(bytes(keypair)).decode()
             encrypted_key = encrypt_private_key(private_key, agent_id, x_agent_key)
+            encrypted_mnemonic = encrypt_private_key(mnemonic, agent_id, x_agent_key)
 
             # Real derived address (base58 pubkey), not random hex
             address = str(keypair.pubkey())
 
             await db.execute("""
                 INSERT INTO agent_wallets
-                (id, agent_id, type, address, private_key_encrypted, name, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (wallet_id, agent_id, "custom", address, encrypted_key, request.name, datetime.utcnow().isoformat()))
+                (id, agent_id, type, address, private_key_encrypted, mnemonic_encrypted,
+                 derivation_scheme, chain_addresses, name, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                wallet_id, agent_id, "custom", address, encrypted_key, encrypted_mnemonic,
+                "bip39-slip10-multichain", json.dumps(wallet.chain_addresses),
+                request.name, datetime.utcnow().isoformat(),
+            ))
 
             response = {
                 "wallet_id": wallet_id,
                 "agent_id": agent_id,
                 "type": "custom",
                 "address": address,
+                "chain_addresses": wallet.chain_addresses,
                 "created_at": datetime.utcnow().isoformat(),
                 "balance_tracking": True,
                 "private_key_stored": True,
-                "private_key_exposed": False
+                "private_key_exposed": False,
+                "mnemonic_stored": True,
+                "mnemonic_exposed": False,
             }
 
         elif request.type == "alchemy":

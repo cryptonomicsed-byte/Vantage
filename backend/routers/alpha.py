@@ -224,28 +224,156 @@ async def score_token_from_intel(
 # pump.fun mint, pre-liquidity) just has no market_cap/tier and the frontend
 # treats it as "just_launch" from age alone. ──────────────────────────────────
 _TIER_BOUNDARIES = [
-    (1_000_000, "migrated_1m"), (10_000_000, "migrated_10m"),
+    # "sub_1m" is the below-$1M band (NOT "migrated_1m") — this band spans the
+    # ~$69k pump.fun graduation floor, so a token here may not have migrated at
+    # all. "migrated_1m" mislabeled it as migrated and the frontend rendered it
+    # as "$1M+" when a $100k token is clearly not.
+    (1_000_000, "sub_1m"), (10_000_000, "migrated_10m"),
     (20_000_000, "migrated_20m"), (100_000_000, "migrated_100m"),
     (500_000_000, "migrated_500m"), (1_000_000_000, "migrated_1b"),
 ]
 
 
 def _classify_tier(market_cap: Optional[float], first_seen_ts: int, now: int) -> str:
+    """`first_seen_ts` is when THIS graph first observed the token (a wallet
+    traded it, a social post mentioned it, etc) -- not the token's real
+    on-chain launch time. That makes it a legitimate signal for "just
+    launched" (age < 1h really does mean brand new to everyone) but NOT a
+    legitimate proxy for market-cap stage: a token that's been trading
+    elsewhere for months but only just entered this graph's tracking would
+    wrongly read as a fresh pumpfun-stage token. Previously this function
+    filled in "pumpfun_10k_20k"/"pre_migration" from that age heuristic
+    whenever market_cap was unknown (no real DexScreener lookup, or beyond
+    tier_lookups) -- a confident-looking $ range with zero real evidence
+    behind it, while the frontend's market_cap field correctly showed
+    "unlisted" right next to it. Now both signals agree: no real market cap
+    data means "unlisted", full stop.
+    """
     age_h = (now - first_seen_ts) / 3600 if first_seen_ts else 999
     if age_h < 1:
         return "just_launch"
     if not market_cap or market_cap <= 0:
-        return "pumpfun_10k_20k" if age_h < 24 else "pre_migration"
+        return "unlisted"
     for cap, tier in _TIER_BOUNDARIES:
         if market_cap < cap:
             return tier
     return "billion_club"
 
 
-async def _dexscreener_mcap(mint: str) -> Optional[float]:
-    """Best-effort market cap for a single mint via DexScreener's token
-    endpoint (fdv/marketCap on the highest-liquidity pair). None on any
-    failure — never blocks the graph on a flaky/missing listing."""
+def _pair_recent_volume(p: dict) -> float:
+    """Most recent meaningful trading volume for a DexScreener pair.
+
+    DexScreener freezes a stale pair's marketCap once it stops updating, but
+    its volume/txns decay toward zero. A pair that is still the active venue
+    has real volume in one of the recent windows; an abandoned pair does not.
+    Raw liquidity is NOT a liveness signal — a dead pair can keep reporting a
+    large historical liquidity long after trading has moved elsewhere."""
+    v = p.get("volume") or {}
+    return max(v.get("h24") or 0.0, v.get("h6") or 0.0,
+               v.get("h1") or 0.0, v.get("m5") or 0.0)
+
+
+def _select_best_pair(pairs: list) -> Optional[dict]:
+    """Choose the pair whose marketCap should represent the token.
+
+    Recent trading activity first (so a stale pair with frozen historical
+    liquidity never shadows the live pair), then liquidity as a tie-break.
+    Returns None on an empty list."""
+    if not pairs:
+        return None
+    return max(pairs, key=lambda p: (
+        _pair_recent_volume(p),
+        (p.get("liquidity") or {}).get("usd") or 0.0,
+    ))
+
+
+def _market_cap_from_pair(pair: dict) -> Optional[float]:
+    """marketCap with explicit None/zero handling — NOT truthy `or`.
+
+    marketCap is the real circulating cap. fdv (fully-diluted valuation) is
+    only used when marketCap is genuinely ABSENT (None). A literal 0 means
+    "no data yet" (common on fresh pre-bonding pump.fun mints) and must NOT
+    silently fall through to fdv — the old `marketCap or fdv` did exactly
+    that, substituting an often much larger fdv for a zero circulating cap."""
+    mcap = pair.get("marketCap")
+    if mcap is None:
+        fdv = pair.get("fdv")
+        return float(fdv) if fdv is not None else None
+    if mcap == 0:
+        return None
+    return float(mcap)
+
+
+async def _dexscreener_mcap_batch(mints: list) -> dict:
+    """Real DexScreener batching -- /latest/dex/tokens/{a,b,c,...} accepts
+    comma-separated addresses in one call (verified live: a 2-address
+    request returns 30 real pairs spanning both tokens). Used instead of
+    N individual _dexscreener_mcap() calls when scoring a whole candidate
+    pool at once (aggregate_score.py) -- N concurrent single-token requests
+    to the same host is both slower (no batching) and more likely to get
+    individually rate-limited than a couple of batched calls, which can
+    silently turn a real market cap into a None (mis-scored as "no data")
+    on any one of the N.
+
+    Chunks at 30 addresses per call (DexScreener's documented per-request
+    address limit for this endpoint). Returns {mint: snapshot_or_None},
+    same snapshot shape as _dexscreener_mcap. A whole chunk failing (network
+    error, non-200) leaves every mint in that chunk mapped to None rather
+    than raising -- same fail-soft contract as the single-mint version."""
+    out: dict = {}
+    if not mints:
+        return out
+    chunks = [mints[i:i + 30] for i in range(0, len(mints), 30)]
+
+    async def _fetch_chunk(chunk: list) -> None:
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                r = await client.get(
+                    f"https://api.dexscreener.com/latest/dex/tokens/{','.join(chunk)}",
+                    headers={"User-Agent": "Vantage/1.0"},
+                )
+                if r.status_code != 200:
+                    for m in chunk:
+                        out[m] = None
+                    return
+                pairs = (r.json() or {}).get("pairs") or []
+        except Exception:
+            for m in chunk:
+                out[m] = None
+            return
+
+        by_mint: dict = {}
+        for p in pairs:
+            addr = (p.get("baseToken") or {}).get("address")
+            if addr:
+                by_mint.setdefault(addr, []).append(p)
+        for m in chunk:
+            best = _select_best_pair(by_mint.get(m, []))
+            if best is None:
+                out[m] = None
+                continue
+            out[m] = {
+                "market_cap": _market_cap_from_pair(best),
+                "price_usd": best.get("priceUsd"),
+                "price_change_24h": (best.get("priceChange") or {}).get("h24"),
+                "liquidity_usd": (best.get("liquidity") or {}).get("usd"),
+                "dexscreener_url": best.get("url"),
+            }
+
+    await asyncio.gather(*[_fetch_chunk(c) for c in chunks])
+    return out
+
+
+async def _dexscreener_mcap(mint: str) -> Optional[dict]:
+    """Best-effort market snapshot for a single mint via DexScreener's token
+    endpoint, from the most-recently-active pair (see _select_best_pair --
+    NOT raw highest-liquidity, which can shadow a live pair with a stale
+    frozen one). None on any failure — never blocks the graph on a flaky/
+    missing listing. Returns the fields already present in the response
+    we're fetching anyway (no extra API calls) -- market_cap for tier
+    classification (via _market_cap_from_pair's explicit None/zero
+    handling), plus price/change/liquidity/url so the frontend can show
+    real numbers and link out instead of just a tier bucket."""
     try:
         async with httpx.AsyncClient(timeout=6.0) as client:
             r = await client.get(f"https://api.dexscreener.com/latest/dex/tokens/{mint}",
@@ -253,10 +381,16 @@ async def _dexscreener_mcap(mint: str) -> Optional[float]:
             if r.status_code != 200:
                 return None
             pairs = (r.json() or {}).get("pairs") or []
-            if not pairs:
+            best = _select_best_pair(pairs)
+            if best is None:
                 return None
-            best = max(pairs, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0)
-            return best.get("marketCap") or best.get("fdv")
+            return {
+                "market_cap": _market_cap_from_pair(best),
+                "price_usd": best.get("priceUsd"),
+                "price_change_24h": (best.get("priceChange") or {}).get("h24"),
+                "liquidity_usd": (best.get("liquidity") or {}).get("usd"),
+                "dexscreener_url": best.get("url"),
+            }
     except Exception:
         return None
 
@@ -318,13 +452,20 @@ async def money_flow(
             except aiosqlite.Error:
                 pass
 
-        # Every tracked wallet, even ones with zero observed edges yet — so
-        # adding a wallet via the watchlist makes it appear immediately.
+        # Every ACTIVE tracked wallet, even ones with zero observed edges yet
+        # — so adding a wallet via the watchlist makes it appear immediately.
+        # "Active" excludes archived_at IS NOT NULL rows -- see
+        # wallet_pruning.py. Production had 86,573 tracked_wallets before
+        # that existed (99.85% zero-signal stub rows from three ad-hoc
+        # discovery daemons with no scoring gate), which alone produced a
+        # ~87k-node graph no force-directed renderer can handle. This filter
+        # is the primary fix for that, not a client-side band-aid.
         tracked_rows: list[dict] = []
         try:
             tracked_rows = [dict(r) for r in await (await db.execute(
                 "SELECT chain, address, label, address_type, degen_score, "
-                "trade_count, unique_tokens, notes, balance_usd FROM tracked_wallets")).fetchall()]
+                "trade_count, unique_tokens, notes, balance_usd FROM tracked_wallets "
+                "WHERE archived_at IS NULL")).fetchall()]
         except aiosqlite.Error:
             pass
 
@@ -339,7 +480,7 @@ async def money_flow(
         # connected to every other wallet and drowns out real signal.
         blacklisted: set = set()
         if exclude_exchanges:
-            blacklisted = wb.get_blacklisted_addresses("solana")
+            blacklisted = await asyncio.to_thread(wb.get_blacklisted_addresses, "solana")
             for addr, meta in wallet_meta.items():
                 if meta.get("address_type") == "exchange" or wb.is_exchange_label(meta.get("label", "")):
                     blacklisted.add(addr)
@@ -595,11 +736,17 @@ async def money_flow(
                          key=lambda n: -n["volume_sol"])
     lookup_targets = token_nodes[:tier_lookups]
     if lookup_targets:
-        mcaps = await asyncio.gather(*[_dexscreener_mcap(n["ca"]) for n in lookup_targets],
-                                      return_exceptions=True)
-        for n, mcap in zip(lookup_targets, mcaps):
-            mc = mcap if isinstance(mcap, (int, float)) else None
+        snapshots = await asyncio.gather(*[_dexscreener_mcap(n["ca"]) for n in lookup_targets],
+                                          return_exceptions=True)
+        for n, snap in zip(lookup_targets, snapshots):
+            s = snap if isinstance(snap, dict) else {}
+            mc = s.get("market_cap")
+            mc = mc if isinstance(mc, (int, float)) else None
             n["market_cap"] = mc
+            n["price_usd"] = s.get("price_usd")
+            n["price_change_24h"] = s.get("price_change_24h")
+            n["liquidity_usd"] = s.get("liquidity_usd")
+            n["dexscreener_url"] = s.get("dexscreener_url")
             n["tier"] = _classify_tier(mc, first_seen.get(n["id"], now), now)
     for n in token_nodes[tier_lookups:]:
         n["tier"] = _classify_tier(None, first_seen.get(n["id"], now), now)
@@ -628,8 +775,13 @@ async def money_flow(
     # distinct from a token that simply hasn't migrated yet.
     MIGRATION_MCAP_FLOOR = 69_000.0   # pump.fun's real graduation threshold
     RUG_MCAP_FLOOR = 7_000.0          # user-specified "fell back under this = dead"
+    # "pumpfun_10k_20k"/"pre_migration" tiers were retired (_classify_tier
+    # now returns "unlisted" for any token with no real market_cap) -- their
+    # old distances live on as the "unlisted" fallback below via .get()'s
+    # default, which lands in the same middle-of-the-pre-migration-range
+    # spot (0.6) rather than guessing which of the two stages it's in.
     PRE_MIGRATION_DISTANCE_BY_TIER = {
-        "just_launch": 1.0, "pumpfun_10k_20k": 0.8, "pre_migration": 0.55,
+        "just_launch": 1.0,
     }
     RAYDIUM_ANCHOR_ADDRESS = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"  # Raydium AMM V4 program
 
@@ -723,9 +875,28 @@ async def money_flow(
         n["last_seen"] = last_seen.get(n["id"], n["first_seen"])
         node_list.append(n)
     node_list.sort(key=lambda x: -x["size"])
+
+    # Hard safety valve on wallet node count -- belt-and-suspenders on top of
+    # wallet_pruning.py's periodic archival (which runs every 30 min and
+    # can't gate the ad-hoc discovery daemons outside this repo directly).
+    # If those daemons resume firehosing tracked_wallets between prune
+    # passes, this keeps the graph renderable in the meantime by keeping
+    # only the highest-size (already sorted) wallets rather than returning
+    # an unbounded response. Tokens/social/exchange nodes are never capped
+    # here -- they're already small (~500 tokens) and are the actual subject
+    # of the graph.
+    MAX_WALLET_NODES = 1500
+    wallet_nodes = [n for n in node_list if n["type"] == "wallet"]
+    if len(wallet_nodes) > MAX_WALLET_NODES:
+        dropped_ids = {n["id"] for n in wallet_nodes[MAX_WALLET_NODES:]}
+        node_list = [n for n in node_list if n["id"] not in dropped_ids]
+    else:
+        dropped_ids = set()
+
     edge_list = [
         {**e, "volume_sol": round(e["volume_sol"], 4), "net_sol": round(e["net_sol"], 4)}
         for e in edges.values()
+        if e["source"] not in dropped_ids and e["target"] not in dropped_ids
     ]
 
     return {

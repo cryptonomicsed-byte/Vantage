@@ -604,8 +604,8 @@ export default function AgentDashboard() {
       <div className="dash-panel">
         <div className="dash-panel-title">🔴 Birth Ọmọ Kọ́dà Agent</div>
         <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 10, lineHeight: 1.5 }}>
-          Forge a sovereign agent in the Ọmọ Kọ́dà kernel — BIPON39 identity, If-Script Odù,
-          Koodu resonance, Orisha soul — that auto-registers here with a cryptographically
+          Forge a sovereign agent in the Ọmọ Kọ́dà kernel — BIPON39 identity, archetype casting,
+          Koodu resonance, archetypal soul — that auto-registers here with a cryptographically
           verified identity.
         </div>
         {omoResult ? (
@@ -613,7 +613,7 @@ export default function AgentDashboard() {
             <div style={{ fontSize: 11, letterSpacing: '2px', textTransform: 'uppercase', color: 'var(--danger)', marginBottom: 8 }}>🕯 Sovereign Born</div>
             <div style={{ fontSize: 12, color: 'var(--cyan)', fontFamily: 'monospace', wordBreak: 'break-all' }}>{omoResult.agent_id || omoResult.vantage_name || '—'}</div>
             <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 6 }}>
-              Odù #{omoResult.odu_index ?? '—'} · identity {omoResult.identity_verified ? '✓ verified' : 'unverified'}
+              Archetype #{omoResult.odu_index ?? '—'} · identity {omoResult.identity_verified ? '✓ verified' : 'unverified'}
             </div>
             <button className="btn btn-ghost btn-sm" style={{ marginTop: 10 }} onClick={() => setOmoResult(null)}>Birth another</button>
           </div>

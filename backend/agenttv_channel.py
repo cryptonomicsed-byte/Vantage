@@ -29,7 +29,7 @@ import time
 import aiosqlite
 
 from .db import get_db
-from .podcast_engine import generate_podcast, ensure_jingle, JINGLE_STREAM_URL, JINGLE_DURATION_SEC
+from .podcast_engine import generate_podcast, ensure_jingle, JINGLE_STREAM_URL, JINGLE_DURATION_SEC, VIDEO_OUT_DIR
 from .podcast_scanners import ai_news_topic, crypto_tier_topic, crypto_degen_topic
 from .routers.surfaces import _insert_broadcast
 
@@ -63,6 +63,43 @@ async def _ensure_agent(name: str, bio: str) -> dict:
 
 NUM_TURNS_PER_EPISODE = 22  # roughly a 3-4min episode at this engine's pace
 NUM_TURNS_PER_SEGMENT = 12  # ~3min segment for the scanner-driven persona channels
+
+RETENTION_KEEP_PER_CHANNEL = 20  # aired episodes kept on disk per persona channel; older ones get pruned so /opt/ares/media/videos doesn't grow forever (VPS disk hit 85% full)
+
+
+async def _prune_aired_episodes(agent_id: int, keep: int = RETENTION_KEEP_PER_CHANNEL) -> None:
+    """Delete the media file for auto-generated episodes of one persona channel
+    once more than `keep` of them have already aired, oldest first, and mark
+    those broadcast rows status='archived' (same gate every browse query
+    already uses, so they just quietly drop out of Cinema/guide listings).
+    Only ever touches broadcasts owned by a persona agent's own generation
+    loop -- never user-submitted podcasts (those belong to the submitter's
+    agent, not agent_id here) and never episodes that haven't aired yet."""
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            """SELECT id, stream_url FROM broadcasts
+               WHERE agent_id=? AND surface='cinema' AND cinema_kind='podcast'
+                 AND status='ready' AND agenttv_aired_at IS NOT NULL
+               ORDER BY agenttv_aired_at DESC""",
+            (agent_id,),
+        )).fetchall()
+    stale = rows[keep:]
+    if not stale:
+        return
+    for row in stale:
+        filename = row["stream_url"].rsplit("/", 1)[-1]
+        try:
+            (VIDEO_OUT_DIR / filename).unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("agenttv retention: failed to delete %s: %s", filename, e)
+    ids = [row["id"] for row in stale]
+    async with get_db() as db:
+        await db.execute(
+            f"UPDATE broadcasts SET status='archived' WHERE id IN ({','.join('?' * len(ids))})",
+            ids,
+        )
+        await db.commit()
 
 TOPICS = [
     "the strangest things found in deep ocean trenches",
@@ -173,6 +210,10 @@ class PersonaChannel:
         async with get_db() as db:
             await db.execute("UPDATE broadcasts SET agenttv_aired_at=datetime('now') WHERE id=?", (bid,))
             await db.commit()
+        try:
+            await _prune_aired_episodes(agent["id"])
+        except Exception as e:
+            logger.warning("%s: retention prune failed: %s", self.agent_name, e)
         return {"url": result["stream_url"], "duration": result["duration_sec"], "title": topic}
 
     async def _run(self):

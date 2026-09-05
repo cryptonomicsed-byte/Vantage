@@ -23,7 +23,7 @@ export default function GenerateWalletModal({
   onCreated: () => void
   tradingApi: (path: string, opts?: RequestInit) => Promise<Response>
 }) {
-  const [system, setSystem] = useState<'bip39' | 'bipon39'>('bip39')
+  const [system, setSystem] = useState<'bip39' | 'bipon39' | 'pumpportal'>('bip39')
   const [label, setLabel] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -56,7 +56,9 @@ export default function GenerateWalletModal({
         {!result ? (
           <>
             <div style={{ fontSize: 11, color: 'rgba(255,255,255,.5)', marginBottom: 10 }}>
-              Creates a real Solana wallet, encrypts the key at rest, and shows the recovery mnemonic once. Save it now — it is never shown again or stored in plaintext.
+              {system === 'pumpportal'
+                ? 'Creates a real PumpPortal Lightning wallet + API key (free -- no funds needed to create it). The key gates PumpPortal\'s Data API (pump.fun trade subscriptions) and Trading API; it stays unfunded/inactive until you send it real SOL yourself.'
+                : 'Creates a real Solana wallet and encrypts the key at rest.'}
             </div>
             <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
               <button onClick={() => setSystem('bip39')}
@@ -65,7 +67,11 @@ export default function GenerateWalletModal({
               </button>
               <button onClick={() => setSystem('bipon39')}
                 style={{ flex: 1, padding: '8px 0', borderRadius: 6, border: '1px solid ' + (system === 'bipon39' ? 'rgba(138,75,255,0.5)' : 'rgba(255,255,255,.1)'), background: system === 'bipon39' ? 'rgba(138,75,255,0.15)' : 'transparent', color: system === 'bipon39' ? '#c4b5fd' : '#9ca3af', fontSize: 12, cursor: 'pointer' }}>
-                BIPỌ̀N39 (Ifá)
+                BIPỌ̀N39 (Archetype)
+              </button>
+              <button onClick={() => setSystem('pumpportal')}
+                style={{ flex: 1, padding: '8px 0', borderRadius: 6, border: '1px solid ' + (system === 'pumpportal' ? 'rgba(138,75,255,0.5)' : 'rgba(255,255,255,.1)'), background: system === 'pumpportal' ? 'rgba(138,75,255,0.15)' : 'transparent', color: system === 'pumpportal' ? '#c4b5fd' : '#9ca3af', fontSize: 12, cursor: 'pointer' }}>
+                PumpPortal
               </button>
             </div>
             <input value={label} onChange={e => setLabel(e.target.value)} placeholder="Label (optional)"
@@ -81,18 +87,30 @@ export default function GenerateWalletModal({
             <div style={{ fontSize: 10, color: '#39ff14', fontWeight: 700, marginBottom: 6 }}>✅ Wallet created</div>
             <div style={{ fontSize: 11, color: 'rgba(255,255,255,.6)', marginBottom: 4 }}>Address</div>
             <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#fff', wordBreak: 'break-all', marginBottom: 10, padding: '6px 8px', background: 'rgba(255,255,255,.04)', borderRadius: 6 }}>{result.address}</div>
-            <div style={{ fontSize: 11, color: '#ffaa00', fontWeight: 700, marginBottom: 4 }}>⚠️ Mnemonic — save this now, shown only once</div>
-            <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#ffaa00', wordBreak: 'break-word', marginBottom: 10, padding: '8px 10px', background: 'rgba(255,170,0,0.08)', border: '1px solid rgba(255,170,0,0.25)', borderRadius: 6, lineHeight: 1.6 }}>
-              {result.mnemonic}
-            </div>
-            {result.dominant_macro && (
-              <div style={{ fontSize: 10, color: 'rgba(255,255,255,.4)', marginBottom: 10 }}>
-                Ifá: dominant macro {result.dominant_macro}, odù index {result.odu_primary_index}
+
+            {result.pumpportal_api_key && (
+              <>
+                <div style={{ fontSize: 11, color: '#ffaa00', fontWeight: 700, marginBottom: 4 }}>⚠️ API Key — save this now, shown only once</div>
+                <div style={{ fontSize: 11, fontFamily: 'monospace', color: '#ffaa00', wordBreak: 'break-all', marginBottom: 10, padding: '8px 10px', background: 'rgba(255,170,0,0.08)', border: '1px solid rgba(255,170,0,0.25)', borderRadius: 6, lineHeight: 1.6 }}>
+                  {result.pumpportal_api_key}
+                </div>
+              </>
+            )}
+            {result.funding_required && (
+              <div style={{ fontSize: 11, color: '#ff9d00', marginBottom: 10, padding: '8px 10px', background: 'rgba(255,157,0,0.08)', border: '1px solid rgba(255,157,0,0.25)', borderRadius: 6, lineHeight: 1.5 }}>
+                {result.funding_required}
               </div>
             )}
-            <div style={{ fontSize: 10, color: 'rgba(255,255,255,.4)', marginBottom: 12 }}>
-              For a stealth paper backup, this mnemonic can be pasted into the separate CloakSeed app (client-side only — not connected to Vantage) to generate a cipher-obscured version.
-            </div>
+            {result.dominant_archetype && (
+              <div style={{ fontSize: 10, color: 'rgba(255,255,255,.4)', marginBottom: 10 }}>
+                Archetype: {result.dominant_archetype}, index {result.archetype_index}
+              </div>
+            )}
+            {result.warning && (
+              <div style={{ fontSize: 10, color: 'rgba(255,255,255,.4)', marginBottom: 12 }}>
+                {result.warning}
+              </div>
+            )}
             <button onClick={onClose} style={{ width: '100%', padding: '9px 0', background: 'rgba(255,255,255,.08)', border: '1px solid rgba(255,255,255,.15)', borderRadius: 6, color: '#fff', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
               Done
             </button>

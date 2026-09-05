@@ -6,7 +6,7 @@ Endpoints (all require X-Agent-Key):
   GET /api/council/calibration  — per-persona win rate + effective weights
   GET /api/council/substrate    — mycelium traces + council findings
 """
-import json, os, sqlite3, urllib.request
+import asyncio, json, os, sqlite3, urllib.request
 from fastapi import APIRouter, Depends
 from backend.deps import get_agent
 
@@ -25,7 +25,7 @@ PERSONAS = [
 ]
 
 
-def q(sql, args=()):
+def _q_sync(sql, args=()):
     try:
         conn = sqlite3.connect(f"file:{COUNCIL_DB}?mode=ro", uri=True, timeout=3)
         conn.row_factory = sqlite3.Row
@@ -36,12 +36,24 @@ def q(sql, args=()):
         return {"error": str(e)}
 
 
-def my_get(url):
+async def q(sql, args=()):
+    """Off the event loop -- a blocking sqlite3.connect()/execute() call
+    directly inside an async handler used to freeze every other in-flight
+    request for the duration."""
+    return await asyncio.to_thread(_q_sync, sql, args)
+
+
+def _my_get_sync(url):
     try:
         with urllib.request.urlopen(url, timeout=5) as r:
             return json.loads(r.read().decode("utf-8", "replace"))
     except Exception:
         return None
+
+
+async def my_get(url):
+    """Off the event loop -- see q() above; same blocking-call issue."""
+    return await asyncio.to_thread(_my_get_sync, url)
 
 
 @router.get("/overview")
@@ -55,23 +67,23 @@ async def council_overview(agent: dict = Depends(get_agent)):
         out["daemon_running"] = os.path.exists(f"/proc/{pid}")
     except Exception:
         pass
-    c = q("SELECT COUNT(*) n FROM verdicts")
+    c = await q("SELECT COUNT(*) n FROM verdicts")
     out["verdict_count"] = c.get("n") if isinstance(c, dict) else c[0]["n"]
-    b = q("SELECT COUNT(*) n FROM trace_buffer WHERE sent_at IS NULL")
+    b = await q("SELECT COUNT(*) n FROM trace_buffer WHERE sent_at IS NULL")
     out["trace_buffer_pending"] = b.get("n") if isinstance(b, dict) else b[0]["n"]
-    out["mycelium"] = my_get(f"{MYCELIUM}/api/status")
+    out["mycelium"] = await my_get(f"{MYCELIUM}/api/status")
     return out
 
 
 @router.get("/verdicts")
 async def council_verdicts(agent: dict = Depends(get_agent), limit: int = 25):
-    rows = q("""SELECT v.id, v.symbol, v.direction, v.conviction, v.entry_price,
+    rows = await q("""SELECT v.id, v.symbol, v.direction, v.conviction, v.entry_price,
                        v.outcome, v.paper, v.posted_at, d.cycle_ts
                 FROM verdicts v JOIN debates d ON d.id = v.debate_id
                 ORDER BY v.id DESC LIMIT ?""", (limit,))
     if isinstance(rows, dict):
         return rows
-    votes = q("""SELECT debate_id, persona, direction, confidence, weight, rationale
+    votes = await q("""SELECT debate_id, persona, direction, confidence, weight, rationale
                  FROM member_votes WHERE round=2 ORDER BY debate_id DESC, persona""")
     by = {}
     if isinstance(votes, list):
@@ -84,7 +96,7 @@ async def council_verdicts(agent: dict = Depends(get_agent), limit: int = 25):
 
 @router.get("/calibration")
 async def council_calibration(agent: dict = Depends(get_agent)):
-    c = q("SELECT persona, correct, total, updated_at FROM calibration")
+    c = await q("SELECT persona, correct, total, updated_at FROM calibration")
     if isinstance(c, dict):
         return c
     lookup = {x["persona"]: x for x in c}
@@ -105,9 +117,9 @@ async def council_calibration(agent: dict = Depends(get_agent)):
 
 @router.get("/substrate")
 async def council_substrate(agent: dict = Depends(get_agent)):
-    my = my_get(f"{MYCELIUM}/api/status")
-    traces = my_get(f"{MYCELIUM}/api/traces?agent=council&limit=100")
-    findings = my_get(f"{MYCELIUM}/api/findings?limit=50")
+    my = await my_get(f"{MYCELIUM}/api/status")
+    traces = await my_get(f"{MYCELIUM}/api/traces?agent=council&limit=100")
+    findings = await my_get(f"{MYCELIUM}/api/findings?limit=50")
     out = {"mycelium": my, "council_traces": [], "findings": []}
     if isinstance(traces, dict):
         t = traces.get("traces", traces.get("data", []))

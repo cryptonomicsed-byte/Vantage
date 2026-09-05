@@ -156,11 +156,31 @@ def poll_updates():
 # ── Main ────────────────────────────────────────────────────────────
 def run():
     print("═══ telegram_alpha_ingester v1 ═══")
-    print(f"  Bot: @{json.loads(urllib.request.urlopen(urllib.request.Request(f'https://api.telegram.org/bot{TOKEN}/getMe')))}")
+    if not TOKEN:
+        # Real bug fixed here: this used to crash on every single
+        # invocation before poll_updates() ever ran -- json.loads() was
+        # called directly on the urlopen() response OBJECT, not its
+        # decoded body (json.loads needs str/bytes, not a file-like
+        # object), so `run()` never survived long enough to log this
+        # message, let alone poll. Under systemd's Restart=always this
+        # just crash-looped silently forever instead of explaining why.
+        print("  ⚠️ TELEGRAM_BOT_TOKEN is not set -- cannot poll. Exiting.")
+        sys.exit(1)
+    try:
+        me = json.loads(urllib.request.urlopen(
+            urllib.request.Request(f"https://api.telegram.org/bot{TOKEN}/getMe"), timeout=15
+        ).read().decode())
+        username = (me.get("result") or {}).get("username", "?")
+        print(f"  Bot: @{username}")
+    except Exception as e:
+        # A getMe failure is informative, not fatal -- poll_updates() has
+        # its own real retry loop and will surface the same underlying
+        # problem (bad token, network) on its first request anyway.
+        print(f"  ⚠️ Could not verify bot identity (continuing regardless): {e}")
     print(f"  Channels: {CHANNELS}")
     print(f"  Waiting for signals...")
     print()
-    
+
     poll_updates()
 
 if __name__ == "__main__":

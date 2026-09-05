@@ -696,7 +696,8 @@ async def suggest_block_neighbors(block_id: str, for_agent: str = "", limit: int
 
 @router.get("/trust/{agent_id}/signals")
 async def get_agent_trust_signals(
-    agent_id: str, neighbor_id: str, block_id: str = "default"
+    agent_id: str, neighbor_id: str, block_id: str = "default",
+    agent: dict = Depends(get_agent),
 ):
     """Get trust signals between agent_id and neighbor_id (for Julia score computation)."""
     signals = await get_trust_signals(block_id, agent_id, neighbor_id)
@@ -717,6 +718,12 @@ async def signal_event(request: Request, agent: dict = Depends(get_agent)):
         raise HTTPException(422, "block_id required")
 
     async with get_db() as db:
+        if actor_id != agent["name"]:
+            # Same class of bug as the trust-signal spoofing fix above:
+            # actor_id was caller-controlled and broadcast to every
+            # subscriber of block.{block_id} as-is, with no check that the
+            # caller actually controls that identity.
+            await _assert_owns_mesh_agent_id(db, block_id, actor_id, agent)
         await _record_event(db, block_id, event_type, actor_id, payload)
         await db.commit()
 

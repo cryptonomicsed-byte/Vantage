@@ -1,7 +1,8 @@
 import React, { useState, useCallback, useEffect } from 'react'
-import { Wallet, TrendingUp, TrendingDown, Shield, BookOpen, PieChart, Activity, Brain, Plus, X, Power, ToggleLeft, ToggleRight } from 'lucide-react'
+import { Wallet, TrendingUp, TrendingDown, Shield, BookOpen, PieChart, Activity, Brain, Plus, X, Power, ToggleLeft, ToggleRight, CreditCard } from 'lucide-react'
 import { useTradingStore } from './tradingStore'
 import GenerateWalletModal from './GenerateWalletModal'
+import OnrampModal from './OnrampModal'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ExecutionPanel — right panel. Risk slider always visible. Quick trade,
@@ -32,6 +33,7 @@ export default function ExecutionPanel() {
   const [tradeMsgOk, setTradeMsgOk] = useState(true)
   const [busy, setBusy] = useState(false)
   const [showGenerateWallet, setShowGenerateWallet] = useState(false)
+  const [onrampWallet, setOnrampWallet] = useState<{ id: number; label: string; address: string; chain: string } | null>(null)
 
   async function refreshWallets() {
     try {
@@ -96,7 +98,7 @@ export default function ExecutionPanel() {
   // pickers below already use), value "1" enabled / anything else disabled.
   const AUTO_TRADE_DAEMONS = [
     { key: 'degen_alpha_fusion_trading_enabled', label: 'Degen Alpha Fusion', hint: 'Moonshot sniping on trending pools' },
-    { key: 'pumpfun_trader_trading_enabled', label: 'Pumpfun Trader', hint: 'Buys pumpfun signals from degen_alpha_fusion/ogun_degen' },
+    { key: 'pumpfun_trader_trading_enabled', label: 'Pumpfun Trader', hint: 'Buys pumpfun signals from degen_alpha_fusion/the Forge scanner' },
     { key: 'jupiter_signer_trading_enabled', label: 'Jupiter Signer', hint: 'Signs + submits queued moonshot swaps' },
     { key: 'hyperliquid_trader_trading_enabled', label: 'Hyperliquid Trader', hint: 'Perp market_open/market_close via the HL SDK — real signing, wallet currently unfunded' },
     { key: 'base_trader_trading_enabled', label: 'Base Trader', hint: '1inch swaps on Base — real EIP-1559 signing + broadcast, needs ETH for gas' },
@@ -276,23 +278,37 @@ export default function ExecutionPanel() {
         {showGenerateWallet && (
           <GenerateWalletModal onClose={() => setShowGenerateWallet(false)} onCreated={refreshWallets} tradingApi={tradingApi} />
         )}
+        {onrampWallet && (
+          <OnrampModal wallet={onrampWallet} onClose={() => setOnrampWallet(null)} tradingApi={tradingApi} />
+        )}
         {state.wallets.length === 0 ? (
           <div style={{ fontSize: 11, color: '#6b7280' }}>No wallets connected</div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
             {state.wallets.map(w => (
-              <button
-                key={w.id}
-                style={{
-                  ...styles.walletBtn,
-                  background: w.id === state.activeWalletId ? 'rgba(138,75,255,0.12)' : 'transparent',
-                  borderColor: w.id === state.activeWalletId ? 'rgba(138,75,255,0.3)' : 'rgba(255,255,255,0.06)',
-                }}
-                onClick={() => dispatch({ type: 'SET_ACTIVE_WALLET', id: w.id })}
-              >
-                <span style={styles.walletLabel}>{w.label}</span>
-                <span style={styles.walletChain}>{w.chain}</span>
-              </button>
+              <div key={w.id} style={{ display: 'flex', alignItems: 'stretch', gap: 3 }}>
+                <button
+                  style={{
+                    ...styles.walletBtn,
+                    flex: 1,
+                    background: w.id === state.activeWalletId ? 'rgba(138,75,255,0.12)' : 'transparent',
+                    borderColor: w.id === state.activeWalletId ? 'rgba(138,75,255,0.3)' : 'rgba(255,255,255,0.06)',
+                  }}
+                  onClick={() => dispatch({ type: 'SET_ACTIVE_WALLET', id: w.id })}
+                >
+                  <span style={styles.walletLabel}>{w.label}</span>
+                  <span style={styles.walletChain}>{w.chain}</span>
+                </button>
+                {w.chain === 'solana' && (
+                  <button
+                    title={`Buy crypto with a debit card into ${w.label}`}
+                    onClick={() => setOnrampWallet({ id: w.id, label: w.label, address: w.address, chain: w.chain })}
+                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 8px', background: 'rgba(57,255,20,0.1)', border: '1px solid rgba(57,255,20,0.25)', borderRadius: 5, color: '#39ff14', cursor: 'pointer' }}
+                  >
+                    <CreditCard size={12} />
+                  </button>
+                )}
+              </div>
             ))}
           </div>
         )}

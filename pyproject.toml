@@ -46,6 +46,16 @@ dependencies = [
     "ccxt>=4.0.0",
     "defusedxml>=0.7.1",
     "coincurve>=20.0.0",
+    # BLAKE3, to verify runtime receipts produced by the agent kernel
+    # (Omo-Koda2 omokoda-core/src/receipt). Its receipt ids are BLAKE3 over
+    # the receipt fields, so recomputing one -- which is the half of
+    # verification that binds the signature to the content -- needs the same
+    # hash. Not reachable with hashlib: BLAKE3 is not in the standard
+    # library, and BLAKE2 is a different function.
+    "blake3>=0.4.0",
+    # Real BIP-39 mnemonic generation + BIP-32/BIP-44/SLIP-0010 multi-chain
+    # derivation for backend/hd_wallet.py (agent wallet creation).
+    "bip-utils>=2.9.3",
     # Pinned <8.0 deliberately: 8.x requires starlette>=1.0.0, which
     # directly conflicts with this project's fastapi>=0.104.0 pin (fastapi
     # 0.128.8, installed live, requires starlette<1.0.0) -- confirmed via a

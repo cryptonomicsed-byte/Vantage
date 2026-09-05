@@ -17,7 +17,7 @@ Collaboration:
   - Gitea repo for video project files
   - OpenCode can edit video scripts/components
 """
-import json, os, subprocess, time, logging
+import asyncio, json, os, subprocess, time, logging
 from typing import Optional
 from datetime import datetime
 
@@ -488,7 +488,10 @@ Use dark background, glowing cyan text (#00ffcc), cinematic pacing."""
     )
 
     try:
-        resp = json.loads(_urlreq.urlopen(req, timeout=30).read())
+        # Off the event loop -- an up-to-30s blocking urlopen call here used
+        # to freeze every other in-flight request (across the whole app)
+        # for the entire LLM round trip.
+        resp = await asyncio.to_thread(lambda: json.loads(_urlreq.urlopen(req, timeout=30).read()))
         raw = resp["choices"][0]["message"]["content"]
     except Exception as e:
         raise RuntimeError(f"ViMax LLM failed: {e}")
@@ -710,6 +713,16 @@ async def my_videos(agent: dict = Depends(get_agent)):
 @router.post("/projects/{project_id}/publish")
 async def publish_video(project_id: int, agent: dict = Depends(get_agent)):
     """Publish rendered video to Vantage feed."""
+    # Was holding this connection open (via `async with get_db()`) across
+    # two self-referential HTTP calls back into Vantage's own API below --
+    # up to ~20s combined at their timeout=10 each, self-calls routed
+    # through this same event loop. Under real load that held the DB
+    # connection's read-lock open for the whole round trip, which is
+    # exactly the pattern that pins SQLite's WAL and blocks checkpoint
+    # truncation for everyone else (confirmed live 2026-08-22: WAL stuck
+    # unable to advance past a frozen checkpoint boundary while this
+    # process was serving traffic). Read, then close, THEN make the HTTP
+    # calls, then a fresh short connection for the final UPDATE.
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         project = await (await db.execute(
@@ -718,59 +731,58 @@ async def publish_video(project_id: int, agent: dict = Depends(get_agent)):
         if not project:
             raise HTTPException(404, "Project not found")
         project = dict(project)
-        
-        if not project.get("render_url"):
-            raise HTTPException(400, "Render the project first")
-        
-        # Publish to Vantage feed
-        import httpx
-        async with httpx.AsyncClient(timeout=10) as client:
-            # Upload video
-            video_file = project["render_url"]
-            if not os.path.exists(video_file):
-                raise HTTPException(404, "Rendered video file not found")
-            
-            # Post as text broadcast with video link
-            r = await client.post(
-                "http://127.0.0.1:8001/api/agents/posts/text",
+
+    if not project.get("render_url"):
+        raise HTTPException(400, "Render the project first")
+
+    video_file = project["render_url"]
+    if not os.path.exists(video_file):
+        raise HTTPException(404, "Rendered video file not found")
+
+    # Publish to Vantage feed -- no DB connection held during these calls.
+    import httpx
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.post(
+            "http://127.0.0.1:8001/api/agents/posts/text",
+            headers={"X-Agent-Key": agent["api_key"]},
+            json={
+                "title": project["title"],
+                "content": project.get("description", project["title"]),
+                "description": project.get("description", ""),
+                "content_type": "video",
+                "stream_url": f"/media/videos/{os.path.basename(project['render_url'])}",
+                "thumbnail_url": project.get("thumbnail_url") or get_default_thumbnail(project.get("template", "custom")),
+                "post_content": project.get("description", ""),
+                "tags": ["video", project.get("template", "custom")],
+            }
+        )
+
+        # Also save to agent memory vault
+        try:
+            await client.post(
+                f"http://127.0.0.1:8001/api/agents/{agent['name']}/vault/note",
                 headers={"X-Agent-Key": agent["api_key"]},
                 json={
-                    "title": project["title"],
-                    "content": project.get("description", project["title"]),
-                    "description": project.get("description", ""),
-                    "content_type": "video",
-                    "stream_url": f"/media/videos/{os.path.basename(project['render_url'])}",
-                    "thumbnail_url": project.get("thumbnail_url") or get_default_thumbnail(project.get("template", "custom")),
-                    "post_content": project.get("description", ""),
+                    "content": f"Video: {project['title']}\nFile: {project['render_url']}\nDuration: {project.get('duration_sec', 0)}s\nTemplate: {project.get('template', 'custom')}",
                     "tags": ["video", project.get("template", "custom")],
                 }
             )
-            
-            await db.execute(
-                "UPDATE video_projects SET status='published', updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                (project_id,)
-            )
-            await db.commit()
-            
-                        # Also save to agent memory vault
-            try:
-                await client.post(
-                    f"http://127.0.0.1:8001/api/agents/{agent['name']}/vault/note",
-                    headers={"X-Agent-Key": agent["api_key"]},
-                    json={
-                        "content": f"Video: {project['title']}\nFile: {project['render_url']}\nDuration: {project.get('duration_sec', 0)}s\nTemplate: {project.get('template', 'custom')}",
-                        "tags": ["video", project.get("template", "custom")],
-                    }
-                )
-            except Exception:
-                pass
+        except Exception:
+            pass
 
-            return {
-                "status": "published",
-                "project_id": project_id,
-                "render_url": project["render_url"],
-                "note": "Video published to Vantage feed and saved to memory vault"
-            }
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE video_projects SET status='published', updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (project_id,)
+        )
+        await db.commit()
+
+    return {
+        "status": "published",
+        "project_id": project_id,
+        "render_url": project["render_url"],
+        "note": "Video published to Vantage feed and saved to memory vault"
+    }
 
 # ── Fork ─────────────────────────────────────────────────────
 

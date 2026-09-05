@@ -1,0 +1,14 @@
+[Unit]
+Description=Hard network-level egress block for the pine-runtime sandbox (DOCKER-USER chain)
+After=docker.service
+Requires=docker.service
+# Applied after pine-runtime's own container is up, so the network exists.
+# Deploy: docker compose up -d pine-runtime, then enable+start this unit.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/ares/Vantage/ops/pine-runtime/enforce-egress-block.sh
+
+[Install]
+WantedBy=multi-user.target

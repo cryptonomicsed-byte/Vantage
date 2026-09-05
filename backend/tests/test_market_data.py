@@ -5,6 +5,7 @@ Network is always mocked so these are deterministic and offline-safe.
 import pytest
 
 from backend import market_sources as ms
+from backend.routers import trading as trading_router
 
 
 # ── market_sources unit tests (no app needed) ─────────────────────────────────────
@@ -382,6 +383,19 @@ def _h(agent):
 
 # Isolated agents come from the conftest `fresh_agent` fixture (direct DB insert,
 # no rate limit) since the session agent is shared and would contaminate totals.
+
+
+@pytest.fixture(autouse=True)
+def _no_risk_cap(monkeypatch):
+    """These tests exercise PnL/valuation math with specific round-number
+    quantities/prices (avg-cost, realized/unrealized math) -- not risk
+    limits, which are already unit-tested directly in test_price_sanity.py
+    against the real _enforce_risk_limits()/RiskLimitExceeded. Bypass here
+    so the $50 no-strategy fallback cap (Hermes audit P1, f656dc8) does not
+    reject orders whose notional only reflects the PnL scenario, not risk."""
+    async def _noop(*a, **kw):
+        return None
+    monkeypatch.setattr(trading_router, "_enforce_risk_limits", _noop)
 
 
 @pytest.mark.asyncio

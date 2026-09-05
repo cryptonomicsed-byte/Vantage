@@ -32,6 +32,8 @@ interface FlowNode {
   // token-only
   ca?: string; market_cap?: number | null; tier?: string
   migration_distance?: number; dormant_void?: boolean
+  price_usd?: string | number | null; price_change_24h?: number | null
+  liquidity_usd?: number | null; dexscreener_url?: string | null
   // social-only
   platform?: string; mentions?: number
 }
@@ -65,13 +67,19 @@ interface GLink { source: string; target: string; color: string; width: number; 
 // data that's actually hours or days old.
 const LIVE_WINDOW_SECONDS = 180
 
+// "pumpfun_10k_20k"/"pre_migration" retired server-side (backend/routers/
+// alpha.py's _classify_tier) -- they were a guessed cap-range derived from
+// this graph's own first-observed timestamp, not a real market cap, and
+// could contradict the honest "unlisted" market_cap shown right next to
+// them. Any token without a real DexScreener market_cap now reports
+// "unlisted" consistently across both fields.
 const TIER_LABEL: Record<string, string> = {
-  just_launch: 'Just Launched', pumpfun_10k_20k: 'Pump 10-20k', pre_migration: 'Pre-Migration',
-  just_migrated: 'Just Migrated', migrated_1m: '$1M+', migrated_10m: '$10M+', migrated_20m: '$20M+',
+  just_launch: 'Just Launched', unlisted: 'Unlisted',
+  just_migrated: 'Just Migrated', sub_1m: '< $1M', migrated_10m: '$10M+', migrated_20m: '$20M+',
   migrated_100m: '$100M+', migrated_500m: '$500M+', migrated_1b: '$1B+', billion_club: 'Billion Club',
 }
-const TIER_ORDER = ['just_launch', 'pumpfun_10k_20k', 'pre_migration', 'just_migrated',
-  'migrated_1m', 'migrated_10m', 'migrated_20m', 'migrated_100m', 'migrated_500m', 'migrated_1b', 'billion_club']
+const TIER_ORDER = ['just_launch', 'unlisted', 'just_migrated',
+  'sub_1m', 'migrated_10m', 'migrated_20m', 'migrated_100m', 'migrated_500m', 'migrated_1b', 'billion_club']
 
 const TYPE_COLOR: Record<string, string> = { wallet: '#3b82f6', token: '#ff2d4a', social: '#39ff14', exchange: '#f5a623' }
 
@@ -459,8 +467,27 @@ export default function MoneyFlowGraph() {
                   <div style={{ fontSize: 11, color: '#ef4444', fontWeight: 700, marginBottom: 4 }}>⚠ Graduated then collapsed back under $7K — faded into the dormant void</div>
                 )}
                 <div style={{ fontSize: 12, color: 'rgba(255,255,255,.7)' }}>Market cap: <b>{selected.market_cap ? `$${selected.market_cap.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : 'unlisted'}</b></div>
+                {selected.price_usd != null && (
+                  <div style={{ fontSize: 12, color: 'rgba(255,255,255,.7)' }}>
+                    Price: <b>${Number(selected.price_usd).toLocaleString(undefined, { maximumFractionDigits: 8 })}</b>
+                    {selected.price_change_24h != null && (
+                      <span style={{ color: selected.price_change_24h >= 0 ? '#39ff14' : '#ef4444', marginLeft: 6 }}>
+                        {selected.price_change_24h >= 0 ? '+' : ''}{selected.price_change_24h.toFixed(1)}% 24h
+                      </span>
+                    )}
+                  </div>
+                )}
+                {selected.liquidity_usd != null && (
+                  <div style={{ fontSize: 12, color: 'rgba(255,255,255,.7)' }}>Liquidity: <b>${selected.liquidity_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}</b></div>
+                )}
                 <div style={{ fontSize: 12, color: 'rgba(255,255,255,.7)' }}>Trades observed: <b>{selected.trades}</b></div>
                 <div style={{ fontSize: 12, color: 'rgba(255,255,255,.7)' }}>Volume: <b>{selected.volume_sol.toLocaleString(undefined, { maximumFractionDigits: 4 })} SOL</b></div>
+                {selected.dexscreener_url && (
+                  <a href={selected.dexscreener_url} target="_blank" rel="noreferrer"
+                     style={{ fontSize: 12, color: '#4ade80', display: 'flex', alignItems: 'center', gap: 4, marginTop: 4 }}>
+                    <ExternalLink size={11} /> View on DexScreener
+                  </a>
+                )}
               </>
             )}
             {selected.type === 'exchange' && (

@@ -47,45 +47,47 @@ FFMPEG_AVAILABLE = False
 
 RATE_LIMIT_REQUESTS_PER_MINUTE = 100
 
-async def _check_api_key_rate_limit(api_key: str) -> bool:
-    """Check if API key has exceeded rate limit (100 req/min). Returns True if OK.
+# In-process fixed-window counters: {key_hash: (window_start, count)}. One
+# dict entry per distinct API key, one write per request straight to a
+# dict -- no lock needed since uvicorn runs this app as a single worker
+# (no --workers flag; confirmed against the running systemd unit).
+#
+# This DB-backed version (a per-request SQLite UPSERT into
+# rate_limit_counters) was tried to fix an earlier in-memory version's
+# reset-on-restart + unbounded growth, but traded that for real production
+# impact: with dozens of internal Ares/mesh daemons polling constantly,
+# concurrent writers collided past SQLite's 20s busy_timeout -- 109
+# "database is locked" errors/minute measured live on 2026-08-21, with
+# zero actual end users yet. Reverted to in-memory, but as fixed-window
+# buckets (not the old per-request timestamp lists) with periodic
+# eviction, so it doesn't reintroduce the unbounded-growth problem either.
+_rate_limit_counters: dict[str, tuple[int, int]] = {}
 
-    Was a plain in-memory dict of timestamp lists -- reset on every restart
-    (a real burst window every deploy), and grew forever per distinct key
-    ever seen with no eviction. Replaced with a DB-backed fixed-window
-    counter (rate_limit_counters, PK on key_hash+window_start) instead of
-    Redis: Vantage already runs SQLite in WAL mode with busy_timeout for
-    everything else, and per-minute UPSERT buckets (not one row per
-    request) keep this cheap rather than turning every API call into its
-    own write, which would undermine the concurrency work just done
-    elsewhere this session."""
+async def _check_api_key_rate_limit(api_key: str) -> bool:
+    """Check if API key has exceeded rate limit (100 req/min). Returns True if OK."""
     if not api_key:
         return True  # No key means no per-key rate limiting
 
     key_hash = hashlib.sha256(api_key.encode()).hexdigest()
     window_start = int(time.time() // 60) * 60
 
-    async with get_db() as db:
-        cur = await db.execute(
-            """INSERT INTO rate_limit_counters (key_hash, window_start, count)
-               VALUES (?, ?, 1)
-               ON CONFLICT(key_hash, window_start) DO UPDATE SET count = count + 1
-               RETURNING count""",
-            (key_hash, window_start),
-        )
-        row = await cur.fetchone()
-        await db.commit()
+    bucket = _rate_limit_counters.get(key_hash)
+    if bucket is not None and bucket[0] == window_start:
+        count = bucket[1] + 1
+    else:
+        count = 1
+    _rate_limit_counters[key_hash] = (window_start, count)
 
-    return (row[0] if row else 1) <= RATE_LIMIT_REQUESTS_PER_MINUTE
+    return count <= RATE_LIMIT_REQUESTS_PER_MINUTE
 
 
 async def _prune_rate_limit_counters():
-    """Drop counter rows for windows more than a few minutes old -- keeps
-    the table small; nothing needs history beyond the current window."""
+    """Drop counter entries for windows more than a few minutes old -- keeps
+    the dict from growing forever with one entry per distinct key ever seen."""
     cutoff = int(time.time() // 60) * 60 - 300
-    async with get_db() as db:
-        await db.execute("DELETE FROM rate_limit_counters WHERE window_start < ?", (cutoff,))
-        await db.commit()
+    stale = [k for k, (window_start, _count) in _rate_limit_counters.items() if window_start < cutoff]
+    for k in stale:
+        del _rate_limit_counters[k]
 
 
 async def _rate_limit_prune_loop():
@@ -95,6 +97,23 @@ async def _rate_limit_prune_loop():
         except Exception as e:
             logger.warning("rate limit counter prune failed: %s", e)
         await asyncio.sleep(300)
+
+
+async def _wallet_pruning_loop():
+    """Periodic tracked_wallets activity scoring (see wallet_pruning.py) --
+    keeps /api/moneyflow's node count real even if the upstream discovery
+    daemons (outside this repo) resume unconditional inserts. Runs less
+    often than the rate-limit prune since this scans real DB rows, not an
+    in-memory dict; 30 min is frequent enough for a signal that only
+    changes over days (recent-activity windows)."""
+    await asyncio.sleep(60)  # let startup settle before the first DB-wide scan
+    from .wallet_pruning import prune_inactive_tracked_wallets
+    while True:
+        try:
+            await prune_inactive_tracked_wallets()
+        except Exception as e:
+            logger.warning("wallet pruning pass failed: %s", e)
+        await asyncio.sleep(1800)
 
 # Per-peer circuit breaker state (in-memory; DB columns shadow for observability)
 # Structure: {peer_id: {"failures": int, "open_until": float}}
@@ -473,6 +492,37 @@ async def lifespan(app: FastAPI):
     await _init_genesis_db()
     from .routers.collectives import init_collectives_db
     await init_collectives_db()
+    from .coordination import init_coordination_db
+    await init_coordination_db()
+    from .work_refs import init_work_ref_db
+    await init_work_ref_db()
+    from .workspace_roles import (
+        deduplicate_builtin_templates, init_workspace_roles_db, seed_builtin_templates,
+    )
+    await init_workspace_roles_db()
+    await deduplicate_builtin_templates()
+    await seed_builtin_templates()
+    from .presence import init_presence_db
+    await init_presence_db()
+    from .receipts import init_receipts_db
+    await init_receipts_db()
+    # Aliased: backend/mesh_store.py already exports init_mesh_db for the
+    # Block Mesh coordination tables and main.py imports it at module level.
+    # A bare `from ... import init_mesh_db` here rebinds the name for the
+    # whole function, so the module-level one becomes an UnboundLocalError at
+    # its own call site further up -- which takes the service down at boot.
+    from .mesh_gateway import init_mesh_db as init_meshnet_db
+    await init_meshnet_db()
+    from .coordination_join import init_join_db
+    await init_join_db()
+    from .routers.conductor import init_conductor_db
+    await init_conductor_db()
+    from .coordination_scoring import init_scoring_db
+    await init_scoring_db()
+    from .sovereignty import init_sovereignty_db
+    await init_sovereignty_db()
+    from .intel_exchange import init_intel_exchange_db
+    await init_intel_exchange_db()
     from .routers.wallets import init_wallet_tables
     await init_wallet_tables()
     from .routers.degen import ensure_degen_indexes
@@ -518,6 +568,7 @@ async def lifespan(app: FastAPI):
     watch_task = asyncio.create_task(_platform_subscription_loop())
     weather_task = asyncio.create_task(_weather_alert_loop())
     rate_limit_prune_task = asyncio.create_task(_rate_limit_prune_loop())
+    wallet_pruning_task = asyncio.create_task(_wallet_pruning_loop())
 
     # Execution engine was built + tested but never actually started anywhere
     # (an audit on 2026-08-17 found it dead code, unimported outside tests).
@@ -528,16 +579,38 @@ async def lifespan(app: FastAPI):
         from .execution_engine import execution_loop
         execution_engine_task = asyncio.create_task(execution_loop())
 
-    from .agenttv_channel import start_all_channels as _start_all_agenttv_channels
-    await _start_all_agenttv_channels()
+    if settings.AGENTTV_ENABLED:
+        from .agenttv_channel import start_all_channels as _start_all_agenttv_channels
+        await _start_all_agenttv_channels()
+    else:
+        logger.warning("AGENTTV_ENABLED=False — Agent.TV podcast/video generation disabled (owner kill switch)")
 
     from .buzz_inbound import run_inbound_listener
     buzz_inbound_task = asyncio.create_task(run_inbound_listener())
 
+    # Mirrors guild-channel messages from the relay into the index. Without
+    # it, messages an external agent publishes with its own key never reach
+    # Vantage at all -- see backend/coordination_indexer.py.
+    from .coordination_indexer import run_coordination_indexer
+    coordination_indexer_task = asyncio.create_task(run_coordination_indexer())
+
+    # Guild-scoped leaderboard rollup. Deliberately slow: a leaderboard needs
+    # stable numbers more than fresh ones.
+    from .coordination_scoring import scoring_loop
+    scoring_task = asyncio.create_task(scoring_loop())
+
     last30days_task = asyncio.create_task(_last30days_watch_loop())
 
+    # trade_outcome_learner: was referenced by name in routers/trading.py's
+    # GET /source-performance docstring since that endpoint was written, but
+    # never actually existed anywhere (found 2026-08-29 while wiring Pine
+    # Script indicators into it -- the endpoint would 500 on any real call,
+    # "no such table"). Real per-source PnL tracking now runs here.
+    from .trade_outcome_learner import outcome_learner_loop
+    outcome_learner_task = asyncio.create_task(outcome_learner_loop())
+
     yield
-    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, buzz_inbound_task, last30days_task]
+    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, scoring_task, last30days_task, outcome_learner_task]
     if execution_engine_task is not None:
         shutdown_tasks.append(execution_engine_task)
     for t in shutdown_tasks:
@@ -546,6 +619,20 @@ async def lifespan(app: FastAPI):
             await t
         except asyncio.CancelledError:
             pass
+        except Exception as e:
+            # A background task can fail with a plain (non-cancellation)
+            # exception in the same instant it's being cancelled during
+            # shutdown -- e.g. buzz_inbound's relay-membership call racing
+            # a pool timeout. `await t` then re-raises THAT exception, not
+            # CancelledError, so it was falling straight through this
+            # handler and out of the whole lifespan context manager,
+            # which uvicorn logs as "Application shutdown failed. Exiting."
+            # and kills the entire process -- turning one background
+            # task's unrelated, non-fatal failure into a hard crash on
+            # every routine restart. Every task here is independent
+            # background work; none of them failing should ever block
+            # process shutdown.
+            logger.warning("shutdown: background task %s failed (non-fatal): %s", t.get_name(), e)
 
 
 app = FastAPI(
@@ -579,6 +666,8 @@ app = FastAPI(
         {"name": "playlists", "description": "Cross-surface saved queue/playlist -- Cinema titles, Audio tracks, Live TV channels, anything else stored"},
         {"name": "swarm", "description": "Agent-population constellation graph, live task-flow particles, and the activity/intent heatmap"},
         {"name": "workspace", "description": "Ephemeral multi-agent collaboration rooms -- shared scratchpad, commit-to-draft-broadcast"},
+        {"name": "guild-forum", "description": "Guild forums: channels and sub-guilds, and the relay-backed message log agents and humans share"},
+        {"name": "identity", "description": "Key custody -- move an agent or human identity from this instance's sealed seed to a keypair you hold yourself"},
         {"name": "guilds", "description": "Persistent named collectives -- membership, aggregate reputation, shared vault, guild-authored content/TROs"},
         {"name": "publish", "description": "Create broadcasts: video, text, audio, image, graph, debate"},
         {"name": "feed", "description": "The social feed only (surface='feed' by default) -- global, trending, personalized, recommended"},
@@ -710,6 +799,24 @@ from .routers.workspace import router as workspace_router
 app.include_router(workspace_router)
 from .routers.guilds import router as guilds_router
 app.include_router(guilds_router)
+# Guild forum/channel routes share the /api/guilds prefix but live in their
+# own module: guilds.py is already large, and these authenticate a principal
+# (agent OR human) rather than an agent. Unrelated to routers/forum.py, which
+# is a separate (currently unregistered) Reddit-style thread API.
+from .routers.guild_forum import router as guild_forum_router, chat_router as guild_chat_router
+app.include_router(guild_forum_router)
+app.include_router(guild_chat_router)
+# Service-to-service bridge for the Elixir Conductor (ops/conductor).
+from .routers.conductor import router as conductor_router
+app.include_router(conductor_router)
+
+# Key custody: an account taking ownership of its own identity.
+from .routers.sovereignty import router as sovereignty_router
+app.include_router(sovereignty_router)
+
+# Opt-in intel exchange between sovereign instances.
+from .routers.intel_exchange import router as intel_exchange_router
+app.include_router(intel_exchange_router)
 from .routers.analytics import router as analytics_router
 app.include_router(analytics_router)
 from .routers.identity import router as identity_router
@@ -785,6 +892,8 @@ app.include_router(composio_router)
 
 from .routers.degen import router as degen_router
 app.include_router(degen_router)
+from .routers.narratives import router as narratives_router
+app.include_router(narratives_router)
 
 from .routers.wallets import router as wallets_router
 app.include_router(wallets_router)
@@ -808,6 +917,12 @@ app.include_router(omokoda_cognition_proxy_router)
 
 from .routers.vantage_anvil import router as vantage_anvil_router
 app.include_router(vantage_anvil_router)
+
+# The radio mesh gateway. Separate from routers/mesh.py's /api/mesh, which
+# is the Block Mesh coordination API -- two different things that share a
+# word, so they get two prefixes.
+from .routers.meshnet import router as meshnet_router
+app.include_router(meshnet_router)
 
 # MCP server — exposes all Vantage routes as MCP tools for Claude/GPT/OpenCode agents.
 # Mount the modern streamable-HTTP transport at /mcp (what current MCP clients expect),

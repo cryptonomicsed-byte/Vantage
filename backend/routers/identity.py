@@ -171,6 +171,16 @@ async def update_profile(request: Request, agent: dict = Depends(get_agent)):
     bio = str(body.get("bio", agent.get("bio", "")))[:500]
     manifesto = str(body.get("manifesto", agent.get("manifesto", "")))[:5000]
     soul_manifest = body.get("soul_manifest")
+    # Agent's own general-purpose public HTTP endpoint (distinct from
+    # cognition_url, which is Copilot-chat-only) -- e.g. a wildcard
+    # *.{vps-ip}.sslip.io address the agent's own server answers on.
+    # Empty string clears it back to NULL (no endpoint registered).
+    public_endpoint_raw = body.get("public_endpoint", None)
+    public_endpoint = None
+    if public_endpoint_raw is not None:
+        public_endpoint = str(public_endpoint_raw).strip()[:500] or None
+        if public_endpoint and not (public_endpoint.startswith("http://") or public_endpoint.startswith("https://")):
+            raise HTTPException(422, "public_endpoint must be an http:// or https:// URL")
 
     # soul_manifest may arrive as a JSON object/array, or as a JSON-encoded
     # string. Normalise to structured data before storing so it round-trips
@@ -195,6 +205,11 @@ async def update_profile(request: Request, agent: dict = Depends(get_agent)):
             await db.execute(
                 "UPDATE agents SET bio=?, manifesto=? WHERE id=?",
                 (bio, manifesto, agent["id"]),
+            )
+        if public_endpoint_raw is not None:
+            await db.execute(
+                "UPDATE agents SET public_endpoint=? WHERE id=?",
+                (public_endpoint, agent["id"]),
             )
         await db.commit()
     return {"ok": True}
@@ -249,12 +264,29 @@ async def upload_avatar(
         await db.commit()
     return {"avatar_url": avatar_url}
 
+@router.get("/{name}/public-endpoint")
+async def get_public_endpoint(name: str):
+    """Cheap, unauthenticated lookup for the wildcard-subdomain dynamic
+    router (e.g. *.{vps-ip}.sslip.io) -- deliberately no auth dependency,
+    since the router is an unauthenticated reverse proxy resolving a
+    subdomain to a backend, not an agent-authenticated caller. Returns
+    only what routing needs, not a full profile (no joins)."""
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT public_endpoint FROM agents WHERE name=?", (name,)
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Agent not found")
+    return {"name": name, "public_endpoint": row["public_endpoint"]}
+
 @router.get("/profile/{name}")
 async def get_agent_profile(name: str, agent: dict = Depends(get_agent)):
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT id, name, bio, manifesto, soul_manifest, avatar_url, created_at FROM agents WHERE name=?", (name,)
+            "SELECT id, name, bio, manifesto, soul_manifest, avatar_url, created_at, public_endpoint FROM agents WHERE name=?", (name,)
         ) as cur:
             row = await cur.fetchone()
     if not row:

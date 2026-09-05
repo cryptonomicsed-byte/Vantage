@@ -85,6 +85,14 @@ class Settings(BaseSettings):
     TRADING_LIVE_ENABLED: bool = False
     TRADING_ENGINE_INTERVAL: int = 5  # seconds between pending-order polls
 
+    # Agent.TV's 4 persona channels each render a fresh podcast episode via
+    # ffmpeg roughly every few minutes, forever, with no concurrency cap
+    # across channels -- confirmed live (2026-08-22) contributing to CPU
+    # pressure during a resource crisis (3 concurrent ffmpeg encodes seen
+    # in one snapshot, each pinning 28-48% CPU on a 2-vCPU box). Owner
+    # kill switch: default OFF until deliberately re-enabled.
+    AGENTTV_ENABLED: bool = False
+
     # Global kill switch, independent of the two gates above (pattern from
     # ai-market-maker's AIMM_KILL_SWITCH). Checked live every poll cycle, not
     # just at process startup, so an operator can halt a running engine
@@ -104,6 +112,12 @@ class Settings(BaseSettings):
     # (not hosted-MCP passthrough), see backend/routers/composio.py
     COMPOSIO_API_KEY: str = ""
     JUPITER_BASE_URL: str = "https://api.jup.ag/swap/v1"
+    # NOT read via this Settings class -- JUPITER_API_KEY is deployed
+    # unprefixed (/etc/systemd/system/vantage.service.d/jupiter-api-key.conf),
+    # same convention as HELIUS_API_KEY in degen.py (bare os.environ.get,
+    # not the VANTAGE_ prefix this class's env_prefix would require).
+    # execution_engine.py reads it directly via os.environ for that reason
+    # -- see _jupiter_headers() there.
 
     # Per-order and per-day safety caps (SOL). Deliberately conservative.
     TRADING_MAX_SOL_PER_ORDER: float = 0.01
@@ -238,12 +252,24 @@ class Settings(BaseSettings):
     OMOKODA_COGNITION_TOKEN: str = ""
 
     # OmniRoute -- free OpenAI-compatible AI gateway Omo-Koda2's kernel
-    # already uses (default localhost:8300, same host, no auth needed
-    # locally -- confirmed live). Copilot's default LLM fallback for any
-    # agent with no cognition_url of its own, so chat is never JUST the
-    # regex parser unless OmniRoute itself is unreachable.
+    # already uses (default localhost:8300, same host). Copilot's default
+    # LLM fallback for any agent with no cognition_url of its own, so chat
+    # is never JUST the regex parser unless OmniRoute itself is unreachable.
+    # REQUIRE_API_KEY was enabled on OmniRoute 2026-08-21 (was previously
+    # allowing anonymous calls) -- every real caller now needs
+    # OMNIROUTE_API_KEY, scoped in OmniRoute to only this service's own
+    # DeepSeek connection + the free Pollinations fallback.
     OMNIROUTE_URL: str = "http://localhost:8300"
     OMNIROUTE_MODEL: str = "auto"
+    OMNIROUTE_API_KEY: str = ""
+
+    # Instance-level Gemini fallback for voice_live.py's Gemini Live engine,
+    # used only when an agent hasn't set its own BYOK Gemini key. This is a
+    # real Gemini API key (Google AI Studio), NOT routed through OmniRoute --
+    # Gemini Live is a realtime multimodal WebSocket API, a different wire
+    # protocol than OpenAI chat-completions, and OmniRoute's provider
+    # catalog has no Gemini Live entry.
+    GEMINI_API_KEY: str = ""
 
     # OSOVM (Proof-of-Simulation VM, Sui/Move settlement) -- when set,
     # Vantage can ask OSOVM to attest a completed job_task with a real
@@ -276,12 +302,29 @@ class Settings(BaseSettings):
     # called in-process (genoffice_client.py), which itself needs a local
     # genspark-ai/genoffice clone (GENOFFICE_REPO) to run the real
     # @genoffice/docx-engine via npx/tsx. Both empty = disabled, same
-    # contract as every other pluggable hook here. Not wired:
-    # de_deliver_client_artifact (writes an engram via NIPAE_NSEC/
-    # NIPAE_RELAY -- the cross-relay dependency above, out of scope until
-    # that's resolved).
+    # contract as every other pluggable hook here.
     GENOFFICE_SKILLS_PATH: str = ""
     GENOFFICE_REPO: str = ""
+
+    # 2026-08-23, owner-authorized: wires de_deliver_client_artifact, the
+    # half of the GenOffice adapter held back above. NIPAE_NSEC is a real
+    # Nostr secret key dedicated to this identity (Vantage's own agent/
+    # federation key is NOT reused here -- a leaked NIPAE_NSEC should only
+    # cost this one identity, not Vantage's whole federation trust).
+    # NIPAE_OWNER intentionally defaults empty: minipae's build_event()
+    # NIP-44-encrypts every engram to a single owner_pubkey via ECDH, with
+    # no discrete tiering (private/followers/federated/public) the way
+    # Vantage's own memory_vault.py has -- confirmed by reading minipae.py
+    # directly (build_event/conversation_key), not assumed. Leaving
+    # NIPAE_OWNER unset makes deliver() encrypt to its own pubkey, so a
+    # delivery receipt is readable only by whoever holds NIPAE_NSEC -- the
+    # most restrictive option available in that model, matching the
+    # "default most-restrictive" posture used everywhere else in this file.
+    # The relay only ever sees ciphertext + routing metadata (kind, HMAC'd
+    # d-tag, pubkey, timestamp), never client name/parts/artifact content.
+    NIPAE_NSEC: str = ""
+    NIPAE_OWNER: str = ""
+    NIPAE_RELAY: str = "wss://relay.damus.io"
 
 
 settings = Settings()

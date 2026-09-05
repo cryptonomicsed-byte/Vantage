@@ -31,9 +31,13 @@ VANTAGE_URL = "http://localhost:8001"
 VANTAGE_KEY = os.environ.get("VANTAGE_KEY","")
 DB_PATH = "/opt/ares/Vantage/data/vantage.db"
 SCAN_DIR = "/tmp/okf-pipeline"
-STRIX_LLM = "openai/oc/deepseek-v4-flash-free"  # via OmniRoute (FREE)
-LLM_API_BASE = "http://localhost:8300/v1"       # OmniRoute endpoint
-LLM_API_KEY = "no-key-needed"                    # OmniRoute handles auth
+# Real, free, self-hosted Ollama on Contabo (10.88.0.2, WireGuard mesh,
+# ollama-wg-only ufw rule) -- OmniRoute free-tier models were hitting real
+# upstream rate-limiting (503/403, confirmed 2026-08-29), this avoids that
+# entirely for good, not just as a fallback.
+STRIX_LLM = "openai/llama3.2:3b"
+LLM_API_BASE = "http://10.88.0.2:11434/v1"
+LLM_API_KEY = "no-key-needed"
 
 TOOLS = {
     "betterleaks": {

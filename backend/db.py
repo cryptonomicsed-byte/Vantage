@@ -1,4 +1,5 @@
 """Database path, media root, and schema initialisation."""
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -12,6 +13,15 @@ logger = logging.getLogger(__name__)
 DB_PATH: Path = settings.DATA_DIR / "vantage.db"
 MEDIA_ROOT: Path = settings.MEDIA_DIR
 
+# Bound concurrent SQLite connections. WAL mode allows many concurrent
+# readers but only a single writer; a bounded semaphore stops the ~600
+# call sites across the backend from opening unbounded connections and
+# colliding past busy_timeout when dozens of internal daemons poll
+# concurrently (the "database is locked" flood measured live on
+# 2026-08-21). The app runs as a single uvicorn worker, so a per-process
+# semaphore is sufficient.
+_DB_CONN_LIMIT = asyncio.Semaphore(8)
+
 # Every ad-hoc `aiosqlite.connect(DB_PATH)` call site across the backend
 # opened a connection with SQLite's default busy behaviour: fail
 # immediately with "database is locked" the instant it collides with
@@ -23,9 +33,42 @@ MEDIA_ROOT: Path = settings.MEDIA_DIR
 # PRAGMA busy_timeout by hand at each one.
 @asynccontextmanager
 async def get_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA busy_timeout=20000")
-        yield db
+    async with _DB_CONN_LIMIT:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA busy_timeout=30000")
+            yield db
+
+
+async def connect_bounded():
+    """Return an open aiosqlite connection on DB_PATH whose close() releases
+    its _DB_CONN_LIMIT slot.
+
+    For the legacy call sites that manage connection lifecycle with an
+    explicit `db = await _db(); try: ... finally: await db.close()` pattern
+    (pre-context-manager code, e.g. routers/wallets.py's endpoints whose
+    try/except HTTPException/finally shape doesn't cleanly map onto
+    `async with get_db()`). Prefer get_db() for all new code; this exists
+    so those call sites still get semaphore bounding + busy_timeout=30000
+    without a mechanical rewrite of their exception handling. The returned
+    connection MUST be closed exactly once (the slot is released in close).
+    """
+    await _DB_CONN_LIMIT.acquire()
+    try:
+        conn = await aiosqlite.connect(DB_PATH)
+        await conn.execute("PRAGMA busy_timeout=30000")
+    except BaseException:
+        _DB_CONN_LIMIT.release()
+        raise
+    _orig_close = conn.close
+
+    async def _close_release():
+        try:
+            await _orig_close()
+        finally:
+            _DB_CONN_LIMIT.release()
+
+    conn.close = _close_release
+    return conn
 
 
 async def init_agents_db() -> None:
@@ -338,11 +381,31 @@ async def init_agents_db() -> None:
             # than being dropped -- is_external marks these so the feed
             # can distinguish "our agent" from "someone else on buzz".
             ("is_external", "INTEGER DEFAULT 0"),
+            # Agent's own general-purpose public HTTP endpoint (e.g. a
+            # wildcard *.{vps-ip}.sslip.io subdomain resolved by a dynamic
+            # router, or any URL the agent's own server answers on).
+            # Distinct from cognition_url, which is scoped strictly to the
+            # Copilot chat-webhook contract ({agent_name,text,human_id} ->
+            # {reply}) -- reusing cognition_url here would silently misroute
+            # generic HTTP traffic through the chat pipeline. NULL/empty
+            # means the agent has no server of its own; callers fall back to
+            # Vantage's own agent-profile page for that agent.
+            ("public_endpoint", "TEXT DEFAULT NULL"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")
             except Exception:
                 pass
+        # One Nostr pubkey binds to at most one agent -- /me/recover-via-nostr
+        # looks an agent up BY pubkey, so two agents sharing one would make
+        # recovery ambiguous (and let a second agent silently hijack another's
+        # recovery path by binding the same pubkey). Partial index: SQLite
+        # treats multiple NULLs as non-conflicting under UNIQUE, so unbound
+        # agents (the common case) are unaffected.
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_nostr_pubkey "
+            "ON agents(nostr_pubkey_hex) WHERE nostr_pubkey_hex IS NOT NULL"
+        )
         # Human accounts — separate identity layer from agents (dual-auth model).
         # An agent's X-Agent-Key is unchanged/sovereign; a human links to agents
         # only via explicit, scoped agent_grants rows below.
@@ -717,6 +780,34 @@ CREATE TABLE IF NOT EXISTS external_conversations (
 )
 """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_external_conv_agent ON external_conversations(agent_id)")
+        # Iranti bridge: Iranti (~/Iranti) is a separate, standalone agent-memory
+        # system (BM25 recall, A2A grants, dream digests) — this table is NOT a
+        # merge of the two systems, just a connector-scoped mirror of whichever
+        # (ns, slug) memories an agent's Iranti grant chooses to surface here.
+        # `iranti_pubkey` ties a row back to the exact Iranti agent identity that
+        # wrote it; `prov` carries Iranti's own free-text provenance string
+        # forward unchanged so the reference chain survives the bridge.
+        await db.execute("""
+CREATE TABLE IF NOT EXISTS external_iranti_memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id INTEGER NOT NULL,
+    connector_id INTEGER NOT NULL,
+    iranti_pubkey TEXT NOT NULL,
+    ns TEXT NOT NULL DEFAULT 'general',
+    slug TEXT NOT NULL,
+    value TEXT NOT NULL,
+    salience INTEGER NOT NULL DEFAULT 50,
+    pin INTEGER NOT NULL DEFAULT 0,
+    prov TEXT,
+    iranti_updated_at INTEGER NOT NULL DEFAULT 0,
+    first_at TEXT DEFAULT (datetime('now')),
+    last_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(connector_id, iranti_pubkey, ns, slug),
+    FOREIGN KEY (agent_id) REFERENCES agents(id),
+    FOREIGN KEY (connector_id) REFERENCES vault_connectors(id)
+)
+""")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_external_iranti_agent ON external_iranti_memories(agent_id)")
         # Guild / Collective system
         await db.execute("""
             CREATE TABLE IF NOT EXISTS guilds (
@@ -1436,6 +1527,16 @@ CREATE TABLE IF NOT EXISTS external_conversations (
                 UNIQUE(agent_id, label)
             )
         """)
+        # PumpPortal Lightning wallets carry a second secret alongside the
+        # Solana private key -- an API key gating subscribeTokenTrade/
+        # subscribeAccountTrade (their Data API) and Trading API execution.
+        # Encrypted the same way as encrypted_private_key, same
+        # decrypt_key_for_agent path, just a second column since it's a
+        # genuinely separate credential, not a duplicate of the private key.
+        try:
+            await db.execute("ALTER TABLE trading_wallets ADD COLUMN encrypted_api_key TEXT DEFAULT ''")
+        except Exception:
+            pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS trading_balances (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1696,6 +1797,35 @@ CREATE TABLE IF NOT EXISTS external_conversations (
             await db.execute("ALTER TABLE tracked_wallets ADD COLUMN notes TEXT DEFAULT ''")
         except Exception:
             pass
+        # degen_score/tokens_traded/unique_tokens/trade_count/balance_usd/
+        # balance_checked_at existed on production (confirmed via .schema)
+        # with no matching migration anywhere in this codebase -- schema
+        # drift from undocumented manual DB surgery at some point. Added
+        # here so a fresh DB (tests, a new deploy) actually reproduces the
+        # real schema every reader of this table (alpha.py's /moneyflow,
+        # wallet_pruning.py) assumes exists.
+        for col_ddl in (
+            "degen_score INTEGER DEFAULT 0",
+            "tokens_traded TEXT DEFAULT ''",
+            "unique_tokens INTEGER DEFAULT 0",
+            "trade_count INTEGER DEFAULT 0",
+            "balance_usd REAL DEFAULT 0",
+            "balance_checked_at TEXT",
+        ):
+            try:
+                await db.execute(f"ALTER TABLE tracked_wallets ADD COLUMN {col_ddl}")
+            except Exception:
+                pass
+        # Archival for wallet_pruning.py -- NULL means active/counted, a
+        # timestamp means it failed the activity/signal bar and is excluded
+        # from /api/moneyflow and default listings, but never hard-deleted
+        # (reversible: a wallet that goes active again gets re-activated,
+        # not re-inserted from scratch).
+        try:
+            await db.execute("ALTER TABLE tracked_wallets ADD COLUMN archived_at TEXT")
+        except Exception:
+            pass
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_tracked_wallets_archived ON tracked_wallets(archived_at)")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS wallet_edges (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1751,6 +1881,77 @@ CREATE TABLE IF NOT EXISTS external_conversations (
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_pumpfun_tier ON pumpfun_premigration_tokens(tier, evicted, migrated)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_pumpfun_last_trade ON pumpfun_premigration_tokens(last_trade_at)")
+        await db.commit()
+
+    # ── Narrative detection (backend/narrative_detection.py) ────────────
+    # Persisted so narrative "heat" is learned over time, not recomputed
+    # from scratch every request -- narrative_theme_tokens is the full
+    # audit trail (every theme traces to the exact real tokens that
+    # produced it); narrative_combo_flags records tokens whose name/symbol
+    # combined 2+ already-hot narratives.
+    async with get_db() as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS narrative_themes (
+                theme_key TEXT PRIMARY KEY,
+                label TEXT NOT NULL,
+                keywords TEXT NOT NULL DEFAULT '[]',
+                first_seen_at TEXT,
+                last_seen_at TEXT,
+                token_count INTEGER DEFAULT 0,
+                heat_score REAL DEFAULT 0,
+                updated_at TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS narrative_theme_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                theme_key TEXT NOT NULL,
+                mint TEXT NOT NULL,
+                symbol TEXT DEFAULT '',
+                name TEXT DEFAULT '',
+                matched_keyword TEXT DEFAULT '',
+                market_cap_usd REAL,
+                score REAL,
+                detected_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(theme_key, mint)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS narrative_combo_flags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mint TEXT NOT NULL UNIQUE,
+                symbol TEXT DEFAULT '',
+                name TEXT DEFAULT '',
+                theme_keys TEXT NOT NULL DEFAULT '[]',
+                theme_labels TEXT NOT NULL DEFAULT '[]',
+                detected_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_narrative_theme_tokens_theme ON narrative_theme_tokens(theme_key)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_narrative_theme_tokens_mint ON narrative_theme_tokens(mint)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_narrative_themes_heat ON narrative_themes(heat_score)")
+        await db.commit()
+
+    # ── pump.fun inter-trade gap log (empirical RUNNING_GRACE_SECONDS
+    # tuning) — pumpfun_premigration_tokens only ever keeps the single most
+    # recent last_trade_at, overwritten on every trade, so there was no way
+    # to retroactively answer "how long was this token silent right before
+    # its next trade arrived, proving it was still alive." This table
+    # records that gap live, going forward, tagged with the market cap at
+    # the moment the pause started -- real observed "alive but paused"
+    # durations for tokens at/above the 10k mcap tier, not a guess. See
+    # pumpfun_tier_scanner.py::apply_trade. ──────────────────────────
+    async with get_db() as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS pumpfun_trade_gaps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mint TEXT,
+                market_cap_usd REAL,
+                gap_seconds REAL,
+                recorded_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_pumpfun_gaps_mcap ON pumpfun_trade_gaps(market_cap_usd)")
         await db.commit()
 
     # ── pump.fun scalp exit-strategy positions ───────────────

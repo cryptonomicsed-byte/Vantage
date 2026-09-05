@@ -1,6 +1,6 @@
 import os
 """Trading API router — wallets, orders, strategies, PnL, and journal."""
-import json, hashlib, hmac, logging, time
+import asyncio, json, hashlib, hmac, logging, time
 from typing import Optional, List
 from datetime import datetime, timezone, date
 
@@ -150,11 +150,25 @@ async def create_wallet(data: WalletCreate, agent: dict = Depends(get_agent)):
         except aiosqlite.IntegrityError:
             raise HTTPException(409, f"Wallet '{data.label}' already exists for this agent")
 
+def _fetch_solana_balance_sync(address: str, helius_key: str) -> float | None:
+    import urllib.request, json as _json
+    payload = _json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "getBalance",
+        "params": [address]
+    }).encode()
+    req = urllib.request.Request(
+        f"https://mainnet.helius-rpc.com/?api-key={helius_key}",
+        data=payload,
+        headers={"Content-Type": "application/json"}
+    )
+    resp = urllib.request.urlopen(req, timeout=5)
+    data = _json.loads(resp.read().decode())
+    return data.get("result", {}).get("value", 0) / 1e9
+
+
 @router.get("/wallets/live")
 async def wallets_live(agent: dict = Depends(get_agent)):
     """Return all wallets with live on-chain balances via Helius RPC."""
-    import urllib.request, json as _json
-    
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         wallets = await db.execute(
@@ -162,31 +176,23 @@ async def wallets_live(agent: dict = Depends(get_agent)):
             (agent["id"],)
         )
         wallets = [dict(w) for w in await wallets.fetchall()]
-    
+
     # Try live Helius refresh for Solana wallets
     helius_key = os.environ.get("HELIUS_API_KEY", "")
-    
+
     for w in wallets:
         if w.get("chain") == "solana" and w.get("address"):
             try:
-                payload = _json.dumps({
-                    "jsonrpc": "2.0", "id": 1, "method": "getBalance",
-                    "params": [w["address"]]
-                }).encode()
-                req = urllib.request.Request(
-                    f"https://mainnet.helius-rpc.com/?api-key={helius_key}",
-                    data=payload,
-                    headers={"Content-Type": "application/json"}
-                )
-                resp = urllib.request.urlopen(req, timeout=5)
-                data = _json.loads(resp.read().decode())
-                sol = data.get("result", {}).get("value", 0) / 1e9
+                # Off the event loop -- this used to run urllib.request.urlopen
+                # synchronously per wallet inside the async handler, freezing
+                # every other in-flight request for the duration of each call.
+                sol = await asyncio.to_thread(_fetch_solana_balance_sync, w["address"], helius_key)
                 w["balance_live"] = f"{sol} SOL"
                 w["balance_value_usd"] = round(sol * 81, 2)  # approximate
             except:
                 w["balance_live"] = w.get("balance_hint", "unknown")
                 w["balance_value_usd"] = 0
-    
+
     return {
         "wallets": wallets,
         "count": len(wallets),
@@ -282,6 +288,73 @@ async def get_wallet(wallet_id: int, agent: dict = Depends(get_agent)):
         w["balances"] = [dict(b) for b in bal_rows]
         return w
 
+@router.post("/wallets/{wallet_id}/onramp")
+async def create_onramp_session(
+    wallet_id: int,
+    currency: str = Query("SOL"),
+    fiat_amount: Optional[float] = Query(None),
+    fiat_currency: str = Query("USD"),
+    agent: dict = Depends(get_agent),
+):
+    """Debit-card fiat-to-crypto on-ramp — real, signed MoonPay widget URL
+    that sells crypto directly into this wallet's own real address.
+
+    MoonPay is the regulated money-transmitter of record: it owns 100% of
+    KYC/AML, card processing, and fraud checks inside its own hosted
+    widget once the user's browser navigates to the returned URL. This
+    endpoint's only real responsibility is looking up the wallet's real
+    address and generating a correctly HMAC-SHA256-signed URL (see
+    backend/moonpay_client.py's module docstring for the real comparison
+    against Transak/Coinbase Onramp/Stripe Crypto Onramp and why MoonPay
+    was chosen, plus the exact signing algorithm and its honest
+    limitations).
+
+    503 if MOONPAY_API_KEY/MOONPAY_SECRET_KEY aren't configured -- no
+    fake/unsigned URL is ever returned. Whichever key IS configured
+    (pk_test_/sk_test_ sandbox or pk_live_/sk_live_ production) decides
+    the environment automatically; this endpoint never guesses."""
+    from backend import moonpay_client
+
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        row = await (await db.execute(
+            "SELECT id, label, chain, address FROM trading_wallets WHERE id=? AND agent_id=?",
+            (wallet_id, agent["id"])
+        )).fetchone()
+    if not row:
+        raise HTTPException(404, "Wallet not found")
+    wallet = dict(row)
+    if wallet["chain"] != "solana":
+        raise HTTPException(400, f"On-ramp currently supports Solana wallets only (this wallet is {wallet['chain']})")
+
+    if not moonpay_client.is_configured():
+        raise HTTPException(
+            503,
+            "MoonPay on-ramp is not configured on this Vantage instance -- "
+            "a real pk_test_/sk_test_ (sandbox) or pk_live_/sk_live_ (production) "
+            "API key pair from a real MoonPay dashboard signup (moonpay.com) is required."
+        )
+
+    try:
+        result = moonpay_client.build_onramp_url(
+            wallet_address=wallet["address"],
+            currency=currency,
+            fiat_amount=fiat_amount,
+            fiat_currency=fiat_currency,
+        )
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+
+    return {
+        "wallet_id": wallet_id,
+        "wallet_label": wallet["label"],
+        "wallet_address": wallet["address"],
+        **result,
+    }
+
+
 @router.delete("/wallets/{wallet_id}")
 async def delete_wallet(wallet_id: int, agent: dict = Depends(get_agent)):
     async with get_db() as db:
@@ -334,6 +407,28 @@ async def sync_wallet(wallet_id: int, agent: dict = Depends(get_agent)):
 
 # ── Wallet Generation ────────────────────────────────────
 
+# Universal-face translation for the bipon39 CLI's Ifá/Yoruba archetype
+# names (OSOVM_CODEX.md §9/§27b: Ifá/Yoruba stays the internal canonical
+# skeleton, user-facing and agent-facing surfaces use the universal name).
+# Diacritic-tolerant: bipon39 emits uppercase accented forms (e.g. "ṢÀNGÓ",
+# "Ọ̀ṢUN") that all normalize to the same bare-letter key here.
+_UNIVERSAL_ARCHETYPE_NAMES = {
+    "SANGO": "Divine Justice",
+    "OGUN": "The Forge",
+    "ESU": "The Messenger",
+    "OBATALA": "Wisdom",
+    "OSUN": "Memory",
+    "YEMOJA": "Creation",
+    "OYA": "Flow",
+}
+
+
+def _universal_archetype_name(macro: str) -> str:
+    import unicodedata
+    key = "".join(c for c in unicodedata.normalize("NFD", macro or "") if unicodedata.category(c) != "Mn").upper()
+    return _UNIVERSAL_ARCHETYPE_NAMES.get(key, macro)
+
+
 @router.post("/wallets/generate")
 async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent), x_agent_key: str = Header(...)):
     """Generate a new wallet (BIP-39 or BIPON39) and store encrypted."""
@@ -344,7 +439,23 @@ async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent)
     chain = data.chain.lower()
     label = data.label or f"{system.upper()} {chain.title()}"
     
-    if system == "bipon39":
+    if system == "pumpportal":
+        # Real, free endpoint (no funds needed to create the wallet+key
+        # itself) -- https://pumpportal.fun/create-wallet. Distinct from
+        # bip39/bipon39: this is PumpPortal's own Lightning wallet, whose
+        # API key is what gates their Data API's subscribeTokenTrade/
+        # subscribeAccountTrade (confirmed live: unfunded key still gets
+        # rejected with "Minimum balance not met" -- needs >=0.02 SOL sent
+        # to the returned address before those subscriptions work). This
+        # branch only creates the credential; funding is a separate real
+        # money action left to the human via the returned address.
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get("https://pumpportal.fun/api/create-wallet")
+                result = r.json() if r.status_code == 200 else None
+        except Exception:
+            result = None
+    elif system == "bipon39":
         try:
             r = await _asyncio.to_thread(lambda: _sp.run(
                 ["bipon39", "generate"], capture_output=True, text=True, timeout=10
@@ -366,7 +477,18 @@ async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent)
     if not result:
         raise HTTPException(500, "Wallet generation failed")
 
-    if system == "bipon39":
+    pumpportal_api_key = ""
+    if system == "pumpportal":
+        # Real shape confirmed live: {"apiKey","walletPublicKey","privateKey"}
+        # -- Solana only, PumpPortal doesn't offer other chains.
+        if chain != "solana":
+            raise HTTPException(422, f"pumpportal wallet generation only supports chain='solana' (got '{chain}')")
+        address = result.get("walletPublicKey", "")
+        private_key = result.get("privateKey", "")
+        pumpportal_api_key = result.get("apiKey", "")
+        if not pumpportal_api_key:
+            raise HTTPException(500, "pumpportal response missing apiKey")
+    elif system == "bipon39":
         # The `bipon39` CLI's actual output shape is keys.bip44.<chain>.private_key_hex
         # — no "chains"/"address" key at all (that shape only matches the
         # other, non-bipon39 generator below). This never worked before;
@@ -403,16 +525,20 @@ async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent)
     # correct pattern (crypto_utils's whole design principle is "the raw API
     # key is the only secret needed" -- it was just never actually raw here).
     encrypted = encrypt_key_for_agent(private_key, {"id": agent["id"], "api_key": x_agent_key})
+    encrypted_pumpportal_key = (
+        encrypt_key_for_agent(pumpportal_api_key, {"id": agent["id"], "api_key": x_agent_key})
+        if pumpportal_api_key else ""
+    )
 
     async with get_db() as db:
         cur = await db.execute(
-            "INSERT INTO trading_wallets (agent_id, label, chain, address, encrypted_private_key) VALUES (?,?,?,?,?)",
-            (agent["id"], label, chain, address, encrypted)
+            "INSERT INTO trading_wallets (agent_id, label, chain, address, encrypted_private_key, encrypted_api_key) VALUES (?,?,?,?,?,?)",
+            (agent["id"], label, chain, address, encrypted, encrypted_pumpportal_key)
         )
         await _sync_to_tracked_wallets(db, agent["id"], chain, address, label)
         await db.commit()
         wallet_id = cur.lastrowid
-    
+
     response = {
         "id": wallet_id, "label": label, "chain": chain,
         "address": address, "system": system,
@@ -427,8 +553,34 @@ async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent)
         # only the human-portable backup phrase is no longer surfaced.
         "warning": "Private key encrypted at rest, decryptable only with your own API key. No separate mnemonic backup is issued.",
     }
+    if system == "pumpportal":
+        response["pumpportal_api_key"] = pumpportal_api_key
+        response["funding_required"] = (
+            "This wallet's API key is created but unfunded. PumpPortal's Data API "
+            "(subscribeTokenTrade/subscribeAccountTrade) and Trading API require the "
+            "wallet to hold at least 0.02 SOL -- confirmed live: an unfunded key gets "
+            "rejected with 'Minimum balance not met'. Send SOL to the address above to "
+            "activate it. The API key is shown once here; it is encrypted at rest the "
+            "same way as the private key."
+        )
     if "ifascript" in result:
-        response.update(result["ifascript"])
+        # The bipon39 CLI's ifascript block names the result with literal
+        # deity names (dominant_macro="ṢÀNGÓ"/"ÈṢÙ"/etc, and every entry in
+        # macro_distribution) -- internal Ifá/Yoruba cosmology terms that
+        # must not reach a user-facing or agent-facing API response
+        # verbatim (see universal-face design: OSOVM_CODEX.md §9/§27b).
+        # Translate to the universal archetypal names before returning;
+        # the raw deity names stay internal to the bipon39 CLI itself.
+        ifascript = result["ifascript"]
+        response["dominant_archetype"] = _universal_archetype_name(ifascript.get("dominant_macro", ""))
+        response["archetype_index"] = ifascript.get("odu_primary_index")
+        if isinstance(ifascript.get("macro_distribution"), list):
+            response["archetype_distribution"] = [
+                {"archetype": _universal_archetype_name(m.get("macro", "")), "count": m.get("count")}
+                for m in ifascript["macro_distribution"]
+            ]
+        if isinstance(ifascript.get("elemental_signature"), dict):
+            response["elemental_signature"] = ifascript["elemental_signature"]
     return response
 
 
@@ -830,7 +982,7 @@ STRATEGY_TEMPLATES = {
                          "separate profit wallet (set profit_wallet_id in config)."),
         "config": {"position_size_usd": 20, "profit_split": {"compound_pct": 50, "extract_pct": 50}, "profit_wallet_id": None},
         "stop_loss_pct": -30.0, "take_profit_pct": 50.0,
-        "target_tiers": "migrated_1m,migrated_10m,migrated_20m",
+        "target_tiers": "sub_1m,migrated_10m,migrated_20m",
         "max_position_size_usd": 20, "risk_per_trade_pct": 2.0,
     },
     "bighit_40_800": {
@@ -860,7 +1012,7 @@ STRATEGY_TEMPLATES = {
             "tier2_dca": {"start_gain_pct": 150, "step_gain_pct": 50, "sell_pct_per_step": 5, "max_steps": 5},
             "moonbag_pct": 25,
         },
-        "target_tiers": "migrated_1m,migrated_10m,migrated_20m,migrated_100m",
+        "target_tiers": "sub_1m,migrated_10m,migrated_20m,migrated_100m",
         "max_position_size_usd": 20, "risk_per_trade_pct": 2.0,
     },
     "doubler_flip": {
@@ -870,7 +1022,7 @@ STRATEGY_TEMPLATES = {
                          "the full proceeds into the next qualifying target — a compounding "
                          "flip loop rather than a hold."),
         "config": {"position_size_usd": 20, "flip_at_gain_pct": 100, "reinvest_pct": 100},
-        "target_tiers": "pumpfun_10k_20k,migrated_1m,migrated_10m",
+        "target_tiers": "pumpfun_10k_20k,sub_1m,migrated_10m",
         "max_position_size_usd": 20, "risk_per_trade_pct": 2.0,
     },
     # The following 4 are config definitions migrated from the now-retired
@@ -886,7 +1038,7 @@ STRATEGY_TEMPLATES = {
         "description": "Momentum swing trades with a trailing-stop activation once up 5%.",
         "config": {"position_size_usd": 20, "trailing_stop_activation_pct": 5.0},
         "stop_loss_pct": -3.0, "take_profit_pct": 10.0,
-        "target_tiers": "migrated_1m,migrated_10m,migrated_20m",
+        "target_tiers": "sub_1m,migrated_10m,migrated_20m",
         "max_position_size_usd": 20, "risk_per_trade_pct": 2.0,
     },
     "moonbag_tiered": {
@@ -956,9 +1108,14 @@ async def generate_strategy_from_description(data: StrategyGenerateRequest, agen
     except ImportError:
         raise HTTPException(500, "instructor/openai not installed")
 
-    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    # Routed through OmniRoute (real gateway on :8300) with a key scoped to
+    # only this service's own DeepSeek connection + the free Pollinations
+    # fallback -- see 2026-08-21 key-rotation cleanup. Replaces a raw
+    # DEEPSEEK_API_KEY read directly from the environment.
+    omniroute_url = os.environ.get("OMNIROUTE_URL", "http://localhost:8300")
+    api_key = os.environ.get("OMNIROUTE_API_KEY", "")
     if not api_key:
-        raise HTTPException(422, "DEEPSEEK_API_KEY not configured — AI strategy generation unavailable")
+        raise HTTPException(422, "OMNIROUTE_API_KEY not configured — AI strategy generation unavailable")
 
     class GeneratedStrategy(BaseModel):
         strategy_type: str = Field(description="MUST be exactly one of: scalper_5020, bighit_40_800, accumulator_tiered, doubler_flip — pick whichever real engine best matches the description")
@@ -971,12 +1128,12 @@ async def generate_strategy_from_description(data: StrategyGenerateRequest, agen
         target_tiers: str = Field("just_launch,pumpfun_10k_20k,pre_migration", description="Comma-separated token lifecycle tiers this strategy should target")
 
     client = instructor.from_openai(
-        OpenAI(api_key=api_key, base_url="https://api.deepseek.com"),
+        OpenAI(api_key=api_key, base_url=f"{omniroute_url}/v1"),
         mode=instructor.Mode.MD_JSON,
     )
     try:
         result = client.chat.completions.create(
-            model="deepseek-chat",
+            model="deepseek/deepseek-v4-flash",
             max_tokens=400,
             response_model=GeneratedStrategy,
             messages=[{
@@ -1231,12 +1388,24 @@ def _decode_private_key_bytes(plaintext_key: str) -> bytes:
         return b
     raise ValueError(f"Unrecognized private key format/length ({len(b)} bytes)")
 
+def _jupiter_headers() -> dict:
+    """x-api-key header for api.jup.ag, if configured. Same key + same
+    empirical verification as execution_engine.py's _jupiter_headers()
+    (2026-08-28: x-ratelimit-remaining 4→9 keyless vs keyed, confirmed
+    live) -- read directly via os.environ since JUPITER_API_KEY is
+    deployed unprefixed, not through backend.config.settings (which would
+    require the VANTAGE_ prefix). Empty dict when unset -- keyless
+    (0.5 RPS) is a real, working fallback, not a broken state."""
+    key = os.environ.get("JUPITER_API_KEY", "")
+    return {"x-api-key": key} if key else {}
+
+
 async def _jupiter_quote(input_mint: str, output_mint: str, amount_lamports: int, slippage_bps: int = 300) -> dict:
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.get("https://api.jup.ag/swap/v1/quote", params={
             "inputMint": input_mint, "outputMint": output_mint,
             "amount": amount_lamports, "slippageBps": slippage_bps,
-        })
+        }, headers=_jupiter_headers())
         r.raise_for_status()
         return r.json()
 
@@ -1246,7 +1415,7 @@ async def _jupiter_swap_tx(quote: dict, user_pubkey: str) -> str:
             "quoteResponse": quote, "userPublicKey": user_pubkey,
             "wrapAndUnwrapSol": True, "dynamicComputeUnitLimit": True,
             "prioritizationFeeLamports": "auto",
-        })
+        }, headers=_jupiter_headers())
         r.raise_for_status()
         return r.json().get("swapTransaction", "")
 
@@ -2019,6 +2188,32 @@ async def list_journal(agent: dict = Depends(get_agent), limit: int = Query(50, 
             (agent["id"], limit)
         )).fetchall()
         return [dict(r) for r in rows]
+
+# ── Shadow Account ──────────────────────────────────────────
+# Retrospective self-behavior mining + counterfactual attribution over an
+# agent's OWN real trade history. Adapted from HKUDS/Vibe-Trading's
+# shadow_account module (2026-08-29 pattern audit) -- see
+# backend/backtest/shadow_account.py's module docstring for the full
+# methodology and why it deliberately differs from the source repo (no
+# cross-symbol backtest of the extracted rules; classifies the agent's own
+# realized trades as rule-compliant or not).
+
+@router.get("/shadow-account")
+async def shadow_account_report(
+    agent: dict = Depends(get_agent),
+    min_support: int = Query(3, ge=1, le=50),
+    max_rules: int = Query(3, ge=1, le=10),
+):
+    """Extract this agent's shadow profile (rules distilled from its own
+    profitable trades) and the delta-PnL attribution against its real
+    history. 400 if there isn't enough profitable trade history yet --
+    never fabricates a rule from insufficient evidence."""
+    from backend.backtest.shadow_account import build_shadow_report
+
+    try:
+        return await build_shadow_report(agent["id"], min_support=min_support, max_rules=max_rules)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 # ── Risk ────────────────────────────────────────────────────
 

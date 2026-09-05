@@ -230,13 +230,17 @@ async def whoami(agent: dict = Depends(get_agent)):
 
 async def _try_omniroute(agent_row: dict, text: str) -> Optional[str]:
     """Default Copilot LLM fallback: OpenAI-compatible OmniRoute gateway,
-    same host Omo-Koda2's kernel already uses (confirmed live, no auth
-    needed locally). Only reached when the agent has no cognition_url of
-    its own (or it just failed) -- this is what keeps Copilot 'a real LLM'
-    for every agent by default, not just ones with a Mind connected.
-    Returns None (never raises) on any failure so the caller falls through
-    to the regex parser."""
-    if not settings.OMNIROUTE_URL:
+    same host Omo-Koda2's kernel already uses. Only reached when the agent
+    has no cognition_url of its own (or it just failed) -- this is what
+    keeps Copilot 'a real LLM' for every agent by default, not just ones
+    with a Mind connected. Returns None (never raises) on any failure so
+    the caller falls through to the regex parser.
+
+    REQUIRE_API_KEY was enabled on OmniRoute 2026-08-21 (previously allowed
+    anonymous calls) -- OMNIROUTE_API_KEY is scoped in OmniRoute to only
+    this service's own DeepSeek connection + the free Pollinations
+    fallback."""
+    if not settings.OMNIROUTE_URL or not settings.OMNIROUTE_API_KEY:
         return None
     model = agent_row.get("copilot_fallback_model") or settings.OMNIROUTE_MODEL
     try:
@@ -251,6 +255,7 @@ async def _try_omniroute(agent_row: dict, text: str) -> Optional[str]:
                     ],
                     "stream": False,
                 },
+                headers={"Authorization": f"Bearer {settings.OMNIROUTE_API_KEY}"},
             )
         if r.status_code == 200:
             content = r.json().get("choices", [{}])[0].get("message", {}).get("content")
@@ -400,6 +405,13 @@ async def copilot_execute(request: Request, agent: dict = Depends(get_agent)):
         # output_path, paragraphs}. template_path/output_path may be
         # supplied explicitly in `data`; paragraphs falls back to the
         # topic/free text split into non-empty lines if not given.
+        #
+        # Optional `client` field opts into de_deliver_client_artifact
+        # (2026-08-23, owner-authorized): generates the same document AND
+        # writes+publishes a NIP-44 encrypted delivery-receipt engram via
+        # NIPAE_NSEC. No `client` field, or NIPAE_NSEC unset, falls back to
+        # plain generation with no receipt -- the receipt path is strictly
+        # opt-in per call, not a default behavior change.
         if not genoffice_client.enabled():
             return {"action":action,"target":"document","data":{"error":"GenOffice not configured (VANTAGE_GENOFFICE_SKILLS_PATH/VANTAGE_GENOFFICE_REPO unset)"},"confidence":0.0}
         template_path = data.get("template_path", "")
@@ -410,7 +422,11 @@ async def copilot_execute(request: Request, agent: dict = Depends(get_agent)):
             paragraphs = [p.strip() for p in topic.split("\n") if p.strip()] or [topic] if topic else []
         if not template_path or not output_path:
             return {"action":action,"target":"document","data":{"error":"template_path and output_path are required"},"confidence":0.0}
-        result = await genoffice_client.generate_document(template_path, output_path, paragraphs)
+        client_name = (data.get("client") or "").strip()
+        if client_name and genoffice_client.delivery_enabled():
+            result = await genoffice_client.deliver_document(client_name, template_path, output_path, paragraphs)
+        else:
+            result = await genoffice_client.generate_document(template_path, output_path, paragraphs)
         if result is None:
             return {"action":action,"target":"document","data":{"error":"document generation failed"},"confidence":0.3}
         return {"action":action,"target":"document","data":result,"confidence":0.9}

@@ -55,7 +55,7 @@ def get_blacklisted_addresses(chain: str = None) -> set:
     optionally filtered to one chain. Cheap — call per-request, not cached,
     since the list is small and correctness matters more than shaving a
     query here."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     try:
         conn.execute(_BLACKLIST_DDL)
         if chain:
@@ -68,7 +68,7 @@ def get_blacklisted_addresses(chain: str = None) -> set:
 
 
 def add_to_blacklist(address: str, chain: str = "solana", reason: str = "", agent_id: int = None):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     try:
         conn.execute(_BLACKLIST_DDL)
         conn.execute(

@@ -765,3 +765,74 @@ async def ingest_external_conversation(request: Request, connector: dict = Depen
         "turn_count": conv_row["turn_count"],
         "vault_path": vault_path,
     }
+
+
+@external_router.post("/iranti/ingest")
+async def ingest_iranti_memory(request: Request, connector: dict = Depends(get_vault_connector)):
+    """Push one (ns, slug) memory from an Iranti A2A grant into this
+    connector's owning agent's vault. Iranti stays the source of truth for
+    the value — this upserts a mirror row keyed on (connector, pubkey, ns,
+    slug) and re-renders it as an OKF note carrying an `iranti://` resource
+    URI back to the real entry. Re-push the same (ns, slug) to stream in
+    updates as Iranti's own value changes."""
+    body = await _parse_body(request)
+    iranti_pubkey = str(body.get("iranti_pubkey", "")).strip()
+    ns = re.sub(r"[^a-z0-9_-]", "-", str(body.get("ns", "general")).strip().lower())[:60] or "general"
+    slug = str(body.get("slug", "")).strip()[:120]
+    value = str(body.get("value", ""))[:_MAX_CONTENT_LEN]
+    if not iranti_pubkey or not slug or not value.strip():
+        raise HTTPException(422, "iranti_pubkey, slug and value are required")
+    salience = max(0, min(100, int(body.get("salience", 50) or 50)))
+    pin = bool(body.get("pin", False))
+    prov = str(body.get("prov", ""))[:500].strip() or None
+    iranti_updated_at = int(body.get("updated_at", 0) or 0)
+
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        existing = await (await db.execute(
+            "SELECT * FROM external_iranti_memories WHERE connector_id=? AND iranti_pubkey=? AND ns=? AND slug=?",
+            (connector["id"], iranti_pubkey, ns, slug),
+        )).fetchone()
+        if existing:
+            await db.execute(
+                """UPDATE external_iranti_memories
+                   SET value=?, salience=?, pin=?, prov=?, iranti_updated_at=?, last_at=datetime('now')
+                   WHERE id=?""",
+                (value, salience, int(pin), prov, iranti_updated_at, existing["id"]),
+            )
+            row_id = existing["id"]
+        else:
+            cur = await db.execute(
+                """INSERT INTO external_iranti_memories
+                   (agent_id, connector_id, iranti_pubkey, ns, slug, value, salience, pin, prov, iranti_updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (connector["agent_id"], connector["id"], iranti_pubkey, ns, slug,
+                 value, salience, int(pin), prov, iranti_updated_at),
+            )
+            row_id = cur.lastrowid
+
+        await db.execute(
+            "UPDATE vault_connectors SET turn_count = turn_count + 1, last_used_at=datetime('now') WHERE id=?",
+            (connector["id"],),
+        )
+        await db.commit()
+
+        mem_row = dict(await (await db.execute(
+            "SELECT * FROM external_iranti_memories WHERE id=?", (row_id,)
+        )).fetchone())
+        agent_row = dict(await (await db.execute(
+            "SELECT id, name FROM agents WHERE id=?", (connector["agent_id"],)
+        )).fetchone())
+        connector_row = dict(await (await db.execute(
+            "SELECT * FROM vault_connectors WHERE id=?", (connector["id"],)
+        )).fetchone())
+
+    vault = MemoryVault(agent_row["id"], agent_row["name"])
+    vault_path = vault.render_iranti_memory(mem_row)
+    await vault.render_connector(connector_row)
+
+    return {
+        "ns": ns,
+        "slug": slug,
+        "vault_path": vault_path,
+    }

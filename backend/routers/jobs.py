@@ -22,6 +22,7 @@ import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from .. import osovm_client
 from ..db import DB_PATH, get_db
 from ..deps import get_agent
 
@@ -56,6 +57,7 @@ class ClaimRequest(BaseModel):
 class SubmitRequest(BaseModel):
     result_broadcast_id: Optional[int] = None
     result_description: str = ""
+    osovm_sim_hash: Optional[str] = None
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────
@@ -188,12 +190,30 @@ async def heartbeat_task(
 
 @router.post("/{job_id}/tasks/{task_id}/submit")
 async def submit_task(job_id: int, task_id: int, req: SubmitRequest, agent: dict = Depends(get_agent)):
-    """Claimant-only: hand in the result for the poster to approve/reject."""
+    """Claimant-only: hand in the result for the poster to approve/reject.
+
+    First real OSOVM data flow (previously osovm_client.get_proof() had zero
+    callers -- config/schema/client existed, nothing used them). "security"
+    job_type tasks are exactly the case osovm_proof_id/osovm_sim_hash were
+    added for: a claimant can attach a sim_hash, and if OSOVM is configured
+    we attempt to fetch and store the real attestation. Best-effort and
+    non-blocking -- an unreachable/unconfigured OSOVM must never stop a
+    submission, same degrade-gracefully contract as every other pluggable
+    hook in this codebase.
+    """
+    osovm_proof_id = None
+    if req.osovm_sim_hash:
+        proof = await osovm_client.get_proof(req.osovm_sim_hash)
+        if proof:
+            osovm_proof_id = proof.get("proof_id") or proof.get("id")
+
     async with get_db() as db:
         cur = await db.execute(
-            """UPDATE job_tasks SET status='submitted', result_broadcast_id=?, result_description=?
+            """UPDATE job_tasks SET status='submitted', result_broadcast_id=?, result_description=?,
+               osovm_sim_hash=?, osovm_proof_id=?
                WHERE id=? AND job_id=? AND status='claimed' AND claimed_by_id=?""",
-            (req.result_broadcast_id, req.result_description, task_id, job_id, agent["id"]),
+            (req.result_broadcast_id, req.result_description, req.osovm_sim_hash, osovm_proof_id,
+             task_id, job_id, agent["id"]),
         )
         await db.commit()
         if cur.rowcount == 0:

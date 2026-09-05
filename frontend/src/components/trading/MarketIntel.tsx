@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, Waypoints, ListOrdered, Share2, Flame, Brain } from 'lucide-react'
+import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, Waypoints, ListOrdered, Share2, Flame, Brain, Scale, UserCog, PlusCircle } from 'lucide-react'
 import Top5Degen from './Top5Degen'
 import MoneyFlowGraph from '../MoneyFlowGraph'
+import CouncilSection from '../CouncilSection'
+import ShadowAccountSection from '../ShadowAccountSection'
 import { TokenLink, WalletLink } from './EntityProfileCard'
 import AgentIntel from './AgentIntel'
 
@@ -146,15 +148,19 @@ function AresArbitrage() {
   if (loading && !data) return <div style={{ color: 'var(--muted)', padding: 20 }}>Loading…</div>
   return (
     <div>
-      <div className="ares-section-title">{opps.length} Arbitrage Opportunities</div>
+      <div className="ares-section-title">{opps.length} Arbitrage Opportunities <span style={{ fontSize: 11, color: 'var(--muted)' }}>(net = spread minus est. taker fees both legs)</span></div>
       <table className="ares-table">
-        <thead><tr><th>Route</th><th>Pair</th><th>Spread</th><th>Buy</th><th>Sell</th></tr></thead>
+        <thead><tr><th>Route</th><th>Pair</th><th>Raw Spread</th><th>Est. Fees</th><th>Net Spread</th><th>Buy</th><th>Sell</th></tr></thead>
         <tbody>
           {opps.map((o: any, i: number) => (
-            <tr key={i} className={o.spread_pct > 3 ? 'threat-high' : ''}>
+            <tr key={i} className={(o.net_spread_pct ?? o.spread_pct) > 3 ? 'threat-high' : ''}>
               <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{o.route}</td>
               <td>{o.pair && o.pair.includes('/') ? <TokenLink symbol={o.pair.split('/')[0]} /> : o.pair}</td>
-              <td style={{ color: o.spread_pct > 3 ? 'var(--danger)' : 'var(--warning)', fontWeight: 700 }}>{o.spread_pct?.toFixed(1)}%</td>
+              <td style={{ color: 'var(--muted)' }}>{o.spread_pct?.toFixed(2)}%</td>
+              <td style={{ color: 'var(--muted)' }}>−{o.est_fees_pct?.toFixed(2) ?? '?'}%</td>
+              <td style={{ color: (o.net_spread_pct ?? 0) > 0 ? ((o.net_spread_pct ?? 0) > 3 ? 'var(--danger)' : 'var(--warning)') : 'var(--muted)', fontWeight: 700 }}>
+                {o.net_spread_pct !== undefined ? `${o.net_spread_pct.toFixed(2)}%` : '—'}
+              </td>
               <td>${o.buy_price?.toFixed(2)}</td>
               <td>${o.sell_price?.toFixed(2)}</td>
             </tr>
@@ -222,7 +228,16 @@ function AresSentiment() {
 
 function AresSources() {
   const { data, loading } = useAresApi('/api/intel/sources', 60000)
+  // /sources-registry is the richer, self-contained source of truth (real
+  // category + integration status per source, 15 named entries) -- /sources
+  // itself is just a thin proxy to the ares-bridge RPC endpoint list and
+  // has neither field. Cross-referenced by name below rather than switching
+  // the primary endpoint outright, so a bridge outage still shows whatever
+  // /sources itself returns.
+  const { data: registryData } = useAresApi('/api/intel/sources-registry', 300000)
   const endpoints = data?.endpoints || {}
+  const registry: { name: string; category: string; integrated: boolean }[] = registryData?.sources || []
+  const registryByKey = new Map(registry.map(s => [s.name.toLowerCase().replace(/[^a-z0-9]/g, ''), s]))
   if (loading && !data) return <div style={{ color: 'var(--muted)', padding: 20 }}>Loading…</div>
   const groups: Record<string, [string, any][]> = {
     'Chain RPC': [], 'Exchanges': [], 'DEX/DeFi': [], 'Finance/FX': [], 'Other': [],
@@ -236,16 +251,38 @@ function AresSources() {
   })
   return (
     <div>
-      <div className="ares-section-title">{Object.keys(endpoints).length} Data Sources</div>
+      <div className="ares-section-title" style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+        <span>{Object.keys(endpoints).length} Data Sources</span>
+        {registry.length > 0 && (
+          <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+            {registry.filter(s => s.integrated).length}/{registry.length} confirmed integrated (sources-registry)
+          </span>
+        )}
+      </div>
       {Object.entries(groups).map(([group, sources]) => sources.length > 0 && (
         <div key={group} style={{ marginBottom: 16 }}>
           <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>{group} ({sources.length})</div>
           <table className="ares-table">
-            <thead><tr><th>Name</th><th>Chain</th></tr></thead>
+            <thead><tr><th>Name</th><th>Chain</th><th>Status</th></tr></thead>
             <tbody>
-              {sources.map(([k, v]) => (
-                <tr key={k}><td style={{ fontFamily: 'monospace', fontSize: 11 }}>{k}</td><td>{v.chain}</td></tr>
-              ))}
+              {sources.map(([k, v]) => {
+                const reg = registryByKey.get(k.toLowerCase().replace(/[^a-z0-9]/g, ''))
+                return (
+                  <tr key={k}>
+                    <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{k}</td>
+                    <td>{v.chain}</td>
+                    <td>
+                      {reg ? (
+                        <span style={{ fontSize: 10, color: reg.integrated ? 'var(--green)' : 'var(--muted)' }}>
+                          {reg.integrated ? '✓ integrated' : 'listed, not integrated'}
+                        </span>
+                      ) : (
+                        <span style={{ fontSize: 10, color: 'var(--muted)' }}>—</span>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>
@@ -262,12 +299,15 @@ function AresAlpha() {
     <div>
       <div className="ares-section-title">{items.length} Active Signals</div>
       <table className="ares-table">
-        <thead><tr><th>Token</th><th>Conviction</th><th>Price</th><th>Volume 24h</th></tr></thead>
+        <thead><tr><th>Token</th><th>Conviction</th><th>24h Change</th><th>Price</th><th>Volume 24h</th></tr></thead>
         <tbody>
           {items.map((i: any, idx: number) => (
             <tr key={idx}>
               <td style={{ fontWeight: 600 }}>{i.symbol ? <TokenLink symbol={i.symbol} ca={i.ca || i.address} chain={i.chain} /> : '?'}</td>
               <td style={{ color: (i.conviction||0) > 3 ? 'var(--danger)' : 'var(--warning)', fontWeight: 700 }}>{(i.conviction||0).toFixed(2)}</td>
+              <td style={{ fontFamily: 'monospace', color: i.direction === 'down' ? 'var(--danger)' : 'var(--green)', fontWeight: 700 }}>
+                {i.direction === 'down' ? '▼' : '▲'} {(i.change_24h||0).toFixed(2)}%
+              </td>
               <td style={{ fontFamily: 'monospace' }}>${(i.price||0).toFixed(8)}</td>
               <td style={{ fontFamily: 'monospace' }}>${(i.volume_24h||0).toLocaleString()}</td>
             </tr>
@@ -290,15 +330,23 @@ function AresYields() {
     <div>
       <div className="ares-section-title">{pools.length} DeFi Yield Pools <span style={{ fontSize: 11, color: 'var(--muted)' }}>(DefiLlama · TVL ≥ $1M)</span></div>
       <table className="ares-table">
-        <thead><tr><th>Pool</th><th>Project</th><th>Chain</th><th>APY</th><th>TVL</th></tr></thead>
+        <thead><tr><th>Pool</th><th>Project</th><th>Chain</th><th>APY</th><th>Yield Source</th><th>IL Risk</th><th>TVL</th></tr></thead>
         <tbody>
-          {pools.length === 0 && <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No pools loaded.</td></tr>}
+          {pools.length === 0 && <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No pools loaded.</td></tr>}
           {pools.map((p: any, i: number) => (
             <tr key={i}>
               <td style={{ fontWeight: 600 }}><TokenLink symbol={p.pool} chain={p.chain} />{p.stablecoin && <span style={{ fontSize: 9, color: 'var(--cyan)', marginLeft: 4 }}>STABLE</span>}</td>
               <td style={{ fontSize: 11 }}>{p.project}</td>
               <td style={{ fontSize: 11, color: 'var(--muted)' }}>{p.chain}</td>
               <td style={{ color: 'var(--green)', fontWeight: 700 }}>{p.apy?.toFixed(1)}%</td>
+              <td style={{ fontSize: 10, color: 'var(--muted)' }} title="organic yield vs. reward-token emissions -- emissions can stop">
+                {p.apy_base != null ? `${p.apy_base.toFixed(1)}% base` : ''}
+                {p.apy_reward ? ` + ${p.apy_reward.toFixed(1)}% reward` : ''}
+                {p.apy_base == null && !p.apy_reward ? '—' : ''}
+              </td>
+              <td style={{ fontSize: 10, color: p.il_risk === 'yes' ? 'var(--warning)' : 'var(--muted)' }}>
+                {p.il_risk === 'yes' ? '⚠️ IL risk' : p.il_risk === 'no' ? 'no IL' : '—'}
+              </td>
               <td style={{ fontFamily: 'monospace' }}>${(p.tvl_usd / 1e6).toFixed(1)}M</td>
             </tr>
           ))}
@@ -466,34 +514,42 @@ function AresFx() {
 function AresBacktest() {
   const [symbol, setSymbol] = useState('BTC')
   const [days, setDays] = useState(90)
+  const [fast, setFast] = useState(10)
+  const [slow, setSlow] = useState(30)
   const [data, setData] = useState<any>(null)
   const [loading, setLoading] = useState(false)
   const run = useCallback(async () => {
     setLoading(true)
     try {
-      const r = await fetch(`/api/intel/backtest?symbol=${encodeURIComponent(symbol)}&days=${days}`)
+      const r = await fetch(`/api/intel/backtest?symbol=${encodeURIComponent(symbol)}&days=${days}&fast=${fast}&slow=${slow}`)
       if (r.ok) setData(await r.json())
     } catch {}
     setLoading(false)
-  }, [symbol, days])
+  }, [symbol, days, fast, slow])
   useEffect(() => { run() }, []) // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
         <input className="ares-input" placeholder="Symbol (e.g. BTC)" value={symbol} onChange={e => setSymbol(e.target.value.toUpperCase())} style={{ maxWidth: 140 }} />
-        <input className="ares-input" type="number" min={30} max={365} value={days} onChange={e => setDays(Number(e.target.value))} style={{ maxWidth: 100 }} />
+        <input className="ares-input" type="number" min={30} max={365} value={days} onChange={e => setDays(Number(e.target.value))} style={{ maxWidth: 100 }} title="days of history" />
+        <input className="ares-input" type="number" min={2} max={100} value={fast} onChange={e => setFast(Number(e.target.value))} style={{ maxWidth: 70 }} title="fast SMA window" />
+        <span style={{ color: 'var(--muted)', fontSize: 11 }}>/</span>
+        <input className="ares-input" type="number" min={3} max={200} value={slow} onChange={e => setSlow(Number(e.target.value))} style={{ maxWidth: 70 }} title="slow SMA window" />
         <button className="btn btn-primary btn-sm" onClick={run} disabled={loading}>{loading ? 'Running…' : 'Run Backtest'}</button>
       </div>
       {data?.error ? (
-        <div style={{ color: 'var(--muted)', padding: 20 }}>Not enough history for {data.symbol} over {days} days.</div>
+        <div style={{ color: 'var(--muted)', padding: 20 }}>{data.error === 'insufficient data' ? `Not enough history for ${data.symbol} over ${days} days.` : data.error}</div>
       ) : data ? (
         <div>
-          <div className="ares-section-title">{data.strategy} vs Buy &amp; Hold — {data.symbol} ({data.days}d)</div>
+          <div className="ares-section-title">{data.strategy} vs Buy &amp; Hold — {data.symbol} ({data.days}d, {data.data_points} closes)</div>
           <div className="ares-stat-grid">
             <div className="ares-stat-tile"><div className="ares-stat-label">Strategy Return</div><div className="ares-stat-value" style={{ color: data.strategy_return_pct >= 0 ? 'var(--green)' : 'var(--danger)' }}>{data.strategy_return_pct}%</div></div>
             <div className="ares-stat-tile"><div className="ares-stat-label">Buy &amp; Hold Return</div><div className="ares-stat-value">{data.buy_hold_return_pct}%</div></div>
             <div className="ares-stat-tile"><div className="ares-stat-label">Trades</div><div className="ares-stat-value">{data.trades}</div></div>
             <div className="ares-stat-tile"><div className="ares-stat-label">Win Rate</div><div className="ares-stat-value">{data.win_rate_pct}%</div></div>
+            <div className="ares-stat-tile" title="worst peak-to-trough decline of the strategy's own equity curve -- can be deep even when total return beats buy-and-hold">
+              <div className="ares-stat-label">Max Drawdown</div><div className="ares-stat-value" style={{ color: 'var(--danger)' }}>{data.max_drawdown_pct}%</div>
+            </div>
           </div>
           <div style={{ marginTop: 12, fontSize: 12, color: data.beat_buy_hold ? 'var(--green)' : 'var(--muted)' }}>
             {data.beat_buy_hold ? 'Strategy beat buy-and-hold over this period.' : 'Buy-and-hold beat the strategy over this period.'}
@@ -760,6 +816,109 @@ function AresTrace() {
   )
 }
 
+// ── Unified ingestion — paste a Twitter/X link or handle, Telegram link or
+// handle, Solana wallet address, or Polymarket/EVM wallet address; the
+// backend auto-detects and routes to the real existing tracker for that
+// domain (see backend/routers/intel.py POST /api/intel/ingest). Falls back
+// to an explicit type selector only when detection is genuinely ambiguous
+// (a bare @handle could be Twitter or Telegram). ───────────────────────────
+function AresIngest() {
+  const [input, setInput] = useState('')
+  const [label, setLabel] = useState('')
+  const [ambiguous, setAmbiguous] = useState<string[] | null>(null)
+  const [typeOverride, setTypeOverride] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [result, setResult] = useState<any>(null)
+  const [error, setError] = useState('')
+
+  async function submit(explicitType?: string) {
+    if (!input.trim()) return
+    setLoading(true); setError(''); setResult(null)
+    try {
+      const r = await intelAuthApi('/ingest', {
+        method: 'POST',
+        body: JSON.stringify({ input: input.trim(), label: label.trim(), type: explicitType || typeOverride || undefined }),
+      })
+      const d = await r.json()
+      if (r.ok) {
+        setResult(d); setAmbiguous(null); setTypeOverride('')
+      } else if (d?.detail?.error === 'ambiguous') {
+        setAmbiguous(d.detail.candidates || [])
+      } else {
+        setError(typeof d?.detail === 'string' ? d.detail : (d?.detail?.message || 'Failed to add'))
+      }
+    } catch {
+      setError('Request failed — check connection')
+    }
+    setLoading(false)
+  }
+
+  return (
+    <div style={{ maxWidth: 640 }}>
+      <div style={{ color: 'var(--muted)', marginBottom: 16, fontSize: 13 }}>
+        Paste a Twitter/X username or profile link, a Telegram channel/group username or t.me link,
+        a Solana wallet address, or a Polymarket wallet address — it's auto-detected and added to the
+        right tracker. No SSH or CLI needed.
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+        <input
+          className="ares-input"
+          placeholder="Paste a link, handle, or wallet address…"
+          value={input}
+          onChange={e => { setInput(e.target.value); setAmbiguous(null); setResult(null); setError('') }}
+          onKeyDown={e => e.key === 'Enter' && !ambiguous && submit()}
+          style={{ minWidth: 320, flex: 1, fontFamily: 'monospace' }}
+        />
+        <input
+          className="ares-input"
+          placeholder="Label (optional)"
+          value={label}
+          onChange={e => setLabel(e.target.value)}
+          style={{ maxWidth: 180 }}
+        />
+        <button className="btn btn-primary btn-sm" onClick={() => submit()} disabled={loading || !input.trim()}>
+          {loading ? 'Adding…' : 'Add'}
+        </button>
+      </div>
+
+      {ambiguous && (
+        <div style={{ padding: 12, border: '1px solid var(--border)', borderRadius: 8, marginTop: 8 }}>
+          <div style={{ marginBottom: 8, fontSize: 13 }}>Could not tell if this is Twitter or Telegram — pick one:</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {ambiguous.map(c => (
+              <button key={c} className="btn btn-ghost btn-sm" onClick={() => { setTypeOverride(c); submit(c) }}>
+                {c === 'twitter' ? 'Twitter/X' : 'Telegram'}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {error && (
+        <div style={{ color: 'var(--danger)', marginTop: 12, fontSize: 13 }}>{error}</div>
+      )}
+
+      {result && (
+        <div style={{ padding: 12, border: '1px solid var(--border)', borderRadius: 8, marginTop: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+            <span style={{ color: '#39ff14', fontWeight: 700, fontSize: 13 }}>Added</span>
+            <TypeBadge type={result.type} />
+            <span style={{ color: 'var(--muted)', fontSize: 12 }}>→ {result.tracker}</span>
+          </div>
+          <pre style={{ fontSize: 11, color: 'var(--muted)', whiteSpace: 'pre-wrap', margin: 0 }}>
+            {JSON.stringify(result.result ?? { wallet: result.wallet, output: result.output }, null, 2)}
+          </pre>
+          {result.degen_watchlist_note && (
+            <div style={{ marginTop: 8, fontSize: 11, color: 'var(--warning, #ffaa00)' }}>
+              {result.degen_watchlist_note}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 const ADDRESS_TYPE_LABELS: Record<string, string> = {
   wallet: 'Wallet', exchange: 'Exchange', contract: 'Contract (CA)', smart_wallet: 'Smart Wallet',
 }
@@ -782,6 +941,7 @@ function TypeBadge({ type }: { type: string }) {
 
 const INTEL_TABS = [
   { id: 'top5', label: 'Top 5', icon: Flame },
+  { id: 'ingest', label: 'Add Tracker', icon: PlusCircle },
   { id: 'overview',  label: 'Overview',  icon: Radio },
   { id: 'trace',     label: 'Trace',     icon: Waypoints },
   { id: 'arbitrage', label: 'Arbitrage', icon: TrendingUp },
@@ -798,6 +958,8 @@ const INTEL_TABS = [
   { id: 'sources',   label: 'Sources',   icon: Database },
   { id: 'intel',     label: 'Raw Intel', icon: BarChart3 },
   { id: 'agent-intel', label: 'Agent Intel', icon: Brain },
+  { id: 'council', label: 'Council', icon: Scale },
+  { id: 'shadow-account', label: 'Shadow Account', icon: UserCog },
 ]
 
 export default function MarketIntel() {
@@ -812,6 +974,7 @@ export default function MarketIntel() {
         ))}
       </div>
       {tab === 'top5' && <Top5Degen />}
+      {tab === 'ingest' && <AresIngest />}
       {tab === 'overview' && <AresOverview />}
       {tab === 'trace' && <AresTrace />}
       {tab === 'arbitrage' && <AresArbitrage />}
@@ -828,6 +991,8 @@ export default function MarketIntel() {
       {tab === 'sources' && <AresSources />}
       {tab === 'intel' && <AresIntel />}
       {tab === 'agent-intel' && <AgentIntel />}
+      {tab === 'council' && <CouncilSection />}
+      {tab === 'shadow-account' && <ShadowAccountSection />}
     </div>
   )
 }

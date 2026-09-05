@@ -108,7 +108,13 @@ async def test_helius_rate_limit_surfaces_as_502_not_fake_zero_balance(client, f
     _patch_client(monkeypatch, _RateLimitedHeliusClient)
     agent, api_key_hash = await _agent_with_id(fresh_agent)
     h = _h(agent)
-    agent_for_crypto = {**agent, "api_key": api_key_hash}
+    # Production always derives the wallet-encryption KEK from the RAW
+    # X-Agent-Key header value (see trading.py create_agent_wallet/execute_live_order,
+    # wallets.py, identity.py's rotate-key) -- never the SHA-256 hash stored in
+    # agents.api_key. api_key_hash is only used above to look up the agent's
+    # numeric id; encrypting under it here would silently mismatch every real
+    # decrypt call and was a real bug in this test file, not in production.
+    agent_for_crypto = agent
 
     fake_seed_hex = "44" * 32
     encrypted = encrypt_key_for_agent(fake_seed_hex, agent_for_crypto)
@@ -158,7 +164,13 @@ async def test_falls_back_to_helius_when_chainstack_proxy_is_unreachable(client,
     _patch_client(monkeypatch, _ProxyDownHeliusUpClient)
     agent, api_key_hash = await _agent_with_id(fresh_agent)
     h = _h(agent)
-    agent_for_crypto = {**agent, "api_key": api_key_hash}
+    # Production always derives the wallet-encryption KEK from the RAW
+    # X-Agent-Key header value (see trading.py create_agent_wallet/execute_live_order,
+    # wallets.py, identity.py's rotate-key) -- never the SHA-256 hash stored in
+    # agents.api_key. api_key_hash is only used above to look up the agent's
+    # numeric id; encrypting under it here would silently mismatch every real
+    # decrypt call and was a real bug in this test file, not in production.
+    agent_for_crypto = agent
 
     fake_seed_hex = "55" * 32
     encrypted = encrypt_key_for_agent(fake_seed_hex, agent_for_crypto)

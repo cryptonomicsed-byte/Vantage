@@ -38,7 +38,21 @@ import vantage_db_shim as _vshim
 import urllib.request
 import websockets
 
-PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
+# subscribeTokenTrade/subscribeAccountTrade require an API key funded with
+# >=0.02 SOL (PumpPortal server-side rejection message, confirmed live) --
+# without it, PumpPortal silently rejects every trade subscription and only
+# "create"/"migration" events (unauthenticated, free) ever arrive. Root
+# cause of every tracked token showing exactly 1 trade forever (creation
+# only) across 210k+ historical rows. Key is a wallet created via
+# https://pumpportal.fun/api/create-wallet -- see
+# /etc/vantage-secrets/pumpportal.env on hostinger (never in git). Falls
+# back to the unauthenticated URL if unset so this daemon still runs (with
+# only create/migration visibility) rather than crash on a missing secret.
+_PUMPPORTAL_API_KEY = os.environ.get("PUMPPORTAL_API_KEY", "")
+PUMPPORTAL_WS = (
+    f"wss://pumpportal.fun/api/data?api-key={_PUMPPORTAL_API_KEY}"
+    if _PUMPPORTAL_API_KEY else "wss://pumpportal.fun/api/data"
+)
 FRESH_GRACE_SECONDS = int(os.environ.get("PUMPFUN_FRESH_GRACE_SECONDS", 7 * 60))
 RUNNING_GRACE_SECONDS = int(os.environ.get("PUMPFUN_RUNNING_GRACE_SECONDS", 60))
 FRESH_TIER_CEILING_USD = 10_000  # below this, use the longer grace window
@@ -126,7 +140,8 @@ def upsert_new_token(conn, mint: str, symbol: str, name: str, deployer: str,
 def apply_trade(conn, mint: str, tx_type: str, trader: str,
                  v_tokens: float, v_sol: float, market_cap_sol: float, sol_price: float) -> None:
     row = conn.execute(
-        "SELECT unique_buyers, unique_sellers, buy_count, sell_count FROM pumpfun_premigration_tokens WHERE mint=?",
+        "SELECT unique_buyers, unique_sellers, buy_count, sell_count, market_cap_usd, last_trade_at "
+        "FROM pumpfun_premigration_tokens WHERE mint=?",
         (mint,),
     ).fetchone()
     if row is None:
@@ -134,6 +149,29 @@ def apply_trade(conn, mint: str, tx_type: str, trader: str,
     buyers = json.loads(row[0] or "[]")
     sellers = json.loads(row[1] or "[]")
     buy_count, sell_count = row[2] or 0, row[3] or 0
+    prev_mcap_usd, prev_last_trade_at = row[4], row[5]
+
+    # Empirical RUNNING_GRACE_SECONDS tuning (temporary instrumentation, see
+    # backend/db.py's pumpfun_trade_gaps comment): this new trade proves the
+    # token was still alive despite the gap since its previous trade -- log
+    # that gap, tagged with the mcap it was at when it went quiet. Originally
+    # scoped to >=10k mcap only (the tier under tuning), but real crossings
+    # are rare (historical eviction data: ~1 token/3hrs ever reaches 10k+
+    # before dying) -- too slow to build a sample in one session. Logging
+    # every tier now for a larger real sample fast; analysis still slices
+    # for the 10k-35k band specifically, this doesn't change what's real,
+    # only how much of it gets captured.
+    if prev_last_trade_at:
+        try:
+            prev_ts = time.mktime(time.strptime(prev_last_trade_at, "%Y-%m-%d %H:%M:%S"))
+            gap = time.time() - prev_ts
+            if gap > 0:
+                conn.execute(
+                    "INSERT INTO pumpfun_trade_gaps (mint, market_cap_usd, gap_seconds) VALUES (?,?,?)",
+                    (mint, prev_mcap_usd, gap),
+                )
+        except Exception:
+            pass  # instrumentation only -- never let a parse hiccup break the real trade update below
 
     if tx_type == "buy":
         buy_count += 1

@@ -141,21 +141,41 @@ async def full_market(limit: int = Query(100, ge=1, le=500), agent: dict = Depen
                     "confidence": pdata.get("conf", 0),
                 })
 
-    # Sort by price (desc) — rough market cap proxy
-    tokens.sort(key=lambda x: -x["price"])
+    # Merge real market cap/rank/24h-change from CoinGecko (Pyth gives price
+    # only, no supply/cap data) -- sorting by raw unit price as a "market cap
+    # proxy" was wrong: a $65k BTC would always outrank a legitimately larger
+    # token trading at $0.001. Join by symbol on the already-cached, real
+    # market-cap-ranked CoinGecko feed.
+    cg_by_symbol = {r["symbol"]: r for r in (await ms.coingecko_markets(250) or []) if r.get("symbol")}
+    ranked, unranked = [], []
+    for t in tokens:
+        cg = cg_by_symbol.get(t["symbol"])
+        if cg and cg.get("market_cap"):
+            t["market_cap"] = cg["market_cap"]
+            t["market_cap_rank"] = cg.get("rank")
+            t["change_24h"] = cg.get("change_24h")
+            t["volume_24h"] = cg.get("volume_24h")
+            ranked.append(t)
+        else:
+            unranked.append(t)
+    ranked.sort(key=lambda x: -(x.get("market_cap") or 0))
+    unranked.sort(key=lambda x: -x["price"])  # no cap data -- price is the only signal left
+    tokens = ranked + unranked
 
-    # Compute stats
-    gainers_24h = len([t for t in tokens if t.get("change_24h", 0) > 0]) if any(t.get("change_24h") for t in tokens) else 0
-    total_mcap = sum(t["price"] for t in tokens[:50])  # rough
+    gainers_24h = len([t for t in tokens if (t.get("change_24h") or 0) > 0])
+    total_mcap = sum(t.get("market_cap") or 0 for t in ranked)
 
     return {
         "total_tokens": len(tokens),
         "displayed": min(len(tokens), limit),
         "total_feeds_available": len(feeds),
+        "ranked_by_market_cap": len(ranked),
         "market_snapshot": {
             "tokens_tracked": len(tokens),
             "pyth_feeds": len(feeds),
-            "data_source": "Pyth Network (3,000+ institutional feeds)",
+            "gainers_24h": gainers_24h,
+            "total_market_cap_top_ranked": total_mcap,
+            "data_source": "Pyth Network (price) + CoinGecko (market cap/rank)",
         },
         "tokens": tokens[:limit],
     }
@@ -207,10 +227,32 @@ async def get_intel(agent: dict = Depends(get_agent)):
     arb = await ms.real_arbitrage()
     breadth = await ms.market_breadth()
 
+    # Real anomaly detection, not a hardcoded []: Pyth's own `conf` field is
+    # its published uncertainty band on that price, in the same units as
+    # `price` -- a wide confidence interval relative to price is Pyth
+    # itself signaling reduced certainty (thin liquidity, feed disagreement,
+    # etc.), not something invented here. Flagging conf/price > 2% surfaces
+    # exactly the tokens where "the price shown" is least trustworthy right
+    # now, using data already fetched for `prices` above -- no extra calls.
+    anomalies = []
+    for t in market.get("tokens", []):
+        price = t.get("price") or 0
+        conf = t.get("confidence") or 0
+        if price > 0 and (conf / price) > 0.02:
+            anomalies.append({
+                "symbol": t.get("symbol"),
+                "type": "low_price_confidence",
+                "price": price,
+                "confidence": conf,
+                "confidence_pct": round(conf / price * 100, 2),
+                "detail": f"Pyth confidence band is {round(conf / price * 100, 1)}% of price -- wider than usual",
+            })
+    anomalies.sort(key=lambda a: -a["confidence_pct"])
+
     return {
         "health": {"chains": chains},
         "arbitrage": {"opportunities": arb},
-        "anomalies": {"anomalies": [], "fusion": {"btc_consensus": btc, "eth": eth, "sol": sol, "sources": 3}},
+        "anomalies": {"anomalies": anomalies[:10], "fusion": {"btc_consensus": btc, "eth": eth, "sol": sol, "sources": 3}},
         "sentiment": {
             "sentiment": breadth or {"overall": "neutral", "fear_greed": 50},
             "indicators": breadth.get("indicators", []) if breadth else [],
@@ -247,10 +289,35 @@ async def get_yields(limit: int = Query(25, ge=1, le=100), agent: dict = Depends
     pools = await ms.defillama_yields(limit)
     return {"pools": pools, "count": len(pools), "source": "DefiLlama"}
 
+def _pairs_sorted_by_liveness(pairs: list) -> list:
+    """Sort raw DexScreener pairs by recent trading activity first.
+
+    DexScreener returns pairs in an arbitrary order that can put a stale,
+    abandoned pair (frozen historical marketCap/liquidity, ~0 recent volume)
+    ahead of the actually-live pair. Any consumer reading pairs[0] for a
+    quick marketCap/price should see the live pair first, not whichever one
+    DexScreener happened to list first. Mirrors _dexscreener_best_pair's
+    volume-first logic."""
+    def _vol(p):
+        v = p.get("volume") or {}
+        return max(v.get("h24") or 0.0, v.get("h6") or 0.0,
+                   v.get("h1") or 0.0, v.get("m5") or 0.0)
+    return sorted(
+        pairs,
+        key=lambda p: (_vol(p), (p.get("liquidity") or {}).get("usd") or 0.0),
+        reverse=True,
+    )
+
+
 @router.get("/dex")
 async def get_dex(q: str = Query("SOL"), limit: int = Query(20, ge=1, le=50), agent: dict = Depends(get_agent)):
-    """DEX pairs/liquidity for a token query (DexScreener)."""
+    """DEX pairs/liquidity for a token query (DexScreener).
+
+    Pairs are sorted by recent trading volume (live-first) so a stale pair
+    with a frozen historical marketCap never shadows the actually-trading
+    pair for any consumer that reads pairs[0]."""
     pairs = await ms.dexscreener_search(q, limit)
+    pairs = _pairs_sorted_by_liveness(pairs)
     return {"query": q, "pairs": pairs, "count": len(pairs), "source": "DexScreener"}
 
 @router.get("/dex/pools")
@@ -405,6 +472,25 @@ from backend import wallet_naming as _wn
 
 _SOL_MINT = "So1111111111111111111" "1111111111111111111112"  # wrapped SOL mint, split to avoid secret-scanner false positive
 
+
+def _dexscreener_best_pair(pairs: list) -> Optional[dict]:
+    """Volume-first pair selection (mirrors routers/alpha.py:_select_best_pair).
+
+    A stale/abandoned DexScreener pair keeps a frozen priceUsd and marketCap
+    but its volume/txns decay to ~0. Raw liquidity is NOT a liveness signal —
+    a dead pair can keep reporting large historical liquidity long after
+    trading moved elsewhere, so we select by recent volume first and use
+    liquidity only as a tie-break."""
+    if not pairs:
+        return None
+    def _vol(p):
+        v = p.get("volume") or {}
+        return max(v.get("h24") or 0.0, v.get("h6") or 0.0,
+                   v.get("h1") or 0.0, v.get("m5") or 0.0)
+    return max(pairs, key=lambda p: (
+        _vol(p), (p.get("liquidity") or {}).get("usd") or 0.0))
+
+
 async def _dexscreener_token_info(mint: str) -> dict:
     try:
         async with httpx.AsyncClient(timeout=6.0) as client:
@@ -413,9 +499,9 @@ async def _dexscreener_token_info(mint: str) -> dict:
             if r.status_code != 200:
                 return {}
             pairs = (r.json() or {}).get("pairs") or []
-            if not pairs:
+            best = _dexscreener_best_pair(pairs)
+            if best is None:
                 return {}
-            best = max(pairs, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0)
             return {
                 "symbol": (best.get("baseToken") or {}).get("symbol", ""),
                 "price_usd": float(best["priceUsd"]) if best.get("priceUsd") else None,
@@ -568,11 +654,21 @@ async def add_watchlist_wallet(req: WatchlistAddRequest, agent: dict = Depends(g
     return dict(row)
 
 @router.get("/watchlist")
-async def list_watchlist_wallets(agent: dict = Depends(get_agent)):
-    """List every tracked wallet — shared across all agents, like /trace and /whales."""
+async def list_watchlist_wallets(agent: dict = Depends(get_agent), include_archived: bool = Query(False)):
+    """List every ACTIVE tracked wallet — shared across all agents, like /trace
+    and /whales. Excludes archived_at IS NOT NULL rows by default (see
+    backend/wallet_pruning.py) -- without this, every consumer of this
+    endpoint (including MoneyFlowGraph.tsx's "My Tracked Wallets" filter)
+    sees the full historical tracked_wallets count, not the real active
+    set. Pass include_archived=true for the rare case of wanting the
+    unfiltered list (e.g. an admin/audit view)."""
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM tracked_wallets ORDER BY created_at DESC") as cur:
+        query = "SELECT * FROM tracked_wallets"
+        if not include_archived:
+            query += " WHERE archived_at IS NULL"
+        query += " ORDER BY created_at DESC"
+        async with db.execute(query) as cur:
             rows = [dict(r) for r in await cur.fetchall()]
     return {"wallets": rows, "count": len(rows)}
 
@@ -616,6 +712,162 @@ async def remove_watchlist_wallet(wallet_id: int, agent: dict = Depends(get_agen
         raise HTTPException(404, "Wallet not found in watchlist")
     return {"status": "deleted"}
 
+# ── Unified ingestion — paste any of {Solana wallet, Polymarket/EVM wallet,
+# Twitter/X handle or link, Telegram handle or t.me link} and route it to the
+# real existing tracker for that domain, instead of the owner needing a
+# separate CLI command per type. Reuses real code paths, doesn't reinvent
+# them: Solana -> add_watchlist_wallet() above (tracked_wallets table);
+# Twitter/Telegram -> social_accounts table, same schema/columns as
+# /opt/ares/social_tracker.py's add_account() (that daemon lives outside the
+# backend.* package on the VPS filesystem, so it can't be imported directly
+# -- this mirrors its exact INSERT rather than duplicating its logic);
+# Polymarket wallet -> shells out to the real `ares_polymarket.py --add`
+# CLI on the same host (the actual add path, not a reimplementation). ──────
+import re as _re
+import os as _os
+
+_SOL_ADDR_RE = _re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+_EVM_ADDR_RE = _re.compile(r"^0x[a-fA-F0-9]{40}$")
+_TWITTER_URL_RE = _re.compile(r"^https?://(?:www\.)?(?:twitter|x)\.com/([A-Za-z0-9_]{1,15})(?:[/?].*)?$", _re.I)
+_TELEGRAM_URL_RE = _re.compile(r"^https?://(?:www\.)?t\.me/(?:s/)?([A-Za-z0-9_]{5,32})(?:[/?].*)?$", _re.I)
+_BARE_HANDLE_RE = _re.compile(r"^@?([A-Za-z0-9_]{1,32})$")
+
+ARES_POLYMARKET_PY = "/opt/ares/ares_polymarket.py"
+ARES_VENV_PYTHON = "/opt/ares/venv/bin/python3"
+
+
+DEGEN_WATCHLIST_PATH = "/root/ares_onion/degen_watchlist.json"
+
+
+def _append_degen_watchlist(wallet: str, label: str) -> str:
+    """Best-effort secondary write: append a manually-added wallet to the
+    degen_score watchlist wallet_learner.py reads for score-boosting/labeling.
+    There is no add_watch_wallet() anywhere in that domain — wallet_learner.py
+    scores wallets automatically from observed trade activity, no
+    registration gate. This JSON file (generated by ares_degen_hunter.py) is
+    the closest real mechanism, but confirmed STALE as of 2026-08-29: its
+    generator isn't running under any active systemd service (only the
+    differently-named ares-degen-alpha-fusion.service is active), so this
+    entry's degen_score will NOT update live until that tracker is revived.
+    Never blocks the primary tracked_wallets add if this fails."""
+    try:
+        with open(DEGEN_WATCHLIST_PATH) as f:
+            data = json.load(f)
+        entries = data.get("watchlist", [])
+        if any(e.get("wallet") == wallet for e in entries):
+            return "already present in degen_watchlist.json (unchanged)"
+        entries.append({
+            "wallet": wallet,
+            "degen_score": 0,
+            "tokens_traded": [],
+            "unique_tokens": 0,
+            "trade_count": 0,
+            "solscan": f"https://solscan.io/account/{wallet}",
+            "label": label or "manual",
+            "action": "watch",
+        })
+        data["watchlist"] = entries
+        data["total_wallets"] = len(entries)
+        with open(DEGEN_WATCHLIST_PATH, "w") as f:
+            json.dump(data, f, indent=2)
+        return ("added to degen_watchlist.json with degen_score=0 (manual entry) — "
+                "scoring is stale/frozen until ares_degen_hunter.py's tracker service is revived")
+    except Exception as e:
+        return f"degen_watchlist.json update skipped (non-fatal): {e}"
+
+
+class IngestRequest(BaseModel):
+    input: str
+    type: Optional[str] = None  # explicit override: 'solana' | 'polymarket' | 'twitter' | 'telegram'
+    label: str = ""
+
+
+def _detect_ingest_type(raw: str) -> dict:
+    """Best-effort type detection. Returns {'type': str} on a confident match,
+    or {'ambiguous': [...]} when a bare handle could be twitter or telegram
+    (the caller must pass `type` explicitly in that case)."""
+    s = raw.strip()
+    if _EVM_ADDR_RE.match(s):
+        return {"type": "polymarket"}
+    m = _TWITTER_URL_RE.match(s)
+    if m:
+        return {"type": "twitter", "handle": m.group(1)}
+    m = _TELEGRAM_URL_RE.match(s)
+    if m:
+        return {"type": "telegram", "handle": m.group(1)}
+    if _SOL_ADDR_RE.match(s):
+        return {"type": "solana"}
+    m = _BARE_HANDLE_RE.match(s)
+    if m:
+        return {"ambiguous": ["twitter", "telegram"], "handle": m.group(1)}
+    return {"unknown": True}
+
+
+@router.post("/ingest")
+async def ingest(req: IngestRequest, agent: dict = Depends(get_agent)):
+    """Paste any of a Solana wallet, Polymarket/EVM wallet, Twitter handle/link,
+    or Telegram handle/t.me link — auto-detect and add to the right tracker."""
+    raw = req.input.strip()
+    if not raw:
+        raise HTTPException(422, "input is required")
+
+    detected = _detect_ingest_type(raw)
+    kind = req.type or detected.get("type")
+    if not kind:
+        if detected.get("ambiguous"):
+            raise HTTPException(422, {
+                "error": "ambiguous",
+                "message": "Could not tell if this is a Twitter or Telegram handle — pass `type`.",
+                "candidates": detected["ambiguous"],
+            })
+        raise HTTPException(422, "Could not detect input type — pass `type` explicitly "
+                                  "('solana', 'polymarket', 'twitter', or 'telegram').")
+
+    if kind == "solana":
+        result = await add_watchlist_wallet(
+            WatchlistAddRequest(chain="solana", address=raw, label=req.label), agent
+        )
+        degen_note = _append_degen_watchlist(raw, req.label)
+        return {"type": "solana", "tracker": "intel_watchlist", "result": result,
+                "degen_watchlist_note": degen_note}
+
+    if kind == "polymarket":
+        if not _EVM_ADDR_RE.match(raw):
+            raise HTTPException(422, "Not a valid EVM/Polymarket address (expected 0x + 40 hex chars)")
+        label = req.label.strip() or raw[:10]
+        proc = await asyncio.create_subprocess_exec(
+            ARES_VENV_PYTHON, ARES_POLYMARKET_PY, "--add", label, raw,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise HTTPException(502, f"ares_polymarket.py --add failed: {stderr.decode()[:300]}")
+        return {"type": "polymarket", "tracker": "ares_polymarket", "label": label,
+                "wallet": raw, "output": stdout.decode().strip()}
+
+    if kind in ("twitter", "telegram"):
+        handle = detected.get("handle") or raw.lstrip("@")
+        handle = handle.lower().strip("@")
+        if not handle:
+            raise HTTPException(422, "Could not extract a username")
+        async with get_db() as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute(
+                """INSERT INTO social_accounts (platform, username, account_type, tickers, contract_addresses, notes)
+                   VALUES (?, ?, 'tracker', '', '', ?)""",
+                (kind, handle, req.label.strip()),
+            )
+            await db.commit()
+            async with db.execute(
+                "SELECT * FROM social_accounts WHERE platform=? AND username=? ORDER BY id DESC LIMIT 1",
+                (kind, handle),
+            ) as cur:
+                row = await cur.fetchone()
+        return {"type": kind, "tracker": "social_tracker", "result": dict(row) if row else None}
+
+    raise HTTPException(422, f"Unknown type '{kind}'")
+
+
 # ── Wallet blacklist — major exchange/custodian wallets excluded from the
 # money-flow graph and smart-wallets rankings. They add no "follow the
 # money" value: everything eventually routes through them, so they become
@@ -633,7 +885,7 @@ async def add_blacklisted_wallet(req: BlacklistAddRequest, agent: dict = Depends
     """Explicitly exclude a wallet from the money-flow graph and smart-
     wallet rankings — for anything the known-exchange pattern list misses
     (a router contract, a known bot, another provider's hot wallet, etc.)."""
-    wb.add_to_blacklist(req.address.strip(), req.chain.strip().lower(), req.reason.strip()[:500], agent["id"])
+    await asyncio.to_thread(wb.add_to_blacklist, req.address.strip(), req.chain.strip().lower(), req.reason.strip()[:500], agent["id"])
     return {"status": "blacklisted", "address": req.address, "chain": req.chain}
 
 @router.get("/blacklist")
@@ -663,12 +915,15 @@ async def remove_blacklisted_wallet(entry_id: int, agent: dict = Depends(get_age
 
 @router.get("/watchlist/refresh")
 async def refresh_watchlist_wallets(agent: dict = Depends(get_agent)):
-    """Re-run the wallet trace for every tracked wallet at once (bounded
-    concurrency, reusing address_lookup's own 20s cache) and flag large recent
-    balance moves as whale activity."""
+    """Re-run the wallet trace for every ACTIVE tracked wallet at once
+    (bounded concurrency, reusing address_lookup's own 20s cache) and flag
+    large recent balance moves as whale activity. Skips archived_at IS NOT
+    NULL rows (see backend/wallet_pruning.py) -- before this filter existed,
+    every call here re-traced all 86k+ tracked_wallets rows regardless of
+    activity, most of which had never shown any real signal."""
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM tracked_wallets ORDER BY created_at DESC") as cur:
+        async with db.execute("SELECT * FROM tracked_wallets WHERE archived_at IS NULL ORDER BY created_at DESC") as cur:
             rows = [dict(r) for r in await cur.fetchall()]
     if not rows:
         return {"wallets": [], "count": 0}
@@ -714,9 +969,21 @@ async def get_wallet_network(
     return {"chain": canon, "nodes": nodes, "links": links, "node_count": len(nodes), "link_count": len(links)}
 
 @router.get("/backtest")
-async def get_backtest(symbol: str = Query("BTC"), days: int = Query(90, ge=14, le=365), agent: dict = Depends(get_agent)):
-    """Backtest an SMA-crossover strategy vs buy-and-hold over real history."""
-    result = await ms.backtest(symbol, days)
+async def get_backtest(
+    symbol: str = Query("BTC"),
+    days: int = Query(90, ge=14, le=365),
+    fast: int = Query(10, ge=2, le=100, description="fast SMA window (days)"),
+    slow: int = Query(30, ge=3, le=200, description="slow SMA window (days)"),
+    agent: dict = Depends(get_agent),
+):
+    """Backtest an SMA-crossover strategy vs buy-and-hold over real history.
+
+    fast/slow were already real parameters on ms.backtest() but this route
+    never exposed them -- every call silently ran the same fixed 10/30
+    window regardless of what a caller might want to test."""
+    if fast >= slow:
+        return {"error": "fast window must be < slow window", "fast": fast, "slow": slow}
+    result = await ms.backtest(symbol, days, fast=fast, slow=slow)
     if result is None:
         return {"error": "insufficient data", "symbol": symbol.upper()}
     return result
@@ -1366,10 +1633,8 @@ async def memory_graph(agent_name: str = None, limit: int = Query(80, ge=1, le=3
     
     Usage: /api/intel/memory/graph?agent_name=Hermes
     """
-    import aiosqlite, os as _os, time as _time, json as _json
-    
-    db = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))), "data", "vantage.db")
-    
+    import time as _time, json as _json
+
     P = {
         "post": "#a855f7", "video": "#3b82f6", "message": "#f59e0b",
         "signal": "#ef4444", "code": "#22c55e", "agent": "#ffffff",
@@ -1380,8 +1645,7 @@ async def memory_graph(agent_name: str = None, limit: int = Query(80, ge=1, le=3
     agent_id = None
     agent_display = agent_name or "Unknown"
     
-    async with aiosqlite.connect(db) as conn:
-        await conn.execute("PRAGMA busy_timeout=20000")
+    async with get_db() as conn:
         conn.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
         
         # Find target agent
@@ -1579,15 +1843,26 @@ async def memory_graph(agent_name: str = None, limit: int = Query(80, ge=1, le=3
 @router.get("/daily")
 async def daily_intel(limit: int = Query(10, ge=1, le=50), agent: dict = Depends(get_agent)):
     """Daily intel digest — recent posted intel-type broadcasts, newest first.
-    Backs the Trading -> Daily Intel tab (frontend/src/components/trading/
-    DailyIntel.tsx). Was a manual, never-committed server edit that got
+    Backs the Trading -> Agent Intel tab (frontend/src/components/trading/
+    AgentIntel.tsx). Was a manual, never-committed server edit that got
     silently wiped on a prior redeploy; recovered from git stash@{3} and
-    committed for real this time."""
+    committed for real this time.
+
+    agent_name is a real column on `agents`, joined here -- the frontend's
+    IntelReport type already declared agent_name as a field, but this query
+    never selected it (nor did anything render it) so the byline was
+    always blank. is_signed surfaces whether the report carries the
+    existing Ed25519 signature this table already supports."""
     import aiosqlite
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT id, title, post_content, created_at FROM broadcasts WHERE content_type='intel' ORDER BY created_at DESC LIMIT ?",
+            """SELECT b.id, b.title, b.post_content, b.created_at, b.is_signed,
+                      a.name AS agent_name
+               FROM broadcasts b
+               LEFT JOIN agents a ON a.id = b.agent_id
+               WHERE b.content_type='intel'
+               ORDER BY b.created_at DESC LIMIT ?""",
             (limit,)
         ) as cur:
             rows = [dict(r) for r in await cur.fetchall()]

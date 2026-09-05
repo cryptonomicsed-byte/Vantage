@@ -95,24 +95,30 @@ _federation_nonces: dict = {}
 
 
 async def _broadcast_gossip(channel: str, event: dict) -> None:
-    dead = set()
-    for ws in list(_gossip_channels.get(channel, set())):
-        try:
-            await ws.send_json({"channel": channel, **event})
-        except Exception:
-            dead.add(ws)
+    """Fan an event out to a named channel.
+
+    Two paths, deliberately (see backend/fanout.py). The in-process one keeps
+    every existing /ws/gossip subscriber working; the Conductor one gives the
+    same event to subscribers on other workers, which the in-process map
+    structurally cannot reach. Sends are concurrent, so one peer that has
+    stopped reading no longer delays the broadcast for everyone behind it.
+    """
+    from .fanout import deliver, to_conductor
+
+    payload = {"channel": channel, **event}
+    dead = await deliver(_gossip_channels.get(channel, set()), payload)
     if dead and channel in _gossip_channels:
         _gossip_channels[channel].difference_update(dead)
+    await to_conductor(channel, payload)
 
 
 async def notify_feed_clients(payload: dict) -> None:
-    dead = set()
-    for ws in list(_feed_clients):
-        try:
-            await ws.send_json({"type": "new_broadcast", **payload})
-        except Exception:
-            dead.add(ws)
+    from .fanout import deliver, to_conductor
+
+    message = {"type": "new_broadcast", **payload}
+    dead = await deliver(_feed_clients, message)
     _feed_clients.difference_update(dead)
+    await to_conductor("feed", message)
 
 def _compute_reputation_badges(
     broadcast_count: int, total_views: int, follower_count: int,
@@ -632,8 +638,11 @@ class _BatchWriter:
         async with self._lock:
             if not self._pending:
                 return
-            batch = self._pending[:]
-            self._pending.clear()
+            # Swap (don't clear-in-place) so a concurrent add() during the
+            # flush lands in a fresh list instead of being swept into `batch`
+            # and then lost if the commit below fails.
+            batch = self._pending
+            self._pending = []
             self._last_flush = _time_mod.monotonic()
         try:
             async with get_db() as db:
@@ -641,7 +650,17 @@ class _BatchWriter:
                     await db.execute(sql, params)
                 await db.commit()
         except Exception as _exc:
-            logger.warning("_BatchWriter flush error: %s", _exc)
+            # Re-queue the failed batch at the FRONT so it retries on the next
+            # flush cycle before any rows added meanwhile. The old code cleared
+            # _pending before this try, so a transient "database is locked"
+            # silently DROPPED the whole batch — view_events/activity rows lost
+            # (measured live: 39 drops in 2h). Never drop on contention.
+            logger.warning(
+                "_BatchWriter flush error (re-queueing %d rows): %s",
+                len(batch), _exc,
+            )
+            async with self._lock:
+                self._pending = batch + self._pending
 
     async def _flush_loop(self) -> None:
         while True:

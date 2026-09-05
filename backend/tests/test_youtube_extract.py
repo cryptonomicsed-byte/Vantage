@@ -9,7 +9,7 @@ watcher per the module's own design.
 """
 import pytest
 
-from backend.youtube_extract import extract_video_id, extract_github_urls
+from backend.youtube_extract import extract_video_id, extract_github_urls, extract_repo_urls
 
 
 # ── extract_video_id ─────────────────────────────────────────────────────
@@ -92,6 +92,34 @@ def test_no_github_links_returns_empty_list():
 def test_ignores_non_github_urls():
     text = "Follow me: https://twitter.com/someone and https://gitlab.com/owner/repo"
     assert extract_github_urls(text) == []
+
+
+# ── extract_repo_urls (multi-host frankenstein harvest) ─────────────────
+
+def test_repo_urls_catches_gitlab_and_gitea():
+    text = ("Tools: https://github.com/RustScan/RustScan, "
+            "https://gitlab.com/gitlab-org/gitlab-runner, "
+            "https://gitea.com/user/myrepo.git and a self-hosted one at "
+            "https://git.example.dev/team/project")
+    assert extract_repo_urls(text) == [
+        "https://github.com/RustScan/RustScan",
+        "https://gitlab.com/gitlab-org/gitlab-runner",
+        "https://gitea.com/user/myrepo",
+        "https://git.example.dev/team/project",
+    ]
+
+
+def test_repo_urls_skips_youtube_and_raw_links():
+    text = ("watch: https://youtube.com/watch?v=abc123, raw file: "
+            "https://raw.githubusercontent.com/owner/repo/main/readme.md, "
+            "real repo: https://github.com/owner/repo")
+    assert extract_repo_urls(text) == ["https://github.com/owner/repo"]
+
+
+def test_repo_urls_dedupes_and_strips_punctuation():
+    text = ("https://github.com/owner/repo), https://github.com/owner/repo "
+            "and https://github.com/owner/repo.git.")
+    assert extract_repo_urls(text) == ["https://github.com/owner/repo"]
 
 
 def test_http_scheme_input_is_matched_but_normalized_to_https():

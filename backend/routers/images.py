@@ -13,12 +13,10 @@ CHALLENGE_THEMES = [
     "Steampunk City", "Ethereal Forest", "Crystal Cavern", "AI Dreams", "Quantum Realm",
 ]
 
-def get_agent(x_agent_key):
-    import sqlite3
-    db = sqlite3.connect(str(DB))
-    db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
-    r = db.execute("SELECT id, name FROM agents WHERE api_key=?", (x_agent_key,)).fetchone()
-    db.close()
+async def get_agent(x_agent_key):
+    async with get_db() as db:
+        db.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
+        r = await (await db.execute("SELECT id, name FROM agents WHERE api_key=?", (x_agent_key,))).fetchone()
     return dict(r) if r else None
 
 # ── Upload ──
@@ -29,7 +27,7 @@ async def upload_image(
     neg_prompt: str = Form(""), params: str = Form("{}"),
     x_agent_key: str = Header(...),
 ):
-    agent = get_agent(x_agent_key)
+    agent = await get_agent(x_agent_key)
     if not agent: raise HTTPException(401)
     import aiosqlite, sqlite3
     iid = str(uuid.uuid4())[:12]
@@ -63,7 +61,7 @@ async def feed(cursor: str = Query(None), limit: int = Query(20)):
 # ── React ──
 @router.post("/{image_id}/react")
 async def react(image_id: str, type: str = Form(...), x_agent_key: str = Header(...)):
-    agent = get_agent(x_agent_key)
+    agent = await get_agent(x_agent_key)
     if not agent: raise HTTPException(401)
     valid = ["HEART", "FIRE", "INSIGHT", "SKEPTICAL"]
     if type not in valid: raise HTTPException(400)
@@ -78,7 +76,7 @@ async def react(image_id: str, type: str = Form(...), x_agent_key: str = Header(
 # ── Remix ──
 @router.post("/{image_id}/remix")
 async def remix(image_id: str, prompt: str = Form(""), x_agent_key: str = Header(...)):
-    agent = get_agent(x_agent_key)
+    agent = await get_agent(x_agent_key)
     if not agent: raise HTTPException(401)
     import aiosqlite
     async with get_db() as db:
@@ -160,7 +158,7 @@ async def challenge_submit(
     x_agent_key: str = Header(...),
 ):
     """Agent submits their generation to today's challenge."""
-    agent = get_agent(x_agent_key)
+    agent = await get_agent(x_agent_key)
     if not agent: raise HTTPException(401)
     import aiosqlite
     async with get_db() as db:
@@ -203,7 +201,7 @@ async def finalize_challenge(
 ):
     """Select the winner for a challenge. Highest reaction_fire + reaction_insight wins.
     Winner's metadata is permanently locked into daily_challenges table."""
-    agent = get_agent(x_agent_key)
+    agent = await get_agent(x_agent_key)
     if not agent: raise HTTPException(401)
     import aiosqlite
     async with get_db() as db:

@@ -20,7 +20,7 @@ rest of Vantage's write endpoints, and become real authenticated MCP tools
 once wired through the /mcp mount (see backend/mcp_server.py).
 """
 
-import logging, httpx, json, os, time, base64, subprocess, shutil, re
+import asyncio, logging, httpx, json, os, time, base64, subprocess, shutil, re
 from datetime import datetime, timezone
 from typing import Literal, Optional
 from fastapi import APIRouter, Depends, Query, Body, HTTPException
@@ -511,7 +511,7 @@ async def _regex_scan(owner: str, name: str, agent_id: int, agent_name: str) -> 
             "scanned_at": datetime.now(timezone.utc).isoformat(),
         }
 
-        _post_critical_findings(name, [f for f in findings if f["severity"] >= 0.90][:3])
+        await _post_critical_findings(name, [f for f in findings if f["severity"] >= 0.90][:3])
 
         scan_id = await _create_scan_row(agent_id, owner, name, "regex")
         await _update_scan_row(
@@ -526,8 +526,7 @@ async def _regex_scan(owner: str, name: str, agent_id: int, agent_name: str) -> 
         shutil.rmtree(target, ignore_errors=True)
 
 
-def _post_critical_findings(repo_name: str, critical: list[dict]) -> None:
-    """Best-effort: post critical findings to Vantage's signal pool."""
+def _post_critical_findings_sync(repo_name: str, critical: list[dict]) -> None:
     if not critical:
         return
     try:
@@ -546,6 +545,14 @@ def _post_critical_findings(repo_name: str, critical: list[dict]) -> None:
             __import__('urllib').request.urlopen(req, timeout=5)
     except Exception:
         pass
+
+
+async def _post_critical_findings(repo_name: str, critical: list[dict]) -> None:
+    """Best-effort: post critical findings to Vantage's signal pool. Off the
+    event loop -- calling urlopen synchronously here (up to 3 findings x 5s
+    timeout each) used to freeze every other in-flight request for the
+    whole chain."""
+    await asyncio.to_thread(_post_critical_findings_sync, repo_name, critical)
 
 
 async def _create_scan_row(agent_id: int, owner: str, name: str, engine: str) -> int:
@@ -652,7 +659,7 @@ async def _trivy_scan(owner: str, name: str, agent_id: int, agent_name: str) -> 
             "findings": findings[:30],
             "scanned_at": datetime.now(timezone.utc).isoformat(),
         }
-        _post_critical_findings(name, critical[:3])
+        await _post_critical_findings(name, critical[:3])
 
         scan_id = await _create_scan_row(agent_id, owner, name, "trivy")
         await _update_scan_row(
@@ -717,7 +724,7 @@ async def _semgrep_scan(owner: str, name: str, agent_id: int, agent_name: str) -
             "findings": findings[:30],
             "scanned_at": datetime.now(timezone.utc).isoformat(),
         }
-        _post_critical_findings(name, critical[:3])
+        await _post_critical_findings(name, critical[:3])
 
         scan_id = await _create_scan_row(agent_id, owner, name, "semgrep")
         await _update_scan_row(
@@ -891,7 +898,7 @@ async def scan_status(owner: str, name: str, scan_id: int, agent: dict = Depends
     if status in ("complete", "error"):
         update["completed_at"] = datetime.now(timezone.utc).isoformat()
         critical = [f for f in findings if f.get("severity", 0) >= 0.90][:3]
-        _post_critical_findings(name, critical)
+        await _post_critical_findings(name, critical)
     await _update_scan_row(scan_id, **update)
     row.update(update)
     return {**row, "findings": findings}

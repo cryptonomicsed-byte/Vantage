@@ -1,0 +1,403 @@
+"""Tests for aggregate_score.py (task b) -- the whole-app aggregate
+scoring engine. Covers: normalization math (pure), disqualification
+(manipulation flags + mint/freeze authority), weight-sum invariant, and a
+real end-to-end scenario with two candidates where the higher-conviction
+one must win.
+"""
+import aiosqlite
+import pytest
+
+from backend.db import DB_PATH, init_agents_db
+from backend.aggregate_score import (
+    WEIGHTS,
+    _normalize,
+    compute_aggregate_scores,
+)
+
+
+@pytest.fixture(autouse=True)
+async def _init_schema():
+    await init_agents_db()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS token_wallet_roles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mint TEXT NOT NULL, symbol TEXT, wallet_address TEXT NOT NULL,
+                role TEXT NOT NULL, rank INTEGER, metric REAL, metric_label TEXT,
+                discovered_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(mint, wallet_address, role)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS wallet_reputation (
+                wallet_address TEXT PRIMARY KEY, chain TEXT DEFAULT 'solana',
+                display_name TEXT DEFAULT '', copy_trade_score REAL DEFAULT 0
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS social_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, ticker TEXT, contract_address TEXT,
+                sentiment TEXT, confidence REAL, created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("DELETE FROM token_wallet_roles")
+        await db.execute("DELETE FROM wallet_reputation")
+        await db.execute("DELETE FROM social_signals")
+        await db.execute("DELETE FROM pumpfun_premigration_tokens")
+        await db.execute("DELETE FROM tracked_wallets")
+        await db.commit()
+
+
+def test_weights_sum_to_one():
+    assert abs(sum(WEIGHTS.values()) - 1.0) < 1e-9
+
+
+def test_normalize_min_max_scaling():
+    result = _normalize({"a": 10.0, "b": 20.0, "c": 30.0})
+    assert result["a"] == 0.0
+    assert result["b"] == 0.5
+    assert result["c"] == 1.0
+
+
+def test_normalize_all_equal_values_returns_zero():
+    result = _normalize({"a": 5.0, "b": 5.0, "c": 5.0})
+    assert result == {"a": 0.0, "b": 0.0, "c": 0.0}
+
+
+def test_normalize_empty_returns_empty():
+    assert _normalize({}) == {}
+
+
+@pytest.mark.asyncio
+async def test_manipulation_flagged_token_is_disqualified():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO pumpfun_premigration_tokens (mint, symbol, score, manipulation_flags, evicted, migrated) "
+            "VALUES (?,?,?,?,0,0)",
+            ("FlaggedMint111111111111111111111111111", "FLAG", 50.0, '["low_unique_buyer_diversity"]'),
+        )
+        await db.commit()
+
+    result = await compute_aggregate_scores(
+        [{"address": "FlaggedMint111111111111111111111111111", "symbol": "FLAG", "platform_breadth": 3}],
+        helius_key="",
+    )
+
+    assert result["ranked"] == []
+    assert len(result["disqualified"]) == 1
+    assert result["disqualified"][0]["address"] == "FlaggedMint111111111111111111111111111"
+    assert "manipulation_flags" in result["disqualified"][0]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_higher_conviction_candidate_wins(monkeypatch):
+    # compute_aggregate_scores now applies a real dust floor (see
+    # degen_filters.py) via a real _dexscreener_mcap network call -- mocked
+    # here (no network in tests) to clear the floor, isolating this test to
+    # the conviction-ranking logic it actually exists to verify.
+    import backend.aggregate_score as agg_module
+
+    async def fake_mcap_batch(mints):
+        return {m: {"market_cap": 50_000.0, "liquidity_usd": 10_000.0} for m in mints}
+
+    monkeypatch.setattr(agg_module, "_dexscreener_mcap_batch", fake_mcap_batch)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO wallet_reputation (wallet_address, copy_trade_score) VALUES (?,?)",
+            ("SmartWallet1111111111111111111111111111", 50.0),
+        )
+        # Strong candidate: high smart-money conviction.
+        await db.execute(
+            "INSERT INTO token_wallet_roles (mint, symbol, wallet_address, role) VALUES (?,?,?,?)",
+            ("StrongMint1111111111111111111111111111", "STRONG", "SmartWallet1111111111111111111111111111", "top_holder"),
+        )
+        await db.commit()
+
+    candidates = [
+        {"address": "StrongMint1111111111111111111111111111", "symbol": "STRONG", "platform_breadth": 4},
+        {"address": "WeakMint11111111111111111111111111111", "symbol": "WEAK", "platform_breadth": 1},
+    ]
+    result = await compute_aggregate_scores(candidates, helius_key="")
+
+    assert len(result["ranked"]) == 2
+    assert result["ranked"][0]["address"] == "StrongMint1111111111111111111111111111"
+    assert result["ranked"][0]["total_score"] > result["ranked"][1]["total_score"]
+    # Fully auditable: raw + normalized + weight present for every component.
+    for comp in ("smart_money", "platform_breadth", "volume_momentum", "social_sentiment", "whale_presence"):
+        assert comp in result["ranked"][0]["components"]
+        assert "raw" in result["ranked"][0]["components"][comp]
+        assert "weight" in result["ranked"][0]["components"][comp]
+
+
+@pytest.mark.asyncio
+async def test_no_candidates_returns_empty_ranked():
+    result = await compute_aggregate_scores([], helius_key="")
+    assert result["ranked"] == []
+    assert result["disqualified"] == []
+    assert result["methodology"] == WEIGHTS
+
+
+@pytest.mark.asyncio
+async def test_whale_presence_detected_from_active_tracked_wallet(monkeypatch):
+    import backend.aggregate_score as agg_module
+
+    async def fake_mcap_batch(mints):
+        return {m: {"market_cap": 50_000.0, "liquidity_usd": 10_000.0} for m in mints}
+
+    monkeypatch.setattr(agg_module, "_dexscreener_mcap_batch", fake_mcap_batch)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO tracked_wallets (chain, address, balance_usd, archived_at) VALUES ('solana',?,?,NULL)",
+            ("WhaleWallet111111111111111111111111111111", 50000.0),
+        )
+        await db.execute(
+            "INSERT INTO token_wallet_roles (mint, symbol, wallet_address, role) VALUES (?,?,?,?)",
+            ("WhaleTokenMint111111111111111111111111", "WHALE", "WhaleWallet111111111111111111111111111111", "deployer"),
+        )
+        await db.commit()
+
+    result = await compute_aggregate_scores(
+        [{"address": "WhaleTokenMint111111111111111111111111", "symbol": "WHALE", "platform_breadth": 1}],
+        helius_key="",
+    )
+
+    assert len(result["ranked"]) == 1
+    assert result["ranked"][0]["components"]["whale_presence"]["raw"] is True
+
+
+@pytest.mark.asyncio
+async def test_archived_whale_wallet_does_not_count(monkeypatch):
+    import backend.aggregate_score as agg_module
+
+    async def fake_mcap_batch(mints):
+        return {m: {"market_cap": 50_000.0, "liquidity_usd": 10_000.0} for m in mints}
+
+    monkeypatch.setattr(agg_module, "_dexscreener_mcap_batch", fake_mcap_batch)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO tracked_wallets (chain, address, balance_usd, archived_at) VALUES ('solana',?,?,'2026-01-01 00:00:00')",
+            ("ArchivedWhale11111111111111111111111111", 50000.0),
+        )
+        await db.execute(
+            "INSERT INTO token_wallet_roles (mint, symbol, wallet_address, role) VALUES (?,?,?,?)",
+            ("NoWhaleTokenMint11111111111111111111111", "NOWHALE", "ArchivedWhale11111111111111111111111111", "deployer"),
+        )
+        await db.commit()
+
+    result = await compute_aggregate_scores(
+        [{"address": "NoWhaleTokenMint11111111111111111111111", "symbol": "NOWHALE", "platform_breadth": 1}],
+        helius_key="",
+    )
+
+    assert len(result["ranked"]) == 1
+    assert result["ranked"][0]["components"]["whale_presence"]["raw"] is False
+
+
+@pytest.mark.asyncio
+async def test_usdc_disqualified_as_major_regardless_of_score(monkeypatch):
+    """Real bug regression: the Aggregate Winner banner scored USDC #1
+    (huge real volume/liquidity/conviction -- mathematically correct, but
+    useless for a degen-plays feature). USDC's real Solana mint must be
+    excluded outright, never even entering the ranked pool."""
+    import backend.aggregate_score as agg_module
+
+    async def fake_mcap_batch(mints):
+        return {m: {"market_cap": 50_000_000_000.0, "liquidity_usd": 1_000_000_000.0} for m in mints}
+
+    monkeypatch.setattr(agg_module, "_dexscreener_mcap_batch", fake_mcap_batch)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO wallet_reputation (wallet_address, copy_trade_score) VALUES (?,?)",
+            ("HugeWallet111111111111111111111111111111", 999.0),
+        )
+        await db.execute(
+            "INSERT INTO token_wallet_roles (mint, symbol, wallet_address, role) VALUES (?,?,?,?)",
+            ("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "penny", "HugeWallet111111111111111111111111111111", "top_holder"),
+        )
+        await db.commit()
+
+    result = await compute_aggregate_scores(
+        [{"address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "symbol": "penny", "platform_breadth": 6}],
+        helius_key="",
+    )
+
+    assert result["ranked"] == []
+    assert len(result["disqualified"]) == 1
+    assert "major/stablecoin" in result["disqualified"][0]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_ten_dollar_mcap_dust_disqualified(monkeypatch):
+    """Real bug regression: pump.fun's leader slot showed a ~$10-mcap
+    dead token. The aggregate scorer's own dust floor must reject it too."""
+    import backend.aggregate_score as agg_module
+
+    async def fake_mcap_batch(mints):
+        return {m: {"market_cap": 10.0, "liquidity_usd": 5.0} for m in mints}
+
+    monkeypatch.setattr(agg_module, "_dexscreener_mcap_batch", fake_mcap_batch)
+
+    result = await compute_aggregate_scores(
+        [{"address": "DustMint1111111111111111111111111111111", "symbol": "DUST", "platform_breadth": 1}],
+        helius_key="",
+    )
+
+    assert result["ranked"] == []
+    assert len(result["disqualified"]) == 1
+    assert "dust" in result["disqualified"][0]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_pumpfun_own_mcap_wins_over_unreliable_thin_dexscreener_pair(monkeypatch):
+    """Real bug regression: a live pre-migration pump.fun token
+    ($richness) had pump.fun's own real tracked mcap but ALSO one thin/
+    unreliable DexScreener pair reporting marketCap=$10.75 (a ~300x
+    discrepancy from the real value -- likely a stray seed LP, not real
+    price discovery). The old logic trusted whichever source returned
+    "something," incorrectly disqualifying a real active token as dust.
+    A mint actively tracked in pumpfun_premigration_tokens must use
+    pump.fun's own mcap, not an incidental thin external pair.
+
+    mcap set within the owner-specified $14k-$32k band (refined
+    2026-08-28, after the original live bug at $3,043 -- which is now
+    correctly below-band on its own, a separate real exclusion) so this
+    test still isolates the ONE thing it's regression-testing: mcap
+    source priority, not the band or activity screen."""
+    import backend.aggregate_score as agg_module
+
+    async def fake_mcap_batch_thin_pair(mints):
+        # Simulates the real observed discrepancy: a technically-present
+        # but unreliable DexScreener listing for a pre-migration token.
+        return {m: {"market_cap": 10.75, "liquidity_usd": None} for m in mints}
+
+    monkeypatch.setattr(agg_module, "_dexscreener_mcap_batch", fake_mcap_batch_thin_pair)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO pumpfun_premigration_tokens
+               (mint, symbol, market_cap_usd, volume_sol_total, score, manipulation_flags, evicted, migrated,
+                buy_count, sell_count, unique_buyers, unique_sellers, last_trade_at, v_sol_in_curve)
+               VALUES (?,?,?,?,?,?,0,0,?,?,?,?,datetime('now'),?)""",
+            ("RichnessMint1111111111111111111111111111", "richness", 20000.0, 100.0, 18.93, "[]",
+             2, 1, '["WalletA","WalletB"]', '["WalletC"]', 30.0),
+        )
+        await db.commit()
+
+    result = await compute_aggregate_scores(
+        [{"address": "RichnessMint1111111111111111111111111111", "symbol": "richness", "platform_breadth": 1}],
+        helius_key="",
+    )
+
+    assert len(result["ranked"]) == 1
+    assert result["ranked"][0]["symbol"] == "richness"
+
+
+# ── Nansen smart-money holdings: real ADDITIONAL signal, not a replacement ──
+
+@pytest.mark.asyncio
+async def test_smart_money_uses_pure_copytrade_when_nansen_unavailable(monkeypatch):
+    """No NANSEN_API_KEY / Nansen down / no data for this pool -> the
+    smart_money component must collapse to 100% the existing
+    copy_trade_score signal, never degrade or block real scoring."""
+    import backend.aggregate_score as agg_module
+
+    async def fake_mcap_batch(mints):
+        return {m: {"market_cap": 50_000.0, "liquidity_usd": 10_000.0} for m in mints}
+
+    async def fake_nansen_empty(mints):
+        return {}  # no key configured / no data, real fail-soft shape
+
+    monkeypatch.setattr(agg_module, "_dexscreener_mcap_batch", fake_mcap_batch)
+    monkeypatch.setattr(agg_module, "smart_money_holdings_by_mint", fake_nansen_empty)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO wallet_reputation (wallet_address, copy_trade_score) VALUES (?,?)",
+            ("SmartWallet1111111111111111111111111111", 25.0),
+        )
+        await db.execute(
+            "INSERT INTO token_wallet_roles (mint, symbol, wallet_address, role) VALUES (?,?,?,?)",
+            ("SoloMint1111111111111111111111111111111", "SOLO", "SmartWallet1111111111111111111111111111", "top_holder"),
+        )
+        await db.commit()
+
+    result = await compute_aggregate_scores(
+        [{"address": "SoloMint1111111111111111111111111111111", "symbol": "SOLO", "platform_breadth": 1}],
+        helius_key="",
+    )
+
+    assert len(result["ranked"]) == 1
+    sm = result["ranked"][0]["components"]["smart_money"]
+    assert sm["raw"]["copy_trade_score"] == 25.0
+    assert sm["raw"]["nansen_smart_money_usd"] is None
+    assert sm["sources"]["nansen_available"] is False
+    assert sm["sources"]["nansen_normalized"] is None
+    # lone survivor with real (>0) copytrade signal -> normalize's n==1
+    # presence-of-signal rule gives 1.0, and with Nansen unavailable the
+    # combined score must equal that pure copytrade normalization exactly.
+    assert sm["normalized"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_nansen_signal_blended_and_disclosed_when_available(monkeypatch):
+    """Real regression for the blend math: two candidates with IDENTICAL
+    copy_trade_score, but one has real Nansen smart-money USD value and
+    the other has none -- the Nansen-backed one must score strictly
+    higher (30% blend weight is real, not decorative), and both raw
+    numbers must be visible in the response, not silently merged into
+    one opaque figure."""
+    import backend.aggregate_score as agg_module
+
+    async def fake_mcap_batch(mints):
+        return {m: {"market_cap": 50_000.0, "liquidity_usd": 10_000.0} for m in mints}
+
+    async def fake_nansen(mints):
+        # Only NansenMint has real Nansen data; PlainMint has none (missing
+        # key, not a zero -- per nansen_client's documented contract).
+        return {"NansenMint111111111111111111111111111111": {
+            "value_usd": 500_000.0, "holders_count": 12, "balance_change_24h_pct": 4.2,
+        }}
+
+    monkeypatch.setattr(agg_module, "_dexscreener_mcap_batch", fake_mcap_batch)
+    monkeypatch.setattr(agg_module, "smart_money_holdings_by_mint", fake_nansen)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO wallet_reputation (wallet_address, copy_trade_score) VALUES (?,?)",
+            ("EqualWallet111111111111111111111111111", 10.0),
+        )
+        for mint, sym in [
+            ("NansenMint111111111111111111111111111111", "NANSEN"),
+            ("PlainMint111111111111111111111111111111", "PLAIN"),
+        ]:
+            await db.execute(
+                "INSERT INTO token_wallet_roles (mint, symbol, wallet_address, role) VALUES (?,?,?,?)",
+                (mint, sym, "EqualWallet111111111111111111111111111", "top_holder"),
+            )
+        await db.commit()
+
+    result = await compute_aggregate_scores(
+        [
+            {"address": "NansenMint111111111111111111111111111111", "symbol": "NANSEN", "platform_breadth": 1},
+            {"address": "PlainMint111111111111111111111111111111", "symbol": "PLAIN", "platform_breadth": 1},
+        ],
+        helius_key="",
+    )
+
+    by_addr = {r["address"]: r for r in result["ranked"]}
+    nansen_sm = by_addr["NansenMint111111111111111111111111111111"]["components"]["smart_money"]
+    plain_sm = by_addr["PlainMint111111111111111111111111111111"]["components"]["smart_money"]
+
+    # Identical raw copy_trade_score...
+    assert nansen_sm["raw"]["copy_trade_score"] == plain_sm["raw"]["copy_trade_score"] == 10.0
+    # ...but Nansen data disclosed separately and only for the real candidate.
+    assert nansen_sm["raw"]["nansen_smart_money_usd"] == 500_000.0
+    assert plain_sm["raw"]["nansen_smart_money_usd"] is None
+    assert nansen_sm["sources"]["nansen_available"] is True
+    # And the blend gives the Nansen-backed candidate a real, strictly
+    # higher combined smart_money score despite equal copy_trade_score.
+    assert nansen_sm["normalized"] > plain_sm["normalized"]
