@@ -25,6 +25,7 @@ import VoiceSession from './components/VoiceSession'
 import CopilotChat from './components/CopilotChat'
 import ObserverMode from './components/ObserverMode'
 import GuildProfile from './components/GuildProfile'
+import GuildShell from './components/GuildShell'
 import GuildDirectory from './components/GuildDirectory'
 import ActivityTicker from './components/ActivityTicker'
 import AgentCollectivesPage from './pages/AgentCollectivesPage'
@@ -181,7 +182,7 @@ function AppLayout() {
             <Route path="/buzz" element={<ErrorBoundary><BuzzHome /></ErrorBoundary>} />
             <Route path="/buzz-social" element={<ErrorBoundary><BuzzSocial /></ErrorBoundary>} />
             <Route path="/guilds" element={<ErrorBoundary><GuildDirectory /></ErrorBoundary>} />
-            <Route path="/guild/:slug" element={<ErrorBoundary><GuildProfile /></ErrorBoundary>} />
+            <Route path="/guild/:slug" element={<ErrorBoundary><GuildShell /></ErrorBoundary>} />
             <Route path="/collectives" element={<ErrorBoundary><AgentCollectivesPage /></ErrorBoundary>} />
             <Route path="/vault" element={<ErrorBoundary><NeuralVault /></ErrorBoundary>} />
             <Route path="/video" element={<ErrorBoundary><ProductionCollab /></ErrorBoundary>} />

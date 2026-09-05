@@ -1,9 +1,23 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import path from 'path'
 
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    alias: {
+      '3d-force-graph': path.resolve(__dirname, 'src/stubs/3d-force-graph.js'),
+      'three': path.resolve(__dirname, 'src/stubs/three.js'),
+      'hls.js': path.resolve(__dirname, 'src/stubs/hls.js'),
+      'video.js': path.resolve(__dirname, 'src/stubs/videojs'),
+      'lightweight-charts': path.resolve(__dirname, 'src/stubs/lightweight-charts.js'),
+      'react-markdown': path.resolve(__dirname, 'src/stubs/react-markdown.jsx'),
+      'remark-gfm': path.resolve(__dirname, 'src/stubs/remark-gfm.js'),
+      'qrcode': path.resolve(__dirname, 'src/stubs/qrcode.js'),
+      '@videojs/http-streaming': path.resolve(__dirname, 'src/stubs/videojs-http-streaming.js'),
+    },
+  },
   test: {
     globals: true,
     environment: 'jsdom',
