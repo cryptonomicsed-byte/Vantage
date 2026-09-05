@@ -28,6 +28,28 @@ Two outcomes look alike from the caller's side and must never be conflated:
 `status` carries that distinction: `"ok"` means a real verdict is present,
 `"unavailable"` means there is none. `valid` is meaningful only when
 `status == "ok"`.
+
+# Two validators, answering different questions
+
+There are two, and the order is deliberate:
+
+1. **The native engine** (`pine-runtime`, `POST /validate`) answers *can Vantage
+   run this?* It is a localhost sidecar, so it needs no internet and cannot be
+   taken away by a third party.
+2. **TradingView** answers *is this valid Pine Script?*
+
+The native check is the one that actually matters here, and it is checked
+first. TradingView accepts the whole Pine language while `pine-engine.js`
+implements a subset — so `ta.percentrank`, `ta.linreg` offsets and dozens of
+other constructs compile cleanly at TradingView and then fail inside our own
+sandbox. A gate that only asked TradingView would wave those through and the
+failure would surface later, at run time, as a sandbox error the author cannot
+connect to anything.
+
+TradingView stays as a second opinion because the reverse also happens: the
+native parser is smaller, so it can accept something malformed that a real Pine
+compiler would reject. Two gates, cheapest and most relevant first, and a
+verdict from either is enough to refuse.
 """
 from __future__ import annotations
 
@@ -47,6 +69,11 @@ FACADE_URL = os.environ.get(
     "PINE_FACADE_URL",
     "https://pine-facade.tradingview.com/pine-facade/translate_light/",
 )
+# The native engine sidecar. Same default as routers/pine.py uses for /run.
+RUNTIME_URL = os.environ.get("PINE_RUNTIME_URL", "http://127.0.0.1:9871")
+# Set to "0" to consult TradingView only. The native check needs no network
+# beyond localhost, so there is rarely a reason to.
+NATIVE_ENABLED = os.environ.get("PINE_VALIDATE_NATIVE", "1") != "0"
 # Set to "0" to skip validation entirely and restore the previous behaviour.
 ENABLED = os.environ.get("PINE_VALIDATE_ENABLED", "1") != "0"
 TIMEOUT = float(os.environ.get("PINE_VALIDATE_TIMEOUT", "6.0"))
@@ -203,3 +230,84 @@ def summarize(verdict: dict, limit: int = 3) -> str:
     )
     extra = len(errors) - limit
     return head + (f" (+{extra} more)" if extra > 0 else "")
+
+
+async def _post_native(code: str):
+    """Ask the local engine whether it can run `code`. Its own seam, like `_post`."""
+    async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+        return await c.post(f"{RUNTIME_URL.rstrip('/')}/validate", json={"script": code})
+
+
+async def validate_native(code: str) -> dict:
+    """Can the Vantage sandbox actually execute this script?
+
+    Same verdict shape as `validate_pine`, so a caller handles both identically.
+    An unreachable sidecar is `unavailable` — no verdict — for the same reason
+    an unreachable TradingView is: the gate must not start refusing every script
+    because a service is down.
+    """
+    if not NATIVE_ENABLED:
+        return {"status": "unavailable", "reason": "native validation disabled"}
+    if not isinstance(code, str) or not code.strip():
+        return {"status": "unavailable", "reason": "empty script"}
+    try:
+        r = await _post_native(code)
+        if r.status_code != 200:
+            return {"status": "unavailable", "reason": f"pine-runtime HTTP {r.status_code}"}
+        payload = r.json()
+    except (httpx.HTTPError, ValueError, asyncio.TimeoutError) as e:
+        logger.debug("pine-runtime unavailable: %s", e)
+        return {"status": "unavailable", "reason": f"{type(e).__name__}"}
+
+    errors = [
+        {
+            "line": e.get("line"),
+            "column": None,
+            "message": e.get("message", ""),
+            "source": e.get("source"),
+        }
+        for e in (payload.get("errors") or [])
+    ]
+    out: dict = {
+        "status": "ok",
+        "valid": bool(payload.get("valid")),
+        "errors": errors,
+        "validator": "native",
+    }
+    if errors:
+        out["annotated"] = annotate(code, errors)
+    return out
+
+
+async def validate_all(code: str) -> dict:
+    """Run both gates, native first, and return the first real verdict of
+    *invalid* — or the best available verdict if the script passes.
+
+    Ordering is the point. The native engine decides whether we can run the
+    script at all, which is the question this codebase actually needs answered,
+    and it costs a localhost round trip. TradingView is consulted only for a
+    script the sandbox already accepts, to catch Pine errors a smaller parser
+    might have let through.
+
+    If both are unavailable the result is `unavailable` and the caller proceeds,
+    exactly as before either gate existed.
+    """
+    native = await validate_native(code)
+    if native.get("status") == "ok" and not native.get("valid"):
+        return native
+
+    remote = await validate_pine(code)
+    if remote.get("status") == "ok" and not remote.get("valid"):
+        remote["validator"] = "tradingview"
+        return remote
+
+    # Neither refused. Prefer whichever actually produced a verdict.
+    if native.get("status") == "ok":
+        return native
+    if remote.get("status") == "ok":
+        remote["validator"] = "tradingview"
+        return remote
+    return {
+        "status": "unavailable",
+        "reason": f"native: {native.get('reason')}; tradingview: {remote.get('reason')}",
+    }

@@ -66,9 +66,15 @@ def _stub_facade(monkeypatch, *, payload=None, status=200, raise_exc=None, count
     monkeypatch.setattr(pv, "ENABLED", True)
 
 
-@pytest_asyncio.fixture(autouse=True)
+@pytest_asyncio.fixture
 async def _init_pine(client):
-    # ASGITransport doesn't run the app lifespan, so create the table here.
+    """Create the indicators table for the route tests.
+
+    Deliberately NOT autouse: it depends on `client`, which builds the whole
+    app. Left autouse, every pure unit test in this file would inherit that
+    dependency and fail whenever anything unrelated in the app fails to import.
+    Only the tests that actually hit a route ask for it.
+    """
     await pine.init_pine_db()
 
 
@@ -218,7 +224,7 @@ def _h(agent):
 
 
 @pytest.mark.asyncio
-async def test_run_rejects_a_script_that_does_not_compile(client, monkeypatch, fresh_agent):
+async def test_run_rejects_a_script_that_does_not_compile(client, monkeypatch, fresh_agent, _init_pine):
     a = await fresh_agent()
     _stub_facade(monkeypatch, payload=BROKEN)
 
@@ -231,7 +237,7 @@ async def test_run_rejects_a_script_that_does_not_compile(client, monkeypatch, f
 
 
 @pytest.mark.asyncio
-async def test_compile_gate_runs_before_governance(client, monkeypatch, fresh_agent):
+async def test_compile_gate_runs_before_governance(client, monkeypatch, fresh_agent, _init_pine):
     """Ordering matters: the cheap deterministic gate should short-circuit the
     governance call, not run after it."""
     a = await fresh_agent()
@@ -251,7 +257,7 @@ async def test_compile_gate_runs_before_governance(client, monkeypatch, fresh_ag
 
 
 @pytest.mark.asyncio
-async def test_run_proceeds_when_the_compiler_is_unreachable(client, monkeypatch, fresh_agent):
+async def test_run_proceeds_when_the_compiler_is_unreachable(client, monkeypatch, fresh_agent, _init_pine):
     """An outage must not start rejecting every agent's work."""
     import httpx
     a = await fresh_agent()
@@ -284,7 +290,7 @@ async def test_run_proceeds_when_the_compiler_is_unreachable(client, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_saving_a_broken_script_is_refused(client, monkeypatch, fresh_agent):
+async def test_saving_a_broken_script_is_refused(client, monkeypatch, fresh_agent, _init_pine):
     """Persisting and later sharing a script that cannot compile is worse than
     running one, because a guild inherits it."""
     a = await fresh_agent()
@@ -296,10 +302,121 @@ async def test_saving_a_broken_script_is_refused(client, monkeypatch, fresh_agen
 
 
 @pytest.mark.asyncio
-async def test_valid_script_still_saves(client, monkeypatch, fresh_agent):
+async def test_valid_script_still_saves(client, monkeypatch, fresh_agent, _init_pine):
     a = await fresh_agent()
     _stub_facade(monkeypatch, payload=CLEAN)
 
     r = await client.post("/api/pine/indicators", headers=_h(a),
                           json={"name": "Good", "script": 'plot(ta.ema(close, 20), "EMA")'})
     assert r.status_code == 200, r.text
+
+
+# --- the two-validator chain ------------------------------------------------
+#
+# The question behind these: if TradingView goes away, does the gate still
+# work? And does the gate catch scripts TradingView accepts but our own
+# sandbox cannot run?
+
+def _stub_native(monkeypatch, *, payload=None, status=200, raise_exc=None):
+    class FakeResp:
+        status_code = status
+        def json(self):
+            return payload
+
+    async def fake_post(code):
+        if raise_exc is not None:
+            raise raise_exc
+        return FakeResp()
+
+    monkeypatch.setattr(pv, "_post_native", fake_post)
+    monkeypatch.setattr(pv, "NATIVE_ENABLED", True)
+
+
+NATIVE_OK = {"valid": True, "errors": []}
+NATIVE_BAD = {"valid": False, "errors": [
+    {"message": "Unknown function: ta.percentrank", "line": 3, "source": "plot(ta.percentrank(close,20))"}
+]}
+
+
+@pytest.mark.asyncio
+async def test_native_validator_alone_still_gates_when_tradingview_is_down(monkeypatch):
+    """The fallback the chain exists for."""
+    import httpx
+    _stub_native(monkeypatch, payload=NATIVE_BAD)
+    _stub_facade(monkeypatch, raise_exc=httpx.ConnectError("tradingview down"))
+
+    v = await pv.validate_all("plot(ta.percentrank(close,20))")
+    assert v["status"] == "ok"
+    assert v["valid"] is False
+    assert v["validator"] == "native"
+
+
+@pytest.mark.asyncio
+async def test_a_script_tradingview_accepts_but_we_cannot_run_is_refused(monkeypatch):
+    """The case a TradingView-only gate waves through: valid Pine using a
+    function pine-engine.js does not implement. It would fail later, in the
+    sandbox, as an error the author cannot trace back."""
+    _stub_native(monkeypatch, payload=NATIVE_BAD)
+    _stub_facade(monkeypatch, payload=CLEAN)
+
+    v = await pv.validate_all("plot(ta.percentrank(close,20))")
+    assert v["valid"] is False
+    assert v["validator"] == "native"
+    assert v["errors"][0]["line"] == 3
+
+
+@pytest.mark.asyncio
+async def test_tradingview_still_catches_what_the_native_parser_misses(monkeypatch):
+    """The reverse direction: the native parser is smaller, so it can accept
+    something a real Pine compiler rejects."""
+    _stub_native(monkeypatch, payload=NATIVE_OK)
+    _stub_facade(monkeypatch, payload=BROKEN)
+
+    v = await pv.validate_all("plot(ta.sma(clse,20))")
+    assert v["valid"] is False
+    assert v["validator"] == "tradingview"
+
+
+@pytest.mark.asyncio
+async def test_both_clean_passes(monkeypatch):
+    _stub_native(monkeypatch, payload=NATIVE_OK)
+    _stub_facade(monkeypatch, payload=CLEAN)
+    v = await pv.validate_all("plot(close)")
+    assert v["status"] == "ok" and v["valid"] is True
+
+
+@pytest.mark.asyncio
+async def test_both_down_yields_no_verdict_and_never_blocks(monkeypatch):
+    """Two outages must not become a rejection."""
+    import httpx
+    _stub_native(monkeypatch, raise_exc=httpx.ConnectError("sidecar down"))
+    _stub_facade(monkeypatch, raise_exc=httpx.ConnectError("tradingview down"))
+
+    v = await pv.validate_all("plot(close)")
+    assert v["status"] == "unavailable"
+    assert "valid" not in v
+
+
+@pytest.mark.asyncio
+async def test_native_verdict_is_preferred_when_tradingview_is_unavailable(monkeypatch):
+    import httpx
+    _stub_native(monkeypatch, payload=NATIVE_OK)
+    _stub_facade(monkeypatch, raise_exc=httpx.ConnectError("down"))
+    v = await pv.validate_all("plot(close)")
+    assert v["status"] == "ok" and v["valid"] is True and v["validator"] == "native"
+
+
+@pytest.mark.asyncio
+async def test_native_sidecar_non_200_is_unavailable_not_invalid(monkeypatch):
+    _stub_native(monkeypatch, payload=None, status=503)
+    v = await pv.validate_native("plot(close)")
+    assert v["status"] == "unavailable"
+    assert "valid" not in v
+
+
+@pytest.mark.asyncio
+async def test_native_disabled_falls_through_to_tradingview(monkeypatch):
+    monkeypatch.setattr(pv, "NATIVE_ENABLED", False)
+    _stub_facade(monkeypatch, payload=BROKEN)
+    v = await pv.validate_all("plot(ta.sma(clse,20))")
+    assert v["valid"] is False and v["validator"] == "tradingview"

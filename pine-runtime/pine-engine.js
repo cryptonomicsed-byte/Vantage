@@ -530,6 +530,108 @@ function intOffset(series) {
   return Math.round(series)
 }
 
+
+// ── additions: functions TradingView accepts that this engine previously did
+// not, so a script could pass an external compile check and still fail here ──
+
+function change(src, len) {
+  const n = len == null ? 1 : len
+  const out = new Array(src.length).fill(null)
+  for (let i = n; i < src.length; i++) {
+    if (src[i] == null || src[i - n] == null) continue
+    out[i] = src[i] - src[i - n]
+  }
+  return out
+}
+
+function roc(src, len) {
+  const out = new Array(src.length).fill(null)
+  for (let i = len; i < src.length; i++) {
+    const prev = src[i - len]
+    if (src[i] == null || prev == null || prev === 0) continue
+    out[i] = ((src[i] - prev) / prev) * 100
+  }
+  return out
+}
+
+function vwma(src, vol, len) {
+  const out = new Array(src.length).fill(null)
+  for (let i = len - 1; i < src.length; i++) {
+    let num = 0, den = 0, ok = true
+    for (let j = i - len + 1; j <= i; j++) {
+      if (src[j] == null || vol[j] == null) { ok = false; break }
+      num += src[j] * vol[j]; den += vol[j]
+    }
+    out[i] = ok && den !== 0 ? num / den : null
+  }
+  return out
+}
+
+// Hull MA: wma(2*wma(n/2) - wma(n), sqrt(n)).
+function hma(src, len) {
+  const half = Math.max(1, Math.floor(len / 2))
+  const sq = Math.max(1, Math.round(Math.sqrt(len)))
+  const a = wma(src, half), b = wma(src, len)
+  const diff = src.map((_, i) => (a[i] == null || b[i] == null ? null : 2 * a[i] - b[i]))
+  return wma(diff, sq)
+}
+
+// Bars since the condition was last true. Null until it has been true once —
+// zero would claim "it just happened", which is a different statement.
+function barssince(cond) {
+  const out = new Array(cond.length).fill(null)
+  let last = null
+  for (let i = 0; i < cond.length; i++) {
+    if (cond[i]) last = i
+    out[i] = last == null ? null : i - last
+  }
+  return out
+}
+
+// Value of `src` when `cond` was true, counting back `occ` occurrences.
+function valuewhen(cond, src, occ) {
+  const out = new Array(src.length).fill(null)
+  const hits = []
+  for (let i = 0; i < src.length; i++) {
+    if (cond[i]) hits.push(i)
+    const idx = hits.length - 1 - (occ || 0)
+    out[i] = idx >= 0 ? src[hits[idx]] : null
+  }
+  return out
+}
+
+function cum(src) {
+  const out = new Array(src.length).fill(null)
+  let acc = 0
+  for (let i = 0; i < src.length; i++) {
+    if (src[i] == null) { out[i] = acc; continue }
+    acc += src[i]; out[i] = acc
+  }
+  return out
+}
+
+// A pivot is only confirmed once `right` more bars exist, so the value is
+// published at the confirming bar rather than backdated to the extreme.
+function pivot(src, left, right, isHigh) {
+  const out = new Array(src.length).fill(null)
+  for (let i = left; i + right < src.length; i++) {
+    const v = src[i]
+    if (v == null) continue
+    let ok = true
+    for (let j = i - left; j <= i + right; j++) {
+      if (j === i || src[j] == null) continue
+      if (isHigh ? src[j] > v : src[j] < v) { ok = false; break }
+    }
+    if (ok) out[i + right] = v
+  }
+  return out
+}
+
+// NOTE: no trueRange here. One already exists above, and it deliberately leaves
+// index 0 null because no prior close exists there. An earlier draft of this
+// block redefined it to fabricate high[0]-low[0] at index 0 — reintroducing the
+// exact TA-Lib drift its comment records fixing, and silently breaking ta.atr.
+
 const COSMETIC_NAMESPACES = new Set([
   'color', 'shape', 'location', 'plot', 'size', 'line', 'label',
   'scale', 'font', 'text', 'xloc', 'yloc', 'extend', 'display', 'format',
@@ -589,6 +691,9 @@ function evaluatePine(script, candles) {
     hlc3: candles.map((c) => (Number(c.high) + Number(c.low) + Number(c.close)) / 3),
     ohlc4: candles.map((c) => (Number(c.open) + Number(c.high) + Number(c.low) + Number(c.close)) / 4),
   }
+  // Pine exposes ta.tr as a built-in *variable*, not a call, so it has to
+  // resolve through the identifier path. `ta.tr()` still works via FUNCS.
+  SOURCES['ta.tr'] = trueRange(SOURCES.high, SOURCES.low, SOURCES.close)
   const vars = {}
   const plots = {}
   const markers = {}
@@ -599,6 +704,17 @@ function evaluatePine(script, candles) {
     'ta.sma': (a) => sma(a[0], int(a[1])),
     'ta.ema': (a) => ema(a[0], int(a[1])),
     'ta.wma': (a) => wma(a[0], int(a[1])),
+    'ta.hma': (a) => hma(a[0], int(a[1])),
+    'ta.vwma': (a) => vwma(a[0], SOURCES.volume, int(a[1])),
+    'ta.change': (a) => change(a[0], a[1] == null ? 1 : int(a[1])),
+    'ta.roc': (a) => roc(a[0], int(a[1])),
+    'ta.mom': (a) => change(a[0], int(a[1])),
+    'ta.cum': (a) => cum(a[0]),
+    'ta.tr': () => trueRange(SOURCES.high, SOURCES.low, SOURCES.close),
+    'ta.barssince': (a) => barssince(a[0]),
+    'ta.valuewhen': (a) => valuewhen(a[0], a[1], a[2] == null ? 0 : int(a[2])),
+    'ta.pivothigh': (a) => pivot(a[0], int(a[1]), int(a[2]), true),
+    'ta.pivotlow': (a) => pivot(a[0], int(a[1]), int(a[2]), false),
     'ta.rsi': (a) => rsi(a[0], int(a[1])),
     'ta.stdev': (a) => stdev(a[0], int(a[1])),
     'ta.highest': (a) => rolling(a[0], int(a[1]), (w) => Math.max(...w)),
@@ -776,9 +892,12 @@ function evaluatePine(script, candles) {
   }
 
   // statements: split by newline
-  for (const rawLine of script.split('\n')) {
+  const _srcLines = script.split('\n')
+  for (let _ln = 0; _ln < _srcLines.length; _ln++) {
+    const rawLine = _srcLines[_ln]
     const line = rawLine.replace(/\/\/.*$/, '').trim()
     if (!line) continue
+    try {
     const toks = tokenize(line)
     if (toks.length === 0) continue
 
@@ -871,6 +990,12 @@ function evaluatePine(script, candles) {
     }
 
     throw new Error('Unsupported statement: ' + line)
+    } catch (e) {
+      // Attach the source line to anything thrown above. Without it an error
+      // says what went wrong but not where, and the author has to hunt.
+      if (e && e.line == null) { e.line = _ln + 1; e.source = rawLine.trim() }
+      throw e
+    }
   }
 
   if (Object.keys(plots).length === 0 && Object.keys(markers).length === 0) {
@@ -879,4 +1004,35 @@ function evaluatePine(script, candles) {
   return { plots, markers, alerts: [], title: scriptTitle }
 }
 
-module.exports = { evaluatePine }
+
+
+// ── validation ──
+//
+// Answers a question the external TradingView compiler cannot: *can this engine
+// actually run the script?* TradingView accepts the whole Pine language; this
+// engine implements a subset, so a script can compile there and still fail
+// here. For Vantage's purposes that makes this the more relevant check, and it
+// needs no network at all.
+//
+// Runs against synthetic candles rather than parsing separately, so there is
+// exactly one code path and validation cannot drift away from execution.
+function validatePine(script) {
+  const N = 60
+  const candles = Array.from({ length: N }, (_, i) => {
+    // Gently varying and strictly positive, so an indicator that divides by a
+    // previous value does not fail on the fixture rather than the script.
+    const base = 100 + Math.sin(i / 5) * 5 + i * 0.1
+    return { time: i, open: base, high: base + 1, low: base - 1, close: base, volume: 1000 + i }
+  })
+  try {
+    evaluatePine(script, candles)
+    return { valid: true, errors: [] }
+  } catch (e) {
+    const err = { message: String((e && e.message) || e) }
+    if (e && e.line != null) err.line = e.line
+    if (e && e.source) err.source = e.source
+    return { valid: false, errors: [err] }
+  }
+}
+
+module.exports = { evaluatePine, validatePine }

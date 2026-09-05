@@ -4,6 +4,7 @@
 // has egress denied (see docker-compose) so even a sandbox escape has no network.
 const http = require('http')
 const { runPine } = require('./runner')
+const { validatePine } = require('./pine-engine')
 
 const HOST = process.env.PINE_HOST || '127.0.0.1'
 const PORT = parseInt(process.env.PINE_PORT || '9871', 10)
@@ -17,7 +18,9 @@ function send(res, code, obj) {
 
 const server = http.createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/healthz') return send(res, 200, { status: 'ok', service: 'pine-runtime' })
-  if (req.method !== 'POST' || req.url !== '/run') return send(res, 404, { error: 'not found' })
+  if (req.method !== 'POST' || (req.url !== '/run' && req.url !== '/validate')) {
+    return send(res, 404, { error: 'not found' })
+  }
 
   let body = ''
   let aborted = false
@@ -30,6 +33,20 @@ const server = http.createServer((req, res) => {
     let payload
     try { payload = JSON.parse(body) } catch { return send(res, 400, { error: 'invalid JSON' }) }
     const { script, candles } = payload || {}
+
+    // /validate answers "can this engine run the script", with no candles and
+    // no network. It is the check that matters for whether Vantage can execute
+    // something — an external compiler accepts the whole Pine language, while
+    // this engine implements a subset.
+    if (req.url === '/validate') {
+      if (typeof script !== 'string') return send(res, 400, { error: 'script (string) required' })
+      try {
+        return send(res, 200, validatePine(script))
+      } catch (e) {
+        return send(res, 500, { error: 'validator failed: ' + (e && e.message) })
+      }
+    }
+
     if (typeof script !== 'string' || !Array.isArray(candles)) return send(res, 400, { error: 'script (string) and candles (array) required' })
     const out = await runPine(script, candles)
     if (out.ok) return send(res, 200, out.result)
