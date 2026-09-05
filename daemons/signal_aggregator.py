@@ -23,6 +23,18 @@ import urllib.request
 
 from vantage_signals import post_signal as _post_signal
 import hashlib
+import asyncio
+from pathlib import Path
+
+# Hyperliquid positioning lives in the backend package, but daemons run from
+# daemons/ with the repo root off the path. Guarded on purpose: a deployment
+# that ships the daemons without the backend package must still scan everything
+# else rather than failing to import.
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from backend import hyperliquid as _hl
+except Exception as _e:  # pragma: no cover - deployment shape, not logic
+    _hl = None
 
 # ── Config ──────────────────────────────────────────────────────────────
 
@@ -454,8 +466,55 @@ def scan_hyperliquid():
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════
 
+# ── Hyperliquid positioning ──────────────────────────────────────────────────
+
+HL_TRACKED = [s.strip() for s in os.environ.get("HL_TRACKED_COINS", "BTC,ETH,SOL").split(",") if s.strip()]
+HL_FUNDING_THRESHOLD = float(os.environ.get("HL_FUNDING_THRESHOLD", "0.0005"))
+
+
+def hyperliquid_scan():
+    """Funding-rate crowding, read straight from Hyperliquid.
+
+    Funding is the cheapest positioning signal available: persistently positive
+    funding means longs are paying to stay long, which is a fact about who is
+    crowded rather than an opinion about price. Deliberately no vendor key —
+    Hyperliquid's own API is public, and routing this through one company's
+    credential would contradict the premise that agents answer to no central
+    operator.
+    """
+    if _hl is None:
+        log.debug("Hyperliquid scan skipped: backend package not importable")
+        return
+
+    book = asyncio.run(_hl.funding_and_oi())
+    if not book:
+        log.debug("Hyperliquid returned nothing this scan")
+        return
+
+    posted = 0
+    for coin in HL_TRACKED:
+        row = book.get(coin)
+        if not row:
+            continue
+        sig = _hl.funding_signal(row.get("funding"), HL_FUNDING_THRESHOLD)
+        if not sig:
+            continue  # inside the band is not a signal
+        post_signal(
+            symbol=coin,
+            source="hyperliquid_funding",
+            stype="positioning",
+            conviction=sig["conviction"],
+            direction=sig["direction"],
+            detail=(f"funding {sig['funding']:+.5f} — {sig['crowded_side']}s crowded "
+                    f"(OI {row.get('open_interest')})"),
+        )
+        posted += 1
+    if posted:
+        log.info(f"Hyperliquid funding signals: {posted}")
+
+
 def run_scan():
-    """Run all three scanners."""
+    """Run every scanner. One failing must never stop the others."""
     log.info("=== Signal Aggregator Scan ===")
 
     # 1. Sentiment (every scan — RSS is cheap)
@@ -478,11 +537,19 @@ def run_scan():
     except Exception as e:
         log.error(f"Price scan failed: {e}")
 
-    # 4. Hyperliquid direct ingestor
+    # 4. Hyperliquid order flow and whale positioning (market_sources ingestor)
     try:
         scan_hyperliquid()
     except Exception as e:
-        log.error(f"Hyperliquid scan failed: {e}")
+        log.error(f"Hyperliquid orderflow scan failed: {e}")
+
+    # 5. Hyperliquid funding crowding. Separate from the scan above: that one
+    # reads order flow and whale size, this one reads who is paying to hold a
+    # position. Different facts, so a failure in one must not hide the other.
+    try:
+        hyperliquid_scan()
+    except Exception as e:
+        log.error(f"Hyperliquid funding scan failed: {e}")
 
 
 if __name__ == "__main__":

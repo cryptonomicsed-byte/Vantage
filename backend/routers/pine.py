@@ -14,8 +14,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from backend.db import DB_PATH
 from backend.deps import get_agent, _parse_body
 from backend import market_sources as ms
+from backend import pine_validate as pv
 from ..db import get_db
-from backend.pine_validate import validate_pine, annotate
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/pine", tags=["pine"])
@@ -58,9 +58,31 @@ async def _review(script: str, agent: dict) -> dict:
     return {"block": False, "reason": "review unavailable (fail-open)"}
 
 
+async def _compile_gate(script: str) -> None:
+    """Reject a script the Pine compiler rejects. Raises `HTTPException(422)`.
+
+    This is the one gate here that fails **closed**, and it can afford to
+    because a compile error is an unambiguous fact about the script rather than
+    a policy judgement. When the compiler is merely unreachable there is no
+    verdict, so we say nothing and let the request continue — an outage must not
+    start rejecting every agent's work.
+    """
+    verdict = await pv.validate_pine(script)
+    if verdict.get("status") != "ok":
+        logger.debug("pine compile check skipped: %s", verdict.get("reason"))
+        return
+    if not verdict.get("valid"):
+        raise HTTPException(422, {
+            "error": "Pine Script does not compile",
+            "summary": pv.summarize(verdict),
+            "errors": verdict.get("errors", []),
+            "annotated": verdict.get("annotated", ""),
+        })
+
+
 @router.post("/run")
 async def run_pine(request: Request, agent: dict = Depends(get_agent)):
-    """Review → fetch candles → execute in the sandbox → return plotted series."""
+    """Compile-check → review → fetch candles → execute in the sandbox → series."""
     body = await _parse_body(request)
     script = (body.get("script") or "").strip()
     symbol = (body.get("symbol") or "BTC").strip()
@@ -70,10 +92,9 @@ async def run_pine(request: Request, agent: dict = Depends(get_agent)):
     if len(script) > 8000:
         raise HTTPException(400, "script too long (max 8000 chars)")
 
-    compile_result = await validate_pine(script)
-    if not compile_result["valid"]:
-        annotated = annotate(script, compile_result["errors"])
-        raise HTTPException(422, {"error": "Pine compile error", "errors": compile_result["errors"], "annotated_source": annotated})
+    # Cheapest gate first, and the only one that fails closed. A script that
+    # cannot compile never reaches governance review, the sandbox, or a guild.
+    await _compile_gate(script)
 
     verdict = await _review(script, agent)
     if verdict["block"]:
@@ -107,10 +128,9 @@ async def save_indicator(request: Request, agent: dict = Depends(get_agent)):
     if len(script) > 8000:
         raise HTTPException(400, "script too long (max 8000 chars)")
 
-    compile_result = await validate_pine(script)
-    if not compile_result["valid"]:
-        annotated = annotate(script, compile_result["errors"])
-        raise HTTPException(422, {"error": "Pine compile error", "errors": compile_result["errors"], "annotated_source": annotated})
+    # Cheapest gate first, and the only one that fails closed. A script that
+    # cannot compile never reaches governance review, the sandbox, or a guild.
+    await _compile_gate(script)
 
     verdict = await _review(script, agent)
     if verdict["block"]:
@@ -352,7 +372,18 @@ async def generate_pine(request: Request, agent: dict = Depends(get_agent)):
                     # Strip markdown fences if present
                     generated = generated.replace("```pinescript", "").replace("```pine", "").replace("```", "").strip()
                     if generated and len(generated) > 20:
-                        return {"script": generated, "method": "llm", "model": "openrouter"}
+                        # Never hand back generated code that does not compile.
+                        # An LLM confidently emitting broken Pine is the common
+                        # case, and the template fallback below is a working
+                        # script — so a failed check falls through rather than
+                        # erroring the request.
+                        gen_verdict = await pv.validate_pine(generated)
+                        if gen_verdict.get("status") != "ok" or gen_verdict.get("valid"):
+                            return {"script": generated, "method": "llm", "model": "openrouter"}
+                        logger.info(
+                            "LLM Pine did not compile, falling back to template: %s",
+                            pv.summarize(gen_verdict),
+                        )
         except Exception as e:
             logger.warning("LLM Pine generation failed, falling back to template: %s", e)
 
