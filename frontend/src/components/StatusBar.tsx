@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { NavLink, Link } from 'react-router-dom'
-import { Users, Code2, CandlestickChart, Clapperboard, Settings, Shield, Radio, Globe } from 'lucide-react'
+import { Users, Code2, CandlestickChart, Clapperboard, Settings, Shield, Radio, Globe, Target } from 'lucide-react'
 import NotificationPanel from './NotificationPanel'
 import SearchPanel from './SearchPanel'
 import PlatformWeather from './PlatformWeather'
@@ -15,6 +15,7 @@ const SECONDARY_NAV = [
   { icon: CandlestickChart, label: 'Trading',     to: '/trading'     },
   { icon: Clapperboard,     label: 'Studio',      to: '/video'       },
   { icon: Radio,            label: 'Buzz',        to: '/buzz'        },
+  { icon: Target,           label: 'Mission',     to: '/mission'     },
 ]
 
 function useUnreadDMs(): number {

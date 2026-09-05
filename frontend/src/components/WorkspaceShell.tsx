@@ -16,6 +16,7 @@ import WorkspaceCode from './WorkspaceCode'
 import WorkspaceTaskBoard from './WorkspaceTaskBoard'
 import WorkspaceMemoryViewer from './WorkspaceMemoryViewer'
 import ProofOfWork from './ProofOfWork'
+import SuiSettlementBadge from './SuiSettlementBadge'
 
 interface WorkspaceItem {
   id: number; slug: string; name: string; repo: string | null
@@ -54,6 +55,7 @@ interface ReceiptItem {
   capability?: string
   verified?: boolean
   receipt_hash?: string
+  sui_tx_digest?: string | null
   created_at: string
 }
 
@@ -542,6 +544,11 @@ function WorkspaceReceipts({
             <span style={{ fontSize: 11, color: 'var(--muted)', fontFamily: 'monospace' }}>
               {truncate(rec.receipt_id, 16)}
             </span>
+            <SuiSettlementBadge
+              receiptId={rec.receipt_id}
+              suiTxDigest={rec.sui_tx_digest}
+              settled={!!rec.sui_tx_digest}
+            />
             <span style={{ flex: 1 }} />
             {rec.agent_name && (
               <span style={{ fontSize: 10, color: '#a78bfa' }}>{rec.agent_name}</span>

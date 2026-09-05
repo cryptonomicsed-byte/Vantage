@@ -186,36 +186,48 @@ function NostrCard({ agent }: { agent: AgentMe | null }) {
 }
 
 function FreenetCard() {
+  const [status, setStatus] = useState<{ status: string; phase?: string; contracts?: number; peers?: number } | null>(null)
+  const apiKey = typeof window !== 'undefined' ? localStorage.getItem('vantage_api_key') : null
+
+  useEffect(() => {
+    if (!apiKey) return
+    const h = { 'X-Agent-Key': apiKey }
+    fetch('/api/freenet/status', { headers: h })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => d && setStatus(d))
+      .catch(() => {})
+    const t = setInterval(() => {
+      fetch('/api/freenet/status', { headers: h })
+        .then(r => r.ok ? r.json() : null)
+        .then(d => d && setStatus(d))
+        .catch(() => {})
+    }, 30000)
+    return () => clearInterval(t)
+  }, [apiKey])
+
+  const connected = status?.status === 'connected'
+
   return (
     <div style={cardStyle}>
       <div style={headerStyle}>
         <span style={headerLabel}>Freenet</span>
         <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 4 }}>Decentralized State</span>
         <div style={{ marginLeft: 'auto' }}>
-          <StatusBadge connected={false} label="Not Connected" />
+          <StatusBadge connected={connected} label={connected ? 'Connected' : 'Phase F1'} />
         </div>
       </div>
       <div style={bodyStyle}>
-        <Row label="Status" value="Adapter not yet initialized" valueColor={AMBER} />
+        <Row label="Phase" value={status?.phase || 'F1 — local stub'} valueColor={AMBER} />
+        <Row label="Node" value={connected ? 'localhost:50509' : 'not running'} valueColor={connected ? GREEN : 'var(--muted)'} />
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
           {[
-            { label: 'Contracts', value: '0' },
+            { label: 'Contracts', value: String(status?.contracts ?? 0) },
             { label: 'Rooms', value: '0' },
-            { label: 'Peers', value: '0' },
-            { label: 'Subscriptions', value: '0' },
+            { label: 'Peers', value: String(status?.peers ?? 0) },
+            { label: 'Git Repos', value: '0' },
           ].map(s => (
-            <div
-              key={s.label}
-              style={{
-                background: 'rgba(255,255,255,0.02)',
-                border: '1px solid var(--border)',
-                borderRadius: 6,
-                padding: '8px 12px',
-              }}
-            >
-              <div style={{ fontSize: 9, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
-                {s.label}
-              </div>
+            <div key={s.label} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border)', borderRadius: 6, padding: '8px 12px' }}>
+              <div style={{ fontSize: 9, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>{s.label}</div>
               <div style={{ fontSize: 18, fontWeight: 700, color: DIM }}>{s.value}</div>
             </div>
           ))}

@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { NavLink } from 'react-router-dom'
-import { BookOpen, Code, Copy, Check, Settings as SettingsIcon, Radio, Plus, Trash2, RefreshCw, ExternalLink, Wifi, WifiOff, AlertCircle, Brain, CheckCircle2, Circle, Tv, Film } from 'lucide-react'
+import { BookOpen, Code, Copy, Check, Settings as SettingsIcon, Radio, Plus, Trash2, RefreshCw, ExternalLink, Wifi, WifiOff, AlertCircle, Brain, CheckCircle2, Circle, Tv, Film, GitMerge } from 'lucide-react'
 import MindTab from './MindTab'
+import DelegationPanel from './DelegationPanel'
 
-const TABS = ['General', 'Mind & LLM', 'Integrations', 'Cinema & Live TV', 'Network', 'Developer'] as const
+const TABS = ['General', 'Mind & LLM', 'Integrations', 'Cinema & Live TV', 'Network', 'Delegations', 'Developer'] as const
 type Tab = typeof TABS[number]
 
 interface IntegrationsStatus {
@@ -272,6 +273,7 @@ export default function Settings() {
             {t === 'Network' && <Radio size={12} style={{ marginRight: 5 }} />}
             {t === 'Mind & LLM' && <Brain size={12} style={{ marginRight: 5 }} />}
             {t === 'Cinema & Live TV' && <Film size={12} style={{ marginRight: 5 }} />}
+            {t === 'Delegations' && <GitMerge size={12} style={{ marginRight: 5 }} />}
             {t}
           </button>
         ))}
@@ -616,6 +618,18 @@ export default function Settings() {
               </button>
             </div>
           )}
+        </div>
+      )}
+
+      {/* ── Delegations ── */}
+      {tab === 'Delegations' && (
+        <div className="settings-section">
+          <h3 className="settings-section-title">Task Delegations</h3>
+          <p style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 16, lineHeight: 1.6 }}>
+            View tasks delegated to you by other agents, and tasks you have delegated out.
+            Accept or complete delegations here. Refreshes every 15 seconds.
+          </p>
+          <DelegationPanel />
         </div>
       )}
 

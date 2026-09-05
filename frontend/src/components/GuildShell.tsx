@@ -19,6 +19,7 @@ import WorkspaceCode from './WorkspaceCode'
 import WorkspaceTaskBoard from './WorkspaceTaskBoard'
 import WorkspaceMemoryViewer from './WorkspaceMemoryViewer'
 import WorkspaceShell from './WorkspaceShell'
+import FreenetGitPanel from './FreenetGitPanel'
 
 // ── types ──────────────────────────────────────────────────────────────────────
 
@@ -970,6 +971,7 @@ export default function GuildShell() {
     if (selectedView === 'activity') return <GuildActivityView guildSlug={slug!} authHeaders={headers} />
     if (selectedView === 'governance') return <GuildGovernanceView guild={guild!} />
     if (selectedView === 'memory') return <WorkspaceMemoryViewer guildSlug={slug!} />
+    if (selectedView === 'git') return <FreenetGitPanel guildSlug={slug!} />
     if (selectedView === 'workspace' && selectedWorkspace) {
       const ch = channels.find(c => c.id === selectedWorkspace.id)
       return <WorkspaceShell guildSlug={slug!} workspace={selectedWorkspace} channel={ch || null} />
@@ -1000,6 +1002,7 @@ export default function GuildShell() {
     : selectedView === 'activity' ? 'Activity'
     : selectedView === 'governance' ? 'Governance'
     : selectedView === 'memory' ? 'Memory'
+    : selectedView === 'git' ? 'Git Replication'
     : selectedView === 'workspace' && selectedWorkspace ? selectedWorkspace.name
     : selectedChannel ? selectedChannel.name
     : 'Command Center'
@@ -1140,6 +1143,7 @@ export default function GuildShell() {
             <NavItem icon={<Package size={12} />} label="Artifacts" active={selectedView === 'artifacts'} onClick={() => selectView('artifacts')} />
             <NavItem icon={<Activity size={12} />} label="Activity" active={selectedView === 'activity'} onClick={() => selectView('activity')} />
             <NavItem icon={<Scale size={12} />} label="Governance" active={selectedView === 'governance'} onClick={() => selectView('governance')} />
+            <NavItem icon={<GitBranch size={12} />} label="Git" active={selectedView === 'git'} onClick={() => selectView('git')} />
           </div>
 
           {/* Footer */}
@@ -1161,6 +1165,7 @@ export default function GuildShell() {
               : selectedView === 'activity' ? <Activity size={13} style={{ color: '#3cc878', flexShrink: 0 }} />
               : selectedView === 'governance' ? <Scale size={13} style={{ color: '#f59e0b', flexShrink: 0 }} />
               : selectedView === 'memory' ? <Database size={13} style={{ color: 'var(--cyan)', flexShrink: 0 }} />
+              : selectedView === 'git' ? <GitBranch size={13} style={{ color: '#a78bfa', flexShrink: 0 }} />
               : selectedChannel ? <Hash size={13} style={{ color: 'var(--muted)', flexShrink: 0 }} />
               : <Zap size={13} style={{ color: '#f59e0b', flexShrink: 0 }} />}
             <strong style={{ fontSize: 13 }}>{channelHeader}</strong>

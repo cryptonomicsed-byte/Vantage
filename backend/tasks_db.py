@@ -99,4 +99,45 @@ async def init_tasks_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_guild_memory ON guild_memory(guild_id, visibility)"
         )
 
+        # Sui settlement columns (added post-initial schema; ALTER is idempotent via try/except)
+        try:
+            await db.execute(
+                "ALTER TABLE guild_execution_receipts ADD COLUMN sui_tx_digest TEXT DEFAULT NULL"
+            )
+        except Exception:
+            pass
+        try:
+            await db.execute(
+                "ALTER TABLE guild_execution_receipts ADD COLUMN settled_at TEXT DEFAULT NULL"
+            )
+        except Exception:
+            pass
+
+        # A2A task delegation table (P3)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS guild_task_delegations (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                guild_slug TEXT NOT NULL,
+                from_agent_id INTEGER NOT NULL,
+                from_agent_name TEXT NOT NULL,
+                to_agent_id INTEGER NOT NULL,
+                to_agent_name TEXT NOT NULL,
+                instructions TEXT DEFAULT '',
+                deadline TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                reject_reason TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now')),
+                accepted_at TEXT,
+                completed_at TEXT,
+                FOREIGN KEY (task_id) REFERENCES guild_tasks(id)
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_delegations_task ON guild_task_delegations(task_id)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_delegations_to ON guild_task_delegations(to_agent_id, status)"
+        )
+
         await db.commit()

@@ -531,6 +531,12 @@ async def lifespan(app: FastAPI):
     await init_workspace_tasks_db()
     from .tasks_db import init_tasks_db
     await init_tasks_db()
+    from .reputation import init_task_reputation_db, update_on_event as _rep_update_on_event
+    await init_task_reputation_db()
+    from .event_bus import subscribe as _eb_subscribe
+    _eb_subscribe("TaskCompleted", lambda e: asyncio.create_task(_rep_update_on_event(e.event_type, e.actor_id or 0)))
+    _eb_subscribe("ArtifactVerified", lambda e: asyncio.create_task(_rep_update_on_event(e.event_type, e.actor_id or 0)))
+    _eb_subscribe("DelegationCompleted", lambda e: asyncio.create_task(_rep_update_on_event(e.event_type, e.actor_id or 0)))
 
     # Check FFmpeg availability on startup
     try:
@@ -615,6 +621,23 @@ async def lifespan(app: FastAPI):
 
     from .event_bus import start_dispatch_loop
     event_bus_task = asyncio.create_task(start_dispatch_loop())
+
+    # Task reputation: create table + subscribe to completion events
+    try:
+        from .reputation import init_task_reputation_db, update_on_event
+        from .event_bus import subscribe
+        await init_task_reputation_db()
+        for _evt in ("TaskCompleted", "ArtifactVerified", "DelegationCompleted"):
+            _evt_name = _evt
+            async def _rep_handler(event, _e=_evt_name):
+                try:
+                    if event.actor_id:
+                        await update_on_event(_e, event.actor_id)
+                except Exception as _ex:
+                    logger.debug("reputation update failed: %s", _ex)
+            subscribe(_evt, _rep_handler)
+    except Exception as e:
+        logger.warning("reputation init skipped: %s", e)
 
     yield
     shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, scoring_task, last30days_task, outcome_learner_task, event_bus_task]
@@ -951,15 +974,33 @@ app.include_router(agent_roster_router)
 from .routers.capabilities import router as capabilities_router
 app.include_router(capabilities_router)
 
+# Platform task reputation (P3) and Sui settlement (P4)
+from .routers.reputation import router as reputation_router
+app.include_router(reputation_router)
+from .routers.sui_settlement import router as sui_settlement_router
+app.include_router(sui_settlement_router)
+
 # NIP-98 HTTP Auth gateway and Nostr identity binding (Ọmọ Kọ́dà2 sovereign agents)
 from .routers.nostr_auth import router as nostr_auth_router
 app.include_router(nostr_auth_router)
 from .routers.identity_binding import router as identity_binding_router
 app.include_router(identity_binding_router)
 
+# P2 — NIP-29 Guild Bridge (Nostr relay-managed groups)
+from .routers.nostr_nip29 import router as nip29_router
+app.include_router(nip29_router)
+
+# P3 — A2A Task Delegation
+from .routers.delegation import router as delegation_router
+app.include_router(delegation_router)
+
 # Freenet decentralized state adapter
 from .freenet.router import router as freenet_router
 app.include_router(freenet_router)
+
+# Freenet Git Bridge — Phase F6 (git bundles as Freenet contract state)
+from .routers.freenet_git import router as freenet_git_router
+app.include_router(freenet_git_router)
 
 # MCP server — exposes all Vantage routes as MCP tools for Claude/GPT/OpenCode agents.
 # Mount the modern streamable-HTTP transport at /mcp (what current MCP clients expect),
