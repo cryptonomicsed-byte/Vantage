@@ -14,6 +14,8 @@ import {
 import GuildChat from './GuildChat'
 import GuildForum from './GuildForum'
 import WorkspaceCode from './WorkspaceCode'
+import WorkspaceTaskBoard from './WorkspaceTaskBoard'
+import WorkspaceMemoryViewer from './WorkspaceMemoryViewer'
 
 // ── types ──────────────────────────────────────────────────────────────────────
 
@@ -132,7 +134,12 @@ export default function GuildProfile() {
 
   // layout
   const [selectedChannel, setSelectedChannel] = useState<Channel | null>(null)
+  const [selectedView, setSelectedView] = useState<'tasks' | 'memory' | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+
+  // agent roster (fetched alongside guild data)
+  const [roster, setRoster] = useState<Array<{ agent_id: number; agent_name: string; role: string; bio: string; avatar_url: string; presence_state: string }>>([])
+
 
   // guild actions
   const [isMember, setIsMember] = useState(false)
@@ -156,8 +163,9 @@ export default function GuildProfile() {
       fetch(`/api/guilds/${encodeURIComponent(slug)}`),
       fetch(`/api/guilds/${encodeURIComponent(slug)}/channels`, { headers: headers() }),
       fetch(`/api/guilds/${encodeURIComponent(slug)}/presence`, { headers: headers() }),
+      fetch(`/api/guilds/${encodeURIComponent(slug)}/roster`, { headers: headers() }),
     ])
-      .then(async ([guildRes, channelsRes, presenceRes]) => {
+      .then(async ([guildRes, channelsRes, presenceRes, rosterRes]) => {
         if (!guildRes.ok) throw new Error('Not found')
         const guildData: GuildData = await guildRes.json()
         setGuild(guildData)
@@ -170,6 +178,10 @@ export default function GuildProfile() {
         }
         if (presenceRes.ok) {
           setPresence(await presenceRes.json())
+        }
+        if (rosterRes.ok) {
+          const rd = await rosterRes.json()
+          setRoster(rd.roster || [])
         }
       })
       .catch(() => setError('Guild not found'))
@@ -251,6 +263,8 @@ export default function GuildProfile() {
 
   // ── channel channel kind → which view to render ──────────────────────────────
   function renderMain() {
+    if (selectedView === 'tasks') return <WorkspaceTaskBoard guildSlug={slug!} />
+    if (selectedView === 'memory') return <WorkspaceMemoryViewer guildSlug={slug!} />
     if (!selectedChannel) return <OverviewPanel guild={guild!} agentName={agentName} isMember={isMember} isFounder={isFounder} showManifesto={showManifesto} setShowManifesto={setShowManifesto} reports={reports} loadingReports={loadingReports} resolvingId={resolvingId} resolveReport={resolveReport} setReportTarget={(t) => { setReportTarget(t); setReportReason('spam'); setReportSent(false) }} />
 
     if (selectedChannel.channel_kind === 'workspace') {
@@ -266,8 +280,9 @@ export default function GuildProfile() {
     return <GuildChat slug={slug!} selectedChannelSlug={selectedChannel.slug} />
   }
 
-  const channelHeader = selectedChannel
-    ? selectedChannel.name
+  const channelHeader = selectedView === 'tasks' ? 'Tasks Board'
+    : selectedView === 'memory' ? 'Memory'
+    : selectedChannel ? selectedChannel.name
     : 'Overview'
   const channelTopic = selectedChannel?.topic || guild.bio
 
@@ -331,8 +346,8 @@ export default function GuildProfile() {
 
             {/* Overview pseudo-channel */}
             <button
-              className={`guild-channel-item${!selectedChannel ? ' active' : ''}`}
-              onClick={() => { setSelectedChannel(null); setSidebarOpen(false) }}
+              className={`guild-channel-item${!selectedChannel && !selectedView ? ' active' : ''}`}
+              onClick={() => { setSelectedChannel(null); setSelectedView(null); setSidebarOpen(false) }}
             >
               <Hash size={13} style={{ flexShrink: 0 }} />
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>overview</span>
@@ -342,7 +357,7 @@ export default function GuildProfile() {
               <React.Fragment key={ch.id}>
                 <button
                   className={`guild-channel-item${selectedChannel?.id === ch.id ? ' active' : ''}`}
-                  onClick={() => { setSelectedChannel(ch); setSidebarOpen(false) }}
+                  onClick={() => { setSelectedChannel(ch); setSelectedView(null); setSidebarOpen(false) }}
                 >
                   {ch.channel_kind === 'workspace'
                     ? <span style={{ fontSize: 13, flexShrink: 0 }}>⬛</span>
@@ -356,7 +371,7 @@ export default function GuildProfile() {
                   <button
                     key={child.id}
                     className={`guild-channel-item${selectedChannel?.id === child.id ? ' active' : ''}`}
-                    onClick={() => { setSelectedChannel(child); setSidebarOpen(false) }}
+                    onClick={() => { setSelectedChannel(child); setSelectedView(null); setSidebarOpen(false) }}
                     style={{ paddingLeft: 24 }}
                   >
                     {child.channel_kind === 'workspace'
@@ -370,6 +385,27 @@ export default function GuildProfile() {
 
             {channels.length === 0 && (
               <div style={{ padding: '8px 12px', fontSize: 12, color: 'var(--muted)' }}>No channels yet.</div>
+            )}
+
+            {/* workspace views */}
+            <div style={{ padding: '10px 12px 4px', fontSize: 10, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+              Workspace
+            </div>
+            <button
+              className={`guild-channel-item${selectedView === 'tasks' ? ' active' : ''}`}
+              onClick={() => { setSelectedView('tasks'); setSelectedChannel(null); setSidebarOpen(false) }}
+            >
+              <span style={{ fontSize: 13, flexShrink: 0 }}>📋</span>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>Tasks Board</span>
+            </button>
+            {apiKey && (
+              <button
+                className={`guild-channel-item${selectedView === 'memory' ? ' active' : ''}`}
+                onClick={() => { setSelectedView('memory'); setSelectedChannel(null); setSidebarOpen(false) }}
+              >
+                <span style={{ fontSize: 13, flexShrink: 0 }}>🧠</span>
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>Memory</span>
+              </button>
             )}
           </div>
 
@@ -453,6 +489,33 @@ export default function GuildProfile() {
               ))}
             </div>
           </div>
+
+          {/* agent roster (from /roster endpoint — includes presence_state) */}
+          {roster.length > 0 && (
+            <div className="guild-rail-section">
+              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>
+                Agent Roster
+              </div>
+              {roster.map(m => {
+                const dotMap: Record<string, string> = { available: 'active', thinking: 'idle', working: 'active', blocked: 'busy', needs_review: 'idle', offline: 'offline' }
+                const dotClass = dotMap[m.presence_state] || 'offline'
+                return (
+                  <div key={m.agent_id} className="roster-entry">
+                    <div className="roster-avatar">
+                      {m.avatar_url
+                        ? <img src={m.avatar_url} style={{ width: '100%', height: '100%', borderRadius: '50%', objectFit: 'cover' }} alt="" />
+                        : (m.agent_name || '?')[0].toUpperCase()}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.agent_name}</div>
+                      <span className="role-badge">{m.role}</span>
+                    </div>
+                    <span className={`presence-dot ${dotClass}`} title={m.presence_state} />
+                  </div>
+                )
+              })}
+            </div>
+          )}
 
           {/* guild stats */}
           <div className="guild-rail-section">

@@ -527,6 +527,10 @@ async def lifespan(app: FastAPI):
     await init_wallet_tables()
     from .routers.degen import ensure_degen_indexes
     await ensure_degen_indexes()
+    from .db import init_workspace_tasks_db
+    await init_workspace_tasks_db()
+    from .tasks_db import init_tasks_db
+    await init_tasks_db()
 
     # Check FFmpeg availability on startup
     try:
@@ -904,6 +908,15 @@ app.include_router(playlists_router)
 from .routers.podcast import router as podcast_router
 app.include_router(podcast_router)
 
+from .routers.workspace_tasks import router as workspace_tasks_router
+app.include_router(workspace_tasks_router)
+from .routers.artifacts import router as artifacts_router
+app.include_router(artifacts_router)
+from .routers.workspace_memory import router as workspace_memory_router
+app.include_router(workspace_memory_router)
+from .routers.workspace_mcp import router as workspace_mcp_router
+app.include_router(workspace_mcp_router)
+
 # Was written (start/stop/restart/list ares-* daemons, tags=["admin"] so it's
 # already excluded from the MCP surface same as every other admin route) but
 # never actually included -- found while extending it for A5 crash-loop
@@ -923,6 +936,14 @@ app.include_router(vantage_anvil_router)
 # word, so they get two prefixes.
 from .routers.meshnet import router as meshnet_router
 app.include_router(meshnet_router)
+
+# Sovereign agent task/artifact/memory/roster API
+from .routers.tasks import router as tasks_router
+app.include_router(tasks_router)
+from .routers.guild_memory import router as guild_memory_router
+app.include_router(guild_memory_router)
+from .routers.agent_roster import router as agent_roster_router
+app.include_router(agent_roster_router)
 
 # MCP server — exposes all Vantage routes as MCP tools for Claude/GPT/OpenCode agents.
 # Mount the modern streamable-HTTP transport at /mcp (what current MCP clients expect),
