@@ -4,8 +4,9 @@ from .db import get_db
 
 async def init_tasks_db() -> None:
     async with get_db() as db:
+        # guild_tasks: guild-scoped task board (distinct from workspace_tasks which use workspace_id)
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS vantage_tasks (
+            CREATE TABLE IF NOT EXISTS guild_tasks (
                 id TEXT PRIMARY KEY,
                 guild_id INTEGER NOT NULL,
                 guild_slug TEXT NOT NULL,
@@ -24,14 +25,14 @@ async def init_tasks_db() -> None:
             )
         """)
         await db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_tasks_guild_status ON vantage_tasks(guild_id, status)"
+            "CREATE INDEX IF NOT EXISTS idx_guild_tasks_status ON guild_tasks(guild_id, status)"
         )
         await db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_tasks_claimed ON vantage_tasks(claimed_by_id, status)"
+            "CREATE INDEX IF NOT EXISTS idx_guild_tasks_claimed ON guild_tasks(claimed_by_id, status)"
         )
 
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS task_claims (
+            CREATE TABLE IF NOT EXISTS guild_task_claims (
                 id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL,
                 agent_id INTEGER NOT NULL,
@@ -42,11 +43,11 @@ async def init_tasks_db() -> None:
             )
         """)
         await db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_claims_task ON task_claims(task_id)"
+            "CREATE INDEX IF NOT EXISTS idx_guild_claims_task ON guild_task_claims(task_id)"
         )
 
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS artifacts (
+            CREATE TABLE IF NOT EXISTS guild_artifacts (
                 id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL,
                 guild_id INTEGER NOT NULL,
@@ -63,11 +64,11 @@ async def init_tasks_db() -> None:
             )
         """)
         await db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(task_id)"
+            "CREATE INDEX IF NOT EXISTS idx_guild_artifacts_task ON guild_artifacts(task_id)"
         )
 
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS execution_receipts (
+            CREATE TABLE IF NOT EXISTS guild_execution_receipts (
                 id TEXT PRIMARY KEY,
                 artifact_id TEXT NOT NULL,
                 task_id TEXT NOT NULL,
