@@ -8,6 +8,22 @@ raises, so callers can treat market data as best-effort enrichment.
 Sources used here are all no-auth, geo-open public endpoints (Pyth, CoinGecko,
 CoinCap, Binance, Kraken, KuCoin, OKX, Coinbase, Gemini, mempool.space, ...). See
 SOURCES for the full registry surfaced at /api/intel/sources-registry.
+
+# Keeping the registry honest
+
+Fail-soft has a cost: a source that quietly stops working returns None forever
+and nothing complains, so a dead feed is indistinguishable from a quiet market.
+Two conventions make that visible instead.
+
+**Date what you verified.** When you confirm a source against a live response,
+stamp it. `"verified_on": "YYYY-MM-DD"` on its SOURCES entry means someone saw
+real data on that date; its absence means nobody has checked since it was
+written.
+
+**Bury what you disproved.** A source proven dead goes in DEAD_SOURCES with the
+reason and the date, and stays there. Deleting it invites the next person to
+add it back from memory, and re-deriving that it is dead costs the same hour
+every time.
 """
 import re
 import time
@@ -1405,6 +1421,10 @@ async def backtest(symbol: str, days: int = 90, fast: int = 10, slow: int = 30) 
 
 
 # ── Source registry (transparency for /api/intel/sources-registry) ──────────────────
+# Sources proven dead, kept so they are not reintroduced from memory.
+# Format: name -> "why it died, and when".
+DEAD_SOURCES: dict[str, str] = {}
+
 SOURCES = [
     {"name": "Pyth Network", "category": "oracle", "url": "https://hermes.pyth.network", "integrated": True},
     {"name": "CoinGecko", "category": "market", "url": "https://api.coingecko.com", "integrated": True},
