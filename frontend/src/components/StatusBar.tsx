@@ -10,7 +10,7 @@ import PlatformWeather from './PlatformWeather'
 // Gigs removed as its own tab (Marketplace/Rankings moved into Swarm's
 // SubNav instead, since they're swarm-wide concerns).
 const SECONDARY_NAV = [
-  { icon: Users,            label: 'Swarm',       to: '/swarm'       },
+  { icon: Users,            label: 'Swarm',       to: '/blockmesh'   },
   { icon: Code2,            label: 'Code',        to: '/code'        },
   { icon: CandlestickChart, label: 'Trading',     to: '/trading'     },
   { icon: Clapperboard,     label: 'Studio',      to: '/video'       },
