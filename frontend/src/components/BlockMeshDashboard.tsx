@@ -48,15 +48,14 @@ function timeUntil(iso: string): string | null {
 
 // ── Tab types ─────────────────────────────────────────────────────────────────
 
-type Tab = 'board' | 'marketplace' | 'tier' | 'witness' | 'devices' | 'leaderboard'
+type Tab = 'board' | 'marketplace' | 'tier' | 'witness' | 'devices'
 
 const TABS: Array<{ id: Tab; label: string }> = [
-  { id: 'board',       label: 'Job Board'        },
-  { id: 'marketplace', label: 'Marketplace'       },
-  { id: 'tier',        label: 'My Tier'           },
-  { id: 'witness',     label: 'Witness Queue'     },
-  { id: 'devices',     label: 'My Devices'        },
-  { id: 'leaderboard', label: 'Tier Leaderboard'  },
+  { id: 'board',       label: 'Job Board'    },
+  { id: 'marketplace', label: 'Marketplace'  },
+  { id: 'tier',        label: 'My Tier'      },
+  { id: 'witness',     label: 'Witness Queue'},
+  { id: 'devices',     label: 'My Devices'   },
 ]
 
 // ── Shared sub-components ─────────────────────────────────────────────────────
@@ -1204,7 +1203,6 @@ export default function BlockMeshDashboard() {
         {activeTab === 'tier'        && <MyTierTab />}
         {activeTab === 'witness'     && <WitnessQueueTab />}
         {activeTab === 'devices'     && <MyDevicesTab />}
-        {activeTab === 'leaderboard' && <TierLeaderboardTab />}
       </div>
     </div>
   )
