@@ -513,10 +513,139 @@ function GuildGovernanceView({ guild }: { guild: GuildData }) {
   )
 }
 
-// ── command center (default overview) ──────────────────────────────────────────
+// ── Message types (reused from GuildChat pattern) ─────────────────────────────
+
+interface CCMessage {
+  id: number
+  event_id: string
+  author: string
+  principal_kind: 'agent' | 'human' | 'external_agent' | null
+  framework: string | null
+  msg_type: string
+  work_ref: string | null
+  content: string
+  created_at: number
+  reply_count: number
+  thread_root_event_id: string | null
+}
+
+interface CCPrincipal {
+  id: number
+  kind: string
+  display_name: string
+  framework: string
+  role: string
+}
+
+const CC_MSG_TYPES = ['say', 'propose', 'claim', 'handoff', 'artifact'] as const
+
+function ccWhen(unix: number): string {
+  if (!unix) return ''
+  const d = new Date(unix * 1000)
+  const secs = Math.floor(Date.now() / 1000) - unix
+  if (secs < 60) return 'just now'
+  if (secs < 86400) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+
+function ccSameDay(a: number, b: number) {
+  const da = new Date(a * 1000), db = new Date(b * 1000)
+  return da.getFullYear() === db.getFullYear() &&
+    da.getMonth() === db.getMonth() &&
+    da.getDate() === db.getDate()
+}
+
+function ccDayLabel(unix: number) {
+  const d = new Date(unix * 1000)
+  const today = new Date()
+  const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1)
+  if (ccSameDay(unix, Math.floor(today.getTime() / 1000))) return 'Today'
+  if (ccSameDay(unix, Math.floor(yesterday.getTime() / 1000))) return 'Yesterday'
+  return d.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' })
+}
+
+function CCAvatar({ name, kind }: { name: string; kind: string | null }) {
+  const initial = (name || '?')[0].toUpperCase()
+  const color =
+    kind === 'human' ? '#4a9eff' :
+    kind === 'external_agent' ? '#f59e0b' : '#8a4bff'
+  return (
+    <div style={{
+      width: 34, height: 34, borderRadius: '50%', flexShrink: 0,
+      background: `${color}22`, border: `1.5px solid ${color}44`,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      fontSize: 13, fontWeight: 700, color,
+    }}>
+      {initial}
+    </div>
+  )
+}
+
+function CCBody({ text }: { text: string }) {
+  const parts = text.split(/(@[A-Za-z0-9_.-]+)/g)
+  return (
+    <span style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', lineHeight: 1.55 }}>
+      {parts.map((part, i) =>
+        part.startsWith('@') ? (
+          <span key={i} style={{
+            color: '#c4b5fd', fontWeight: 600,
+            background: 'rgba(138,75,255,0.15)', borderRadius: 3, padding: '0 2px',
+          }}>{part}</span>
+        ) : <span key={i}>{part}</span>
+      )}
+    </span>
+  )
+}
+
+function CCMessageRow({ m, grouped, isReply }: { m: CCMessage; grouped: boolean; isReply: boolean }) {
+  const agentColor =
+    m.principal_kind === 'human' ? '#4a9eff' :
+    m.principal_kind === 'external_agent' ? '#f59e0b' : '#8a4bff'
+
+  return (
+    <div style={{
+      display: 'flex', gap: 10, paddingLeft: isReply ? 28 : 0,
+      paddingTop: grouped ? 1 : 10,
+      paddingBottom: 1,
+    }}>
+      <div style={{ width: 34, flexShrink: 0, paddingTop: grouped ? 0 : 2 }}>
+        {!grouped && <CCAvatar name={m.author} kind={m.principal_kind} />}
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        {!grouped && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2, flexWrap: 'wrap' }}>
+            <span style={{ fontWeight: 700, fontSize: 13, color: agentColor }}>{m.author}</span>
+            {m.msg_type !== 'say' && (
+              <span style={{
+                fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em',
+                background: 'rgba(138,75,255,0.16)', color: '#a78bfa',
+                borderRadius: 3, padding: '1px 5px',
+              }}>{m.msg_type}</span>
+            )}
+            {m.work_ref && (
+              <span style={{
+                fontSize: 9, background: 'rgba(255,255,255,0.07)', color: 'var(--muted)',
+                borderRadius: 3, padding: '1px 5px',
+              }}>{m.work_ref}</span>
+            )}
+            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', marginLeft: 2 }}>
+              {ccWhen(m.created_at)}
+            </span>
+          </div>
+        )}
+        <div style={{ fontSize: 13.5, color: 'rgba(255,255,255,0.88)' }}>
+          <CCBody text={m.content} />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── command center (main hall chat + control panel) ────────────────────────────
 
 function CommandCenter({
   guild, roster, taskSummary, workspaces, presence,
+  channels, guildSlug, apiKey, humanSession, isMember,
   onSelectView, onSelectWorkspace,
 }: {
   guild: GuildData
@@ -524,183 +653,589 @@ function CommandCenter({
   taskSummary: TaskSummary
   workspaces: WorkspaceItem[]
   presence: PresenceData | null
+  channels: Channel[]
+  guildSlug: string
+  apiKey: string
+  humanSession: string
+  isMember: boolean
   onSelectView: (v: string) => void
   onSelectWorkspace: (ws: WorkspaceItem) => void
 }) {
-  const working = roster.filter(r => r.presence_state === 'working' || r.presence_state === 'executing')
-  const thinking = roster.filter(r => r.presence_state === 'thinking')
-  const available = roster.filter(r => r.presence_state === 'available')
-  const blocked = roster.filter(r => r.presence_state === 'blocked')
-  const needsReview = roster.filter(r => r.presence_state === 'needs_review')
+  // Determine which channel to use — prefer "general", else first channel
+  const targetChannel = channels.find(c => c.name.toLowerCase() === 'general') || channels[0] || null
+
+  // Chat state
+  const [ccMessages, setCcMessages] = useState<CCMessage[]>([])
+  const [ccDraft, setCcDraft] = useState('')
+  const [ccDraftType, setCcDraftType] = useState('say')
+  const [ccLoading, setCcLoading] = useState(false)
+  const [ccError, setCcError] = useState('')
+  const [ccSending, setCcSending] = useState(false)
+  const [ccPrincipals, setCcPrincipals] = useState<CCPrincipal[]>([])
+  const [ccShowSuggestions, setCcShowSuggestions] = useState(false)
+  const [ccSuggestionQuery, setCcSuggestionQuery] = useState('')
+
+  // Panel collapse state
+  const [onlineCollapsed, setOnlineCollapsed] = useState(false)
+  const [tasksCollapsed, setTasksCollapsed] = useState(false)
+  const [wsCollapsed, setWsCollapsed] = useState(false)
+
+  const streamRef = useRef<HTMLDivElement | null>(null)
+  const inputRef = useRef<HTMLTextAreaElement | null>(null)
+
+  const ccHeaders = useCallback((form = false): Record<string, string> => {
+    const h: Record<string, string> = {}
+    if (apiKey) h['X-Agent-Key'] = apiKey
+    else if (humanSession) h['X-Human-Session'] = humanSession
+    if (form) h['Content-Type'] = 'application/x-www-form-urlencoded'
+    return h
+  }, [apiKey, humanSession])
+
+  const loadMessages = useCallback(async () => {
+    if (!targetChannel) return
+    setCcLoading(true)
+    try {
+      const res = await fetch(
+        `/api/guilds/${encodeURIComponent(guildSlug)}/channels/${targetChannel.slug}/messages?limit=100`,
+        { headers: ccHeaders() }
+      )
+      if (res.ok) {
+        const data = await res.json()
+        const msgs: CCMessage[] = (data.messages || [])
+        msgs.sort((a: CCMessage, b: CCMessage) => a.created_at - b.created_at || a.id - b.id)
+        setCcMessages(msgs)
+      }
+    } finally {
+      setCcLoading(false)
+    }
+  }, [guildSlug, targetChannel, ccHeaders])
+
+  // Load principals for @mention
+  useEffect(() => {
+    fetch(`/api/guilds/${encodeURIComponent(guildSlug)}/principals`, { headers: ccHeaders() })
+      .then(r => r.ok ? r.json() : { principals: [] })
+      .then(d => setCcPrincipals(d.principals || []))
+      .catch(() => {})
+  }, [guildSlug]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (targetChannel) loadMessages()
+  }, [targetChannel, loadMessages])
+
+  // WebSocket for live updates
+  useEffect(() => {
+    if (!targetChannel) return
+    let socket: WebSocket | null = null
+    let pollTimer: ReturnType<typeof setInterval> | null = null
+    try {
+      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+      const key = apiKey ? `&key=${encodeURIComponent(apiKey)}` : ''
+      socket = new WebSocket(`${proto}://${window.location.host}/ws/gossip?channel=guild.${guildSlug}${key}`)
+      socket.onmessage = evt => {
+        try {
+          const data = JSON.parse(evt.data)
+          if (data.type === 'channel_message' && data.channel === targetChannel.slug) loadMessages()
+        } catch { /* ignore */ }
+      }
+      socket.onerror = () => {
+        // Fallback to polling if WS fails
+        pollTimer = setInterval(loadMessages, 10000)
+      }
+    } catch {
+      pollTimer = setInterval(loadMessages, 10000)
+    }
+    return () => {
+      socket?.close()
+      if (pollTimer) clearInterval(pollTimer)
+    }
+  }, [targetChannel, guildSlug, apiKey, loadMessages])
+
+  // Auto-scroll to bottom on new messages
+  useEffect(() => {
+    const el = streamRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [ccMessages])
+
+  // @mention detection
+  useEffect(() => {
+    const cursor = inputRef.current?.selectionStart ?? ccDraft.length
+    const upto = ccDraft.slice(0, cursor)
+    const match = upto.match(/(?:^|\s)@([A-Za-z0-9_.-]*)$/)
+    if (match) {
+      setCcSuggestionQuery(match[1])
+      setCcShowSuggestions(true)
+    } else {
+      setCcShowSuggestions(false)
+      setCcSuggestionQuery('')
+    }
+  }, [ccDraft])
+
+  const mentionSuggestions = ccShowSuggestions
+    ? ccPrincipals
+        .filter(p => p.display_name.toLowerCase().includes(ccSuggestionQuery.toLowerCase()))
+        .slice(0, 6)
+    : []
+
+  function acceptMention(name: string) {
+    const cursor = inputRef.current?.selectionStart ?? ccDraft.length
+    const before = ccDraft.slice(0, cursor)
+    const after = ccDraft.slice(cursor)
+    const replaced = before.replace(/@[A-Za-z0-9_.-]*$/, `@${name} `)
+    setCcDraft(replaced + after)
+    setCcShowSuggestions(false)
+    inputRef.current?.focus()
+  }
+
+  async function ccSend() {
+    if (!targetChannel || !ccDraft.trim()) return
+    setCcSending(true); setCcError('')
+    try {
+      const res = await fetch(
+        `/api/guilds/${encodeURIComponent(guildSlug)}/channels/${targetChannel.slug}/messages`,
+        {
+          method: 'POST',
+          headers: ccHeaders(true),
+          body: new URLSearchParams({ content: ccDraft, msg_type: ccDraftType }),
+        }
+      )
+      if (res.ok) {
+        setCcDraft('')
+        if (inputRef.current) { inputRef.current.style.height = 'auto' }
+        await loadMessages()
+      } else {
+        const d = await res.json().catch(() => ({}))
+        setCcError(typeof d.detail === 'string' ? d.detail : `Could not send (${res.status})`)
+      }
+    } catch {
+      setCcError('Network error — message not sent')
+    } finally {
+      setCcSending(false)
+    }
+  }
+
+  // Grouped messages
+  const groupedMessages = ccMessages.map((m, i) => {
+    const prev = ccMessages[i - 1]
+    const isReply = !!(m.thread_root_event_id && m.thread_root_event_id !== m.event_id)
+    const grouped = !isReply && !!prev && !prev.thread_root_event_id &&
+      prev.author === m.author && (m.created_at - prev.created_at) < 120
+    const showDate = !prev || !ccSameDay(prev.created_at, m.created_at)
+    return { m, grouped, isReply, showDate }
+  })
+
   const online = roster.filter(r => r.presence_state !== 'offline')
 
-  return (
-    <div style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: 24, overflowY: 'auto', height: '100%', boxSizing: 'border-box' }}>
+  // ── render ──────────────────────────────────────────────────────────────────
 
-      {/* Guild identity header */}
-      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16 }}>
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, overflow: 'hidden' }}>
+
+      {/* ── CONTROL STRIP ── */}
+      <div style={{
+        height: 48, flexShrink: 0, borderBottom: '1px solid var(--border)',
+        display: 'flex', alignItems: 'center', gap: 10, padding: '0 16px',
+        background: 'rgba(0,0,0,0.2)',
+      }}>
+        {/* Guild avatar + name */}
         {guild.avatar_url ? (
-          <img src={guild.avatar_url} alt={guild.name} style={{ width: 56, height: 56, borderRadius: 12, objectFit: 'cover', flexShrink: 0, border: '2px solid var(--border)' }} />
+          <img src={guild.avatar_url} alt={guild.name} style={{ width: 28, height: 28, borderRadius: 6, objectFit: 'cover', flexShrink: 0, border: '1px solid var(--border)' }} />
         ) : (
-          <div style={{ width: 56, height: 56, borderRadius: 12, background: 'rgba(138,75,255,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, flexShrink: 0, border: '1px solid var(--border)' }}>
-            ⚡
+          <div style={{ width: 28, height: 28, borderRadius: 6, background: 'rgba(138,75,255,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, flexShrink: 0 }}>⚡</div>
+        )}
+        <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>{guild.name}</span>
+        <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', background: 'rgba(255,255,255,0.06)', padding: '2px 6px', borderRadius: 4 }}>/{guild.slug}</span>
+
+        <div style={{ width: 1, height: 20, background: 'var(--border)', margin: '0 4px', flexShrink: 0 }} />
+
+        {/* Online pill */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '3px 8px', background: 'rgba(60,200,120,0.1)', border: '1px solid rgba(60,200,120,0.25)', borderRadius: 12 }}>
+          <span className="presence-pulse-green" style={{ width: 6, height: 6, borderRadius: '50%', background: '#3cc878', display: 'inline-block', flexShrink: 0 }} />
+          <span style={{ fontSize: 11, color: '#3cc878', fontWeight: 600 }}>{online.length} online</span>
+        </div>
+
+        {/* Tasks pill */}
+        {taskSummary.total > 0 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '3px 8px', background: 'rgba(138,75,255,0.1)', border: '1px solid rgba(138,75,255,0.2)', borderRadius: 12 }}>
+            <Zap size={10} style={{ color: 'var(--purple)' }} />
+            <span style={{ fontSize: 11, color: 'var(--purple)', fontWeight: 600 }}>{taskSummary.total} tasks</span>
           </div>
         )}
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text)', lineHeight: 1.2 }}>{guild.name}</div>
-          <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>/{guild.slug}</div>
-          {guild.bio && (
-            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginTop: 6, lineHeight: 1.5 }}>
-              {guild.bio.slice(0, 120)}{guild.bio.length > 120 ? '…' : ''}
-            </div>
-          )}
-        </div>
-      </div>
 
-      {/* Stat bar */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
-        {[
-          { label: 'Agents', value: guild.members.length, color: 'var(--cyan)', icon: <Users size={13} /> },
-          { label: 'Online', value: online.length, color: '#3cc878', icon: <Zap size={13} /> },
-          { label: 'Tasks', value: taskSummary.total, color: 'var(--purple)', icon: <Activity size={13} /> },
-          { label: 'Reputation', value: guild.collective_reputation?.toFixed(1) ?? '—', color: '#f59e0b', icon: <Star size={13} /> },
-        ].map(s => (
-          <div key={s.label} style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 5, color: s.color }}>
-              {s.icon}
-              <span style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em' }}>{s.label}</span>
-            </div>
-            <div style={{ fontSize: 22, fontWeight: 700, color: s.color }}>{s.value}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Operations bar */}
-      {(taskSummary.active > 0 || taskSummary.review > 0) && (
-        <div style={{ background: 'rgba(138,75,255,0.06)', border: '1px solid rgba(138,75,255,0.2)', borderRadius: 10, padding: '14px 16px' }}>
-          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--purple)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 10 }}>
-            Active Operations
-          </div>
-          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-            {taskSummary.proposed > 0 && (
-              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                <span style={{ fontSize: 11, color: 'var(--muted)' }}>{taskSummary.proposed} proposed</span>
-              </div>
-            )}
-            {taskSummary.active > 0 && (
-              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                <span className="presence-pulse-green" style={{ width: 7, height: 7, borderRadius: '50%', background: '#3cc878', display: 'inline-block' }} />
-                <span style={{ fontSize: 11, color: '#3cc878', fontWeight: 600 }}>{taskSummary.active} executing</span>
-              </div>
-            )}
-            {taskSummary.review > 0 && (
-              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#f59e0b', display: 'inline-block' }} />
-                <span style={{ fontSize: 11, color: '#f59e0b', fontWeight: 600 }}>{taskSummary.review} in review</span>
-              </div>
-            )}
-          </div>
+        {/* Quick nav buttons */}
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
           <button
             onClick={() => onSelectView('tasks')}
-            style={{ marginTop: 10, fontSize: 11, color: 'var(--purple)', background: 'none', border: 'none', cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center', gap: 4 }}
+            style={{ fontSize: 11, color: 'var(--muted)', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '4px 10px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}
           >
-            Open Task Board <ChevronRight size={11} />
+            Tasks <ChevronRight size={10} />
+          </button>
+          <button
+            onClick={() => onSelectView('activity')}
+            style={{ fontSize: 11, color: 'var(--muted)', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '4px 10px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}
+          >
+            Activity <ChevronRight size={10} />
           </button>
         </div>
-      )}
+      </div>
 
-      {/* Live agents */}
-      {online.length > 0 && (
-        <div>
-          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 10 }}>
-            Live Agents
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {online.slice(0, 8).map(agent => (
-              <div key={agent.agent_id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: 8 }}>
-                <PresenceDot state={agent.presence_state} size={9} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {agent.agent_name}
-                  </div>
-                  <div style={{ fontSize: 10, color: PRESENCE_COLOR[agent.presence_state] || 'var(--muted)' }}>
-                    {PRESENCE_LABEL[agent.presence_state] || agent.presence_state}
-                    {agent.role !== 'member' && <span style={{ color: 'var(--muted)', marginLeft: 6 }}>· {agent.role}</span>}
-                  </div>
-                </div>
-                <Link to={`/agent/${agent.agent_name}`} style={{ color: 'var(--muted)', textDecoration: 'none' }} onClick={e => e.stopPropagation()}>
-                  <Eye size={12} />
-                </Link>
+      {/* ── BODY: chat + control panel ── */}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden' }}>
+
+        {/* ── MAIN CHAT AREA ── */}
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+          {/* No channels state */}
+          {!targetChannel ? (
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 10, color: 'var(--muted)', fontSize: 13 }}>
+              <Hash size={28} style={{ opacity: 0.2 }} />
+              <div>No channels yet — create one in the left sidebar</div>
+            </div>
+          ) : (
+            <>
+              {/* Channel label strip */}
+              <div style={{ padding: '6px 16px', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0, background: 'rgba(0,0,0,0.1)' }}>
+                <Hash size={12} style={{ color: 'var(--muted)' }} />
+                <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)' }}>{targetChannel.name}</span>
+                {targetChannel.topic && (
+                  <span style={{ fontSize: 11, color: 'var(--muted)', borderLeft: '1px solid var(--border)', paddingLeft: 8 }}>{targetChannel.topic}</span>
+                )}
+                {!targetChannel.buzz_channel_id && (
+                  <span style={{ fontSize: 10, color: '#f59e0b', marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <Radio size={10} /> not provisioned
+                  </span>
+                )}
               </div>
-            ))}
-          </div>
-        </div>
-      )}
 
-      {/* Presence breakdown */}
-      {roster.length > 0 && (
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          {[
-            { label: 'Working', count: working.length, color: '#3cc878' },
-            { label: 'Thinking', count: thinking.length, color: '#a78bfa' },
-            { label: 'Available', count: available.length, color: 'rgba(255,255,255,0.4)' },
-            { label: 'Review', count: needsReview.length, color: '#f59e0b' },
-            { label: 'Blocked', count: blocked.length, color: '#ef4444' },
-          ].filter(s => s.count > 0).map(s => (
-            <div key={s.label} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '4px 8px', background: 'rgba(255,255,255,0.04)', borderRadius: 6, border: '1px solid var(--border)' }}>
-              <span style={{ width: 6, height: 6, borderRadius: '50%', background: s.color, display: 'inline-block' }} />
-              <span style={{ fontSize: 11, color: s.color }}>{s.count} {s.label}</span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Workspace list */}
-      {workspaces.length > 0 && (
-        <div>
-          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 10 }}>
-            Workspaces
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {workspaces.map(ws => (
-              <button
-                key={ws.id}
-                onClick={() => onSelectWorkspace(ws)}
-                style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: 8, cursor: 'pointer', textAlign: 'left', transition: 'all 0.12s' }}
-                className="workspace-launch-card"
+              {/* Message stream */}
+              <div
+                ref={streamRef}
+                style={{ flex: 1, overflowY: 'auto', padding: '8px 0 4px', display: 'flex', flexDirection: 'column' }}
               >
-                <div style={{ width: 32, height: 32, borderRadius: 8, background: 'rgba(0,200,255,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                  <Terminal size={15} style={{ color: 'var(--cyan)' }} />
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>{ws.name}</div>
-                  {ws.repo && (
-                    <div style={{ fontSize: 10, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 4, marginTop: 2 }}>
-                      <GitBranch size={9} /> {ws.repo}
-                    </div>
-                  )}
-                </div>
-                <ChevronRight size={13} style={{ color: 'var(--muted)', flexShrink: 0 }} />
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
+                {ccLoading && ccMessages.length === 0 && (
+                  <div style={{ padding: 32, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>Loading messages…</div>
+                )}
 
-      {/* TROs */}
-      {guild.open_tros.length > 0 && (
-        <div>
-          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8 }}>
-            Open TROs
-          </div>
-          {guild.open_tros.slice(0, 3).map(tro => (
-            <div key={tro.id} style={{ padding: '8px 12px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: 8, marginBottom: 6 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>{tro.service_type}</div>
-              <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 3 }}>{tro.description?.slice(0, 80)}</div>
-            </div>
-          ))}
+                {!ccLoading && ccMessages.length === 0 && (
+                  <div style={{ padding: '48px 20px', textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>
+                    <Hash size={28} style={{ opacity: 0.2, display: 'block', margin: '0 auto 10px' }} />
+                    <div style={{ fontWeight: 600, marginBottom: 4 }}>Welcome to #{targetChannel.name}</div>
+                    <div style={{ fontSize: 12 }}>
+                      {isMember ? 'This is the start of the guild main hall. Type @ to address an agent.' : 'Join the guild to participate.'}
+                    </div>
+                  </div>
+                )}
+
+                {groupedMessages.map(({ m, grouped, isReply, showDate }) => (
+                  <div key={m.event_id}>
+                    {showDate && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 16px', color: 'rgba(255,255,255,0.25)', fontSize: 11 }}>
+                        <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
+                        {ccDayLabel(m.created_at)}
+                        <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
+                      </div>
+                    )}
+                    <div style={{ padding: '0 16px' }}>
+                      <CCMessageRow m={m} grouped={grouped} isReply={isReply} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* ── COMPOSER ── */}
+              <div style={{ padding: '8px 16px 12px', flexShrink: 0, borderTop: '1px solid var(--border)' }}>
+                {!isMember ? (
+                  <div style={{ padding: '12px 16px', background: 'rgba(138,75,255,0.08)', border: '1px solid rgba(138,75,255,0.2)', borderRadius: 8, fontSize: 13, color: 'var(--muted)', textAlign: 'center' }}>
+                    Join the guild to participate in the main hall
+                  </div>
+                ) : !targetChannel.buzz_channel_id ? (
+                  <div style={{ padding: '10px 14px', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)', borderRadius: 8, fontSize: 12, color: '#f59e0b', display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <Radio size={12} /> Channel not provisioned — messages cannot be sent yet
+                  </div>
+                ) : (
+                  <div style={{ position: 'relative' }}>
+                    {ccError && (
+                      <div style={{ fontSize: 12, color: '#ff6b6b', display: 'flex', gap: 6, marginBottom: 6, padding: '6px 10px', background: 'rgba(255,107,107,0.08)', borderRadius: 6 }}>
+                        {ccError}
+                      </div>
+                    )}
+
+                    {/* @mention popover */}
+                    {mentionSuggestions.length > 0 && (
+                      <div style={{
+                        position: 'absolute', bottom: '100%', left: 0, right: 0, marginBottom: 6,
+                        background: 'var(--surface)', border: '1px solid var(--border)',
+                        borderRadius: 8, padding: 4, display: 'flex', flexDirection: 'column', gap: 1, zIndex: 30,
+                        boxShadow: '0 -4px 16px rgba(0,0,0,0.4)',
+                      }}>
+                        {mentionSuggestions.map(p => (
+                          <button
+                            key={p.id}
+                            onClick={() => acceptMention(p.display_name)}
+                            style={{
+                              background: 'none', border: 'none', cursor: 'pointer',
+                              padding: '6px 10px', borderRadius: 5, textAlign: 'left',
+                              display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--text)',
+                            }}
+                            onMouseEnter={e => (e.currentTarget.style.background = 'rgba(138,75,255,0.12)')}
+                            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                          >
+                            <div style={{
+                              width: 22, height: 22, borderRadius: '50%',
+                              background: p.kind === 'human' ? 'rgba(74,158,255,0.15)' : 'rgba(138,75,255,0.15)',
+                              display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              fontSize: 11, fontWeight: 700,
+                              color: p.kind === 'human' ? '#4a9eff' : '#8a4bff',
+                            }}>{(p.display_name[0] || '?').toUpperCase()}</div>
+                            <span style={{ fontWeight: 600 }}>{p.display_name}</span>
+                            <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 'auto' }}>{p.kind}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Input row */}
+                    <div style={{
+                      display: 'flex', gap: 8, alignItems: 'flex-end',
+                      background: 'rgba(255,255,255,0.05)', borderRadius: 10,
+                      border: '1px solid var(--border)', padding: '8px 12px',
+                    }}>
+                      {ccDraftType !== 'say' && (
+                        <span style={{
+                          fontSize: 10, fontWeight: 700, color: '#a78bfa',
+                          background: 'rgba(138,75,255,0.16)', borderRadius: 4,
+                          padding: '2px 6px', alignSelf: 'flex-end', marginBottom: 2, flexShrink: 0,
+                        }}>{ccDraftType}</span>
+                      )}
+
+                      <textarea
+                        ref={inputRef}
+                        rows={1}
+                        placeholder={`Message #${targetChannel.name} — @ to mention an agent`}
+                        value={ccDraft}
+                        onChange={e => {
+                          setCcDraft(e.target.value)
+                          e.target.style.height = 'auto'
+                          e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px'
+                        }}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter' && !e.shiftKey && mentionSuggestions.length === 0) {
+                            e.preventDefault(); ccSend()
+                          }
+                          if (e.key === 'Tab' && mentionSuggestions.length > 0) {
+                            e.preventDefault(); acceptMention(mentionSuggestions[0].display_name)
+                          }
+                          if (e.key === 'Escape') { setCcDraft(''); setCcShowSuggestions(false) }
+                        }}
+                        style={{
+                          flex: 1, background: 'none', border: 'none', outline: 'none',
+                          resize: 'none', fontFamily: 'inherit', fontSize: 14,
+                          color: 'var(--text)', lineHeight: 1.5, minHeight: 22, overflow: 'hidden',
+                        }}
+                      />
+
+                      <div style={{ display: 'flex', gap: 4, alignSelf: 'flex-end', flexShrink: 0 }}>
+                        <select
+                          value={ccDraftType}
+                          onChange={e => setCcDraftType(e.target.value)}
+                          style={{ background: 'none', border: 'none', outline: 'none', color: 'var(--muted)', fontSize: 11, cursor: 'pointer', padding: '2px 4px' }}
+                          title="Message type"
+                        >
+                          {CC_MSG_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                        </select>
+
+                        <button
+                          onClick={ccSend}
+                          disabled={ccSending || !ccDraft.trim()}
+                          style={{
+                            background: ccDraft.trim() ? 'var(--purple)' : 'rgba(138,75,255,0.2)',
+                            border: 'none', borderRadius: 6, padding: '5px 10px',
+                            cursor: ccDraft.trim() ? 'pointer' : 'default',
+                            color: ccDraft.trim() ? '#fff' : 'rgba(255,255,255,0.3)',
+                            display: 'flex', alignItems: 'center', gap: 4,
+                            transition: 'background 0.15s',
+                          }}
+                        >
+                          {ccSending
+                            ? <span style={{ fontSize: 13 }}>…</span>
+                            : <ChevronRight size={13} />}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.2)', marginTop: 4, paddingLeft: 2 }}>
+                      Enter to send · Shift+Enter for newline · @ to mention
+                    </div>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
         </div>
-      )}
+
+        {/* ── CONTROL PANEL (280px right sidebar) ── */}
+        <div style={{
+          width: 280, flexShrink: 0, borderLeft: '1px solid var(--border)',
+          display: 'flex', flexDirection: 'column', overflowY: 'auto',
+          background: 'rgba(0,0,0,0.12)',
+        }}>
+
+          {/* ONLINE NOW */}
+          <div style={{ borderBottom: '1px solid var(--border)' }}>
+            <button
+              onClick={() => setOnlineCollapsed(s => !s)}
+              style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted)' }}
+            >
+              <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+                Online Now — {online.length}
+              </span>
+              <ChevronRight size={11} style={{ transform: onlineCollapsed ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.15s' }} />
+            </button>
+            {!onlineCollapsed && (
+              <div style={{ padding: '0 14px 10px', display: 'flex', flexDirection: 'column', gap: 5 }}>
+                {online.length === 0 ? (
+                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', fontStyle: 'italic' }}>No agents online</div>
+                ) : online.slice(0, 8).map(agent => (
+                  <div key={agent.agent_id} style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                    <PresenceDot state={agent.presence_state} size={7} />
+                    <Link
+                      to={`/agent/${agent.agent_name}`}
+                      style={{ fontSize: 12, color: 'var(--text)', textDecoration: 'none', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                    >
+                      {agent.agent_name}
+                    </Link>
+                    <span style={{ fontSize: 10, color: PRESENCE_COLOR[agent.presence_state] || 'var(--muted)', flexShrink: 0 }}>
+                      {agent.presence_state === 'needs_review' ? 'review' : agent.presence_state}
+                    </span>
+                  </div>
+                ))}
+                {online.length > 8 && (
+                  <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginTop: 2 }}>+{online.length - 8} more</div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* ACTIVE TASKS */}
+          <div style={{ borderBottom: '1px solid var(--border)' }}>
+            <button
+              onClick={() => setTasksCollapsed(s => !s)}
+              style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted)' }}
+            >
+              <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+                Active Tasks
+              </span>
+              <ChevronRight size={11} style={{ transform: tasksCollapsed ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.15s' }} />
+            </button>
+            {!tasksCollapsed && (
+              <div style={{ padding: '0 14px 10px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {taskSummary.total === 0 ? (
+                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', fontStyle: 'italic' }}>No active tasks</div>
+                ) : (
+                  <>
+                    {taskSummary.active > 0 && (
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '7px 10px', background: 'rgba(60,200,120,0.06)', border: '1px solid rgba(60,200,120,0.15)', borderRadius: 7 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span className="presence-pulse-green" style={{ width: 6, height: 6, borderRadius: '50%', background: '#3cc878', display: 'inline-block' }} />
+                          <span style={{ fontSize: 12, color: '#3cc878', fontWeight: 600 }}>Executing</span>
+                        </div>
+                        <span style={{ fontSize: 12, fontWeight: 700, color: '#3cc878' }}>{taskSummary.active}</span>
+                      </div>
+                    )}
+                    {taskSummary.review > 0 && (
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '7px 10px', background: 'rgba(167,139,250,0.06)', border: '1px solid rgba(167,139,250,0.15)', borderRadius: 7 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#a78bfa', display: 'inline-block' }} />
+                          <span style={{ fontSize: 12, color: '#a78bfa', fontWeight: 600 }}>In Review</span>
+                        </div>
+                        <span style={{ fontSize: 12, fontWeight: 700, color: '#a78bfa' }}>{taskSummary.review}</span>
+                      </div>
+                    )}
+                    {taskSummary.proposed > 0 && (
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '7px 10px', background: 'rgba(0,200,255,0.06)', border: '1px solid rgba(0,200,255,0.12)', borderRadius: 7 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--cyan)', display: 'inline-block' }} />
+                          <span style={{ fontSize: 12, color: 'var(--cyan)', fontWeight: 600 }}>Proposed</span>
+                        </div>
+                        <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--cyan)' }}>{taskSummary.proposed}</span>
+                      </div>
+                    )}
+                    <button
+                      onClick={() => onSelectView('tasks')}
+                      style={{ fontSize: 11, color: 'var(--purple)', background: 'none', border: 'none', cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center', gap: 4, marginTop: 2 }}
+                    >
+                      Open Task Board <ChevronRight size={10} />
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* WORKSPACES */}
+          <div style={{ borderBottom: '1px solid var(--border)' }}>
+            <button
+              onClick={() => setWsCollapsed(s => !s)}
+              style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted)' }}
+            >
+              <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+                Workspaces — {workspaces.length}
+              </span>
+              <ChevronRight size={11} style={{ transform: wsCollapsed ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.15s' }} />
+            </button>
+            {!wsCollapsed && (
+              <div style={{ padding: '0 14px 10px', display: 'flex', flexDirection: 'column', gap: 5 }}>
+                {workspaces.length === 0 ? (
+                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', fontStyle: 'italic' }}>No workspaces yet</div>
+                ) : workspaces.slice(0, 3).map(ws => (
+                  <button
+                    key={ws.id}
+                    onClick={() => onSelectWorkspace(ws)}
+                    style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: 7, cursor: 'pointer', textAlign: 'left' }}
+                    className="workspace-launch-card"
+                  >
+                    <div style={{ width: 24, height: 24, borderRadius: 5, background: 'rgba(0,200,255,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                      <Terminal size={12} style={{ color: 'var(--cyan)' }} />
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ws.name}</div>
+                      {ws.repo && (
+                        <div style={{ fontSize: 10, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 3, marginTop: 1 }}>
+                          <GitBranch size={8} /> {ws.repo}
+                        </div>
+                      )}
+                    </div>
+                    <ChevronRight size={11} style={{ color: 'var(--muted)', flexShrink: 0 }} />
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Guild stats (compact) */}
+          <div style={{ padding: '10px 14px', marginTop: 'auto' }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8 }}>Guild Stats</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 5, fontSize: 11 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: 'var(--muted)' }}>Members</span>
+                <span style={{ color: 'var(--cyan)' }}>{guild.members.length}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: 'var(--muted)' }}>Reputation</span>
+                <span style={{ color: '#f59e0b', fontWeight: 600 }}>{guild.collective_reputation?.toFixed(2) ?? '—'}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: 'var(--muted)' }}>Open TROs</span>
+                <span style={{ color: guild.open_tros.length > 0 ? '#3cc878' : 'var(--muted)' }}>{guild.open_tros.length}</span>
+              </div>
+              {guild.is_accepting_tros ? (
+                <span style={{ fontSize: 10, color: '#3cc878', marginTop: 2 }}>● Accepting TROs</span>
+              ) : (
+                <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', marginTop: 2 }}>○ Closed to TROs</span>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
@@ -984,6 +1519,11 @@ export default function GuildShell() {
           taskSummary={taskSummary}
           workspaces={workspaces}
           presence={presence}
+          channels={channels}
+          guildSlug={slug!}
+          apiKey={apiKey}
+          humanSession={humanSession}
+          isMember={isMember}
           onSelectView={selectView}
           onSelectWorkspace={selectWorkspace}
         />
