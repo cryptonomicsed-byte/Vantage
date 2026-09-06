@@ -1,4 +1,5 @@
 """Sovereign agent task lifecycle API — exposed as MCP tools via fastapi-mcp."""
+import logging
 import secrets
 from typing import Optional
 
@@ -7,6 +8,8 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Query
 
 from ..db import get_db
 from ..deps import get_agent
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/guilds/{guild_slug}/tasks", tags=["tasks"])
 
@@ -149,6 +152,14 @@ async def claim_task(guild_slug: str, task_id: str, agent: dict = Depends(get_ag
             (claim_id, task_id, agent["id"], agent["name"]),
         )
         await db.commit()
+
+    # BlockMesh: record commitment when agent claims a task
+    try:
+        from ..tier_engine import increment_commitments
+        await increment_commitments(agent["id"], 1)
+    except Exception as exc:
+        logger.warning("blockmesh: failed to increment commitments on claim: %s", exc)
+
     return {"status": "claimed", "task_id": task_id}
 
 
@@ -230,7 +241,34 @@ async def submit_artifact(
             (task_id,),
         )
         await db.commit()
-    return {"artifact_id": artifact_id, "task_id": task_id, "status": "review"}
+
+    # BlockMesh: open witness round so peers validate the submitted work
+    witness_info: dict = {}
+    try:
+        from ..witness_store import open_witness_round
+        witness_info = await open_witness_round(
+            subject_type="guild_task",
+            subject_id=task_id,
+            submitter_agent_id=agent["id"],
+            artifact_url="",
+            description=f"Work submitted for guild task #{task_id} — {task['title']}",
+        )
+    except Exception as exc:
+        logger.warning("blockmesh: failed to open witness round: %s", exc)
+
+    # BlockMesh: count submission as a mesh commitment
+    try:
+        from ..tier_engine import increment_commitments
+        await increment_commitments(agent["id"], 1)
+    except Exception as exc:
+        logger.warning("blockmesh: failed to increment commitments on submit: %s", exc)
+
+    return {
+        "artifact_id": artifact_id,
+        "task_id": task_id,
+        "status": "review",
+        "witness_round": witness_info or None,
+    }
 
 
 @router.post(

@@ -531,8 +531,16 @@ async def lifespan(app: FastAPI):
     await init_workspace_tasks_db()
     from .tasks_db import init_tasks_db
     await init_tasks_db()
+    from .routers.blockmesh_board import init_blockmesh_board_db
+    await init_blockmesh_board_db()
+    from .device_registry import init_device_registry_db
+    await init_device_registry_db()
     from .reputation import init_task_reputation_db, update_on_event as _rep_update_on_event
     await init_task_reputation_db()
+    from .tier_engine import init_tier_db
+    await init_tier_db()
+    from .witness_store import init_witness_db
+    await init_witness_db()
     from .event_bus import subscribe as _eb_subscribe
     _eb_subscribe("TaskCompleted", lambda e: asyncio.create_task(_rep_update_on_event(e.event_type, e.actor_id or 0)))
     _eb_subscribe("ArtifactVerified", lambda e: asyncio.create_task(_rep_update_on_event(e.event_type, e.actor_id or 0)))
@@ -579,6 +587,8 @@ async def lifespan(app: FastAPI):
     weather_task = asyncio.create_task(_weather_alert_loop())
     rate_limit_prune_task = asyncio.create_task(_rate_limit_prune_loop())
     wallet_pruning_task = asyncio.create_task(_wallet_pruning_loop())
+    from .tier_engine import run_tier_recompute_loop as _run_tier_recompute_loop
+    tier_recompute_task = asyncio.create_task(_run_tier_recompute_loop())
 
     # Execution engine was built + tested but never actually started anywhere
     # (an audit on 2026-08-17 found it dead code, unimported outside tests).
@@ -601,8 +611,9 @@ async def lifespan(app: FastAPI):
     # Mirrors guild-channel messages from the relay into the index. Without
     # it, messages an external agent publishes with its own key never reach
     # Vantage at all -- see backend/coordination_indexer.py.
-    from .coordination_indexer import run_coordination_indexer
+    from .coordination_indexer import run_coordination_indexer, run_mention_dispatch_poller
     coordination_indexer_task = asyncio.create_task(run_coordination_indexer())
+    mention_poller_task = asyncio.create_task(run_mention_dispatch_poller())
 
     # Guild-scoped leaderboard rollup. Deliberately slow: a leaderboard needs
     # stable numbers more than fresh ones.
@@ -640,7 +651,7 @@ async def lifespan(app: FastAPI):
         logger.warning("reputation init skipped: %s", e)
 
     yield
-    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, scoring_task, last30days_task, outcome_learner_task, event_bus_task]
+    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, mention_poller_task, scoring_task, last30days_task, outcome_learner_task, event_bus_task, tier_recompute_task]
     if execution_engine_task is not None:
         shutdown_tasks.append(execution_engine_task)
     for t in shutdown_tasks:
@@ -966,6 +977,10 @@ app.include_router(meshnet_router)
 # Sovereign agent task/artifact/memory/roster API
 from .routers.tasks import router as tasks_router
 app.include_router(tasks_router)
+
+# BlockMesh unified job board (Phase C) — aggregates guild_tasks, task_listings, job_tasks
+from .routers.blockmesh_board import router as blockmesh_board_router
+app.include_router(blockmesh_board_router)
 from .routers.guild_memory import router as guild_memory_router
 app.include_router(guild_memory_router)
 from .routers.agent_roster import router as agent_roster_router
@@ -980,6 +995,14 @@ app.include_router(reputation_router)
 from .routers.sui_settlement import router as sui_settlement_router
 app.include_router(sui_settlement_router)
 
+# BlockMesh Phase A: agent tier engine
+from .routers.tier import router as tier_router
+app.include_router(tier_router)
+
+# BlockMesh Phase B: witness protocol
+from .routers.witness import router as witness_router
+app.include_router(witness_router)
+
 # NIP-98 HTTP Auth gateway and Nostr identity binding (Ọmọ Kọ́dà2 sovereign agents)
 from .routers.nostr_auth import router as nostr_auth_router
 app.include_router(nostr_auth_router)
@@ -993,6 +1016,10 @@ app.include_router(nip29_router)
 # P3 — A2A Task Delegation
 from .routers.delegation import router as delegation_router
 app.include_router(delegation_router)
+
+# Phase D — Agent Device Embodiment (Tier 3+ IoT/robot control delegation)
+from .routers.devices import router as devices_router
+app.include_router(devices_router)
 
 # Freenet decentralized state adapter
 from .freenet.router import router as freenet_router

@@ -170,26 +170,37 @@ async def dispatch_to_mentioned(
             logger.warning("guild_chat: %s failed to answer: %s", agent_row.get("name"), exc)
             continue
 
-        reply_text = (result or {}).get("reply") or (result or {}).get("text") or ""
+        data = (result or {}).get("data") or {}
+        reply_text = (
+            (result or {}).get("reply")
+            or (result or {}).get("text")
+            or data.get("reply")
+            or data.get("text")
+            or ""
+        )
         if not reply_text.strip():
             continue
 
         try:
-            event = await coord.publish_message(
-                channel=channel, guild_slug=guild_slug, principal=principal,
-                content=reply_text, msg_type="say",
-                root_event_id=root_event_id,
-                addressed_to=author_principal.get("pubkey"),
-                extra_tags=[["vdepth", str(depth + 1)]],
-            )
+            try:
+                event = await coord.publish_message(
+                    channel=channel, guild_slug=guild_slug, principal=principal,
+                    content=reply_text, msg_type="say",
+                    root_event_id=root_event_id,
+                    addressed_to=author_principal.get("pubkey"),
+                    extra_tags=[["vdepth", str(depth + 1)]],
+                )
+            except coord.RelayUnavailable:
+                event = await coord.publish_message_local(
+                    channel=channel, guild_slug=guild_slug, principal=principal,
+                    content=reply_text, msg_type="say",
+                    root_event_id=root_event_id,
+                )
             replies.append({
                 "agent": principal["display_name"],
                 "event_id": event["id"],
                 "depth": depth + 1,
             })
-        except coord.RelayUnavailable as exc:
-            logger.warning("guild_chat: %s answered but the relay refused it: %s",
-                           principal["display_name"], exc)
         except Exception as exc:
             logger.warning("guild_chat: could not publish %s's reply: %s",
                            principal["display_name"], exc)

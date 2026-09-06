@@ -74,6 +74,72 @@ def _build_filter(channel_ids: list[str], since: int) -> dict:
     return filt
 
 
+async def _dispatch_guild_mentions(event: dict) -> None:
+    """Fire guild_chat mention dispatch for a newly-indexed relay event.
+
+    This is the path for agents that hold their own keys and post straight
+    to the relay rather than through the REST API — the REST handler calls
+    dispatch_to_mentioned itself, but relay-native posts only reach dispatch
+    here, after the indexer has already written the row.
+
+    Never raises: one agent failing to answer must not break the indexer.
+    """
+    from .coordination import get_channel_by_buzz_id, parse_message_event
+    from .guild_chat import dispatch_depth, dispatch_to_mentioned, parse_mentions, resolve_mentions
+
+    content = event.get("content", "")
+    mentions = parse_mentions(content)
+    if not mentions:
+        return
+
+    parsed = parse_message_event(event)
+    channel = await get_channel_by_buzz_id(parsed["buzz_channel_id"])
+    if channel is None:
+        return
+
+    depth = dispatch_depth(event)
+    if depth >= 3:
+        return
+
+    async with get_db() as db:
+        import aiosqlite
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT slug FROM guilds WHERE id=?", (channel["guild_id"],))
+        row = await cur.fetchone()
+        if not row:
+            return
+        guild_slug = row["slug"]
+
+        cur = await db.execute(
+            "SELECT * FROM principals WHERE pubkey=? LIMIT 1", (event.get("pubkey", ""),)
+        )
+        row = await cur.fetchone()
+        author_principal = dict(row) if row else {
+            "id": None, "pubkey": event.get("pubkey", ""), "display_name": "unknown",
+        }
+
+    mentioned = await resolve_mentions(channel["guild_id"], mentions)
+    if not mentioned:
+        return
+
+    logger.info(
+        "coordination_indexer: dispatching @mentions %s in %s/%s (depth=%d)",
+        mentions, guild_slug, channel["slug"], depth,
+    )
+    try:
+        await dispatch_to_mentioned(
+            channel=channel,
+            guild_slug=guild_slug,
+            content=content,
+            author_principal=author_principal,
+            mentioned=mentioned,
+            depth=depth,
+            root_event_id=parsed.get("thread_root_event_id"),
+        )
+    except Exception as exc:
+        logger.warning("coordination_indexer: mention dispatch failed: %s", exc)
+
+
 async def _consume(sess: BuzzSession, sub_id: str) -> None:
     """Index everything the relay sends until the stream ends."""
     async for event in sess.stream_events(sub_id):
@@ -81,6 +147,7 @@ async def _consume(sess: BuzzSession, sub_id: str) -> None:
             row_id = await index_event(event)
             if row_id is not None:
                 await _tell_conductor(event)
+                await _dispatch_guild_mentions(event)
         except Exception as exc:
             # One malformed or unexpected event must never kill the listener;
             # the next one may be perfectly good.
@@ -122,6 +189,133 @@ async def _watch_channel_set(initial: list[str]) -> None:
                 return
         except Exception as exc:
             logger.debug("coordination_indexer: channel-set check failed: %s", exc)
+
+
+_dispatched_event_ids: set[str] = set()
+_dispatched_timestamps: dict[str, float] = {}
+_DISPATCH_TTL = 600  # seconds; clear tracked IDs after this long
+
+
+async def run_mention_dispatch_poller() -> None:
+    """Fallback: scan channel_messages every 30 s for @mentions without replies.
+
+    This catches messages posted by relay-native agents when the coordination
+    indexer's relay connection is down (NIP-42 auth failure). Relay-indexed
+    messages are handled in _consume via _dispatch_guild_mentions; this path
+    exists so no @mention goes permanently unanswered just because the relay
+    was unreachable at the moment the message was indexed.
+
+    Skips messages that were already dispatched this session (tracked by
+    event_id) and messages older than 10 minutes (stale enough that a person
+    should reply instead).
+    """
+    import time as _time
+    POLL_INTERVAL = 30
+    LOOKBACK_SECONDS = 600  # 10 minutes
+
+    while True:
+        await asyncio.sleep(POLL_INTERVAL)
+        try:
+            now = _time.time()
+            cutoff = int(now) - LOOKBACK_SECONDS
+
+            # Purge old tracked IDs to keep memory bounded.
+            stale = [eid for eid, ts in _dispatched_timestamps.items() if now - ts > _DISPATCH_TTL]
+            for eid in stale:
+                _dispatched_event_ids.discard(eid)
+                _dispatched_timestamps.pop(eid, None)
+
+            async with get_db() as db:
+                import aiosqlite
+                db.row_factory = aiosqlite.Row
+                cur = await db.execute(
+                    """SELECT cm.event_id, cm.content, cm.pubkey, cm.channel_id,
+                              cm.thread_root_event_id,
+                              gc.slug as channel_slug, gc.buzz_channel_id, gc.guild_id,
+                              g.slug as guild_slug
+                         FROM channel_messages cm
+                         JOIN guild_channels gc ON gc.id=cm.channel_id
+                         JOIN guilds g ON g.id=gc.guild_id
+                        WHERE cm.created_at >= ?
+                          AND cm.content LIKE '%@%'
+                          AND cm.msg_type = 'say'
+                        ORDER BY cm.created_at ASC""",
+                    (cutoff,),
+                )
+                candidates = [dict(r) for r in await cur.fetchall()]
+
+            for row in candidates:
+                event_id = row["event_id"]
+                if event_id in _dispatched_event_ids:
+                    continue
+
+                from .guild_chat import parse_mentions
+                mentions = parse_mentions(row["content"])
+                if not mentions:
+                    _dispatched_event_ids.add(event_id)
+                    _dispatched_timestamps[event_id] = now
+                    continue
+
+                # Check if a reply already exists for this message.
+                async with get_db() as db:
+                    cur = await db.execute(
+                        "SELECT 1 FROM channel_messages WHERE thread_root_event_id=? LIMIT 1",
+                        (event_id,),
+                    )
+                    already_replied = await cur.fetchone() is not None
+
+                if already_replied:
+                    _dispatched_event_ids.add(event_id)
+                    _dispatched_timestamps[event_id] = now
+                    continue
+
+                # Mark before dispatching so a concurrent reply doesn't double-fire.
+                _dispatched_event_ids.add(event_id)
+                _dispatched_timestamps[event_id] = now
+
+                from .coordination import get_channel_by_buzz_id
+                from .guild_chat import dispatch_to_mentioned, resolve_mentions
+
+                channel = await get_channel_by_buzz_id(row["buzz_channel_id"])
+                if channel is None:
+                    continue
+
+                async with get_db() as db:
+                    import aiosqlite
+                    db.row_factory = aiosqlite.Row
+                    cur = await db.execute(
+                        "SELECT * FROM principals WHERE pubkey=? LIMIT 1", (row["pubkey"],)
+                    )
+                    prow = await cur.fetchone()
+                author_principal = dict(prow) if prow else {
+                    "id": None, "pubkey": row["pubkey"], "display_name": "unknown",
+                }
+
+                mentioned = await resolve_mentions(row["guild_id"], mentions)
+                if not mentioned:
+                    continue
+
+                logger.info(
+                    "mention_poller: dispatching unanswered @mentions %s in %s/%s",
+                    mentions, row["guild_slug"], row["channel_slug"],
+                )
+                try:
+                    await dispatch_to_mentioned(
+                        channel=channel,
+                        guild_slug=row["guild_slug"],
+                        content=row["content"],
+                        author_principal=author_principal,
+                        mentioned=mentioned,
+                        depth=0,
+                        root_event_id=row.get("thread_root_event_id"),
+                    )
+                except Exception as exc:
+                    logger.warning("mention_poller: dispatch failed for %s: %s", event_id[:8], exc)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("mention_poller: scan failed: %s", exc)
 
 
 async def run_coordination_indexer() -> None:

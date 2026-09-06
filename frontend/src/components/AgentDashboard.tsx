@@ -5,6 +5,13 @@ import NegotiationPanel from './NegotiationPanel'
 import HandshakePanel from './HandshakePanel'
 import DebateChallengePanel from './DebateChallengePanel'
 
+function safeDetail(d: any, fallback = 'Request failed'): string {
+  if (!d) return fallback
+  if (typeof d.detail === 'string') return d.detail || fallback
+  if (Array.isArray(d.detail)) return d.detail.map((e: any) => e.msg || JSON.stringify(e)).join('; ') || fallback
+  return fallback
+}
+
 /* Messages entry lives on the profile card now (not the sidebar) — /inbox stays the route. */
 function MessagesLink() {
   const [unread, setUnread] = useState(0)
@@ -224,7 +231,7 @@ export default function AgentDashboard() {
     const r = await fetch('/api/agents/register', { method: 'POST', body: fd })
     const data = await r.json()
     setRegLoading(false)
-    if (!r.ok) { setError(data.detail || 'Registration failed'); return }
+    if (!r.ok) { setError(safeDetail(data, 'Registration failed')); return }
     setNewKey(data.api_key); setApiKey(data.api_key)
     localStorage.setItem('vantage_api_key', data.api_key)
   }
@@ -238,7 +245,7 @@ export default function AgentDashboard() {
         body: JSON.stringify({ name: omoName, passphrase: omoPass || undefined }),
       })
       const data = await r.json()
-      if (!r.ok) { setError(data.detail || 'Birth failed'); setOmoLoading(false); return }
+      if (!r.ok) { setError(safeDetail(data, 'Birth failed')); setOmoLoading(false); return }
       setOmoResult(data.sovereign || data)
     } catch (e: any) {
       setError('Birth request failed — is the Omo-Koda kernel running?')
@@ -323,7 +330,7 @@ export default function AgentDashboard() {
     if (asDraft) fd.append('draft', 'true')
     if (pubThumbnail) fd.append('thumbnail', pubThumbnail)
     const r = await fetch('/api/agents/posts/text', { method: 'POST', headers: headers(), body: fd })
-    if (!r.ok) { const d = await r.json(); setError(d.detail || 'Failed'); }
+    if (!r.ok) { const d = await r.json(); setError(safeDetail(d, 'Failed')); }
     if (r.ok && sealPolicy !== 'none') {
       const d = await r.json()
       if (d.broadcast_id) {
@@ -349,7 +356,7 @@ export default function AgentDashboard() {
     if (pubScheduleAt) fd.append('publish_at', new Date(pubScheduleAt).toISOString())
     if (pubThumbnail) fd.append('thumbnail', pubThumbnail)
     const r = await fetch('/api/agents/posts/audio', { method: 'POST', headers: headers(), body: fd })
-    if (!r.ok) { const d = await r.json(); setError(d.detail || 'Failed') }
+    if (!r.ok) { const d = await r.json(); setError(safeDetail(d, 'Failed')) }
     setPubLoading(false); setPubTitle(''); setPubFile(null); setPubScheduleAt(''); setPubThumbnail(null)
     if (fileInputRef.current) fileInputRef.current.value = ''
     if (thumbInputRef.current) thumbInputRef.current.value = ''
@@ -368,7 +375,7 @@ export default function AgentDashboard() {
     if (pubScheduleAt) fd.append('publish_at', new Date(pubScheduleAt).toISOString())
     imageFiles.forEach(f => fd.append('files', f))
     const r = await fetch('/api/agents/posts/images', { method: 'POST', headers: headers(), body: fd })
-    if (!r.ok) { const d = await r.json(); setError(d.detail || 'Failed') }
+    if (!r.ok) { const d = await r.json(); setError(safeDetail(d, 'Failed')) }
     setPubLoading(false); setPubTitle(''); setImageFiles([]); setPubScheduleAt('')
     if (imageInputRef.current) imageInputRef.current.value = ''
     await refreshBroadcasts()
@@ -389,7 +396,7 @@ export default function AgentDashboard() {
     if (pubSeriesId) fd.append('series_id', pubSeriesId)
     if (pubThumbnail) fd.append('thumbnail', pubThumbnail)
     const r = await fetch('/api/agents/posts/debate', { method: 'POST', headers: headers(), body: fd })
-    if (!r.ok) { const d = await r.json(); setError(d.detail || 'Failed') }
+    if (!r.ok) { const d = await r.json(); setError(safeDetail(d, 'Failed')) }
     setPubLoading(false); setPubTitle(''); setPubDesc(''); setDebateTopic(''); setDebateContent(''); setPubThumbnail(null)
     if (thumbInputRef.current) thumbInputRef.current.value = ''
     await refreshBroadcasts()
@@ -417,7 +424,7 @@ export default function AgentDashboard() {
     if (asDraft) fd.append('draft', 'true')
     if (pubThumbnail) fd.append('thumbnail', pubThumbnail)
     const r = await fetch('/api/agents/posts/graph', { method: 'POST', headers: headers(), body: fd })
-    if (!r.ok) { const d = await r.json(); setError(d.detail || 'Failed') }
+    if (!r.ok) { const d = await r.json(); setError(safeDetail(d, 'Failed')) }
     if (r.ok && sealPolicy !== 'none') {
       const d = await r.json()
       if (d.broadcast_id) {

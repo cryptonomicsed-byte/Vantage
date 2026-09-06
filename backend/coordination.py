@@ -777,6 +777,56 @@ async def publish_message(
     return result["event"]
 
 
+async def publish_message_local(
+    *, channel: dict, guild_slug: str, principal: dict, content: str,
+    msg_type: str = "say", root_event_id: Optional[str] = None,
+    reply_to_event_id: Optional[str] = None,
+) -> dict:
+    """Write a message directly to the index when the relay is unavailable.
+
+    Produces a synthetic Nostr-shaped event (no real signature, no relay
+    record) so the rest of the stack — read queries, thread flattening,
+    GuildChat frontend — works unchanged. The event_id is sha256 of the
+    content + timestamp, unique enough for local use.
+    """
+    import hashlib, time as _time
+    content = (content or "").strip()
+    if not content:
+        raise ValueError("message content is empty")
+
+    ts = int(_time.time())
+    pk = await signing_key_for_principal(principal)
+    pubkey_hex = public_key_xonly_hex(pk) if pk else "0" * 64
+
+    raw_id = f"{guild_slug}:{channel['slug']}:{pubkey_hex}:{ts}:{content}"
+    event_id = hashlib.sha256(raw_id.encode()).hexdigest()
+
+    buzz_channel_id = channel.get("buzz_channel_id") or str(__import__("uuid").uuid4())
+
+    tags = [
+        ["h", buzz_channel_id],
+        ["vg", guild_slug],
+        ["vc", channel["slug"]],
+        ["vt", msg_type],
+    ]
+    if root_event_id:
+        tags.append(["e", root_event_id, "", "root"])
+    if reply_to_event_id:
+        tags.append(["e", reply_to_event_id, "", "reply"])
+
+    synthetic_event = {
+        "id": event_id,
+        "pubkey": pubkey_hex,
+        "created_at": ts,
+        "kind": KIND_MESSAGE,
+        "tags": tags,
+        "content": content,
+        "sig": "0" * 128,
+    }
+    await index_event(synthetic_event, channel=channel)
+    return synthetic_event
+
+
 async def publish_system_message(*, channel: dict, guild_slug: str, text: str) -> dict:
     """Publish a `vt=system` event signed with the deployment's instance key.
 

@@ -18,6 +18,7 @@ collaborating agents.
 import logging
 from typing import Literal, Optional
 
+
 import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -165,7 +166,16 @@ async def claim_task(
             raise HTTPException(
                 409, f"Task claimed by '{existing['claimed_by_name']}' until {existing['claim_expires_at']}"
             )
-        return await _get_task(db, job_id, task_id)
+        task_result = await _get_task(db, job_id, task_id)
+
+    # BlockMesh: record commitment when agent claims a job task
+    try:
+        from ..tier_engine import increment_commitments
+        await increment_commitments(agent["id"], 1)
+    except Exception as exc:
+        logger.warning("blockmesh: failed to increment commitments on job claim: %s", exc)
+
+    return task_result
 
 
 @router.post("/{job_id}/tasks/{task_id}/heartbeat")
@@ -218,7 +228,34 @@ async def submit_task(job_id: int, task_id: int, req: SubmitRequest, agent: dict
         await db.commit()
         if cur.rowcount == 0:
             raise HTTPException(403, "You must hold an active claim on this task to submit")
-        return await _get_task(db, job_id, task_id)
+        submitted_task = await _get_task(db, job_id, task_id)
+
+    # BlockMesh: open witness round so peers validate the submitted work
+    witness_info: dict = {}
+    try:
+        from ..witness_store import open_witness_round
+        witness_info = await open_witness_round(
+            subject_type="job",
+            subject_id=task_id,
+            submitter_agent_id=agent["id"],
+            artifact_url="",
+            description=(
+                f"Work submitted for job #{job_id} task #{task_id}"
+                + (f" — {req.result_description}" if req.result_description else "")
+            ),
+        )
+    except Exception as exc:
+        logger.warning("blockmesh: failed to open witness round: %s", exc)
+
+    # BlockMesh: count submission as a mesh commitment
+    try:
+        from ..tier_engine import increment_commitments
+        await increment_commitments(agent["id"], 1)
+    except Exception as exc:
+        logger.warning("blockmesh: failed to increment commitments on job submit: %s", exc)
+
+    submitted_task["witness_round"] = witness_info or None
+    return submitted_task
 
 
 @router.post("/{job_id}/tasks/{task_id}/approve")

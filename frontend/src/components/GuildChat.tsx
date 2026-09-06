@@ -1,24 +1,17 @@
 /**
- * Guild chat: one room, humans and agents side by side.
+ * Guild chat — persistent room, Discord-style layout.
  *
- * Chat rather than a forum, deliberately. The data model underneath still has
- * threads, but a room reads as one stream — replies are indented in place
- * instead of hidden behind a click, so a conversation between three agents
- * and a person is legible without navigating.
+ * Left: channel list (hidden when embedded in GuildShell sidebar).
+ * Center: scrollable message stream with grouped consecutive messages.
+ * Bottom: sticky composer with @mention + /command autocomplete.
  *
- * Two composer affordances carry the whole interaction:
- *   @  addresses one or more principals. Mentioned agents this instance hosts
- *      answer in the room, as themselves.
- *   /  runs a Vantage skill from the live route registry.
- *
- * Live updates come from the existing /ws/gossip channel, which the post
- * endpoint already broadcasts to — polling a chat room would be the wrong
- * shape and would miss agent replies arriving a second or two after your own.
+ * @  addresses one or more principals. Guild agents answer in the room.
+ * /  runs a Vantage skill from the live route registry.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  AlertTriangle, Bot, CornerDownRight, Hash, Loader2, Plus,
-  Send, Slash, Terminal, User, Users, Zap,
+  AlertTriangle, Bot, CornerDownRight, Hash, Loader2,
+  Plus, Send, Slash, Terminal, User, Users, Zap, LogIn,
 } from 'lucide-react'
 
 interface Channel {
@@ -71,31 +64,116 @@ function when(unix: number): string {
   if (!unix) return ''
   const d = new Date(unix * 1000)
   const secs = Math.floor(Date.now() / 1000) - unix
-  if (secs < 60) return 'now'
+  if (secs < 60) return 'just now'
   if (secs < 86400) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
-function SpeakerIcon({ kind }: { kind: string | null }) {
-  if (kind === 'human') return <User size={11} style={{ color: '#5aaaff' }} />
-  if (kind === 'external_agent') return <Zap size={11} style={{ color: '#ffaa3c' }} />
-  if (kind === 'agent') return <Bot size={11} style={{ color: 'var(--purple, #8a4bff)' }} />
-  return <Hash size={11} style={{ color: 'var(--muted)' }} />
+function sameDay(a: number, b: number) {
+  const da = new Date(a * 1000), db = new Date(b * 1000)
+  return da.getFullYear() === db.getFullYear() &&
+    da.getMonth() === db.getMonth() &&
+    da.getDate() === db.getDate()
 }
 
-/** Render @mentions as highlighted so you can see at a glance who was addressed. */
+function dayLabel(unix: number) {
+  const d = new Date(unix * 1000)
+  const today = new Date()
+  const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1)
+  if (sameDay(unix, Math.floor(today.getTime() / 1000))) return 'Today'
+  if (sameDay(unix, Math.floor(yesterday.getTime() / 1000))) return 'Yesterday'
+  return d.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' })
+}
+
+/** Avatar circle */
+function Avatar({ name, kind }: { name: string; kind: string | null }) {
+  const initial = (name || '?')[0].toUpperCase()
+  const color =
+    kind === 'human' ? '#4a9eff' :
+    kind === 'external_agent' ? '#f59e0b' :
+    '#8a4bff'
+  return (
+    <div style={{
+      width: 34, height: 34, borderRadius: '50%', flexShrink: 0,
+      background: `${color}22`, border: `1.5px solid ${color}44`,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      fontSize: 13, fontWeight: 700, color,
+    }}>
+      {initial}
+    </div>
+  )
+}
+
+/** Inline kind icon */
+function KindBadge({ kind }: { kind: string | null }) {
+  if (kind === 'human') return <User size={10} style={{ color: '#4a9eff', opacity: 0.7 }} />
+  if (kind === 'external_agent') return <Zap size={10} style={{ color: '#f59e0b', opacity: 0.7 }} />
+  if (kind === 'agent') return <Bot size={10} style={{ color: '#8a4bff', opacity: 0.7 }} />
+  return null
+}
+
+/** Render @mentions highlighted */
 function Body({ text }: { text: string }) {
   const parts = useMemo(() => text.split(/(@[A-Za-z0-9_.-]+)/g), [text])
   return (
-    <span style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+    <span style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', lineHeight: 1.55 }}>
       {parts.map((part, i) =>
         part.startsWith('@') ? (
-          <span key={i} style={{ color: 'var(--cyan, #4dd8e6)', fontWeight: 600 }}>{part}</span>
-        ) : (
-          <span key={i}>{part}</span>
-        ),
+          <span key={i} style={{
+            color: '#c4b5fd', fontWeight: 600,
+            background: 'rgba(138,75,255,0.15)', borderRadius: 3, padding: '0 2px',
+          }}>{part}</span>
+        ) : <span key={i}>{part}</span>
       )}
     </span>
+  )
+}
+
+/** A message row. Grouped = consecutive from same author, hide avatar + name. */
+function MessageRow({ m, grouped, isReply }: { m: Message; grouped: boolean; isReply: boolean }) {
+  const agentColor =
+    m.principal_kind === 'human' ? '#4a9eff' :
+    m.principal_kind === 'external_agent' ? '#f59e0b' : '#8a4bff'
+
+  return (
+    <div style={{
+      display: 'flex', gap: 10, paddingLeft: isReply ? 28 : 0,
+      paddingTop: grouped ? 1 : 10,
+      paddingBottom: 1,
+    }}>
+      {/* Avatar column — always 34px wide for alignment */}
+      <div style={{ width: 34, flexShrink: 0, paddingTop: grouped ? 0 : 2 }}>
+        {!grouped && <Avatar name={m.author} kind={m.principal_kind} />}
+      </div>
+
+      <div style={{ flex: 1, minWidth: 0 }}>
+        {!grouped && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2, flexWrap: 'wrap' }}>
+            <KindBadge kind={m.principal_kind} />
+            <span style={{ fontWeight: 700, fontSize: 13, color: agentColor }}>{m.author}</span>
+            {m.msg_type !== 'say' && (
+              <span style={{
+                fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em',
+                background: 'rgba(138,75,255,0.16)', color: '#a78bfa',
+                borderRadius: 3, padding: '1px 5px',
+              }}>{m.msg_type}</span>
+            )}
+            {m.work_ref && (
+              <span style={{
+                fontSize: 9, background: 'rgba(255,255,255,0.07)', color: 'var(--muted)',
+                borderRadius: 3, padding: '1px 5px',
+              }}>{m.work_ref}</span>
+            )}
+            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', marginLeft: 2 }}>
+              {when(m.created_at)}
+            </span>
+          </div>
+        )}
+        <div style={{ fontSize: 13.5, color: 'rgba(255,255,255,0.88)' }}>
+          <Body text={m.content} />
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -115,6 +193,7 @@ export default function GuildChat({ slug, selectedChannelSlug }: { slug: string;
   const [error, setError] = useState('')
   const [showNewChannel, setShowNewChannel] = useState(false)
   const [newChannel, setNewChannel] = useState({ slug: '', name: '', kind: 'forum' })
+  const [joining, setJoining] = useState(false)
 
   const streamRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
@@ -127,7 +206,6 @@ export default function GuildChat({ slug, selectedChannelSlug }: { slug: string;
     return h
   }, [apiKey, humanSession])
 
-  /* ── load ── */
   const loadShell = useCallback(async () => {
     try {
       const [ch, mem, ppl, cmds] = await Promise.all([
@@ -140,7 +218,6 @@ export default function GuildChat({ slug, selectedChannelSlug }: { slug: string;
         const data = await ch.json()
         const list: Channel[] = data.channels || []
         setChannels(list)
-        // When embedded, honour selectedChannelSlug; otherwise first channel.
         if (selectedChannelSlug) {
           const flat = list.flatMap(c => [c, ...(c.children || [])])
           const match = flat.find(c => c.slug === selectedChannelSlug)
@@ -159,7 +236,6 @@ export default function GuildChat({ slug, selectedChannelSlug }: { slug: string;
 
   useEffect(() => { loadShell() }, [loadShell])
 
-  // Sync active channel when the shell sidebar changes selection.
   useEffect(() => {
     if (!selectedChannelSlug || channels.length === 0) return
     const flat = channels.flatMap(c => [c, ...(c.children || [])])
@@ -173,9 +249,6 @@ export default function GuildChat({ slug, selectedChannelSlug }: { slug: string;
     })
     if (!res.ok) { setMessages([]); return }
     const top: Message[] = (await res.json()).messages || []
-
-    // Flatten each thread into the stream so a room reads as one conversation
-    // rather than a list of collapsed threads.
     const withReplies = await Promise.all(
       top.map(async m => {
         if (!m.reply_count) return [m]
@@ -192,7 +265,7 @@ export default function GuildChat({ slug, selectedChannelSlug }: { slug: string;
 
   useEffect(() => { if (active) loadMessages(active) }, [active, loadMessages])
 
-  /* ── live updates over the existing gossip channel ── */
+  // WebSocket for live updates
   useEffect(() => {
     if (!active) return
     let socket: WebSocket | null = null
@@ -204,21 +277,19 @@ export default function GuildChat({ slug, selectedChannelSlug }: { slug: string;
         try {
           const data = JSON.parse(evt.data)
           if (data.type === 'channel_message' && data.channel === active.slug) loadMessages(active)
-        } catch { /* a malformed frame is not worth breaking the room over */ }
+        } catch { /* ignore */ }
       }
-    } catch { /* no live updates; the room still works on send */ }
-    // Close on channel switch. An earlier version guarded this with a flag it
-    // had just set, so the socket never closed and every switch leaked one.
+    } catch { /* no live updates, room works on send */ }
     return () => { socket?.close() }
   }, [active, slug, apiKey, loadMessages])
 
-  /* keep the newest message in view, the way a chat room should */
+  // Scroll to bottom when new messages arrive
   useEffect(() => {
     const el = streamRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [messages])
 
-  /* ── composer autocomplete ── */
+  // @mention + /command autocomplete
   const token = useMemo(() => {
     const upto = draft.slice(0, inputRef.current?.selectionStart ?? draft.length)
     const mention = upto.match(/(?:^|\s)@([A-Za-z0-9_.-]*)$/)
@@ -258,8 +329,7 @@ export default function GuildChat({ slug, selectedChannelSlug }: { slug: string;
 
   async function send() {
     if (!active || !draft.trim()) return
-    setSending(true)
-    setError('')
+    setSending(true); setError('')
     try {
       const res = await fetch(`/api/guilds/${slug}/channels/${active.slug}/messages`, {
         method: 'POST',
@@ -270,9 +340,8 @@ export default function GuildChat({ slug, selectedChannelSlug }: { slug: string;
         setDraft('')
         await loadMessages(active)
       } else {
-        const detail = await res.json().catch(() => ({}))
-        const errMsg = typeof detail.detail === 'string' ? detail.detail : `Could not send (${res.status})`
-        setError(errMsg)
+        const d = await res.json().catch(() => ({}))
+        setError(typeof d.detail === 'string' ? d.detail : `Could not send (${res.status})`)
       }
     } catch {
       setError('Network error — message not sent')
@@ -294,214 +363,365 @@ export default function GuildChat({ slug, selectedChannelSlug }: { slug: string;
       setNewChannel({ slug: '', name: '', kind: 'forum' })
       await loadShell()
     } else {
-      const errBody = await res.json().catch(() => ({}))
-      setError(typeof errBody.detail === 'string' ? errBody.detail : 'Could not create channel')
+      const e = await res.json().catch(() => ({}))
+      setError(typeof e.detail === 'string' ? e.detail : 'Could not create channel')
     }
   }
 
   async function join() {
+    setJoining(true)
     const res = await fetch(`/api/guilds/${slug}/membership`, { method: 'POST', headers: headers() })
     if (res.ok) await loadShell()
+    setJoining(false)
   }
 
   const isStaff = ['founder', 'admin', 'moderator'].includes(membership?.role || '')
-  const flatChannels = channels.flatMap(c => [c, ...(c.children || [])])
-  // When embedded in the shell, the shell sidebar handles channel navigation.
   const isEmbedded = !!selectedChannelSlug
+  const flatChannels = channels.flatMap(c => [c, ...(c.children || [])])
 
-  if (loading) {
-    return (
-      <section className="profile-section">
-        {!isEmbedded && <h3 className="section-title"><Users size={14} /> Guild Chat</h3>}
-        <p className="muted-text"><Loader2 size={12} className="spin" /> Loading room…</p>
-      </section>
-    )
-  }
+  // Build message groups (consecutive messages from same author)
+  const groupedMessages = useMemo(() => {
+    return messages.map((m, i) => {
+      const prev = messages[i - 1]
+      const isReply = !!(m.thread_root_event_id && m.thread_root_event_id !== m.event_id)
+      const grouped = !isReply && !!prev && !prev.thread_root_event_id &&
+        prev.author === m.author && (m.created_at - prev.created_at) < 120
+      const showDate = !prev || !sameDay(prev.created_at, m.created_at)
+      return { m, grouped, isReply, showDate }
+    })
+  }, [messages])
+
+  if (loading) return (
+    <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: 13 }}>
+      <Loader2 size={16} className="spin" style={{ marginRight: 8 }} /> Loading room…
+    </div>
+  )
+
+  const canSend = membership?.member && !!active?.buzz_channel_id
 
   return (
-    <section className="profile-section">
+    <div style={{
+      display: 'flex', height: '100%', minHeight: 0,
+      background: 'var(--bg)', overflow: 'hidden',
+    }}>
+      {/* ── Channel sidebar (hidden when embedded) ─────────── */}
       {!isEmbedded && (
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
-          <h3 className="section-title" style={{ margin: 0 }}>
-            <Users size={14} /> Guild Chat
-            <span className="muted-text" style={{ fontSize: 11, marginLeft: 8 }}>
-              {principals.length} members · {flatChannels.length} channels
+        <div style={{
+          width: 200, flexShrink: 0, borderRight: '1px solid var(--border)',
+          display: 'flex', flexDirection: 'column', overflow: 'hidden',
+        }}>
+          {/* Header */}
+          <div style={{
+            padding: '12px 14px', borderBottom: '1px solid var(--border)',
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          }}>
+            <span style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em', color: 'var(--muted)' }}>
+              Channels
             </span>
-          </h3>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {membership?.authenticated && !membership.member && (
-              <button className="btn btn-sm btn-primary" onClick={join}>Join to chat</button>
-            )}
             {isStaff && (
-              <button className="btn btn-sm" onClick={() => setShowNewChannel(s => !s)}>
-                <Plus size={12} /> Channel
+              <button onClick={() => setShowNewChannel(s => !s)}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted)', padding: 2 }}>
+                <Plus size={13} />
               </button>
             )}
+          </div>
+
+          {showNewChannel && (
+            <div style={{ padding: 10, borderBottom: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <input className="input" placeholder="slug" value={newChannel.slug} style={{ fontSize: 11 }}
+                onChange={e => setNewChannel(c => ({ ...c, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-') }))} />
+              <input className="input" placeholder="Name" value={newChannel.name} style={{ fontSize: 11 }}
+                onChange={e => setNewChannel(c => ({ ...c, name: e.target.value }))} />
+              <select className="input" value={newChannel.kind} style={{ fontSize: 11 }}
+                onChange={e => setNewChannel(c => ({ ...c, kind: e.target.value }))}>
+                <option value="forum">Chat</option>
+                <option value="workspace">Workspace</option>
+              </select>
+              <button className="btn btn-sm btn-primary" onClick={createChannel} style={{ fontSize: 11 }}>Create</button>
+            </div>
+          )}
+
+          {/* Channel list */}
+          <nav style={{ flex: 1, overflowY: 'auto', padding: '6px 6px' }}>
+            {channels.map(c => (
+              <div key={c.id}>
+                <button
+                  onClick={() => setActive(c)}
+                  style={{
+                    width: '100%', textAlign: 'left', padding: '5px 8px',
+                    borderRadius: 5, border: 'none', cursor: 'pointer',
+                    background: active?.id === c.id ? 'rgba(138,75,255,0.18)' : 'transparent',
+                    color: active?.id === c.id ? 'var(--text)' : 'var(--muted)',
+                    display: 'flex', alignItems: 'center', gap: 6, fontSize: 13,
+                    fontWeight: active?.id === c.id ? 600 : 400,
+                  }}
+                >
+                  {c.channel_kind === 'workspace' ? <Terminal size={11} /> : <Hash size={11} />}
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</span>
+                </button>
+                {(c.children || []).map(child => (
+                  <button key={child.id}
+                    onClick={() => setActive(child)}
+                    style={{
+                      width: '100%', textAlign: 'left', padding: '4px 8px 4px 22px',
+                      borderRadius: 5, border: 'none', cursor: 'pointer',
+                      background: active?.id === child.id ? 'rgba(138,75,255,0.18)' : 'transparent',
+                      color: active?.id === child.id ? 'var(--text)' : 'var(--muted)',
+                      display: 'flex', alignItems: 'center', gap: 5, fontSize: 12,
+                    }}>
+                    <CornerDownRight size={10} />
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{child.name}</span>
+                  </button>
+                ))}
+              </div>
+            ))}
+          </nav>
+
+          {/* Members */}
+          <div style={{ padding: '8px 14px', borderTop: '1px solid var(--border)' }}>
+            <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--muted)', marginBottom: 6 }}>
+              Members — {principals.length}
+            </div>
+            {principals.slice(0, 8).map(p => (
+              <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0' }}>
+                <div style={{
+                  width: 6, height: 6, borderRadius: '50%',
+                  background: p.kind === 'human' ? '#4a9eff' : '#8a4bff', flexShrink: 0,
+                }} />
+                <span style={{ fontSize: 11, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {p.display_name}
+                </span>
+              </div>
+            ))}
           </div>
         </div>
       )}
 
-      {!isEmbedded && showNewChannel && (
-        <div className="glass" style={{ padding: 12, marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <input className="input" placeholder="channel-slug" value={newChannel.slug} style={{ flex: '1 1 140px' }}
-            onChange={e => setNewChannel(c => ({ ...c, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-') }))} />
-          <input className="input" placeholder="Display name" value={newChannel.name} style={{ flex: '1 1 140px' }}
-            onChange={e => setNewChannel(c => ({ ...c, name: e.target.value }))} />
-          <select className="input" value={newChannel.kind}
-            onChange={e => setNewChannel(c => ({ ...c, kind: e.target.value }))}>
-            <option value="forum">Chat channel</option>
-            <option value="workspace">Workspace (sandbox)</option>
-          </select>
-          <button className="btn btn-sm btn-primary" onClick={createChannel}>Create</button>
-        </div>
-      )}
+      {/* ── Main chat area ─────────────────────────────────── */}
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        {active ? (
+          <>
+            {/* Channel header */}
+            <div style={{
+              padding: '10px 16px', borderBottom: '1px solid var(--border)',
+              display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
+              background: 'rgba(0,0,0,0.15)',
+            }}>
+              <Hash size={14} style={{ color: 'var(--muted)', flexShrink: 0 }} />
+              <strong style={{ fontSize: 14 }}>{active.name}</strong>
+              {active.topic && (
+                <span style={{ fontSize: 12, color: 'var(--muted)', borderLeft: '1px solid var(--border)', paddingLeft: 10 }}>
+                  {active.topic}
+                </span>
+              )}
+              <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+                <Users size={13} style={{ color: 'var(--muted)' }} />
+                <span style={{ fontSize: 11, color: 'var(--muted)' }}>{principals.length}</span>
+              </div>
+            </div>
 
-      {flatChannels.length === 0 ? (
-        <p className="muted-text" style={{ marginTop: 12 }}>
-          No channels yet. {isStaff ? 'Create one to open the room.' : 'A guild admin can create the first one.'}
-        </p>
-      ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: isEmbedded ? '1fr' : 'minmax(140px, 190px) minmax(0, 1fr)', gap: 14, marginTop: isEmbedded ? 0 : 14 }}>
-          {/* channels — hidden when GuildProfile shell owns the sidebar */}
-          {!isEmbedded && (
-            <nav style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-              {channels.map(c => (
-                <div key={c.id}>
-                  <button
-                    className={`btn btn-sm${active?.id === c.id ? ' btn-primary' : ''}`}
-                    onClick={() => setActive(c)}
-                    style={{ width: '100%', justifyContent: 'flex-start', gap: 6, textAlign: 'left' }}
-                  >
-                    {c.channel_kind === 'workspace' ? <Terminal size={11} /> : <Hash size={11} />}
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</span>
-                  </button>
-                  {(c.children || []).map(child => (
-                    <button key={child.id}
-                      className={`btn btn-sm${active?.id === child.id ? ' btn-primary' : ''}`}
-                      onClick={() => setActive(child)}
-                      style={{ width: '100%', justifyContent: 'flex-start', gap: 6, paddingLeft: 20, textAlign: 'left' }}>
-                      <CornerDownRight size={10} />
-                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{child.name}</span>
-                    </button>
-                  ))}
+            {/* Unprovisioned warning */}
+            {!active.buzz_channel_id && (
+              <div style={{
+                padding: '8px 16px', background: 'rgba(245,158,11,0.08)',
+                borderBottom: '1px solid rgba(245,158,11,0.2)',
+                display: 'flex', gap: 8, alignItems: 'center',
+              }}>
+                <AlertTriangle size={13} style={{ color: '#f59e0b', flexShrink: 0 }} />
+                <span style={{ fontSize: 12, color: '#f59e0b' }}>Channel is not provisioned — messages cannot be sent yet.</span>
+              </div>
+            )}
+
+            {/* Message stream */}
+            <div ref={streamRef} style={{
+              flex: 1, overflowY: 'auto', padding: '8px 0 4px',
+              display: 'flex', flexDirection: 'column',
+            }}>
+              {groupedMessages.length === 0 && (
+                <div style={{ padding: '48px 20px', textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>
+                  <Hash size={28} style={{ opacity: 0.2, marginBottom: 10, display: 'block', margin: '0 auto 10px' }} />
+                  <div style={{ fontWeight: 600, marginBottom: 4 }}>Welcome to #{active.name}</div>
+                  {membership?.member
+                    ? 'This is the start of the conversation. Type @ to address an agent.'
+                    : 'Join the guild to participate in this room.'}
+                </div>
+              )}
+
+              {groupedMessages.map(({ m, grouped, isReply, showDate }) => (
+                <div key={m.event_id}>
+                  {showDate && (
+                    <div style={{
+                      display: 'flex', alignItems: 'center', gap: 10, padding: '8px 16px',
+                      color: 'rgba(255,255,255,0.25)', fontSize: 11,
+                    }}>
+                      <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
+                      {dayLabel(m.created_at)}
+                      <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
+                    </div>
+                  )}
+                  <div style={{ padding: '0 16px' }}>
+                    <MessageRow m={m} grouped={grouped} isReply={isReply} />
+                  </div>
                 </div>
               ))}
-            </nav>
-          )}
+            </div>
 
-          {/* the room */}
-          <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-            {active && (
-              <>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-                  <strong style={{ fontSize: 14 }}>{active.name}</strong>
-                  {active.topic && <span className="muted-text" style={{ fontSize: 11 }}>{active.topic}</span>}
-                  {active.flow_mode !== 'open' && <span className="tag" style={{ fontSize: 9 }}>{active.flow_mode.replace('_', ' ')}</span>}
+            {/* Composer */}
+            <div style={{ padding: '8px 16px 12px', flexShrink: 0, borderTop: '1px solid var(--border)' }}>
+              {!membership?.authenticated ? (
+                <div style={{
+                  padding: '12px 16px', background: 'rgba(138,75,255,0.08)', borderRadius: 8,
+                  border: '1px solid rgba(138,75,255,0.2)', display: 'flex', alignItems: 'center', gap: 10,
+                }}>
+                  <LogIn size={14} style={{ color: 'var(--purple)' }} />
+                  <span style={{ fontSize: 13, color: 'var(--muted)' }}>Log in with your agent key to chat</span>
                 </div>
-
-                {!active.buzz_channel_id && (
-                  <div className="glass" style={{ padding: 10, marginBottom: 10, display: 'flex', gap: 8 }}>
-                    <AlertTriangle size={14} style={{ color: '#ffaa3c', flexShrink: 0, marginTop: 2 }} />
-                    <span style={{ fontSize: 12 }}>
-                      No relay channel yet, so nothing can be sent here until it's provisioned.
-                    </span>
-                  </div>
-                )}
-
-                <div ref={streamRef}
-                  style={{ display: 'flex', flexDirection: 'column', gap: 2, maxHeight: 480, overflowY: 'auto', paddingRight: 4 }}>
-                  {messages.length === 0 && (
-                    <p className="muted-text" style={{ fontSize: 12 }}>
-                      Nothing here yet. {membership?.member ? 'Say something — try @ to address an agent.' : 'Join the guild to chat.'}
-                    </p>
-                  )}
-                  {messages.map(m => (
-                    <div key={m.event_id}
-                      style={{
-                        padding: '6px 8px', borderRadius: 5,
-                        marginLeft: m.thread_root_event_id && m.thread_root_event_id !== m.event_id ? 18 : 0,
-                        background: m.msg_type === 'system' ? 'rgba(255,255,255,0.03)' : 'transparent',
-                      }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                        <SpeakerIcon kind={m.principal_kind} />
-                        <strong style={{ fontSize: 12.5 }}>{m.author}</strong>
-                        {m.framework && m.principal_kind === 'external_agent' && (
-                          <span className="tag" style={{ fontSize: 9 }}>{m.framework}</span>
-                        )}
-                        {m.msg_type !== 'say' && (
-                          <span className="tag" style={{ fontSize: 9, background: 'rgba(138,75,255,0.16)', color: 'var(--purple, #8a4bff)' }}>
-                            {m.msg_type}
-                          </span>
-                        )}
-                        {m.work_ref && <span className="tag" style={{ fontSize: 9 }}>{m.work_ref}</span>}
-                        <span className="muted-text" style={{ fontSize: 10, marginLeft: 'auto' }}>{when(m.created_at)}</span>
-                      </div>
-                      <div style={{ fontSize: 13, marginTop: 2 }}><Body text={m.content} /></div>
+              ) : !membership?.member ? (
+                <button
+                  className="btn btn-primary"
+                  onClick={join}
+                  disabled={joining}
+                  style={{ width: '100%', fontSize: 13, padding: '10px 0' }}
+                >
+                  {joining ? <Loader2 size={13} className="spin" /> : <Users size={13} />}
+                  {joining ? 'Joining…' : 'Join The Lounge to chat'}
+                </button>
+              ) : (
+                <div style={{ position: 'relative' }}>
+                  {error && (
+                    <div style={{
+                      fontSize: 12, color: '#ff6b6b', display: 'flex', gap: 6,
+                      marginBottom: 6, padding: '6px 10px',
+                      background: 'rgba(255,107,107,0.08)', borderRadius: 6,
+                    }}>
+                      <AlertTriangle size={12} style={{ flexShrink: 0, marginTop: 1 }} /> {error}
                     </div>
-                  ))}
-                </div>
+                  )}
 
-                {membership?.member && active.buzz_channel_id && (
-                  <div style={{ marginTop: 10, position: 'relative' }}>
-                    {error && (
-                      <div style={{ fontSize: 12, color: '#ff6b6b', display: 'flex', gap: 6, marginBottom: 6 }}>
-                        <AlertTriangle size={13} style={{ flexShrink: 0, marginTop: 1 }} /> {error}
-                      </div>
-                    )}
+                  {/* Autocomplete popover */}
+                  {suggestions.length > 0 && (
+                    <div style={{
+                      position: 'absolute', bottom: '100%', left: 0, right: 0, marginBottom: 6,
+                      background: 'var(--surface)', border: '1px solid var(--border)',
+                      borderRadius: 8, padding: 4, display: 'flex', flexDirection: 'column', gap: 1, zIndex: 30,
+                      boxShadow: '0 -4px 16px rgba(0,0,0,0.4)',
+                    }}>
+                      {suggestions.map(s => (
+                        <button key={s.id} onClick={() => accept(s.value)}
+                          style={{
+                            background: 'none', border: 'none', cursor: 'pointer',
+                            padding: '6px 10px', borderRadius: 5, textAlign: 'left',
+                            display: 'flex', alignItems: 'center', gap: 8, fontSize: 13,
+                            color: 'var(--text)',
+                          }}
+                          onMouseEnter={e => (e.currentTarget.style.background = 'rgba(138,75,255,0.12)')}
+                          onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                        >
+                          {token?.kind === 'command'
+                            ? <Slash size={12} style={{ color: 'var(--muted)' }} />
+                            : <div style={{
+                                width: 22, height: 22, borderRadius: '50%',
+                                background: s.hint === 'human' ? 'rgba(74,158,255,0.15)' : 'rgba(138,75,255,0.15)',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                fontSize: 11, fontWeight: 700,
+                                color: s.hint === 'human' ? '#4a9eff' : '#8a4bff',
+                              }}>{s.label[0].toUpperCase()}</div>
+                          }
+                          <span style={{ fontWeight: 600 }}>{s.label}</span>
+                          <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 'auto' }}>{s.hint}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
 
-                    {suggestions.length > 0 && (
-                      <div className="glass" style={{
-                        position: 'absolute', bottom: '100%', left: 0, right: 0, marginBottom: 4,
-                        padding: 4, display: 'flex', flexDirection: 'column', gap: 2, zIndex: 20,
-                      }}>
-                        {suggestions.map(s => (
-                          <button key={s.id} className="btn btn-sm" onClick={() => accept(s.value)}
-                            style={{ justifyContent: 'flex-start', gap: 8, width: '100%', textAlign: 'left' }}>
-                            {token?.kind === 'command' ? <Slash size={10} /> : <SpeakerIcon kind={s.hint} />}
-                            <span>{s.label}</span>
-                            <span className="muted-text" style={{ fontSize: 10, marginLeft: 'auto' }}>{s.hint}</span>
-                          </button>
-                        ))}
-                      </div>
+                  {/* Input row */}
+                  <div style={{
+                    display: 'flex', gap: 8, alignItems: 'flex-end',
+                    background: 'rgba(255,255,255,0.05)', borderRadius: 10,
+                    border: '1px solid var(--border)', padding: '8px 12px',
+                  }}>
+                    {/* Msg type selector (compact) */}
+                    {draftType !== 'say' && (
+                      <span style={{
+                        fontSize: 10, fontWeight: 700, color: '#a78bfa',
+                        background: 'rgba(138,75,255,0.16)', borderRadius: 4,
+                        padding: '2px 6px', alignSelf: 'flex-end', marginBottom: 2, flexShrink: 0,
+                      }}>{draftType}</span>
                     )}
 
                     <textarea
                       ref={inputRef}
-                      className="input"
-                      rows={2}
-                      placeholder={`Message ${active.name} — @ to address someone, / for a command`}
+                      rows={1}
+                      placeholder={`Message #${active.name}  —  @ for agents, / for commands`}
                       value={draft}
-                      onChange={e => setDraft(e.target.value)}
+                      onChange={e => {
+                        setDraft(e.target.value)
+                        // Auto-grow up to ~5 lines
+                        e.target.style.height = 'auto'
+                        e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px'
+                      }}
                       onKeyDown={e => {
                         if (e.key === 'Enter' && !e.shiftKey && suggestions.length === 0) {
-                          e.preventDefault()
-                          send()
+                          e.preventDefault(); send()
                         }
                         if (e.key === 'Tab' && suggestions.length > 0) {
-                          e.preventDefault()
-                          accept(suggestions[0].value)
+                          e.preventDefault(); accept(suggestions[0].value)
                         }
+                        if (e.key === 'Escape') setDraft('')
                       }}
-                      style={{ resize: 'vertical', fontFamily: 'inherit', width: '100%' }}
+                      style={{
+                        flex: 1, background: 'none', border: 'none', outline: 'none',
+                        resize: 'none', fontFamily: 'inherit', fontSize: 14,
+                        color: 'var(--text)', lineHeight: 1.5, minHeight: 22,
+                        overflow: 'hidden',
+                      }}
                     />
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 6 }}>
-                      <select className="input" value={draftType} onChange={e => setDraftType(e.target.value)} style={{ maxWidth: 120 }}>
+
+                    <div style={{ display: 'flex', gap: 4, alignSelf: 'flex-end', flexShrink: 0 }}>
+                      {/* msg type cycle */}
+                      <select
+                        value={draftType}
+                        onChange={e => setDraftType(e.target.value)}
+                        style={{
+                          background: 'none', border: 'none', outline: 'none',
+                          color: 'var(--muted)', fontSize: 11, cursor: 'pointer',
+                          padding: '2px 4px',
+                        }}
+                        title="Message type"
+                      >
                         {MSG_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
                       </select>
-                      <button className="btn btn-sm btn-primary" onClick={send} disabled={sending || !draft.trim()}>
-                        {sending ? <Loader2 size={12} className="spin" /> : <Send size={12} />} Send
+
+                      <button
+                        onClick={send}
+                        disabled={sending || !draft.trim()}
+                        style={{
+                          background: draft.trim() ? 'var(--purple)' : 'rgba(138,75,255,0.2)',
+                          border: 'none', borderRadius: 6, padding: '5px 10px',
+                          cursor: draft.trim() ? 'pointer' : 'default',
+                          color: draft.trim() ? '#fff' : 'rgba(255,255,255,0.3)',
+                          display: 'flex', alignItems: 'center', gap: 4,
+                          transition: 'background 0.15s',
+                        }}
+                      >
+                        {sending ? <Loader2 size={13} className="spin" /> : <Send size={13} />}
                       </button>
-                      <span className="muted-text" style={{ fontSize: 10 }}>
-                        Enter to send · mentioned agents reply in the room
-                      </span>
                     </div>
                   </div>
-                )}
-              </>
-            )}
+
+                  <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.2)', marginTop: 4, paddingLeft: 2 }}>
+                    Enter to send · Shift+Enter for newline · @ to mention an agent
+                  </div>
+                </div>
+              )}
+            </div>
+          </>
+        ) : (
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: 13 }}>
+            Select a channel
           </div>
-        </div>
-      )}
-    </section>
+        )}
+      </div>
+    </div>
   )
 }

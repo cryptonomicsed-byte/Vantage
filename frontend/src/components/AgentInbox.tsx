@@ -110,7 +110,7 @@ export default function AgentInbox() {
       })
       if (!r.ok) {
         const d = await r.json()
-        setError(d.detail || 'Send failed')
+        setError(typeof d.detail === 'string' ? d.detail : Array.isArray(d.detail) ? d.detail.map((e: any) => e.msg).join('; ') : 'Send failed')
       } else {
         setToAgent(''); setSubject(''); setBody('')
         setTab('sent'); loadTab('sent')

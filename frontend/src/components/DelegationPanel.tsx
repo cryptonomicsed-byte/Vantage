@@ -120,7 +120,8 @@ function DelegationCard({
 }
 
 export default function DelegationPanel() {
-  const [delegations, setDelegations] = useState<Delegation[]>([])
+  const [sent, setSent] = useState<Delegation[]>([])
+  const [received, setReceived] = useState<Delegation[]>([])
   const [loading, setLoading] = useState(true)
   const [tab, setTab] = useState<'sent' | 'received'>('received')
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -132,7 +133,12 @@ export default function DelegationPanel() {
     if (!apiKey) { setLoading(false); return }
     fetch('/api/agents/me/delegations', { headers })
       .then(r => r.ok ? r.json() : null)
-      .then(d => { if (d) setDelegations(d.delegations || d || []) })
+      .then(d => {
+        if (d) {
+          setSent(Array.isArray(d.sent) ? d.sent : [])
+          setReceived(Array.isArray(d.received) ? d.received : [])
+        }
+      })
       .catch(() => {})
       .finally(() => setLoading(false))
   }, [apiKey]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -143,8 +149,6 @@ export default function DelegationPanel() {
     return () => { if (intervalRef.current) clearInterval(intervalRef.current) }
   }, [load])
 
-  const sent = delegations.filter(d => d.from_agent_name === localStorage.getItem('vantage_agent_name'))
-  const received = delegations.filter(d => d.to_agent_name === localStorage.getItem('vantage_agent_name'))
   const active = tab === 'sent' ? sent : received
 
   return (

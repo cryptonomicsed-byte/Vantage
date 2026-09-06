@@ -60,10 +60,10 @@ interface WorkspaceItem {
 interface TaskSummary { total: number; proposed: number; active: number; review: number }
 
 interface GuildTask {
-  task_id: number
+  id: string
   title: string
   description?: string
-  status: 'open' | 'claimed' | 'executing' | 'review' | 'done' | 'aborted'
+  status: 'proposed' | 'claimed' | 'executing' | 'review' | 'done' | 'aborted'
   agent_id?: number
   agent_name?: string
   required_capabilities?: string[]
@@ -166,7 +166,7 @@ function NavItem({
 // ── task status helpers ────────────────────────────────────────────────────────
 
 const TASK_STATUS_COLOR: Record<string, string> = {
-  open: 'var(--cyan)',
+  proposed: 'var(--cyan)',
   claimed: '#f59e0b',
   executing: '#3cc878',
   review: '#a78bfa',
@@ -193,7 +193,7 @@ function StatusPill({ status }: { status: string }) {
 function GuildTasksView({ guildSlug, authHeaders }: { guildSlug: string; authHeaders: () => Record<string, string> }) {
   const [tasks, setTasks] = useState<GuildTask[]>([])
   const [loading, setLoading] = useState(true)
-  const [claiming, setClaiming] = useState<number | null>(null)
+  const [claiming, setClaiming] = useState<string | null>(null)
 
   useEffect(() => {
     fetch(`/api/guilds/${encodeURIComponent(guildSlug)}/tasks?limit=50`, { headers: authHeaders() })
@@ -203,21 +203,21 @@ function GuildTasksView({ guildSlug, authHeaders }: { guildSlug: string; authHea
       .finally(() => setLoading(false))
   }, [guildSlug]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  async function claimTask(taskId: number) {
+  async function claimTask(taskId: string) {
     setClaiming(taskId)
     try {
       const r = await fetch(`/api/guilds/${encodeURIComponent(guildSlug)}/tasks/${taskId}/claim`, {
         method: 'POST', headers: authHeaders(),
       })
       if (r.ok) {
-        setTasks(prev => prev.map(t => t.task_id === taskId ? { ...t, status: 'claimed' } : t))
+        setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'claimed' } : t))
       }
     } finally {
       setClaiming(null)
     }
   }
 
-  const STATUS_ORDER: GuildTask['status'][] = ['open', 'claimed', 'executing', 'review', 'done']
+  const STATUS_ORDER: GuildTask['status'][] = ['proposed', 'claimed', 'executing', 'review', 'done']
   const grouped = STATUS_ORDER.reduce<Record<string, GuildTask[]>>((acc, s) => {
     acc[s] = tasks.filter(t => t.status === s)
     return acc
@@ -251,7 +251,7 @@ function GuildTasksView({ guildSlug, authHeaders }: { guildSlug: string; authHea
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {group.map(task => (
-                <div key={task.task_id} style={{ padding: '12px 14px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: 8, display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                <div key={task.id} style={{ padding: '12px 14px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: 8, display: 'flex', alignItems: 'flex-start', gap: 10 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
                       <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>{task.title}</span>
@@ -278,13 +278,13 @@ function GuildTasksView({ guildSlug, authHeaders }: { guildSlug: string; authHea
                       </span>
                     </div>
                   </div>
-                  {task.status === 'open' && (
+                  {task.status === 'proposed' && (
                     <button
-                      onClick={() => claimTask(task.task_id)}
-                      disabled={claiming === task.task_id}
+                      onClick={() => claimTask(task.id)}
+                      disabled={claiming === task.id}
                       style={{ fontSize: 11, fontWeight: 600, color: 'var(--cyan)', background: 'rgba(0,200,255,0.08)', border: '1px solid rgba(0,200,255,0.2)', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', flexShrink: 0, whiteSpace: 'nowrap' }}
                     >
-                      {claiming === task.task_id ? '…' : 'Claim'}
+                      {claiming === task.id ? '…' : 'Claim'}
                     </button>
                   )}
                 </div>
@@ -1175,7 +1175,11 @@ export default function GuildShell() {
               </span>
             )}
           </div>
-          <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+          <div style={{
+            flex: 1, minHeight: 0,
+            overflowY: (selectedChannel && !selectedChannel.channel_kind?.includes('workspace')) ? 'hidden' : 'auto',
+            display: 'flex', flexDirection: 'column',
+          }}>
             {renderMain()}
           </div>
         </main>

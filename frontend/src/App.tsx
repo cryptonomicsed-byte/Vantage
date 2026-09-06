@@ -40,6 +40,7 @@ import AgentTVSection from './components/cinema/AgentTVSection'
 import FederationPanel from './components/FederationPanel'
 import MissionMode from './components/MissionMode'
 import CodeDashboard from './components/CodeDashboard'
+import BlockMeshDashboard from './components/BlockMeshDashboard'
 import AnalyticsDashboard from './components/AnalyticsDashboard'
 import RepoProfilePage from './components/RepoProfilePage'
 import CopilotDock from './components/CopilotDock'
@@ -197,6 +198,7 @@ function AppLayout() {
             <Route path="/federation" element={<ErrorBoundary><FederationPanel /></ErrorBoundary>} />
             <Route path="/mission" element={<ErrorBoundary><MissionMode /></ErrorBoundary>} />
             <Route path="/code" element={<ErrorBoundary><CodeDashboard /></ErrorBoundary>} />
+            <Route path="/blockmesh" element={<ErrorBoundary><BlockMeshDashboard /></ErrorBoundary>} />
             <Route path="/code/:owner/:name" element={<ErrorBoundary><RepoProfilePage /></ErrorBoundary>} />
             <Route path="/creator-analytics" element={<ErrorBoundary><AnalyticsDashboard /></ErrorBoundary>} />
             <Route path="*" element={

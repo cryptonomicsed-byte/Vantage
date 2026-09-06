@@ -2,6 +2,13 @@ import React, { useState, useEffect, useRef } from 'react'
 import { Radio, Loader, CheckCircle2, Circle, Copy, Zap, Trash2, Play, Plus, Smartphone, ShieldAlert } from 'lucide-react'
 import QRCode from 'qrcode'
 
+function safeDetail(d: any, fallback = 'Request failed'): string {
+  if (!d) return fallback
+  if (typeof d.detail === 'string') return d.detail || fallback
+  if (Array.isArray(d.detail)) return d.detail.map((e: any) => e.msg || JSON.stringify(e)).join('; ') || fallback
+  return fallback
+}
+
 interface BuzzStatus {
   pubkey: string
   registered: boolean
@@ -71,7 +78,7 @@ export default function BuzzTab({ apiKey }: { apiKey: string }) {
         headers: { 'X-Agent-Key': apiKey },
       })
       const data = await r.json()
-      if (!r.ok) { setPairingError(data.detail || 'Could not start pairing.'); return }
+      if (!r.ok) { setPairingError(safeDetail(data, 'Could not start pairing.')); return }
       setPairing({ token: data.token, qrUri: data.qr_uri })
     } catch {
       setPairingError('Network error starting pairing.')
@@ -148,7 +155,7 @@ export default function BuzzTab({ apiKey }: { apiKey: string }) {
         body: JSON.stringify({ definition }),
       })
       const data = await r.json()
-      if (!r.ok) { setWfError(data.detail || 'Create failed.'); return }
+      if (!r.ok) { setWfError(safeDetail(data, 'Create failed.')); return }
       setShowEditor(false)
       setDraft(DEFAULT_DEF)
       loadWorkflows()
@@ -168,7 +175,7 @@ export default function BuzzTab({ apiKey }: { apiKey: string }) {
         headers: { 'X-Agent-Key': apiKey, 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
       })
-      if (!r.ok) { const d = await r.json(); setWfError(d.detail || 'Trigger failed.') }
+      if (!r.ok) { const d = await r.json(); setWfError(safeDetail(d, 'Trigger failed.')) }
     } catch {
       setWfError('Network error triggering workflow.')
     } finally {
@@ -184,7 +191,7 @@ export default function BuzzTab({ apiKey }: { apiKey: string }) {
         method: 'DELETE',
         headers: { 'X-Agent-Key': apiKey },
       })
-      if (!r.ok) { const d = await r.json(); setWfError(d.detail || 'Delete failed.'); return }
+      if (!r.ok) { const d = await r.json(); setWfError(safeDetail(d, 'Delete failed.')); return }
       loadWorkflows()
     } catch {
       setWfError('Network error deleting workflow.')
@@ -214,7 +221,7 @@ export default function BuzzTab({ apiKey }: { apiKey: string }) {
         headers: { 'X-Agent-Key': apiKey },
       })
       const data = await r.json()
-      if (!r.ok) { setError(data.detail || 'Registration failed.'); return }
+      if (!r.ok) { setError(safeDetail(data, 'Registration failed.')); return }
       load()
     } catch {
       setError('Network error registering on Buzz.')

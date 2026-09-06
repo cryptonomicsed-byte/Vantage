@@ -83,7 +83,7 @@ export function DmsView() {
         body: JSON.stringify({ pubkey: openTo.trim() }),
       })
       const data = await r.json()
-      if (!r.ok) { setError(data.detail || 'Could not open DM.'); return }
+      if (!r.ok) { setError(typeof data.detail === 'string' ? data.detail : Array.isArray(data.detail) ? data.detail.map((e: any) => e.msg).join('; ') : 'Could not open DM.'); return }
       setChannelId(data.channel_id)
       await loadMessages(data.channel_id)
     } catch {

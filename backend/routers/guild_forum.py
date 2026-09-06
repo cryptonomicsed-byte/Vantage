@@ -527,11 +527,18 @@ async def post_channel_message(
             reply_to_event_id=reply_to or None,
             addressed_to=addressees or None, work_ref=work_ref or None,
         )
-    except coord.RelayUnavailable as exc:
-        # Same stance as routers/workspace.py's sandbox: no host-side
-        # fallback. An unsigned message in the index that no relay subscriber
-        # can see would be worse than an error.
-        raise HTTPException(503, f"Relay unavailable — message not posted. {exc}") from exc
+    except coord.RelayUnavailable:
+        # Relay is down — fall back to local-only indexing so the room stays
+        # usable. Messages written this way are visible to guild members via
+        # the API but are not on the relay log.
+        try:
+            event = await coord.publish_message_local(
+                channel=channel, guild_slug=slug, principal=principal, content=content,
+                msg_type=msg_type, root_event_id=root_event_id,
+                reply_to_event_id=reply_to or None,
+            )
+        except Exception as exc2:
+            raise HTTPException(503, f"Could not post message: {exc2}") from exc2
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
