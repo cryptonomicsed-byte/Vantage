@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { Clock, Filter, RefreshCw, TrendingUp, Zap } from 'lucide-react'
 import TierBadge from './TierBadge'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -24,12 +25,34 @@ function relativeTime(iso: string): string {
   return `${d}d ago`
 }
 
+function timeAgo(iso: string): string {
+  if (!iso) return '—'
+  const diff = Date.now() - new Date(iso).getTime()
+  const m = Math.floor(diff / 60000)
+  if (m < 1) return 'just now'
+  if (m < 60) return `${m}m ago`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ago`
+  return `${Math.floor(h / 24)}d ago`
+}
+
+function timeUntil(iso: string): string | null {
+  if (!iso) return null
+  const diff = new Date(iso).getTime() - Date.now()
+  if (diff <= 0) return 'Expired'
+  const h = Math.floor(diff / 3600000)
+  const m = Math.floor((diff % 3600000) / 60000)
+  if (h > 0) return `${h}h ${m}m left`
+  return `${m}m left`
+}
+
 // ── Tab types ─────────────────────────────────────────────────────────────────
 
-type Tab = 'board' | 'tier' | 'witness' | 'devices' | 'leaderboard'
+type Tab = 'board' | 'marketplace' | 'tier' | 'witness' | 'devices' | 'leaderboard'
 
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'board',       label: 'Job Board'        },
+  { id: 'marketplace', label: 'Marketplace'       },
   { id: 'tier',        label: 'My Tier'           },
   { id: 'witness',     label: 'Witness Queue'     },
   { id: 'devices',     label: 'My Devices'        },
@@ -235,7 +258,310 @@ function JobBoardTab() {
   )
 }
 
-// ── Tab 2: My Tier ────────────────────────────────────────────────────────────
+// ── Tab 2: Marketplace ────────────────────────────────────────────────────────
+
+interface MarketStats {
+  open_tasks: number
+  awarded_tasks: number
+  completed_tasks: number
+  avg_reward_usdc: number
+  bids_last_hour: number
+  total_bids: number
+  avg_completion_hours: number
+  top_capabilities: Array<{ capability: string; count: number }>
+}
+
+interface MarketTask {
+  id: number
+  title: string
+  description: string
+  required_capability: string
+  reward_usdc: number
+  poster_name: string
+  status: string
+  created_at: string
+  expires_at: string
+}
+
+interface BidState {
+  open: boolean
+  approach: string
+  hours: string
+  submitting: boolean
+  error: string
+  success: boolean
+}
+
+function MarketplaceTab() {
+  const [stats, setStats] = useState<MarketStats | null>(null)
+  const [tasks, setTasks] = useState<MarketTask[]>([])
+  const [filter, setFilter] = useState('')
+  const [sort, setSort] = useState<'newest' | 'reward' | 'capability'>('newest')
+  const [capFilter, setCapFilter] = useState('')
+  const [secondsAgo, setSecondsAgo] = useState(0)
+  const [bidStates, setBidStates] = useState<Record<number, BidState>>({})
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const clockRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const loadStats = useCallback(async () => {
+    try {
+      const r = await fetch('/api/agents/market/stats')
+      if (r.ok) setStats(await r.json())
+    } catch {}
+  }, [])
+
+  const loadTasks = useCallback(async () => {
+    try {
+      const r = await fetch('/api/agents/tasks?status=open&limit=50')
+      if (r.ok) { setTasks(await r.json()); setSecondsAgo(0) }
+    } catch {}
+  }, [])
+
+  useEffect(() => {
+    loadStats()
+    loadTasks()
+    timerRef.current = setInterval(() => { loadStats(); loadTasks() }, 15000)
+    clockRef.current = setInterval(() => setSecondsAgo(p => p + 1), 1000)
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current)
+      if (clockRef.current) clearInterval(clockRef.current)
+    }
+  }, [loadStats, loadTasks])
+
+  function getBidState(taskId: number): BidState {
+    return bidStates[taskId] ?? { open: false, approach: '', hours: '', submitting: false, error: '', success: false }
+  }
+
+  function setBidField(taskId: number, patch: Partial<BidState>) {
+    setBidStates(prev => ({
+      ...prev,
+      [taskId]: { ...getBidState(taskId), ...patch },
+    }))
+  }
+
+  async function submitBid(taskId: number) {
+    const state = getBidState(taskId)
+    if (!state.approach.trim()) return
+    setBidField(taskId, { submitting: true, error: '' })
+    try {
+      const r = await fetch(`/api/agents/tasks/${taskId}/bid`, {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approach: state.approach.trim(), estimated_hours: parseFloat(state.hours) || 1 }),
+      })
+      if (!r.ok) throw new Error(await r.text())
+      setBidField(taskId, { success: true, submitting: false })
+      setTimeout(() => setBidField(taskId, { open: false, success: false, approach: '', hours: '' }), 1200)
+    } catch (e: unknown) {
+      setBidField(taskId, { submitting: false, error: e instanceof Error ? e.message : 'Bid failed' })
+    }
+  }
+
+  const currentKey = apiKey()
+
+  const filteredTasks = tasks
+    .filter(t => {
+      const q = (filter || capFilter).toLowerCase()
+      if (!q) return true
+      return (
+        t.title.toLowerCase().includes(q) ||
+        (t.description || '').toLowerCase().includes(q) ||
+        (t.required_capability || '').toLowerCase().includes(q)
+      )
+    })
+    .sort((a, b) => {
+      if (sort === 'reward') return b.reward_usdc - a.reward_usdc
+      if (sort === 'capability') return (a.required_capability || '').localeCompare(b.required_capability || '')
+      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    })
+
+  const tickerText = stats?.top_capabilities.length
+    ? stats.top_capabilities.map(c => `${c.capability.toUpperCase()} x${c.count}`).join('   ·   ')
+    : 'NO ACTIVE LISTINGS'
+
+  return (
+    <div className="mv-root">
+      <style>{`@keyframes mv-scroll { from { transform: translateX(100vw); } to { transform: translateX(-200%); } }`}</style>
+
+      {/* Ticker strip */}
+      <div className="mv-ticker-strip">
+        <div className="mv-ticker-inner">MARKET PULSE: {tickerText} &nbsp;&nbsp;&nbsp; MARKET PULSE: {tickerText}</div>
+      </div>
+
+      {/* Header */}
+      <div className="mv-header">
+        <div className="mv-header-title">
+          <span className="mv-live-dot" />TASK MARKET VELOCITY
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 11, color: 'var(--muted)' }}>Updated {secondsAgo}s ago</span>
+          <button className="btn btn-ghost btn-sm" onClick={() => { loadStats(); loadTasks() }}>
+            <RefreshCw size={12} />
+          </button>
+        </div>
+      </div>
+
+      {/* Stats grid */}
+      <div className="mv-stats-grid">
+        {[
+          { label: 'Open Tasks', value: stats?.open_tasks ?? '—' },
+          { label: 'Awarded',    value: stats?.awarded_tasks ?? '—' },
+          { label: 'Completed',  value: stats?.completed_tasks ?? '—' },
+          { label: 'Avg Reward', value: stats ? `$${stats.avg_reward_usdc}` : '—' },
+          { label: 'Bids / hr',  value: stats?.bids_last_hour ?? '—' },
+          { label: 'Avg Fill',   value: stats ? `${stats.avg_completion_hours}h` : '—' },
+        ].map(s => (
+          <div key={s.label} className="mv-stat-cell">
+            <div className="mv-stat-num">{s.value}</div>
+            <div className="mv-stat-label">{s.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Hot capabilities */}
+      {!!stats?.top_capabilities.length && (
+        <div className="mv-caps-strip">
+          <span className="mv-cap-label">HOT:</span>
+          {stats.top_capabilities.map(c => (
+            <span
+              key={c.capability}
+              className="mv-cap-pill"
+              onClick={() => setCapFilter(prev => prev === c.capability ? '' : c.capability)}
+              style={{ cursor: 'pointer', opacity: capFilter && capFilter !== c.capability ? 0.5 : 1 }}
+            >
+              {c.capability} x{c.count}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Listings header */}
+      <div className="mv-listings-header">
+        <span className="mv-listings-title">
+          <Zap size={12} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />
+          Live Listings ({filteredTasks.length})
+        </span>
+        <input
+          className="mv-filter-input"
+          placeholder="Filter tasks…"
+          value={filter}
+          onChange={e => { setFilter(e.target.value); setCapFilter('') }}
+        />
+        <Filter size={12} style={{ color: 'var(--muted)' }} />
+        <select className="mv-sort-select" value={sort} onChange={e => setSort(e.target.value as typeof sort)}>
+          <option value="newest">Newest</option>
+          <option value="reward">Highest Reward</option>
+          <option value="capability">Capability</option>
+        </select>
+      </div>
+
+      {/* Listings body */}
+      <div className="mv-listings-body">
+        {tasks.length === 0 && (
+          <div style={{ textAlign: 'center', color: 'var(--muted)', padding: 40, fontSize: 14 }}>
+            <TrendingUp size={32} style={{ marginBottom: 12, opacity: 0.3 }} />
+            <div>No open tasks in the market yet.</div>
+          </div>
+        )}
+
+        {filteredTasks.map(task => {
+          const bid = getBidState(task.id)
+          const isHighValue = task.reward_usdc > 10
+          const hasReward = task.reward_usdc > 0
+          const expires = task.expires_at ? timeUntil(task.expires_at) : null
+
+          return (
+            <div key={task.id} className={`mv-task-card${isHighValue ? ' high-value' : ''}`}>
+              <div className="mv-task-row1">
+                {task.required_capability && (
+                  <span className="mv-cap-badge">{task.required_capability}</span>
+                )}
+                <span className={`mv-reward-badge ${hasReward ? 'has-reward' : 'no-reward'}`}>
+                  {hasReward ? `$${task.reward_usdc.toFixed(1)}` : 'No reward'}
+                </span>
+                <span className="mv-task-title">{task.title}</span>
+                {currentKey && !bid.open && !bid.success && (
+                  <button className="btn btn-cyan btn-sm" style={{ flexShrink: 0 }} onClick={() => setBidField(task.id, { open: true })}>
+                    BID
+                  </button>
+                )}
+              </div>
+
+              {task.description && (
+                <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>
+                  {task.description.slice(0, 120)}{task.description.length > 120 ? '…' : ''}
+                </div>
+              )}
+
+              <div className="mv-task-meta">
+                <span>by <span style={{ color: 'var(--text)' }}>{task.poster_name}</span></span>
+                <span>·</span>
+                <span>{timeAgo(task.created_at)}</span>
+                {expires && (
+                  <>
+                    <span>·</span>
+                    <span style={{ color: expires === 'Expired' ? 'var(--danger)' : 'var(--warning)' }}>
+                      <Clock size={10} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 2 }} />
+                      {expires}
+                    </span>
+                  </>
+                )}
+              </div>
+
+              {/* Inline bid form */}
+              {bid.open && currentKey && (
+                <div className="mv-bid-form">
+                  {bid.success ? (
+                    <div style={{ color: 'var(--green)', fontSize: 13 }}>Bid placed!</div>
+                  ) : (
+                    <>
+                      <textarea
+                        placeholder="Your approach to this task…"
+                        value={bid.approach}
+                        onChange={e => setBidField(task.id, { approach: e.target.value })}
+                        rows={2}
+                        style={{
+                          width: '100%', background: 'rgba(10,10,20,0.8)', border: '1px solid var(--border)',
+                          borderRadius: 6, color: 'var(--text)', padding: '6px 8px', fontSize: 12,
+                          fontFamily: 'inherit', resize: 'none',
+                        }}
+                      />
+                      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                        <input
+                          type="number"
+                          placeholder="Est. hours"
+                          value={bid.hours}
+                          onChange={e => setBidField(task.id, { hours: e.target.value })}
+                          style={{
+                            width: 90, background: 'rgba(10,10,20,0.8)', border: '1px solid var(--border)',
+                            borderRadius: 6, color: 'var(--text)', padding: '5px 8px', fontSize: 12, fontFamily: 'inherit',
+                          }}
+                        />
+                        <button
+                          className="btn btn-primary btn-sm"
+                          onClick={() => submitBid(task.id)}
+                          disabled={bid.submitting || !bid.approach.trim()}
+                        >
+                          {bid.submitting ? '…' : 'Submit Bid'}
+                        </button>
+                        <button className="btn btn-ghost btn-sm" onClick={() => setBidField(task.id, { open: false })}>
+                          Cancel
+                        </button>
+                        {bid.error && <span style={{ color: 'var(--danger)', fontSize: 11 }}>{bid.error}</span>}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ── Tab 3: My Tier ────────────────────────────────────────────────────────────
 
 interface TierInfo {
   tier: number
@@ -383,7 +709,7 @@ function MyTierTab() {
   )
 }
 
-// ── Tab 3: Witness Queue ──────────────────────────────────────────────────────
+// ── Tab 4: Witness Queue ──────────────────────────────────────────────────────
 
 interface WitnessItem {
   round_id: number
@@ -501,7 +827,7 @@ function WitnessQueueTab() {
   )
 }
 
-// ── Tab 4: My Devices ─────────────────────────────────────────────────────────
+// ── Tab 5: My Devices ─────────────────────────────────────────────────────────
 
 interface Device {
   id: number
@@ -762,7 +1088,7 @@ function MyDevicesTab() {
   )
 }
 
-// ── Tab 5: Tier Leaderboard ───────────────────────────────────────────────────
+// ── Tab 6: Tier Leaderboard ───────────────────────────────────────────────────
 
 interface LeaderEntry {
   rank?: number
@@ -874,6 +1200,7 @@ export default function BlockMeshDashboard() {
 
       <div style={{ marginTop: 16 }}>
         {activeTab === 'board'       && <JobBoardTab />}
+        {activeTab === 'marketplace' && <MarketplaceTab />}
         {activeTab === 'tier'        && <MyTierTab />}
         {activeTab === 'witness'     && <WitnessQueueTab />}
         {activeTab === 'devices'     && <MyDevicesTab />}

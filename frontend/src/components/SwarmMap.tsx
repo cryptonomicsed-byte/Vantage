@@ -49,6 +49,47 @@ interface SwarmTask {
 interface GNode { id: number; name: string; val: number; color: string; raw: AgentNode }
 interface GLink { source: number; target: number; color: string; live: boolean }
 
+// ── Intent heatmap types ────────────────────────────────────────────────────
+interface HeatmapData {
+  content_activity: { type: string; count: number; agents: number }[]
+  hot_tags: { tag: string; count: number }[]
+  active_jobs: { stage: string; count: number }[]
+  tro_activity: { service_type: string; count: number }[]
+  active_agents: number
+  snapshot_time: string
+}
+
+const TYPE_ICONS: Record<string, string> = {
+  video: '🎬', text: '📝', audio: '🎵', image: '🖼️',
+  graph: '🕸️', debate: '⚔️', tro: '⚡',
+}
+
+const JOB_COLORS: Record<string, string> = {
+  scripting:   '#8a4bff',
+  voicing:     '#00f5ff',
+  visualizing: '#ffaa00',
+  composing:   '#4ade80',
+  transcoding: '#ff6b35',
+}
+
+function heatColor(count: number, max: number): string {
+  if (max === 0 || count === 0) return 'rgba(138,75,255,0.06)'
+  const r = count / max
+  if (r < 0.25) return `rgba(138,75,255,${0.1 + r * 0.3})`
+  if (r < 0.5)  return `rgba(0,245,255,${0.15 + r * 0.3})`
+  if (r < 0.75) return `rgba(255,170,0,${0.2 + r * 0.4})`
+  return `rgba(255,45,74,${0.25 + r * 0.5})`
+}
+
+function glowColor(count: number, max: number): string {
+  if (max === 0 || count === 0) return 'transparent'
+  const r = count / max
+  if (r < 0.4) return 'rgba(138,75,255,0.3)'
+  if (r < 0.7) return 'rgba(0,245,255,0.4)'
+  return 'rgba(255,45,74,0.5)'
+}
+// ───────────────────────────────────────────────────────────────────────────
+
 function isActiveRecently(lastSeenAt: string): boolean {
   if (!lastSeenAt) return false
   const diff = Date.now() - new Date(lastSeenAt).getTime()
@@ -89,6 +130,43 @@ export default function SwarmMap() {
   const [taskPanelOpen, setTaskPanelOpen] = useState(true)
   const [taskLinks, setTaskLinks] = useState<(GLink & { id: number })[]>([])
   const wsRef = useRef<WebSocket | null>(null)
+
+  // ── Intent panel state ───────────────────────────────────────────────────
+  const [intentOpen, setIntentOpen] = useState(false)
+  const [intentData, setIntentData] = useState<HeatmapData | null>(null)
+  const [intentLoading, setIntentLoading] = useState(false)
+  const intentIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const loadIntent = useCallback(async () => {
+    setIntentLoading(true)
+    try {
+      const apiKey = localStorage.getItem('vantage_api_key')
+      const headers: HeadersInit = apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
+      const res = await fetch('/api/agents/activity/heatmap', { headers })
+      if (res.ok) setIntentData(await res.json())
+    } catch { /* ignore */ }
+    setIntentLoading(false)
+  }, [])
+
+  // Fetch when panel opens; clear interval when it closes
+  useEffect(() => {
+    if (intentOpen) {
+      loadIntent()
+      intentIntervalRef.current = setInterval(loadIntent, 30_000)
+    } else {
+      if (intentIntervalRef.current) {
+        clearInterval(intentIntervalRef.current)
+        intentIntervalRef.current = null
+      }
+    }
+    return () => {
+      if (intentIntervalRef.current) {
+        clearInterval(intentIntervalRef.current)
+        intentIntervalRef.current = null
+      }
+    }
+  }, [intentOpen, loadIntent])
+  // ────────────────────────────────────────────────────────────────────────
 
   const loadData = useCallback(async () => {
     setLoading(true)
@@ -259,6 +337,10 @@ export default function SwarmMap() {
     g.cameraPosition({ x: pos.x * ratio, y: pos.y * ratio, z: pos.z * ratio }, undefined, 400)
   }
 
+  // Derived heatmap maxes -- computed during render, no effects needed
+  const maxTypeCount = Math.max(1, ...(intentData?.content_activity.map(c => c.count) ?? [1]))
+  const maxTagCount  = Math.max(1, ...(intentData?.hot_tags.map(t => t.count) ?? [1]))
+
   return (
     <div
       style={{
@@ -321,6 +403,22 @@ export default function SwarmMap() {
           {agentCount} agents
         </span>
 
+        {/* Intent toggle button */}
+        <button
+          onClick={() => setIntentOpen(o => !o)}
+          style={{
+            padding: '4px 12px',
+            background: intentOpen ? 'rgba(0,245,255,0.18)' : 'rgba(0,245,255,0.07)',
+            border: `1px solid ${intentOpen ? 'rgba(0,245,255,0.6)' : 'rgba(0,245,255,0.25)'}`,
+            borderRadius: 4, color: intentOpen ? '#00f5ff' : '#5ec8d0',
+            fontFamily: 'monospace', fontSize: 12, cursor: 'pointer',
+            transition: 'background 0.15s, border-color 0.15s, color 0.15s',
+          }}
+          title={intentOpen ? 'Hide swarm intent' : 'Show swarm intent'}
+        >
+          Intent
+        </button>
+
         {/* Legend */}
         <div style={{
           display: 'flex', alignItems: 'center', gap: 10, padding: '4px 10px',
@@ -341,6 +439,180 @@ export default function SwarmMap() {
           scroll to zoom · drag to orbit · click a node to open the agent
         </span>
       </div>
+
+      {/* ── Intent Panel (left side) ─────────────────────────────────────── */}
+      {intentOpen && (
+        <div
+          style={{
+            position: 'absolute', top: 0, left: 0, bottom: 0,
+            width: 300,
+            background: 'rgba(5,5,8,0.45)',
+            borderRight: '1px solid rgba(0,245,255,0.2)',
+            display: 'flex', flexDirection: 'column',
+            zIndex: 10,
+            backdropFilter: 'blur(20px)',
+            WebkitBackdropFilter: 'blur(20px)',
+            pointerEvents: 'auto',
+          }}
+        >
+          {/* Panel header */}
+          <div style={{
+            padding: '10px 12px 8px',
+            borderBottom: '1px solid rgba(0,245,255,0.15)',
+            fontFamily: 'monospace', fontSize: 11,
+            color: '#00f5ff', fontWeight: 700,
+            letterSpacing: '1px', textTransform: 'uppercase',
+            display: 'flex', alignItems: 'center', gap: 6,
+            flexShrink: 0,
+          }}>
+            <span style={{ flex: 1 }}>⚡ Swarm Intent</span>
+            {intentLoading && (
+              <span style={{ fontSize: 9, color: 'rgba(0,245,255,0.5)', fontWeight: 400 }}>refreshing…</span>
+            )}
+            <button
+              onClick={() => setIntentOpen(false)}
+              style={{
+                background: 'none', border: 'none', color: '#5ec8d0',
+                cursor: 'pointer', fontSize: 14, lineHeight: 1,
+                padding: '0 2px', display: 'flex', alignItems: 'center',
+              }}
+              title="Close intent panel"
+            >✕</button>
+          </div>
+
+          {/* Scrollable content */}
+          <div style={{ flex: 1, overflowY: 'auto', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+
+            {intentLoading && !intentData ? (
+              <div style={{ padding: '32px 0', textAlign: 'center', fontFamily: 'monospace', fontSize: 11, color: '#555' }}>
+                Reading swarm intent…
+              </div>
+            ) : !intentData ? (
+              <div style={{ padding: '32px 0', textAlign: 'center', fontFamily: 'monospace', fontSize: 11, color: '#555' }}>
+                No data available
+              </div>
+            ) : (
+              <>
+                {/* Content type activity grid (2-column compact) */}
+                <div>
+                  <div style={{ fontFamily: 'monospace', fontSize: 9, color: 'rgba(0,245,255,0.5)', letterSpacing: '1px', textTransform: 'uppercase', marginBottom: 7 }}>
+                    Content Activity
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5 }}>
+                    {['video','text','audio','image','graph','debate','tro'].map(type => {
+                      const entry = intentData.content_activity.find(c => c.type === type)
+                      const count = entry?.count ?? 0
+                      return (
+                        <div
+                          key={type}
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: 6,
+                            padding: '5px 7px', borderRadius: 5,
+                            background: heatColor(count, maxTypeCount),
+                            boxShadow: count > 0 ? `0 0 10px ${glowColor(count, maxTypeCount)}` : 'none',
+                            border: '1px solid rgba(255,255,255,0.05)',
+                            position: 'relative', overflow: 'hidden',
+                          }}
+                        >
+                          <span style={{ fontSize: 13, flexShrink: 0 }}>{TYPE_ICONS[type] ?? '📡'}</span>
+                          <span style={{ fontFamily: 'monospace', fontSize: 10, color: '#c0c8e0', flex: 1, textTransform: 'capitalize' }}>{type}</span>
+                          <span style={{ fontFamily: 'monospace', fontSize: 10, color: count > 0 ? '#e0e0ff' : '#444', fontWeight: 700 }}>
+                            {count > 0 ? count : '—'}
+                          </span>
+                          {/* Inline heat bar at bottom */}
+                          {count > 0 && (
+                            <div style={{
+                              position: 'absolute', bottom: 0, left: 0,
+                              height: 2,
+                              width: `${Math.round((count / maxTypeCount) * 100)}%`,
+                              background: glowColor(count, maxTypeCount),
+                              borderRadius: '0 0 5px 5px',
+                            }} />
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+
+                {/* Hot Topics (top 5) */}
+                <div>
+                  <div style={{ fontFamily: 'monospace', fontSize: 9, color: 'rgba(0,245,255,0.5)', letterSpacing: '1px', textTransform: 'uppercase', marginBottom: 7 }}>
+                    Hot Topics · 24h
+                  </div>
+                  {intentData.hot_tags.length === 0 ? (
+                    <div style={{ fontFamily: 'monospace', fontSize: 10, color: '#444' }}>No tag activity</div>
+                  ) : intentData.hot_tags.slice(0, 5).map(({ tag, count }) => (
+                    <div key={tag} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
+                      <span style={{ fontFamily: 'monospace', fontSize: 10, color: '#8a9bc4', width: 80, flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        #{tag}
+                      </span>
+                      <div style={{ flex: 1, height: 6, background: 'rgba(255,255,255,0.05)', borderRadius: 3, overflow: 'hidden' }}>
+                        <div style={{
+                          height: '100%',
+                          width: `${Math.round((count / maxTagCount) * 100)}%`,
+                          background: heatColor(count, maxTagCount),
+                          boxShadow: `0 0 6px ${glowColor(count, maxTagCount)}`,
+                          borderRadius: 3,
+                          transition: 'width 0.4s ease',
+                        }} />
+                      </div>
+                      <span style={{ fontFamily: 'monospace', fontSize: 9, color: '#555', width: 24, textAlign: 'right', flexShrink: 0 }}>{count}</span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Pipeline stages */}
+                <div>
+                  <div style={{ fontFamily: 'monospace', fontSize: 9, color: 'rgba(0,245,255,0.5)', letterSpacing: '1px', textTransform: 'uppercase', marginBottom: 7 }}>
+                    Pipeline
+                  </div>
+                  {intentData.active_jobs.length === 0 ? (
+                    <div style={{ fontFamily: 'monospace', fontSize: 10, color: '#444' }}>No active jobs</div>
+                  ) : intentData.active_jobs.map(({ stage, count }) => (
+                    <div key={stage} style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 6 }}>
+                      <span style={{
+                        width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+                        background: JOB_COLORS[stage] ?? '#8a4bff',
+                        boxShadow: `0 0 5px ${JOB_COLORS[stage] ?? '#8a4bff'}`,
+                      }} />
+                      <span style={{ fontFamily: 'monospace', fontSize: 10, color: '#8a9bc4', flex: 1, textTransform: 'capitalize' }}>{stage}</span>
+                      <span style={{
+                        fontFamily: 'monospace', fontSize: 10, fontWeight: 700,
+                        color: JOB_COLORS[stage] ?? '#8a4bff',
+                        background: 'rgba(255,255,255,0.05)',
+                        padding: '1px 6px', borderRadius: 99,
+                      }}>{count}</span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Active agents pill at bottom */}
+                <div style={{ marginTop: 'auto', paddingTop: 4, borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+                  <span style={{
+                    fontFamily: 'monospace', fontSize: 10, color: '#5ec8d0',
+                    display: 'flex', alignItems: 'center', gap: 5,
+                  }}>
+                    <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#4ade80', boxShadow: '0 0 5px #4ade80', display: 'inline-block' }} />
+                    {intentData.active_agents} active agents
+                  </span>
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Auto-refresh footer */}
+          <div style={{
+            padding: '6px 12px',
+            borderTop: '1px solid rgba(255,255,255,0.05)',
+            fontFamily: 'monospace', fontSize: 9, color: '#333',
+            flexShrink: 0,
+          }}>
+            Auto-refreshes every 30s
+          </div>
+        </div>
+      )}
+      {/* ────────────────────────────────────────────────────────────────── */}
 
       {/* Swarm Tasks Panel */}
       <div style={{
