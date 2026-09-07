@@ -1,4 +1,6 @@
-import React, { useEffect, useRef, useState, ReactNode } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
+import SearchPanel from './SearchPanel'
+import NotificationPanel from './NotificationPanel'
 
 interface WeatherData {
   overall: 'green' | 'amber' | 'red'
@@ -24,7 +26,7 @@ interface WeatherData {
   trending_tags: Array<{ tag: string; count: number }>
 }
 
-export default function PlatformWeather({ children }: { children?: ReactNode }) {
+export default function PlatformWeather() {
   const [weather, setWeather] = useState<WeatherData | null>(null)
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -57,11 +59,6 @@ export default function PlatformWeather({ children }: { children?: ReactNode }) 
   return (
     <div ref={ref} className="sb-weather-seg" title="Platform Weather">
       {/* Search + Notifications sit inside this cluster, clicks don't open weather */}
-      {children && (
-        <span className="sb-weather-icons" onClick={e => e.stopPropagation()}>
-          {children}
-        </span>
-      )}
       {weather && (
         <span className="sb-weather-data" onClick={() => setOpen(o => !o)}>
           <span className={`sb-weather-dot ${status}`} />
@@ -72,7 +69,13 @@ export default function PlatformWeather({ children }: { children?: ReactNode }) 
       )}
       {open && weather && (
         <div className="weather-popover" onClick={e => e.stopPropagation()}>
-          <div className="weather-popover-title">PLATFORM WEATHER</div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+            <div className="weather-popover-title" style={{ marginBottom: 0 }}>PLATFORM WEATHER</div>
+            <div style={{ display: 'flex', gap: 2 }}>
+              <SearchPanel bottomBarMode />
+              <NotificationPanel bottomBarMode />
+            </div>
+          </div>
           <div className="weather-row">
             <span className="weather-row-label">Network</span>
             <span className="weather-row-value">

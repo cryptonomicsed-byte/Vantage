@@ -79,10 +79,7 @@ export default function StatusBar() {
 
       {/* ── Right: utilities ── */}
       <span className="sb-sep" />
-      <PlatformWeather>
-        <SearchPanel bottomBarMode />
-        <NotificationPanel bottomBarMode />
-      </PlatformWeather>
+      <PlatformWeather />
       <span className="sb-sep" />
 
       <NavLink
