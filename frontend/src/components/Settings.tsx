@@ -1,10 +1,16 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { NavLink } from 'react-router-dom'
-import { BookOpen, Code, Copy, Check, Settings as SettingsIcon, Radio, Plus, Trash2, RefreshCw, ExternalLink, Wifi, WifiOff, AlertCircle, Brain, CheckCircle2, Circle, Tv, Film, GitMerge } from 'lucide-react'
+import {
+  BookOpen, Code, Copy, Check, Settings as SettingsIcon, Radio, Plus, Trash2,
+  RefreshCw, ExternalLink, Wifi, WifiOff, AlertCircle, Brain, CheckCircle2,
+  Circle, Tv, Film,
+} from 'lucide-react'
 import MindTab from './MindTab'
 
 const TABS = ['General', 'Mind & LLM', 'Integrations', 'Cinema & Live TV', 'Network', 'Developer'] as const
 type Tab = typeof TABS[number]
+
+// ── Shared types ───────────────────────────────────────────────────────────────
 
 interface IntegrationsStatus {
   tmdb: boolean
@@ -23,6 +29,370 @@ interface InstanceInfo {
   name: string; version: string; public_url: string; onion_url: string | null
   agent_count: number; federation_enabled: boolean
 }
+interface FederationPeer {
+  id: number
+  url: string
+  name: string
+  status: string
+  reputation: number
+  last_seen: string
+  flagged: number
+  failure_count?: number
+}
+
+// ── FederationPanel types ──────────────────────────────────────────────────────
+
+interface AgentMe {
+  agent_id: number
+  agent_name: string
+  npub?: string
+  sui_address?: string
+  metadata?: Record<string, unknown>
+}
+
+interface HealthData {
+  status: string
+  [key: string]: unknown
+}
+
+interface FreenetStatus {
+  status: string
+  phase?: string
+  contracts?: number
+  peers?: number
+}
+
+// ── FederationPanel constants ──────────────────────────────────────────────────
+
+const FED_GREEN = '#3cc878'
+const FED_DIM   = 'rgba(255,255,255,0.25)'
+const FED_AMBER = '#f59e0b'
+const FED_CYAN  = 'var(--cyan)'
+const POLL_MS   = 30_000
+
+// ── FederationPanel helpers ────────────────────────────────────────────────────
+
+function fedDot(color: string, pulse = false) {
+  return (
+    <span
+      style={{
+        display: 'inline-block',
+        width: 8,
+        height: 8,
+        borderRadius: '50%',
+        background: color,
+        flexShrink: 0,
+        boxShadow: pulse ? `0 0 6px ${color}` : undefined,
+      }}
+    />
+  )
+}
+
+function truncate(s: string, max = 20) {
+  if (!s) return ''
+  return s.length > max ? s.slice(0, max) + '…' : s
+}
+
+function fmt(val: unknown, max = 36): string {
+  if (val === null || val === undefined) return '-'
+  const s = String(val)
+  return s.length > max ? s.slice(0, max) + '…' : s
+}
+
+// ── Protocol card sub-styles ───────────────────────────────────────────────────
+
+const protoCardStyle: React.CSSProperties = {
+  background: 'rgba(255,255,255,0.02)',
+  border: '1px solid var(--border)',
+  borderRadius: 10,
+  overflow: 'hidden',
+}
+
+const protoHeaderStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  padding: '10px 16px',
+  borderBottom: '1px solid var(--border)',
+  background: 'rgba(0,0,0,0.25)',
+}
+
+const protoHeaderLabel: React.CSSProperties = {
+  fontSize: 11,
+  fontWeight: 700,
+  letterSpacing: '0.1em',
+  textTransform: 'uppercase',
+  color: FED_CYAN,
+}
+
+const protoBodyStyle: React.CSSProperties = {
+  padding: '12px 16px',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 8,
+}
+
+const protoRowStyle: React.CSSProperties = {
+  display: 'flex',
+  gap: 12,
+  fontSize: 12,
+}
+
+const protoLabelStyle: React.CSSProperties = {
+  color: 'var(--muted)',
+  flexShrink: 0,
+  width: 110,
+  paddingTop: 1,
+}
+
+const protoValueStyle: React.CSSProperties = {
+  color: 'var(--text)',
+  fontFamily: 'monospace',
+  wordBreak: 'break-all',
+}
+
+function ProtoRow({ label, value, valueColor }: { label: string; value: React.ReactNode; valueColor?: string }) {
+  return (
+    <div style={protoRowStyle}>
+      <span style={protoLabelStyle}>{label}</span>
+      <span style={{ ...protoValueStyle, color: valueColor || 'var(--text)' }}>{value}</span>
+    </div>
+  )
+}
+
+function ProtoStatusBadge({ connected, label }: { connected: boolean; label?: string }) {
+  const color = connected ? FED_GREEN : FED_DIM
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      {fedDot(color, connected)}
+      <span style={{ fontSize: 11, color, fontWeight: 600 }}>
+        {label ?? (connected ? 'Connected' : 'Not Connected')}
+      </span>
+    </div>
+  )
+}
+
+// ── Protocol cards ─────────────────────────────────────────────────────────────
+
+function NostrCard({ agent }: { agent: AgentMe | null }) {
+  const npub = agent?.npub || null
+  const connected = !!npub
+
+  return (
+    <div style={protoCardStyle}>
+      <div style={protoHeaderStyle}>
+        <span style={protoHeaderLabel}>Nostr</span>
+        <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 4 }}>Identity + Federation</span>
+        <div style={{ marginLeft: 'auto' }}>
+          <ProtoStatusBadge connected={connected} />
+        </div>
+      </div>
+      <div style={protoBodyStyle}>
+        <ProtoRow label="Relay" value="omokoda.duckdns.org:3443" valueColor={FED_CYAN} />
+        <ProtoRow
+          label="npub"
+          value={npub ? truncate(npub, 30) : 'not registered'}
+          valueColor={npub ? 'var(--text)' : 'var(--muted)'}
+        />
+        <ProtoRow label="Write Relays" value="wss://relay.damus.io" />
+        <ProtoRow
+          label="NIPs"
+          value={
+            <span style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+              {['01', '19', '44', '46', '65', '98', '29', '71', '73'].map(n => (
+                <span
+                  key={n}
+                  style={{
+                    fontSize: 10,
+                    padding: '1px 5px',
+                    borderRadius: 4,
+                    background: 'rgba(0,245,255,0.1)',
+                    color: FED_CYAN,
+                    fontFamily: 'monospace',
+                  }}
+                >
+                  {n}
+                </span>
+              ))}
+            </span>
+          }
+        />
+      </div>
+    </div>
+  )
+}
+
+function FreenetCard({ freenetStatus }: { freenetStatus: FreenetStatus | null }) {
+  const connected = freenetStatus?.status === 'connected'
+
+  return (
+    <div style={protoCardStyle}>
+      <div style={protoHeaderStyle}>
+        <span style={protoHeaderLabel}>Freenet</span>
+        <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 4 }}>Decentralized State</span>
+        <div style={{ marginLeft: 'auto' }}>
+          <ProtoStatusBadge connected={connected} label={connected ? 'Connected' : 'Phase F1'} />
+        </div>
+      </div>
+      <div style={protoBodyStyle}>
+        <ProtoRow label="Phase" value={freenetStatus?.phase || 'F1 — local stub'} valueColor={FED_AMBER} />
+        <ProtoRow
+          label="Node"
+          value={connected ? 'localhost:50509' : 'not running'}
+          valueColor={connected ? FED_GREEN : 'var(--muted)'}
+        />
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          {[
+            { label: 'Contracts', value: String(freenetStatus?.contracts ?? 0) },
+            { label: 'Rooms',     value: '0' },
+            { label: 'Peers',     value: String(freenetStatus?.peers ?? 0) },
+            { label: 'Git Repos', value: '0' },
+          ].map(s => (
+            <div
+              key={s.label}
+              style={{
+                background: 'rgba(255,255,255,0.02)',
+                border: '1px solid var(--border)',
+                borderRadius: 6,
+                padding: '8px 12px',
+              }}
+            >
+              <div style={{ fontSize: 9, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
+                {s.label}
+              </div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: FED_DIM }}>{s.value}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function GiteaCard() {
+  return (
+    <div style={protoCardStyle}>
+      <div style={protoHeaderStyle}>
+        <span style={protoHeaderLabel}>Gitea</span>
+        <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 4 }}>Source Code</span>
+        <div style={{ marginLeft: 'auto' }}>
+          <ProtoStatusBadge connected={true} />
+        </div>
+      </div>
+      <div style={protoBodyStyle}>
+        <ProtoRow label="Host" value="localhost:3001" valueColor={FED_GREEN} />
+        <ProtoRow label="Repos" value="-" valueColor="var(--muted)" />
+      </div>
+    </div>
+  )
+}
+
+function OmoKodaCard({ health }: { health: HealthData | null }) {
+  const connected = health?.status === 'ok'
+
+  return (
+    <div style={protoCardStyle}>
+      <div style={protoHeaderStyle}>
+        <span style={protoHeaderLabel}>Ọmọ Kọ́dà2</span>
+        <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 4 }}>Sovereign Runtime</span>
+        <div style={{ marginLeft: 'auto' }}>
+          <ProtoStatusBadge connected={connected} />
+        </div>
+      </div>
+      <div style={protoBodyStyle}>
+        <ProtoRow label="Host" value="localhost:7777" valueColor={connected ? FED_GREEN : FED_DIM} />
+        <ProtoRow
+          label="Status"
+          value={connected ? 'Sovereign' : fmt(health?.status) || 'Unreachable'}
+          valueColor={connected ? FED_GREEN : FED_AMBER}
+        />
+      </div>
+    </div>
+  )
+}
+
+function SuiCard({ agent }: { agent: AgentMe | null }) {
+  const addr = agent?.sui_address || null
+  const configured = !!addr
+
+  return (
+    <div style={protoCardStyle}>
+      <div style={protoHeaderStyle}>
+        <span style={protoHeaderLabel}>Sui</span>
+        <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 4 }}>Settlement</span>
+        <div style={{ marginLeft: 'auto' }}>
+          <ProtoStatusBadge connected={configured} label={configured ? 'Configured' : 'Not Configured'} />
+        </div>
+      </div>
+      <div style={protoBodyStyle}>
+        <ProtoRow label="Network" value="testnet" />
+        <ProtoRow
+          label="Address"
+          value={addr ? truncate(addr, 32) : 'none'}
+          valueColor={addr ? FED_CYAN : 'var(--muted)'}
+        />
+      </div>
+    </div>
+  )
+}
+
+function ArweaveCard() {
+  return (
+    <div style={protoCardStyle}>
+      <div style={protoHeaderStyle}>
+        <span style={protoHeaderLabel}>Arweave</span>
+        <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 4 }}>Permanent Archive</span>
+        <div style={{ marginLeft: 'auto' }}>
+          <ProtoStatusBadge connected={false} label="Not Configured" />
+        </div>
+      </div>
+      <div style={protoBodyStyle}>
+        <ProtoRow label="Role" value="archival" />
+        <ProtoRow label="Use" value="receipts, genesis records, governance" valueColor="var(--muted)" />
+      </div>
+    </div>
+  )
+}
+
+function MeshCard() {
+  return (
+    <div style={protoCardStyle}>
+      <div style={protoHeaderStyle}>
+        <span style={protoHeaderLabel}>Meshtastic / Reticulum</span>
+        <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 4 }}>Mesh</span>
+        <div style={{ marginLeft: 'auto' }}>
+          <ProtoStatusBadge connected={false} label="Not Configured" />
+        </div>
+      </div>
+      <div style={protoBodyStyle}>
+        <ProtoRow label="Role" value="off-grid agent comms" valueColor="var(--muted)" />
+      </div>
+    </div>
+  )
+}
+
+// ── Health summary dot helper ──────────────────────────────────────────────────
+
+function HealthDot({ color, label }: { color: string; label: string }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+      <span
+        style={{
+          display: 'inline-block',
+          width: 8,
+          height: 8,
+          borderRadius: '50%',
+          background: color,
+          boxShadow: `0 0 5px ${color}`,
+          flexShrink: 0,
+        }}
+      />
+      <span style={{ fontSize: 10, color: 'var(--muted)', letterSpacing: '0.04em' }}>{label}</span>
+    </div>
+  )
+}
+
+// ── Integrations helper ────────────────────────────────────────────────────────
 
 function IntegrationRow({ name, ok, hint }: { name: string; ok: boolean; hint?: string }) {
   return (
@@ -34,16 +404,7 @@ function IntegrationRow({ name, ok, hint }: { name: string; ok: boolean; hint?: 
   )
 }
 
-interface FederationPeer {
-  id: number
-  url: string
-  name: string
-  status: string
-  reputation: number
-  last_seen: string
-  flagged: number
-  failure_count?: number
-}
+// ── Peer status dot ────────────────────────────────────────────────────────────
 
 function StatusDot({ status }: { status: string }) {
   const color = status === 'active' ? '#22c55e' : status === 'unreachable' ? '#ef4444' : '#f59e0b'
@@ -57,7 +418,13 @@ function StatusDot({ status }: { status: string }) {
   )
 }
 
-const HASH_TO_TAB: Record<string, Tab> = { mind: 'Mind & LLM', integrations: 'Integrations', cinema: 'Cinema & Live TV', network: 'Network', developer: 'Developer' }
+const HASH_TO_TAB: Record<string, Tab> = {
+  mind: 'Mind & LLM',
+  integrations: 'Integrations',
+  cinema: 'Cinema & Live TV',
+  network: 'Network',
+  developer: 'Developer',
+}
 
 export default function Settings() {
   const initialTab = HASH_TO_TAB[window.location.hash.replace('#', '')] || 'General'
@@ -65,103 +432,114 @@ export default function Settings() {
   const [copied, setCopied] = useState(false)
   const apiKey = localStorage.getItem('vantage_api_key') || ''
 
-  // Federation state
-  const [peers, setPeers]           = useState<FederationPeer[]>([])
+  // ── Federation peer state ──────────────────────────────────────────────────
+  const [peers, setPeers]               = useState<FederationPeer[]>([])
   const [loadingPeers, setLoadingPeers] = useState(false)
-  const [addUrl, setAddUrl]         = useState('')
-  const [addName, setAddName]       = useState('')
-  const [adding, setAdding]         = useState(false)
-  const [addError, setAddError]     = useState('')
-  const [addSuccess, setAddSuccess] = useState('')
-  const [pingingId, setPingingId]   = useState<number | null>(null)
+  const [addUrl, setAddUrl]             = useState('')
+  const [addName, setAddName]           = useState('')
+  const [adding, setAdding]             = useState(false)
+  const [addError, setAddError]         = useState('')
+  const [addSuccess, setAddSuccess]     = useState('')
+  const [pingingId, setPingingId]       = useState<number | null>(null)
   const [federationEnabled, setFederationEnabled] = useState(false)
 
-  // Integrations state
+  // ── FederationPanel (cockpit) state ───────────────────────────────────────
+  const [fedAgent, setFedAgent]           = useState<AgentMe | null>(null)
+  const [fedHealth, setFedHealth]         = useState<HealthData | null>(null)
+  const [freenetStatus, setFreenetStatus] = useState<FreenetStatus | null>(null)
+  const [lastPoll, setLastPoll]           = useState<Date | null>(null)
+  const [polling, setPolling]             = useState(false)
+  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const freenetTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // ── Integrations state ────────────────────────────────────────────────────
   const [streamStatus, setStreamStatus] = useState<IntegrationsStatus | null>(null)
-  const [sysStatus, setSysStatus] = useState<SystemIntegrations | null>(null)
+  const [sysStatus, setSysStatus]       = useState<SystemIntegrations | null>(null)
 
-  useEffect(() => {
-    if (tab !== 'Integrations') return
-    fetch('/api/cinema/livetv/integrations/status').then(r => r.ok ? r.json() : null).then(d => d && setStreamStatus(d)).catch(() => {})
-    fetch('/api/agents/system/integrations').then(r => r.ok ? r.json() : null).then(d => d && setSysStatus(d)).catch(() => {})
-  }, [tab])
-
-  // Instance info (real, non-secret config -- public_url/onion_url/agent_count)
-  // used in both Network (share your URL for peers to add you) and Developer.
+  // ── Instance info ─────────────────────────────────────────────────────────
   const [instanceInfo, setInstanceInfo] = useState<InstanceInfo | null>(null)
+
+  // ── Per-peer preview state ────────────────────────────────────────────────
+  const [expandedPeer, setExpandedPeer]         = useState<number | null>(null)
+  const [peerPreview, setPeerPreview]           = useState<Record<number, any[]>>({})
+  const [peerPreviewLoading, setPeerPreviewLoading] = useState<number | null>(null)
+
+  // ── Cinema / Live TV state ────────────────────────────────────────────────
+  const [cinemaAutoplay, setCinemaAutoplay] = useState(localStorage.getItem('cinema_autoplay') !== 'false')
+  const [defaultCountry, setDefaultCountry] = useState(localStorage.getItem('livetv_default_country') || 'US')
+
+  // ── Load instance info on Network or Developer tab ────────────────────────
   useEffect(() => {
     if (tab !== 'Network' && tab !== 'Developer') return
     fetch('/api/agents/info', { headers: apiKey ? { 'X-Agent-Key': apiKey } : {} })
-      .then(r => r.ok ? r.json() : null).then(d => d && setInstanceInfo(d)).catch(() => {})
+      .then(r => r.ok ? r.json() : null)
+      .then(d => d && setInstanceInfo(d))
+      .catch(() => {})
   }, [tab, apiKey])
 
-  // Cinema autoplay -- same real per-agent KV persistence pattern as the
-  // Live TV default country below, not just a localStorage-only toggle.
-  const [cinemaAutoplay, setCinemaAutoplay] = useState(localStorage.getItem('cinema_autoplay') !== 'false')
+  // ── Integrations fetch ────────────────────────────────────────────────────
+  useEffect(() => {
+    if (tab !== 'Integrations') return
+    fetch('/api/cinema/livetv/integrations/status')
+      .then(r => r.ok ? r.json() : null).then(d => d && setStreamStatus(d)).catch(() => {})
+    fetch('/api/agents/system/integrations')
+      .then(r => r.ok ? r.json() : null).then(d => d && setSysStatus(d)).catch(() => {})
+  }, [tab])
+
+  // ── Cinema autoplay server-side KV ───────────────────────────────────────
   useEffect(() => {
     if (!apiKey) return
     fetch('/api/agents/me/state/cinema_autoplay', { headers: { 'X-Agent-Key': apiKey } })
       .then(r => r.ok ? r.json() : null)
-      .then(d => { if (d?.value != null) { const v = d.value !== 'false'; setCinemaAutoplay(v); localStorage.setItem('cinema_autoplay', String(v)) } })
+      .then(d => {
+        if (d?.value != null) {
+          const v = d.value !== 'false'
+          setCinemaAutoplay(v)
+          localStorage.setItem('cinema_autoplay', String(v))
+        }
+      })
       .catch(() => {})
   }, [apiKey])
+
   function saveCinemaAutoplay(v: boolean) {
     setCinemaAutoplay(v)
     localStorage.setItem('cinema_autoplay', String(v))
     if (apiKey) {
       fetch('/api/agents/me/state/cinema_autoplay', {
-        method: 'PUT', headers: { 'X-Agent-Key': apiKey, 'Content-Type': 'application/json' },
+        method: 'PUT',
+        headers: { 'X-Agent-Key': apiKey, 'Content-Type': 'application/json' },
         body: JSON.stringify({ value: String(v) }),
       }).catch(() => {})
     }
   }
 
-  // Per-peer "recent broadcasts" preview -- real backend endpoint
-  // (GET /federation/peers/{id}/recent) existed with zero frontend
-  // consumer until now.
-  const [expandedPeer, setExpandedPeer] = useState<number | null>(null)
-  const [peerPreview, setPeerPreview] = useState<Record<number, any[]>>({})
-  const [peerPreviewLoading, setPeerPreviewLoading] = useState<number | null>(null)
-  async function togglePeerPreview(id: number) {
-    if (expandedPeer === id) { setExpandedPeer(null); return }
-    setExpandedPeer(id)
-    if (!peerPreview[id]) {
-      setPeerPreviewLoading(id)
-      try {
-        const r = await fetch(`/api/agents/federation/peers/${id}/recent?limit=8`)
-        if (r.ok) {
-          const d = await r.json()
-          setPeerPreview(prev => ({ ...prev, [id]: d.broadcasts || [] }))
-        }
-      } catch { /* ignore */ }
-      setPeerPreviewLoading(null)
-    }
-  }
-
-  // Live TV preference -- persisted server-side via the generic per-agent
-  // KV state store (PUT /api/agents/me/state/{key}), same one an agent can
-  // set directly via its own API calls, not just localStorage. localStorage
-  // is kept only as an instant-render cache so LiveTV.tsx doesn't have to
-  // wait on a fetch before picking a default country.
-  const [defaultCountry, setDefaultCountry] = useState(localStorage.getItem('livetv_default_country') || 'US')
+  // ── Live TV default country server-side KV ────────────────────────────────
   useEffect(() => {
     if (!apiKey) return
     fetch('/api/agents/me/state/livetv_default_country', { headers: { 'X-Agent-Key': apiKey } })
       .then(r => r.ok ? r.json() : null)
-      .then(d => { if (d?.value) { setDefaultCountry(d.value); localStorage.setItem('livetv_default_country', d.value) } })
+      .then(d => {
+        if (d?.value) {
+          setDefaultCountry(d.value)
+          localStorage.setItem('livetv_default_country', d.value)
+        }
+      })
       .catch(() => {})
   }, [apiKey])
+
   function saveDefaultCountry(code: string) {
     setDefaultCountry(code)
     localStorage.setItem('livetv_default_country', code)
     if (apiKey) {
       fetch('/api/agents/me/state/livetv_default_country', {
-        method: 'PUT', headers: { 'X-Agent-Key': apiKey, 'Content-Type': 'application/json' },
+        method: 'PUT',
+        headers: { 'X-Agent-Key': apiKey, 'Content-Type': 'application/json' },
         body: JSON.stringify({ value: code }),
       }).catch(() => {})
     }
   }
 
+  // ── API key helpers ───────────────────────────────────────────────────────
   function copyKey() {
     navigator.clipboard.writeText(apiKey).catch(() => {})
     setCopied(true)
@@ -172,7 +550,7 @@ export default function Settings() {
     ? `${apiKey.slice(0, 12)}${'•'.repeat(16)}${apiKey.slice(-6)}`
     : ''
 
-  // Load federation peers
+  // ── Peer management ───────────────────────────────────────────────────────
   const loadPeers = useCallback(async () => {
     setLoadingPeers(true)
     try {
@@ -213,7 +591,7 @@ export default function Settings() {
       } else {
         setAddError(d.detail || d.reason || 'Failed to add peer')
       }
-    } catch (e) {
+    } catch {
       setAddError('Network error — is the instance reachable?')
     }
     setAdding(false)
@@ -242,16 +620,97 @@ export default function Settings() {
     loadPeers()
   }
 
+  async function togglePeerPreview(id: number) {
+    if (expandedPeer === id) { setExpandedPeer(null); return }
+    setExpandedPeer(id)
+    if (!peerPreview[id]) {
+      setPeerPreviewLoading(id)
+      try {
+        const r = await fetch(`/api/agents/federation/peers/${id}/recent?limit=8`)
+        if (r.ok) {
+          const d = await r.json()
+          setPeerPreview(prev => ({ ...prev, [id]: d.broadcasts || [] }))
+        }
+      } catch { /* ignore */ }
+      setPeerPreviewLoading(null)
+    }
+  }
+
   function timeAgo(ts: string): string {
     if (!ts) return 'never'
     const diff = Date.now() - new Date(ts).getTime()
     const m = Math.floor(diff / 60000)
-    if (m < 1)   return 'just now'
-    if (m < 60)  return `${m}m ago`
+    if (m < 1)  return 'just now'
+    if (m < 60) return `${m}m ago`
     const h = Math.floor(m / 60)
-    if (h < 24)  return `${h}h ago`
+    if (h < 24) return `${h}h ago`
     return `${Math.floor(h / 24)}d ago`
   }
+
+  // ── Cockpit poll (agent + health) ─────────────────────────────────────────
+  const pollCockpit = useCallback(async () => {
+    setPolling(true)
+    try {
+      const headers: Record<string, string> = {}
+      if (apiKey) headers['X-Agent-Key'] = apiKey
+
+      const [agentRes, healthRes] = await Promise.allSettled([
+        fetch('/api/agents/me', { headers }),
+        fetch('/api/health'),
+      ])
+
+      if (agentRes.status === 'fulfilled' && agentRes.value.ok) {
+        setFedAgent(await agentRes.value.json())
+      }
+      if (healthRes.status === 'fulfilled' && healthRes.value.ok) {
+        setFedHealth(await healthRes.value.json())
+      }
+      setLastPoll(new Date())
+    } finally {
+      setPolling(false)
+    }
+  }, [apiKey])
+
+  // ── Freenet poll ──────────────────────────────────────────────────────────
+  const pollFreenet = useCallback(async () => {
+    if (!apiKey) return
+    try {
+      const r = await fetch('/api/freenet/status', { headers: { 'X-Agent-Key': apiKey } })
+      if (r.ok) setFreenetStatus(await r.json())
+    } catch { /* ignore */ }
+  }, [apiKey])
+
+  // Start / stop polls when the Network tab is active
+  useEffect(() => {
+    if (tab !== 'Network') return
+
+    pollCockpit()
+    pollFreenet()
+
+    pollTimerRef.current    = setInterval(pollCockpit,  POLL_MS)
+    freenetTimerRef.current = setInterval(pollFreenet, POLL_MS)
+
+    return () => {
+      if (pollTimerRef.current)    clearInterval(pollTimerRef.current)
+      if (freenetTimerRef.current) clearInterval(freenetTimerRef.current)
+    }
+  }, [tab, pollCockpit, pollFreenet])
+
+  // ── Health summary bar helpers ────────────────────────────────────────────
+  const nostrOk      = !!fedAgent?.npub
+  const freenetOk    = freenetStatus?.status === 'connected'
+  const giteaOk      = true // always "configured" per GiteaCard
+  const omokodaOk    = fedHealth?.status === 'ok'
+  const suiOk        = !!fedAgent?.sui_address
+  const arweaveOk    = false
+  const meshOk       = false
+
+  function healthColor(ok: boolean | null) {
+    if (ok === null) return FED_AMBER
+    return ok ? FED_GREEN : FED_DIM
+  }
+
+  // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
     <div className="settings-page">
@@ -269,8 +728,8 @@ export default function Settings() {
             className={'settings-inner-tab' + (tab === t ? ' active' : '')}
             onClick={() => setTab(t)}
           >
-            {t === 'Network' && <Radio size={12} style={{ marginRight: 5 }} />}
-            {t === 'Mind & LLM' && <Brain size={12} style={{ marginRight: 5 }} />}
+            {t === 'Network'       && <Radio size={12} style={{ marginRight: 5 }} />}
+            {t === 'Mind & LLM'   && <Brain size={12} style={{ marginRight: 5 }} />}
             {t === 'Cinema & Live TV' && <Film size={12} style={{ marginRight: 5 }} />}
             {t}
           </button>
@@ -318,8 +777,7 @@ export default function Settings() {
         </div>
       )}
 
-
-      {/* ── Integrations (read-only status) ── */}
+      {/* ── Integrations ── */}
       {tab === 'Integrations' && (
         <div className="settings-section">
           <h3 className="settings-section-title" style={{ marginBottom: 4 }}>Audio &amp; Video sources</h3>
@@ -345,8 +803,12 @@ export default function Settings() {
           </div>
           {(sysStatus?.omniroute_url || sysStatus?.omokoda_url) && (
             <div style={{ marginTop: 10, padding: '10px 16px', fontSize: 11, color: 'var(--muted)', fontFamily: 'monospace' }}>
-              {sysStatus?.omniroute_url && <div>OmniRoute endpoint: {sysStatus.omniroute_url} · default model: {sysStatus.omniroute_default_model || 'auto'}</div>}
-              {sysStatus?.omokoda_url && <div style={{ marginTop: 4 }}>Omo-Koda2 kernel: {sysStatus.omokoda_url}</div>}
+              {sysStatus?.omniroute_url && (
+                <div>OmniRoute endpoint: {sysStatus.omniroute_url} · default model: {sysStatus.omniroute_default_model || 'auto'}</div>
+              )}
+              {sysStatus?.omokoda_url && (
+                <div style={{ marginTop: 4 }}>Omo-Koda2 kernel: {sysStatus.omokoda_url}</div>
+              )}
             </div>
           )}
           <p style={{ fontSize: 11, color: 'var(--muted)', marginTop: 14, opacity: 0.7 }}>
@@ -357,7 +819,7 @@ export default function Settings() {
         </div>
       )}
 
-      {/* ── Cinema & Live TV preferences ── */}
+      {/* ── Cinema & Live TV ── */}
       {tab === 'Cinema & Live TV' && (
         <div className="settings-section">
           <h3 className="settings-section-title" style={{ marginBottom: 4 }}>Live TV</h3>
@@ -365,11 +827,17 @@ export default function Settings() {
             Default country when you open the Live TV tab. Real iptv-org catalog, currently 3,286 channels for the US.
           </p>
           <div className="stat-card" style={{ marginBottom: 24, padding: 16 }}>
-            <label style={{ fontSize: 12, color: 'var(--muted)', display: 'block', marginBottom: 8 }}>Default country code (e.g. US, GB, CA)</label>
+            <label style={{ fontSize: 12, color: 'var(--muted)', display: 'block', marginBottom: 8 }}>
+              Default country code (e.g. US, GB, CA)
+            </label>
             <input
               value={defaultCountry}
               onChange={e => saveDefaultCountry(e.target.value.toUpperCase().slice(0, 2))}
-              style={{ width: 80, padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6, color: 'var(--text)', fontSize: 13, textAlign: 'center' }}
+              style={{
+                width: 80, padding: '8px 10px',
+                background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.1)',
+                borderRadius: 6, color: 'var(--text)', fontSize: 13, textAlign: 'center',
+              }}
             />
           </div>
 
@@ -379,7 +847,10 @@ export default function Settings() {
             (Agent.TV/podcast channels never auto-play regardless of this — that's a separate,
             deliberate "pick a channel first" flow, see below.)
           </p>
-          <label className="stat-card" style={{ marginBottom: 24, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', width: 'fit-content' }}>
+          <label
+            className="stat-card"
+            style={{ marginBottom: 24, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', width: 'fit-content' }}
+          >
             <input type="checkbox" checked={cinemaAutoplay} onChange={e => saveCinemaAutoplay(e.target.checked)} />
             <span style={{ fontSize: 13 }}>Autoplay when opening a title</span>
           </label>
@@ -398,26 +869,123 @@ export default function Settings() {
         </div>
       )}
 
-      {/* ── Network (Federation) ── */}
+      {/* ── Network — Federation Cockpit ── */}
       {tab === 'Network' && (
         <div className="settings-section">
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+
+          {/* ── Cockpit header ── */}
+          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
             <div>
-              <h3 className="settings-section-title" style={{ marginBottom: 4 }}>Federation Network</h3>
-              <p style={{ fontSize: 12, color: 'var(--muted)', margin: 0 }}>
-                Connect to other Vantage instances to see their agents and broadcasts.
-                Any user on any port can be connected.
-              </p>
+              <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.15em', textTransform: 'uppercase', color: FED_CYAN, marginBottom: 2 }}>
+                Federation Cockpit
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                Infrastructure layer status — agent ecosystem
+              </div>
             </div>
-            <div style={{
-              display: 'flex', alignItems: 'center', gap: 6,
-              fontSize: 11, color: federationEnabled ? '#22c55e' : '#ef4444',
-            }}>
-              {federationEnabled ? <Wifi size={13} /> : <WifiOff size={13} />}
-              {federationEnabled ? 'ENABLED' : 'DISABLED'}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              {/* Federation enabled badge */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, color: federationEnabled ? '#22c55e' : '#ef4444' }}>
+                {federationEnabled ? <Wifi size={13} /> : <WifiOff size={13} />}
+                {federationEnabled ? 'ENABLED' : 'DISABLED'}
+              </div>
+              {/* Agent identity */}
+              {fedAgent && (
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '5px 12px', borderRadius: 6,
+                  background: 'rgba(0,245,255,0.05)',
+                  border: '1px solid rgba(0,245,255,0.15)',
+                  fontSize: 11,
+                }}>
+                  <span style={{ color: 'var(--muted)' }}>as</span>
+                  <span style={{ fontWeight: 700, color: FED_CYAN }}>{fedAgent.agent_name}</span>
+                  <span style={{ color: 'var(--muted)', fontFamily: 'monospace' }}>#{fedAgent.agent_id}</span>
+                </div>
+              )}
+              {/* Last sync / refresh */}
+              {polling && <span style={{ fontSize: 10, color: FED_AMBER }}>Polling…</span>}
+              {lastPoll && !polling && (
+                <span style={{ fontSize: 10, color: 'var(--muted)' }}>
+                  Last sync {lastPoll.toLocaleTimeString()}
+                </span>
+              )}
+              <button
+                onClick={pollCockpit}
+                disabled={polling}
+                style={{
+                  fontSize: 11, padding: '4px 10px', borderRadius: 6,
+                  border: '1px solid var(--border)',
+                  background: 'rgba(255,255,255,0.04)',
+                  color: polling ? 'var(--muted)' : 'var(--text)',
+                  cursor: polling ? 'default' : 'pointer',
+                  display: 'flex', alignItems: 'center', gap: 5,
+                }}
+              >
+                <RefreshCw size={11} /> Refresh
+              </button>
             </div>
           </div>
 
+          {/* ── Health summary bar ── */}
+          <div
+            className="stat-card"
+            style={{
+              marginBottom: 20,
+              padding: '10px 16px',
+              display: 'flex',
+              gap: 18,
+              flexWrap: 'wrap',
+              alignItems: 'center',
+            }}
+          >
+            <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', color: 'var(--muted)', textTransform: 'uppercase', marginRight: 4 }}>
+              Health
+            </span>
+            <HealthDot color={healthColor(nostrOk)}   label="Nostr" />
+            <HealthDot color={healthColor(freenetOk)} label="Freenet" />
+            <HealthDot color={healthColor(giteaOk)}   label="Gitea" />
+            <HealthDot color={healthColor(omokodaOk)} label="Ọmọ Kọ́dà2" />
+            <HealthDot color={healthColor(suiOk)}     label="Sui" />
+            <HealthDot color={healthColor(arweaveOk)} label="Arweave" />
+            <HealthDot color={healthColor(meshOk)}    label="Meshtastic" />
+          </div>
+
+          {/* ═══════════ PROTOCOL STATUS ═══════════ */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+            <h3 className="settings-section-title" style={{ margin: 0 }}>Protocol Status</h3>
+            <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
+          </div>
+
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(3, 1fr)',
+              gap: 12,
+              marginBottom: 28,
+            }}
+          >
+            <NostrCard   agent={fedAgent} />
+            <FreenetCard freenetStatus={freenetStatus} />
+            <GiteaCard />
+            <OmoKodaCard health={fedHealth} />
+            <SuiCard     agent={fedAgent} />
+            <ArweaveCard />
+            <MeshCard />
+          </div>
+
+          {/* ═══════════ PEER NETWORK ═══════════ */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+            <h3 className="settings-section-title" style={{ margin: 0 }}>Peer Network</h3>
+            <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
+          </div>
+
+          <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 16, marginTop: -8 }}>
+            Connect to other Vantage instances to see their agents and broadcasts.
+            Any user on any port can be connected.
+          </p>
+
+          {/* Your instance URL */}
           {instanceInfo?.public_url && (
             <div className="stat-card" style={{ marginBottom: 20, padding: 16 }}>
               <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--muted-hi)', marginBottom: 6, letterSpacing: '0.05em' }}>
@@ -487,9 +1055,7 @@ export default function Settings() {
               </div>
             )}
             {addSuccess && (
-              <div style={{ fontSize: 12, color: '#22c55e', marginTop: 6 }}>
-                {addSuccess}
-              </div>
+              <div style={{ fontSize: 12, color: '#22c55e', marginTop: 6 }}>{addSuccess}</div>
             )}
           </div>
 
@@ -512,9 +1078,9 @@ export default function Settings() {
                   className="stat-card"
                   style={{
                     padding: '12px 16px',
-                    borderColor: peer.status === 'active' ? 'rgba(34,197,94,0.2)'
-                      : peer.status === 'unreachable' ? 'rgba(239,68,68,0.15)'
-                      : 'rgba(255,255,255,0.06)',
+                    borderColor: peer.status === 'active'      ? 'rgba(34,197,94,0.2)'
+                               : peer.status === 'unreachable' ? 'rgba(239,68,68,0.15)'
+                               : 'rgba(255,255,255,0.06)',
                   }}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -551,7 +1117,10 @@ export default function Settings() {
                         title={peer.flagged ? 'Flagged peers cannot be previewed' : 'Preview recent broadcasts from this peer'}
                         style={{ padding: '4px 8px' }}
                       >
-                        {peerPreviewLoading === peer.id ? <RefreshCw size={11} className="spin" /> : <Radio size={11} />}
+                        {peerPreviewLoading === peer.id
+                          ? <RefreshCw size={11} className="spin" />
+                          : <Radio size={11} />
+                        }
                       </button>
                       <button
                         className="btn btn-ghost btn-sm"
@@ -598,7 +1167,9 @@ export default function Settings() {
                           {(peerPreview[peer.id] || []).slice(0, 8).map((b: any) => (
                             <div key={b.id} style={{ fontSize: 11, color: 'var(--muted-hi)', display: 'flex', gap: 8 }}>
                               <span style={{ color: 'var(--cyan)', flexShrink: 0 }}>{b.agent_name || '?'}</span>
-                              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.title || '(untitled)'}</span>
+                              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {b.title || '(untitled)'}
+                              </span>
                             </div>
                           ))}
                         </div>
@@ -616,9 +1187,13 @@ export default function Settings() {
               </button>
             </div>
           )}
+
+          {/* Footer note */}
+          <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.18)', textAlign: 'center', paddingTop: 20, letterSpacing: '0.06em' }}>
+            Polls every 30 s · /api/agents/me · /api/health · /api/freenet/status
+          </div>
         </div>
       )}
-
 
       {/* ── Developer ── */}
       {tab === 'Developer' && (
