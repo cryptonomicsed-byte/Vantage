@@ -126,6 +126,11 @@ function AppLayout() {
   const section = getSection(location.pathname)
   const subLinks = SUB_NAV[section]
   const [observerEnabled, setObserverEnabled] = useState(false)
+  useEffect(() => {
+    const handler = () => setObserverEnabled(o => !o)
+    window.addEventListener('vantage:toggle-observer', handler)
+    return () => window.removeEventListener('vantage:toggle-observer', handler)
+  }, [])
 
   // Every API call needs X-Agent-Key now (PR #39) — a first-time visitor has
   // none stored, so give them a throwaway agent identity automatically rather

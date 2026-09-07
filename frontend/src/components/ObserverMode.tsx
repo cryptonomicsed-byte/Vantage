@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Eye, EyeOff, X } from 'lucide-react'
+import { Eye, X } from 'lucide-react'
 
 interface TraceEntry {
   id: number
@@ -77,18 +77,7 @@ export default function ObserverMode({ enabled, onToggle }: Props) {
 
   return (
     <>
-      {/* Toggle button — always visible */}
-      <button
-        className={`observer-toggle${enabled ? ' active' : ''}`}
-        onClick={onToggle}
-        title={enabled ? 'Disable Observer Mode' : 'Enable Observer Mode — watch agent thought streams'}
-      >
-        {enabled ? <EyeOff size={14} /> : <Eye size={14} />}
-        <span>Observer</span>
-        {enabled && <span className="observer-live-dot" />}
-      </button>
-
-      {/* Side panel */}
+      {/* Side panel — triggered from StatusBar 👁️ button via vantage:toggle-observer event */}
       {enabled && (
         <div className="observer-panel">
           <div className="observer-header">

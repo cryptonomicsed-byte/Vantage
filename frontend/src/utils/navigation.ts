@@ -26,7 +26,7 @@ export const SECTION_PATHS: Record<string, string[]> = {
   code: ['/code'],
   video: ['/video', '/studio', '/cinema', '/audio', '/playlists', '/agenttv'],
   buzz: ['/buzz', '/buzz-social'],
-  swarm: ['/swarm', '/blockmesh', '/workspace', '/guilds', '/leaderboard'],
+  swarm: ['/swarm', '/blockmesh', '/workspace', '/guilds', '/mission', '/leaderboard'],
   dashboard: [
     '/dashboard', '/agents', '/vault', '/analytics',
     '/inbox', '/knowledge', '/collectives', '/search',
@@ -50,6 +50,7 @@ export const SUB_NAV: Record<string, Array<{ to: string; label: string }>> = {
     { to: '/swarm',       label: 'Graph'       },
     { to: '/workspace',   label: 'Workspace'   },
     { to: '/guilds',      label: 'Guilds'      },
+    { to: '/mission',     label: 'Mission'     },
     { to: '/leaderboard', label: 'Rankings'    },
   ],
   video: [

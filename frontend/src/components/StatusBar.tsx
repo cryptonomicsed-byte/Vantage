@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { NavLink, Link } from 'react-router-dom'
-import { Users, Code2, CandlestickChart, Clapperboard, Settings, Shield, Radio, Globe, Target } from 'lucide-react'
+import { Users, Code2, CandlestickChart, Clapperboard, Settings, Shield, Radio, Globe } from 'lucide-react'
 import NotificationPanel from './NotificationPanel'
 import SearchPanel from './SearchPanel'
 import PlatformWeather from './PlatformWeather'
@@ -10,12 +10,11 @@ import PlatformWeather from './PlatformWeather'
 // Gigs removed as its own tab (Marketplace/Rankings moved into Swarm's
 // SubNav instead, since they're swarm-wide concerns).
 const SECONDARY_NAV = [
-  { icon: Users,            label: 'Swarm',       to: '/blockmesh'   },
-  { icon: Code2,            label: 'Code',        to: '/code'        },
-  { icon: CandlestickChart, label: 'Trading',     to: '/trading'     },
-  { icon: Clapperboard,     label: 'Studio',      to: '/video'       },
-  { icon: Radio,            label: 'Buzz',        to: '/buzz'        },
-  { icon: Target,           label: 'Mission',     to: '/mission'     },
+  { icon: Users,            label: 'Swarm',   to: '/blockmesh' },
+  { icon: Code2,            label: 'Code',    to: '/code'      },
+  { icon: CandlestickChart, label: 'Trading', to: '/trading'   },
+  { icon: Clapperboard,     label: 'Studio',  to: '/video'     },
+  { icon: Radio,            label: 'Buzz',    to: '/buzz'      },
 ]
 
 function useUnreadDMs(): number {
@@ -79,6 +78,22 @@ export default function StatusBar() {
       <span className="sb-spacer" />
 
       {/* ── Right: utilities ── */}
+      <span className="sb-sep" />
+
+      {/* ── Copilot + Observer — emoji icon only, no labels ── */}
+      <button
+        className="sb-icon-btn"
+        title="Copilot"
+        onClick={() => window.dispatchEvent(new CustomEvent('vantage:toggle-copilot'))}
+        style={{ fontSize: 14 }}
+      >🤖</button>
+      <button
+        className="sb-icon-btn"
+        title="Observer — agent thought stream"
+        onClick={() => window.dispatchEvent(new CustomEvent('vantage:toggle-observer'))}
+        style={{ fontSize: 14 }}
+      >👁️</button>
+
       <span className="sb-sep" />
       <SearchPanel bottomBarMode />
       <NotificationPanel bottomBarMode />
