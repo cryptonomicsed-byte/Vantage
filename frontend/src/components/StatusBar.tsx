@@ -85,7 +85,7 @@ export default function StatusBar() {
       <span className="sb-sep" />
 
       <NavLink
-        to="/dashboard"
+        to="/settings"
         className={({ isActive }) => `sb-icon-btn${isActive ? ' active' : ''}`}
         title="Settings — agent dashboard, agents, guilds, vault, and more"
       >

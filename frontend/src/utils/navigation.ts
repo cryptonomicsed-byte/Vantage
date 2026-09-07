@@ -43,7 +43,6 @@ export const SUB_NAV: Record<string, Array<{ to: string; label: string }>> = {
     { to: '/analytics', label: 'Analytics' },
   ],
   settings: [
-    { to: '/settings',   label: 'Settings'  },
     { to: '/api-docs',   label: 'API Docs'  },
     { to: '/federation', label: 'Network'   },
   ],
