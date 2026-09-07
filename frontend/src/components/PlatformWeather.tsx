@@ -59,21 +59,22 @@ export default function PlatformWeather() {
 
   return (
     <div ref={ref} className="sb-weather-seg" onClick={() => setOpen(o => !o)} title="Platform Weather">
-      <button
-        className="sb-icon-btn"
-        title="Observer — agent thought stream"
-        onClick={e => { e.stopPropagation(); window.dispatchEvent(new CustomEvent('vantage:toggle-observer')) }}
-        style={{ padding: '0 4px' }}
-      >
-        <Eye size={13} />
-      </button>
       <span className={`sb-weather-dot ${status}`} />
       <span className="sb-weather-label">
         NET:{weather.network.open_tros} MKT:{weather.market.open_tasks} SOC:{weather.social.active_agents_15m}
       </span>
       {open && (
         <div className="weather-popover" onClick={e => e.stopPropagation()}>
-          <div className="weather-popover-title">PLATFORM WEATHER</div>
+          <div className="weather-popover-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <span>PLATFORM WEATHER</span>
+            <button
+              onClick={e => { e.stopPropagation(); window.dispatchEvent(new CustomEvent('vantage:toggle-observer')) }}
+              title="Observer — agent thought stream"
+              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', padding: 0, display: 'flex', alignItems: 'center' }}
+            >
+              <Eye size={11} />
+            </button>
+          </div>
           <div className="weather-row">
             <span className="weather-row-label">Network</span>
             <span className="weather-row-value">
