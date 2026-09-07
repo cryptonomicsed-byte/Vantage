@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useRef, useState, ReactNode } from 'react'
 
 interface WeatherData {
   overall: 'green' | 'amber' | 'red'
@@ -24,7 +24,7 @@ interface WeatherData {
   trending_tags: Array<{ tag: string; count: number }>
 }
 
-export default function PlatformWeather() {
+export default function PlatformWeather({ children }: { children?: ReactNode }) {
   const [weather, setWeather] = useState<WeatherData | null>(null)
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -49,20 +49,28 @@ export default function PlatformWeather() {
     return () => document.removeEventListener('mousedown', handler)
   }, [open])
 
-  if (!weather) return null
-
-  const status = weather.overall
-  const netDot = weather.network.congestion
-  const mktDot = weather.market.market_pressure
-  const socDot = weather.social.vitality
+  const status = weather?.overall
+  const netDot = weather?.network.congestion
+  const mktDot = weather?.market.market_pressure
+  const socDot = weather?.social.vitality
 
   return (
-    <div ref={ref} className="sb-weather-seg" onClick={() => setOpen(o => !o)} title="Platform Weather">
-      <span className={`sb-weather-dot ${status}`} />
-      <span className="sb-weather-label">
-        NET:{weather.network.open_tros} MKT:{weather.market.open_tasks} SOC:{weather.social.active_agents_15m}
-      </span>
-      {open && (
+    <div ref={ref} className="sb-weather-seg" title="Platform Weather">
+      {/* Search + Notifications sit inside this cluster, clicks don't open weather */}
+      {children && (
+        <span className="sb-weather-icons" onClick={e => e.stopPropagation()}>
+          {children}
+        </span>
+      )}
+      {weather && (
+        <span className="sb-weather-data" onClick={() => setOpen(o => !o)}>
+          <span className={`sb-weather-dot ${status}`} />
+          <span className="sb-weather-label">
+            NET:{weather.network.open_tros} MKT:{weather.market.open_tasks} SOC:{weather.social.active_agents_15m}
+          </span>
+        </span>
+      )}
+      {open && weather && (
         <div className="weather-popover" onClick={e => e.stopPropagation()}>
           <div className="weather-popover-title">PLATFORM WEATHER</div>
           <div className="weather-row">
