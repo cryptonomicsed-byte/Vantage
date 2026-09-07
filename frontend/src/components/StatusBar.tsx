@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { NavLink, Link } from 'react-router-dom'
-import { Users, Code2, CandlestickChart, Clapperboard, Settings, Shield, Radio, Globe } from 'lucide-react'
+import { Users, Code2, CandlestickChart, Clapperboard, Settings, Shield, Radio, Globe, Bot } from 'lucide-react'
 import NotificationPanel from './NotificationPanel'
 import SearchPanel from './SearchPanel'
 import PlatformWeather from './PlatformWeather'
@@ -79,22 +79,6 @@ export default function StatusBar() {
 
       {/* ── Right: utilities ── */}
       <span className="sb-sep" />
-
-      {/* ── Copilot + Observer — emoji icon only, no labels ── */}
-      <button
-        className="sb-icon-btn"
-        title="Copilot"
-        onClick={() => window.dispatchEvent(new CustomEvent('vantage:toggle-copilot'))}
-        style={{ fontSize: 14 }}
-      >🤖</button>
-      <button
-        className="sb-icon-btn"
-        title="Observer — agent thought stream"
-        onClick={() => window.dispatchEvent(new CustomEvent('vantage:toggle-observer'))}
-        style={{ fontSize: 14 }}
-      >👁️</button>
-
-      <span className="sb-sep" />
       <SearchPanel bottomBarMode />
       <NotificationPanel bottomBarMode />
       <PlatformWeather />
@@ -108,6 +92,14 @@ export default function StatusBar() {
         <Settings size={13} />
         {unreadDMs > 0 && <span className="sb-icon-badge">{unreadDMs > 99 ? '99+' : unreadDMs}</span>}
       </NavLink>
+
+      <button
+        className="sb-icon-btn"
+        title="Copilot"
+        onClick={() => window.dispatchEvent(new CustomEvent('vantage:toggle-copilot'))}
+      >
+        <Bot size={13} />
+      </button>
 
       <NavLink
         to="/federation"
