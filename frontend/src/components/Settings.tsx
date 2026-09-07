@@ -6,8 +6,9 @@ import {
   Circle, Tv, Film,
 } from 'lucide-react'
 import MindTab from './MindTab'
+import ApiDocs from './ApiDocs'
 
-const TABS = ['Mind & LLM', 'Integrations', 'Cinema & Live TV', 'Network', 'Developer'] as const
+const TABS = ['Network', 'Mind & LLM', 'Integrations', 'Cinema & Live TV', 'Developer', 'API Docs'] as const
 type Tab = typeof TABS[number]
 
 // ── Shared types ───────────────────────────────────────────────────────────────
@@ -424,6 +425,7 @@ const HASH_TO_TAB: Record<string, Tab> = {
   cinema: 'Cinema & Live TV',
   network: 'Network',
   developer: 'Developer',
+  'api-docs': 'API Docs',
 }
 
 export default function Settings() {
@@ -1529,6 +1531,13 @@ export default function Settings() {
               </div>
             </>
           )}
+        </div>
+      )}
+
+      {/* ── API Docs ── */}
+      {tab === 'API Docs' && (
+        <div className="settings-section">
+          <ApiDocs />
         </div>
       )}
     </div>
