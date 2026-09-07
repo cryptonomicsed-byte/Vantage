@@ -68,18 +68,16 @@ export default function StatusBar() {
         <NavLink
           key={to}
           to={to}
-          className={({ isActive }) => `sb-nav-btn sb-holo${isActive ? ' active' : ''}`}
+          className={({ isActive }) => `sb-nav-btn sb-holo sb-nav-icon-only${isActive ? ' active' : ''}`}
+          title={label}
         >
-          <Icon size={11} />
-          <span>{label}</span>
+          <Icon size={13} />
         </NavLink>
       ))}
 
       <span className="sb-spacer" />
 
       {/* ── Right: utilities ── */}
-      <span className="sb-sep" />
-      <PlatformWeather />
       <span className="sb-sep" />
 
       <NavLink
@@ -106,10 +104,6 @@ export default function StatusBar() {
         <Eye size={13} />
       </button>
 
-      <Link to="/ares" className="sb-icon-btn sb-ares sb-holo" title="Ares SOC">
-        <Shield size={13} />
-      </Link>
-
       <NavLink
         to="/settings"
         className={({ isActive }) => `sb-icon-btn sb-holo${isActive ? ' active' : ''}`}
@@ -118,6 +112,13 @@ export default function StatusBar() {
         <Settings size={13} />
         {unreadDMs > 0 && <span className="sb-icon-badge">{unreadDMs > 99 ? '99+' : unreadDMs}</span>}
       </NavLink>
+
+      <span className="sb-sep" />
+      <PlatformWeather />
+
+      <Link to="/ares" className="sb-icon-btn sb-ares" title="Ares Sentinel Control">
+        <Shield size={13} />
+      </Link>
 
       <span className="sb-version">v0.2</span>
     </div>

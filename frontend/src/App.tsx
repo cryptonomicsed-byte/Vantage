@@ -36,6 +36,7 @@ import AudioSection from './components/AudioSection'
 import Playlists from './components/Playlists'
 import BuzzSocial from './components/BuzzSocial'
 import BuzzHome from './components/BuzzHome'
+import ProtocolHub from './components/ProtocolHub'
 import AgentTVSection from './components/cinema/AgentTVSection'
 import FederationPanel from './components/FederationPanel'
 import DelegationPanel from './components/DelegationPanel'
@@ -188,7 +189,7 @@ function AppLayout() {
             <Route path="/voice" element={<ErrorBoundary><VoiceSession /></ErrorBoundary>} />
             <Route path="/copilot" element={<ErrorBoundary><CopilotChat /></ErrorBoundary>} />
             <Route path="/welcome" element={<ErrorBoundary><Landing /></ErrorBoundary>} />
-            <Route path="/buzz" element={<ErrorBoundary><BuzzHome /></ErrorBoundary>} />
+            <Route path="/buzz" element={<ErrorBoundary><ProtocolHub /></ErrorBoundary>} />
             <Route path="/buzz-social" element={<ErrorBoundary><BuzzSocial /></ErrorBoundary>} />
             <Route path="/guilds" element={<ErrorBoundary><GuildDirectory /></ErrorBoundary>} />
             <Route path="/guild/:slug" element={<ErrorBoundary><GuildShell /></ErrorBoundary>} />
