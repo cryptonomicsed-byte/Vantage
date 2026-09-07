@@ -26,12 +26,12 @@ export const SECTION_PATHS: Record<string, string[]> = {
   code: ['/code'],
   video: ['/video', '/studio', '/cinema', '/audio', '/playlists', '/agenttv'],
   buzz: ['/buzz', '/buzz-social'],
-  swarm: ['/swarm', '/blockmesh', '/workspace', '/guilds', '/mission', '/leaderboard'],
+  swarm: ['/swarm', '/blockmesh', '/workspace', '/guilds', '/mission', '/delegation', '/leaderboard'],
   dashboard: [
     '/dashboard', '/agents', '/vault', '/analytics',
     '/inbox', '/knowledge', '/collectives', '/search',
   ],
-  settings: ['/settings', '/api-docs'],
+  settings: ['/settings', '/api-docs', '/federation'],
 }
 
 export const SUB_NAV: Record<string, Array<{ to: string; label: string }>> = {
@@ -42,14 +42,16 @@ export const SUB_NAV: Record<string, Array<{ to: string; label: string }>> = {
     { to: '/analytics', label: 'Analytics' },
   ],
   settings: [
-    { to: '/api-docs',  label: 'API Docs'      },
-    { to: '/dashboard', label: 'Open Dashboard' },
+    { to: '/api-docs',    label: 'API Docs'   },
+    { to: '/federation',  label: 'Network'    },
+    { to: '/dashboard',   label: 'Dashboard'  },
   ],
   swarm: [
     { to: '/blockmesh',   label: 'BlockMesh'   },
     { to: '/swarm',       label: 'Graph'       },
     { to: '/workspace',   label: 'Workspace'   },
     { to: '/guilds',      label: 'Guilds'      },
+    { to: '/delegation',  label: 'Delegations' },
     { to: '/mission',     label: 'Mission'     },
     { to: '/leaderboard', label: 'Rankings'    },
   ],

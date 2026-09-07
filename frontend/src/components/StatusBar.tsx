@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { NavLink, Link } from 'react-router-dom'
-import { Users, Code2, CandlestickChart, Clapperboard, Settings, Shield, Radio, Globe, Bot } from 'lucide-react'
+import { Users, Code2, CandlestickChart, Clapperboard, Settings, Shield, Radio, Bot, Eye } from 'lucide-react'
 import NotificationPanel from './NotificationPanel'
 import SearchPanel from './SearchPanel'
 import PlatformWeather from './PlatformWeather'
@@ -101,13 +101,13 @@ export default function StatusBar() {
         <Bot size={13} />
       </button>
 
-      <NavLink
-        to="/federation"
-        className={({ isActive }) => `sb-icon-btn${isActive ? ' active' : ''}`}
-        title="Federation — Nostr · Freenet · Sui · Arweave"
+      <button
+        className="sb-icon-btn"
+        title="Observer — agent thought stream"
+        onClick={() => window.dispatchEvent(new CustomEvent('vantage:toggle-observer'))}
       >
-        <Globe size={13} />
-      </NavLink>
+        <Eye size={13} />
+      </button>
 
       <Link to="/ares" className="sb-icon-btn sb-ares" title="Ares SOC">
         <Shield size={13} />

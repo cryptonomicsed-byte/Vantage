@@ -1,5 +1,4 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Eye } from 'lucide-react'
 
 interface WeatherData {
   overall: 'green' | 'amber' | 'red'
@@ -65,16 +64,7 @@ export default function PlatformWeather() {
       </span>
       {open && (
         <div className="weather-popover" onClick={e => e.stopPropagation()}>
-          <div className="weather-popover-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span>PLATFORM WEATHER</span>
-            <button
-              onClick={e => { e.stopPropagation(); window.dispatchEvent(new CustomEvent('vantage:toggle-observer')) }}
-              title="Observer — agent thought stream"
-              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', padding: 0, display: 'flex', alignItems: 'center' }}
-            >
-              <Eye size={11} />
-            </button>
-          </div>
+          <div className="weather-popover-title">PLATFORM WEATHER</div>
           <div className="weather-row">
             <span className="weather-row-label">Network</span>
             <span className="weather-row-value">

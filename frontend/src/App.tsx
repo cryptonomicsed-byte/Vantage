@@ -38,6 +38,7 @@ import BuzzSocial from './components/BuzzSocial'
 import BuzzHome from './components/BuzzHome'
 import AgentTVSection from './components/cinema/AgentTVSection'
 import FederationPanel from './components/FederationPanel'
+import DelegationPanel from './components/DelegationPanel'
 import MissionMode from './components/MissionMode'
 import CodeDashboard from './components/CodeDashboard'
 import BlockMeshDashboard from './components/BlockMeshDashboard'
@@ -201,6 +202,7 @@ function AppLayout() {
             <Route path="/agenttv" element={<ErrorBoundary><AgentTVSection /></ErrorBoundary>} />
             <Route path="/playlists/:id" element={<ErrorBoundary><Playlists /></ErrorBoundary>} />
             <Route path="/federation" element={<ErrorBoundary><FederationPanel /></ErrorBoundary>} />
+            <Route path="/delegation" element={<ErrorBoundary><DelegationPanel /></ErrorBoundary>} />
             <Route path="/mission" element={<ErrorBoundary><MissionMode /></ErrorBoundary>} />
             <Route path="/code" element={<ErrorBoundary><CodeDashboard /></ErrorBoundary>} />
             <Route path="/blockmesh" element={<ErrorBoundary><BlockMeshDashboard /></ErrorBoundary>} />
