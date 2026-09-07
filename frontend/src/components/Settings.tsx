@@ -7,7 +7,7 @@ import {
 } from 'lucide-react'
 import MindTab from './MindTab'
 
-const TABS = ['Dashboard', 'Mind & LLM', 'Integrations', 'Cinema & Live TV', 'Network', 'Developer'] as const
+const TABS = ['Network', 'Mind & LLM', 'Integrations', 'Cinema & Live TV', 'Developer', 'Dashboard'] as const
 type Tab = typeof TABS[number]
 
 // ── Shared types ───────────────────────────────────────────────────────────────
@@ -427,7 +427,7 @@ const HASH_TO_TAB: Record<string, Tab> = {
 }
 
 export default function Settings() {
-  const initialTab = HASH_TO_TAB[window.location.hash.replace('#', '')] || 'Dashboard'
+  const initialTab = HASH_TO_TAB[window.location.hash.replace('#', '')] || 'Network'
   const [tab, setTab]       = useState<Tab>(initialTab)
   const [copied, setCopied] = useState(false)
   const apiKey = localStorage.getItem('vantage_api_key') || ''
