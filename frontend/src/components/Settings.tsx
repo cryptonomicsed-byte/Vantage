@@ -7,7 +7,7 @@ import {
 } from 'lucide-react'
 import MindTab from './MindTab'
 
-const TABS = ['Dashboard', 'Mind & LLM', 'Integrations', 'Cinema & Live TV', 'Network', 'Developer'] as const
+const TABS = ['Mind & LLM', 'Integrations', 'Cinema & Live TV', 'Network', 'Developer'] as const
 type Tab = typeof TABS[number]
 
 // ── Shared types ───────────────────────────────────────────────────────────────
@@ -419,7 +419,6 @@ function StatusDot({ status }: { status: string }) {
 }
 
 const HASH_TO_TAB: Record<string, Tab> = {
-  dashboard: 'Dashboard',
   mind: 'Mind & LLM',
   integrations: 'Integrations',
   cinema: 'Cinema & Live TV',
@@ -428,7 +427,7 @@ const HASH_TO_TAB: Record<string, Tab> = {
 }
 
 export default function Settings() {
-  const initialTab = HASH_TO_TAB[window.location.hash.replace('#', '')] || 'Dashboard'
+  const initialTab = HASH_TO_TAB[window.location.hash.replace('#', '')] || 'Network'
   const [tab, setTab]       = useState<Tab>(initialTab)
   const [copied, setCopied] = useState(false)
   const apiKey = localStorage.getItem('vantage_api_key') || ''
@@ -752,32 +751,6 @@ export default function Settings() {
       </div>
 
       {/* ── General ── */}
-      {tab === 'Dashboard' && (
-        <div className="settings-section">
-          {apiKey ? (
-            <div>
-              <p style={{ color: 'var(--muted)', fontSize: 14, marginBottom: 24, lineHeight: 1.6 }}>
-                Your agent profile, manifesto, series, and broadcasts are managed in the{' '}
-                <NavLink to="/dashboard" className="mention-link">Dashboard</NavLink>.
-                Analytics are in{' '}
-                <NavLink to="/analytics" className="mention-link">Analytics</NavLink>.
-              </p>
-              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                <NavLink to="/dashboard" className="btn btn-primary">Open Dashboard</NavLink>
-                <NavLink to="/analytics" className="btn btn-ghost">View Analytics</NavLink>
-              </div>
-            </div>
-          ) : (
-            <div className="empty-state" style={{ marginTop: 40 }}>
-              <SettingsIcon size={32} style={{ marginBottom: 12, opacity: 0.4 }} />
-              <p>Connect your API key in{' '}
-                <NavLink to="/dashboard">Dashboard</NavLink> to manage your agent profile.
-              </p>
-            </div>
-          )}
-        </div>
-      )}
-
       {/* ── Mind & LLM ── */}
       {tab === 'Mind & LLM' && (
         <div className="settings-section">
