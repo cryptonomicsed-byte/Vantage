@@ -696,18 +696,32 @@ export default function Settings() {
     }
   }, [tab, pollCockpit, pollFreenet])
 
-  // ── Health summary bar helpers ────────────────────────────────────────────
-  const nostrOk      = !!fedAgent?.npub
-  const freenetOk    = freenetStatus?.status === 'connected'
-  const giteaOk      = true // always "configured" per GiteaCard
-  const omokodaOk    = fedHealth?.status === 'ok'
-  const suiOk        = !!fedAgent?.sui_address
-  const arweaveOk    = false
-  const meshOk       = false
+  // ── Protocol selector state ───────────────────────────────────────────────
+  const [selectedProtocol, setSelectedProtocol] = useState<string>('nostr')
+  const [copiedNpub, setCopiedNpub]             = useState(false)
+  const [copiedSui, setCopiedSui]               = useState(false)
 
-  function healthColor(ok: boolean | null) {
-    if (ok === null) return FED_AMBER
-    return ok ? FED_GREEN : FED_DIM
+  // ── Health summary helpers ─────────────────────────────────────────────────
+  const nostrOk   = !!fedAgent?.npub
+  const freenetOk = freenetStatus?.status === 'connected'
+  const giteaOk   = true
+  const omokodaOk = fedHealth?.status === 'ok'
+  const suiOk     = !!fedAgent?.sui_address
+
+  function copyNpub() {
+    if (fedAgent?.npub) {
+      navigator.clipboard.writeText(fedAgent.npub).catch(() => {})
+      setCopiedNpub(true)
+      setTimeout(() => setCopiedNpub(false), 2000)
+    }
+  }
+
+  function copySui() {
+    if (fedAgent?.sui_address) {
+      navigator.clipboard.writeText(fedAgent.sui_address).catch(() => {})
+      setCopiedSui(true)
+      setTimeout(() => setCopiedSui(false), 2000)
+    }
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -927,51 +941,323 @@ export default function Settings() {
             </div>
           </div>
 
-          {/* ── Health summary bar ── */}
-          <div
-            className="stat-card"
-            style={{
-              marginBottom: 20,
-              padding: '10px 16px',
-              display: 'flex',
-              gap: 18,
-              flexWrap: 'wrap',
-              alignItems: 'center',
-            }}
-          >
-            <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', color: 'var(--muted)', textTransform: 'uppercase', marginRight: 4 }}>
-              Health
-            </span>
-            <HealthDot color={healthColor(nostrOk)}   label="Nostr" />
-            <HealthDot color={healthColor(freenetOk)} label="Freenet" />
-            <HealthDot color={healthColor(giteaOk)}   label="Gitea" />
-            <HealthDot color={healthColor(omokodaOk)} label="Ọmọ Kọ́dà2" />
-            <HealthDot color={healthColor(suiOk)}     label="Sui" />
-            <HealthDot color={healthColor(arweaveOk)} label="Arweave" />
-            <HealthDot color={healthColor(meshOk)}    label="Meshtastic" />
-          </div>
-
           {/* ═══════════ PROTOCOL STATUS ═══════════ */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
             <h3 className="settings-section-title" style={{ margin: 0 }}>Protocol Status</h3>
             <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
           </div>
 
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(3, 1fr)',
-              gap: 12,
-              marginBottom: 28,
-            }}
-          >
-            <NostrCard   agent={fedAgent} />
-            <FreenetCard freenetStatus={freenetStatus} />
-            <GiteaCard />
-            <OmoKodaCard health={fedHealth} />
-            <SuiCard     agent={fedAgent} />
-            <ArweaveCard />
-            <MeshCard />
+          {/* ── Protocol selector pills ── */}
+          {(() => {
+            const protocols: { id: string; label: string; connected: boolean }[] = [
+              { id: 'nostr',    label: 'Nostr',       connected: nostrOk   },
+              { id: 'freenet',  label: 'Freenet',     connected: freenetOk },
+              { id: 'gitea',    label: 'Gitea',       connected: giteaOk   },
+              { id: 'omokoda',  label: 'Ọmọ Kọ́dà2',  connected: omokodaOk },
+              { id: 'sui',      label: 'Sui',         connected: suiOk     },
+              { id: 'arweave',  label: 'Arweave',     connected: false     },
+              { id: 'mesh',     label: 'Meshtastic',  connected: false     },
+            ]
+            return (
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
+                {protocols.map(p => {
+                  const active = selectedProtocol === p.id
+                  const dotColor = p.connected ? FED_GREEN : '#4b5563'
+                  return (
+                    <button
+                      key={p.id}
+                      onClick={() => setSelectedProtocol(p.id)}
+                      style={{
+                        padding: '6px 14px',
+                        borderRadius: 99,
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        fontSize: 12,
+                        fontWeight: 600,
+                        border: `1px solid ${active ? 'var(--cyan)' : 'var(--border)'}`,
+                        background: active ? 'rgba(0,245,255,0.06)' : 'transparent',
+                        color: active ? 'var(--cyan)' : 'var(--text)',
+                        transition: 'all 0.15s',
+                      }}
+                    >
+                      <span style={{ width: 8, height: 8, borderRadius: '50%', background: dotColor, flexShrink: 0, display: 'inline-block' }} />
+                      {p.label}
+                    </button>
+                  )
+                })}
+              </div>
+            )
+          })()}
+
+          {/* ── Active protocol detail panel ── */}
+          <div style={{ marginBottom: 28 }}>
+            {selectedProtocol === 'nostr' && (
+              <div style={protoCardStyle}>
+                <div style={protoHeaderStyle}>
+                  <span style={{ fontSize: 16 }}>⚡</span>
+                  <span style={protoHeaderLabel}>Nostr</span>
+                  <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 4 }}>Identity + Federation</span>
+                  <div style={{ marginLeft: 'auto' }}>
+                    <ProtoStatusBadge connected={nostrOk} />
+                  </div>
+                </div>
+                <div style={protoBodyStyle}>
+                  <ProtoRow label="Protocol" value="NIP-01 event-based relay network" />
+                  <ProtoRow label="Role" value="Identity, key management, guild channels, social graph" valueColor="var(--muted)" />
+                  <ProtoRow label="Relay" value="omokoda.duckdns.org:3443" valueColor={FED_CYAN} />
+                  <ProtoRow
+                    label="npub"
+                    value={
+                      fedAgent?.npub ? (
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span style={{ wordBreak: 'break-all' }}>{fedAgent.npub}</span>
+                          <button
+                            onClick={copyNpub}
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: copiedNpub ? FED_GREEN : 'var(--muted)', flexShrink: 0 }}
+                            title="Copy npub"
+                          >
+                            {copiedNpub ? <Check size={12} /> : <Copy size={12} />}
+                          </button>
+                        </span>
+                      ) : (
+                        <span style={{ color: 'var(--muted)' }}>not registered</span>
+                      )
+                    }
+                  />
+                  <ProtoRow label="Write Relays" value="wss://relay.damus.io" />
+                  <ProtoRow
+                    label="NIPs supported"
+                    value={
+                      <span style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        {['01', '19', '44', '46', '65', '98', '29', '71', '73'].map(n => (
+                          <span
+                            key={n}
+                            style={{
+                              fontSize: 10,
+                              padding: '1px 5px',
+                              borderRadius: 4,
+                              background: 'rgba(0,245,255,0.1)',
+                              color: FED_CYAN,
+                              fontFamily: 'monospace',
+                            }}
+                          >
+                            {n}
+                          </span>
+                        ))}
+                      </span>
+                    }
+                  />
+                  <ProtoRow label="Key custody" value="derived from VANTAGE_SEED_MASTER_KEY" valueColor="var(--muted)" />
+                  <ProtoRow label="Auth" value="NIP-42 (HMAC challenge-response)" />
+                  <ProtoRow label="Use cases" value="Guild channels, agent @mentions, broadcast events, TROs" valueColor="var(--muted)" />
+                </div>
+              </div>
+            )}
+
+            {selectedProtocol === 'freenet' && (
+              <div style={protoCardStyle}>
+                <div style={protoHeaderStyle}>
+                  <span style={{ fontSize: 16 }}>🌐</span>
+                  <span style={protoHeaderLabel}>Freenet</span>
+                  <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 4 }}>Decentralized State</span>
+                  <div style={{ marginLeft: 'auto' }}>
+                    <ProtoStatusBadge connected={freenetOk} label={freenetOk ? 'Connected' : 'Phase F1'} />
+                  </div>
+                </div>
+                <div style={protoBodyStyle}>
+                  <ProtoRow label="Protocol" value="Freenet 2.0 decentralized key-value store" />
+                  <ProtoRow label="Role" value="Persistent contract state, immutable storage" valueColor="var(--muted)" />
+                  <ProtoRow label="Phase" value={freenetStatus?.phase || 'F1 — local stub'} valueColor={FED_AMBER} />
+                  <ProtoRow
+                    label="Node"
+                    value={freenetOk ? 'localhost:50509' : 'not running'}
+                    valueColor={freenetOk ? FED_GREEN : 'var(--muted)'}
+                  />
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 4 }}>
+                    {[
+                      { label: 'Contracts', value: String(freenetStatus?.contracts ?? 0) },
+                      { label: 'Rooms',     value: '0' },
+                      { label: 'Peers',     value: String(freenetStatus?.peers ?? 0) },
+                      { label: 'Git Repos', value: '0' },
+                    ].map(s => (
+                      <div
+                        key={s.label}
+                        style={{
+                          background: 'rgba(255,255,255,0.02)',
+                          border: '1px solid var(--border)',
+                          borderRadius: 6,
+                          padding: '8px 12px',
+                        }}
+                      >
+                        <div style={{ fontSize: 9, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
+                          {s.label}
+                        </div>
+                        <div style={{ fontSize: 18, fontWeight: 700, color: FED_DIM }}>{s.value}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <ProtoRow label="Use cases" value="Agent memory, guild archives, governance records" valueColor="var(--muted)" />
+                  <ProtoRow label="Dev roadmap" value="F1=local stub · F2=DHT routing · F3=contract VM" valueColor="var(--muted)" />
+                </div>
+              </div>
+            )}
+
+            {selectedProtocol === 'gitea' && (
+              <div style={protoCardStyle}>
+                <div style={protoHeaderStyle}>
+                  <span style={{ fontSize: 16 }}>🐙</span>
+                  <span style={protoHeaderLabel}>Gitea</span>
+                  <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 4 }}>Source Code Forge</span>
+                  <div style={{ marginLeft: 'auto' }}>
+                    <ProtoStatusBadge connected={true} />
+                  </div>
+                </div>
+                <div style={protoBodyStyle}>
+                  <ProtoRow label="Protocol" value="Gitea self-hosted Git forge" />
+                  <ProtoRow label="Role" value="Code collaboration, agent-authored repositories" valueColor="var(--muted)" />
+                  <ProtoRow label="Host" value="localhost:3001" valueColor={FED_GREEN} />
+                  <ProtoRow label="API" value="http://localhost:3001/api/v1" valueColor={FED_CYAN} />
+                  <ProtoRow label="Auth" value="API token (per-agent)" />
+                  <ProtoRow label="Use cases" value="Agent code workspace, version-controlled artifacts, CI triggers" valueColor="var(--muted)" />
+                  <ProtoRow label="Repos" value="-" valueColor="var(--muted)" />
+                </div>
+              </div>
+            )}
+
+            {selectedProtocol === 'omokoda' && (
+              <div style={protoCardStyle}>
+                <div style={protoHeaderStyle}>
+                  <span style={{ fontSize: 16 }}>⚙️</span>
+                  <span style={protoHeaderLabel}>Ọmọ Kọ́dà2</span>
+                  <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 4 }}>Sovereign Runtime</span>
+                  <div style={{ marginLeft: 'auto' }}>
+                    <ProtoStatusBadge
+                      connected={omokodaOk}
+                      label={omokodaOk ? 'Sovereign' : 'Unreachable'}
+                    />
+                  </div>
+                </div>
+                <div style={protoBodyStyle}>
+                  <ProtoRow label="Protocol" value="Ọmọ Kọ́dà 2.0 sovereign execution runtime" />
+                  <ProtoRow label="Role" value="Agent execution, capability dispatch, skill orchestration" valueColor="var(--muted)" />
+                  <ProtoRow label="Host" value="localhost:7777" valueColor={omokodaOk ? FED_GREEN : FED_DIM} />
+                  <ProtoRow label="Runtime" value="WASM sandbox + Python workers" />
+                  <ProtoRow label="Auth" value="Derived instance keypair" />
+                  <ProtoRow label="Use cases" value="Skill execution, broadcast pipeline, LLM routing" valueColor="var(--muted)" />
+                  <ProtoRow
+                    label="Capabilities"
+                    value={
+                      <span style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        {['code', 'video', 'audio', 'image', 'trade', 'intel'].map(cap => (
+                          <span
+                            key={cap}
+                            style={{
+                              fontSize: 10,
+                              padding: '1px 6px',
+                              borderRadius: 4,
+                              background: 'rgba(245,158,11,0.1)',
+                              color: FED_AMBER,
+                              fontFamily: 'monospace',
+                            }}
+                          >
+                            {cap}
+                          </span>
+                        ))}
+                      </span>
+                    }
+                  />
+                  <ProtoRow
+                    label="Status"
+                    value={omokodaOk ? 'Sovereign' : (fmt(fedHealth?.status) || 'Unreachable')}
+                    valueColor={omokodaOk ? FED_GREEN : FED_AMBER}
+                  />
+                </div>
+              </div>
+            )}
+
+            {selectedProtocol === 'sui' && (
+              <div style={protoCardStyle}>
+                <div style={protoHeaderStyle}>
+                  <span style={{ fontSize: 16 }}>🌊</span>
+                  <span style={protoHeaderLabel}>Sui</span>
+                  <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 4 }}>Settlement Layer</span>
+                  <div style={{ marginLeft: 'auto' }}>
+                    <ProtoStatusBadge connected={suiOk} label={suiOk ? 'Configured' : 'Not Configured'} />
+                  </div>
+                </div>
+                <div style={protoBodyStyle}>
+                  <ProtoRow label="Protocol" value="Sui Move blockchain (Layer 1)" />
+                  <ProtoRow label="Role" value="Tokenized reputation, NFT identity, on-chain settlements" valueColor="var(--muted)" />
+                  <ProtoRow label="Network" value="testnet" valueColor={FED_CYAN} />
+                  <ProtoRow
+                    label="Address"
+                    value={
+                      fedAgent?.sui_address ? (
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span style={{ wordBreak: 'break-all' }}>{fedAgent.sui_address}</span>
+                          <button
+                            onClick={copySui}
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: copiedSui ? FED_GREEN : 'var(--muted)', flexShrink: 0 }}
+                            title="Copy address"
+                          >
+                            {copiedSui ? <Check size={12} /> : <Copy size={12} />}
+                          </button>
+                        </span>
+                      ) : (
+                        <span style={{ color: 'var(--muted)' }}>not configured</span>
+                      )
+                    }
+                  />
+                  <ProtoRow label="Token standard" value="SUI native + custom Vantage token" />
+                  <ProtoRow label="Use cases" value="Agent reputation staking, TRO escrow, guild treasury, P3 settlements" valueColor="var(--muted)" />
+                  <ProtoRow label="RPC" value="https://fullnode.testnet.sui.io" valueColor={FED_CYAN} />
+                </div>
+              </div>
+            )}
+
+            {selectedProtocol === 'arweave' && (
+              <div style={protoCardStyle}>
+                <div style={protoHeaderStyle}>
+                  <span style={{ fontSize: 16 }}>🗄️</span>
+                  <span style={protoHeaderLabel}>Arweave</span>
+                  <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 4 }}>Permanent Archive</span>
+                  <div style={{ marginLeft: 'auto' }}>
+                    <ProtoStatusBadge connected={false} label="Not Configured" />
+                  </div>
+                </div>
+                <div style={protoBodyStyle}>
+                  <ProtoRow label="Protocol" value="Arweave permanent storage (AR)" />
+                  <ProtoRow label="Role" value="Immutable archival — receipts, genesis records, governance" valueColor="var(--muted)" />
+                  <ProtoRow label="Network" value="mainnet" />
+                  <ProtoRow label="Address" value="not configured" valueColor="var(--muted)" />
+                  <ProtoRow label="Use cases" value="Guild manifestos, broadcast receipts, agent birth records, TRO audit trail" valueColor="var(--muted)" />
+                  <ProtoRow label="Cost model" value="pay-once permanent storage (AR token)" />
+                </div>
+              </div>
+            )}
+
+            {selectedProtocol === 'mesh' && (
+              <div style={protoCardStyle}>
+                <div style={protoHeaderStyle}>
+                  <span style={{ fontSize: 16 }}>📡</span>
+                  <span style={protoHeaderLabel}>Meshtastic / Reticulum</span>
+                  <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 4 }}>Mesh</span>
+                  <div style={{ marginLeft: 'auto' }}>
+                    <ProtoStatusBadge connected={false} label="Not Configured" />
+                  </div>
+                </div>
+                <div style={protoBodyStyle}>
+                  <ProtoRow label="Protocol" value="Meshtastic (LoRa mesh) / Reticulum (cryptographic mesh)" />
+                  <ProtoRow label="Role" value="Off-grid agent comms, disaster-resilient operation" valueColor="var(--muted)" />
+                  <ProtoRow label="Channel" value="encrypted mesh" />
+                  <ProtoRow label="Interface" value="serial / TCP bridge" />
+                  <ProtoRow label="Use cases" value="Field agent coordination, off-internet operation, IoT sensor integration" valueColor="var(--muted)" />
+                  <ProtoRow label="Range" value="~5km LoRa node-to-node, mesh extends range" />
+                </div>
+              </div>
+            )}
           </div>
 
           {/* ═══════════ PEER NETWORK ═══════════ */}
