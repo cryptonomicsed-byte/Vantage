@@ -68,7 +68,7 @@ export default function StatusBar() {
         <NavLink
           key={to}
           to={to}
-          className={({ isActive }) => `sb-nav-btn${isActive ? ' active' : ''}`}
+          className={({ isActive }) => `sb-nav-btn sb-holo${isActive ? ' active' : ''}`}
         >
           <Icon size={11} />
           <span>{label}</span>
@@ -112,7 +112,7 @@ export default function StatusBar() {
 
       <NavLink
         to="/settings"
-        className={({ isActive }) => `sb-icon-btn sb-holo${isActive ? ' active' : ''}`}
+        className={({ isActive }) => `sb-icon-btn${isActive ? ' active' : ''}`}
         title="Settings"
       >
         <Settings size={13} />

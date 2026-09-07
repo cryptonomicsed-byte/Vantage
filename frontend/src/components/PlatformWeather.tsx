@@ -71,7 +71,7 @@ export default function PlatformWeather() {
         <div className="weather-popover" onClick={e => e.stopPropagation()}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
             <div className="weather-popover-title" style={{ marginBottom: 0 }}>PLATFORM WEATHER</div>
-            <div style={{ display: 'flex', gap: 2 }}>
+            <div className="sb-holo-group" style={{ display: 'flex', gap: 2 }}>
               <SearchPanel bottomBarMode />
               <NotificationPanel bottomBarMode />
             </div>
