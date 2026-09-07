@@ -32,6 +32,7 @@ export const SECTION_PATHS: Record<string, string[]> = {
     '/inbox', '/knowledge', '/collectives', '/search',
   ],
   settings: ['/settings', '/api-docs', '/federation'],
+  // Settings ⚙ icon now lands on /dashboard; /settings stays reachable via subnav
 }
 
 export const SUB_NAV: Record<string, Array<{ to: string; label: string }>> = {
@@ -42,9 +43,9 @@ export const SUB_NAV: Record<string, Array<{ to: string; label: string }>> = {
     { to: '/analytics', label: 'Analytics' },
   ],
   settings: [
-    { to: '/api-docs',    label: 'API Docs'   },
-    { to: '/federation',  label: 'Network'    },
-    { to: '/dashboard',   label: 'Dashboard'  },
+    { to: '/settings',   label: 'Settings'  },
+    { to: '/api-docs',   label: 'API Docs'  },
+    { to: '/federation', label: 'Network'   },
   ],
   swarm: [
     { to: '/blockmesh',   label: 'BlockMesh'   },

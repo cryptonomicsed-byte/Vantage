@@ -293,7 +293,7 @@ function OmoKodaCard({ health }: { health: HealthData | null }) {
   return (
     <div style={protoCardStyle}>
       <div style={protoHeaderStyle}>
-        <span style={protoHeaderLabel}>Ọmọ Kọ́dà2</span>
+        <span style={protoHeaderLabel}>Ọmọ Kọ́dà</span>
         <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 4 }}>Sovereign Runtime</span>
         <div style={{ marginLeft: 'auto' }}>
           <ProtoStatusBadge connected={connected} />
@@ -811,7 +811,7 @@ export default function Settings() {
             or pick a specific fallback model.
           </p>
           <div className="stat-card" style={{ padding: '4px 16px' }}>
-            <IntegrationRow name="Omo-Koda2 kernel" ok={!!sysStatus?.omokoda} hint="not configured on this instance" />
+            <IntegrationRow name="Ọmọ Kọ́dà kernel" ok={!!sysStatus?.omokoda} hint="not configured on this instance" />
             <IntegrationRow name="OmniRoute (default Copilot LLM fallback)" ok={!!sysStatus?.omniroute} hint="not configured on this instance" />
             <IntegrationRow name="Federation" ok={!!sysStatus?.federation_enabled} hint="disabled on this instance" />
           </div>
@@ -821,7 +821,7 @@ export default function Settings() {
                 <div>OmniRoute endpoint: {sysStatus.omniroute_url} · default model: {sysStatus.omniroute_default_model || 'auto'}</div>
               )}
               {sysStatus?.omokoda_url && (
-                <div style={{ marginTop: 4 }}>Omo-Koda2 kernel: {sysStatus.omokoda_url}</div>
+                <div style={{ marginTop: 4 }}>Ọmọ Kọ́dà kernel: {sysStatus.omokoda_url}</div>
               )}
             </div>
           )}
@@ -953,7 +953,7 @@ export default function Settings() {
               { id: 'nostr',    label: 'Nostr',       connected: nostrOk   },
               { id: 'freenet',  label: 'Freenet',     connected: freenetOk },
               { id: 'gitea',    label: 'Gitea',       connected: giteaOk   },
-              { id: 'omokoda',  label: 'Ọmọ Kọ́dà2',  connected: omokodaOk },
+              { id: 'omokoda',  label: 'Ọmọ Kọ́dà',  connected: omokodaOk },
               { id: 'sui',      label: 'Sui',         connected: suiOk     },
               { id: 'arweave',  label: 'Arweave',     connected: false     },
               { id: 'mesh',     label: 'Meshtastic',  connected: false     },
@@ -1130,7 +1130,7 @@ export default function Settings() {
               <div style={protoCardStyle}>
                 <div style={protoHeaderStyle}>
                   <span style={{ fontSize: 16 }}>⚙️</span>
-                  <span style={protoHeaderLabel}>Ọmọ Kọ́dà2</span>
+                  <span style={protoHeaderLabel}>Ọmọ Kọ́dà</span>
                   <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 4 }}>Sovereign Runtime</span>
                   <div style={{ marginLeft: 'auto' }}>
                     <ProtoStatusBadge
