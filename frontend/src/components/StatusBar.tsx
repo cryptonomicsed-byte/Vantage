@@ -83,16 +83,15 @@ export default function StatusBar() {
       <span className="sb-sep" />
 
       <NavLink
-        to="/settings"
-        className={({ isActive }) => `sb-icon-btn${isActive ? ' active' : ''}`}
-        title="Settings — agent dashboard, agents, guilds, vault, and more"
+        to="/dashboard"
+        className={({ isActive }) => `sb-icon-btn sb-holo${isActive ? ' active' : ''}`}
+        title="Dashboard"
       >
-        <Settings size={13} />
-        {unreadDMs > 0 && <span className="sb-icon-badge">{unreadDMs > 99 ? '99+' : unreadDMs}</span>}
+        <LayoutDashboard size={13} />
       </NavLink>
 
       <button
-        className="sb-icon-btn"
+        className="sb-icon-btn sb-holo"
         title="Copilot"
         onClick={() => window.dispatchEvent(new CustomEvent('vantage:toggle-copilot'))}
       >
@@ -100,23 +99,24 @@ export default function StatusBar() {
       </button>
 
       <button
-        className="sb-icon-btn"
+        className="sb-icon-btn sb-holo"
         title="Observer — agent thought stream"
         onClick={() => window.dispatchEvent(new CustomEvent('vantage:toggle-observer'))}
       >
         <Eye size={13} />
       </button>
 
-      <Link to="/ares" className="sb-icon-btn sb-ares" title="Ares SOC">
+      <Link to="/ares" className="sb-icon-btn sb-ares sb-holo" title="Ares SOC">
         <Shield size={13} />
       </Link>
 
       <NavLink
-        to="/dashboard"
-        className={({ isActive }) => `sb-icon-btn${isActive ? ' active' : ''}`}
-        title="Dashboard"
+        to="/settings"
+        className={({ isActive }) => `sb-icon-btn sb-holo${isActive ? ' active' : ''}`}
+        title="Settings"
       >
-        <LayoutDashboard size={13} />
+        <Settings size={13} />
+        {unreadDMs > 0 && <span className="sb-icon-badge">{unreadDMs > 99 ? '99+' : unreadDMs}</span>}
       </NavLink>
 
       <span className="sb-version">v0.2</span>
