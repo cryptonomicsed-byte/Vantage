@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { NavLink, Link } from 'react-router-dom'
-import { Users, Code2, CandlestickChart, Clapperboard, Settings, Shield, Radio, Bot, Eye } from 'lucide-react'
+import { Users, Code2, CandlestickChart, Clapperboard, Settings, Shield, Radio, Bot, Eye, LayoutDashboard } from 'lucide-react'
 import NotificationPanel from './NotificationPanel'
 import SearchPanel from './SearchPanel'
 import PlatformWeather from './PlatformWeather'
@@ -112,6 +112,14 @@ export default function StatusBar() {
       <Link to="/ares" className="sb-icon-btn sb-ares" title="Ares SOC">
         <Shield size={13} />
       </Link>
+
+      <NavLink
+        to="/dashboard"
+        className={({ isActive }) => `sb-icon-btn${isActive ? ' active' : ''}`}
+        title="Dashboard"
+      >
+        <LayoutDashboard size={13} />
+      </NavLink>
 
       <span className="sb-version">v0.2</span>
     </div>

@@ -43,9 +43,7 @@ export const SUB_NAV: Record<string, Array<{ to: string; label: string }>> = {
     { to: '/analytics', label: 'Analytics' },
   ],
   settings: [
-    { to: '/dashboard', label: 'Dashboard' },
-    { to: '/analytics', label: 'Analytics' },
-    { to: '/api-docs',  label: 'API Docs'  },
+    { to: '/api-docs', label: 'API Docs' },
   ],
   swarm: [
     { to: '/blockmesh',   label: 'BlockMesh'   },
