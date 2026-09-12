@@ -1029,6 +1029,17 @@ app.include_router(freenet_router)
 from .routers.freenet_git import router as freenet_git_router
 app.include_router(freenet_git_router)
 
+# Sovereign-node integration: DIP envelope ingest + receipt public index
+from .routers import dip_ingest, receipt_index, twin_receipt_index
+app.include_router(dip_ingest.router)
+app.include_router(receipt_index.router)
+app.include_router(twin_receipt_index.router)
+
+# OSOVM simulation engine proxy and sovereign-node heartbeat
+from .routers import osovm_router, heartbeat
+app.include_router(osovm_router.router)
+app.include_router(heartbeat.router)
+
 # MCP server — exposes all Vantage routes as MCP tools for Claude/GPT/OpenCode agents.
 # Mount the modern streamable-HTTP transport at /mcp (what current MCP clients expect),
 # and keep SSE mounted at a distinct path for older clients — mount_http()'s default
