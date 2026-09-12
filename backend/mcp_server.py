@@ -51,7 +51,7 @@ def create_mcp_server(app):
         # MCP-speaking client (Claude, ChatGPT via a custom connector, Codex,
         # etc.) push conversations into an agent's vault through its own
         # scoped token, without ever handling the agent's real X-Agent-Key.
-        headers=["authorization", "x-agent-key", "x-vault-connector-key"],
+        headers=["authorization", "x-agent-key", "x-vault-connector-key", "x-voice-exec"],
         # Keep the MCP tool surface agent-scoped: drop the admin console
         # (X-Admin-Key routes) and inbound webhook handlers. Tag-based so
         # new endpoints on those routers stay excluded without edits here.

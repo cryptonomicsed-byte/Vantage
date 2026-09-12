@@ -98,6 +98,8 @@ async def open_witness_round(
     artifact_url: str = "",
     description: str = "",
     pool_size: int | None = None,
+    sim_receipt_id: str | None = None,       # P0-9: link to ScarabSwarm sim receipt
+    consensus_output_id: str | None = None,  # P0-9: link to Twelve Thrones consensus
 ) -> dict:
     """Open a new witness round and assign the witness pool."""
     # Determine pool size from submitter's tier
@@ -114,13 +116,21 @@ async def open_witness_round(
     q = QUORUM.get(pool_size, 2)
 
     async with get_db() as db:
+        # Ensure proof-binding columns exist (added P0-9)
+        try:
+            await db.execute("ALTER TABLE witness_rounds ADD COLUMN sim_receipt_id TEXT")
+            await db.execute("ALTER TABLE witness_rounds ADD COLUMN consensus_output_id TEXT")
+            await db.commit()
+        except Exception:
+            pass  # columns already exist
+
         cur = await db.execute("""
             INSERT INTO witness_rounds
                 (subject_type, subject_id, submitter_agent_id, pool_size, quorum,
-                 artifact_url, description)
-            VALUES (?,?,?,?,?,?,?)
+                 artifact_url, description, sim_receipt_id, consensus_output_id)
+            VALUES (?,?,?,?,?,?,?,?,?)
         """, (subject_type, subject_id, submitter_agent_id, pool_size, q,
-              artifact_url, description))
+              artifact_url, description, sim_receipt_id, consensus_output_id))
         round_id = cur.lastrowid
         await db.commit()
 
@@ -136,7 +146,10 @@ async def open_witness_round(
                 pass
         await db.commit()
 
-    return {"round_id": round_id, "pool_size": pool_size, "quorum": q, "witnesses": witnesses}
+    return {
+        "round_id": round_id, "pool_size": pool_size, "quorum": q, "witnesses": witnesses,
+        "sim_receipt_id": sim_receipt_id, "consensus_output_id": consensus_output_id,
+    }
 
 
 async def cast_vote(round_id: int, witness_agent_id: int, vote: str, comment: str = "") -> dict:
@@ -208,6 +221,14 @@ async def _finalize_round(round_id: int, outcome: str, submitter_agent_id: int) 
         )
         voters = [r["witness_agent_id"] for r in await cur.fetchall()]
 
+        # P0-9: retrieve proof-binding fields from the round row
+        round_row = await (await db.execute(
+            "SELECT sim_receipt_id, consensus_output_id FROM witness_rounds WHERE id=?",
+            (round_id,)
+        )).fetchone()
+        sim_receipt_id      = round_row["sim_receipt_id"]      if round_row else None
+        consensus_output_id = round_row["consensus_output_id"] if round_row else None
+
     if outcome == "approved":
         await increment_reputation(submitter_agent_id, REPUTATION_APPROVE)
 
@@ -217,7 +238,7 @@ async def _finalize_round(round_id: int, outcome: str, submitter_agent_id: int) 
 
     logger.info("witness: round %d finalized as %s (submitter=%d)", round_id, outcome, submitter_agent_id)
 
-    # Emit WitnessRoundFinalized event to the Vantage event bus
+    # Emit WitnessRoundFinalized event to the Vantage event bus (P0-4: carry identity chain)
     try:
         from .event_bus import VantageEvent, emit
         await emit(VantageEvent(
@@ -226,11 +247,30 @@ async def _finalize_round(round_id: int, outcome: str, submitter_agent_id: int) 
             aggregate_id=str(round_id),
             aggregate_type="witness_round",
             payload={
-                "round_id": round_id,
-                "outcome": outcome,
-                "submitter_agent_id": submitter_agent_id,
-                "voter_count": len(voters),
+                "round_id":            round_id,
+                "outcome":             outcome,
+                "submitter_agent_id":  submitter_agent_id,
+                "voter_count":         len(voters),
+                "sim_receipt_id":      sim_receipt_id,
+                "consensus_output_id": consensus_output_id,
             },
+            # P0-9: proof binding in event itself
+            receipt_id = sim_receipt_id,
         ))
     except Exception as exc:
         logger.warning("witness: failed to emit WitnessRoundFinalized event: %s", exc)
+
+    # P0-9: emit proof-binding trace to Mycelium when sim_receipt is linked
+    if sim_receipt_id:
+        try:
+            from .mycelium_bridge import emit_witness_finalized_trace
+            emit_witness_finalized_trace(
+                round_id=str(round_id),
+                outcome=outcome,
+                submitter_agent_id=str(submitter_agent_id),
+                voter_count=len(voters),
+                sim_receipt_id=sim_receipt_id,
+                receipt_id=sim_receipt_id,
+            )
+        except Exception as exc:
+            logger.warning("witness: proof-binding trace failed: %s", exc)

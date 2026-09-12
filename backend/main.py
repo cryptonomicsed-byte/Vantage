@@ -989,6 +989,14 @@ app.include_router(agent_roster_router)
 from .routers.capabilities import router as capabilities_router
 app.include_router(capabilities_router)
 
+# UCX Bootstrap Rendezvous — provider discovery for the Universal Compute Exchange
+from .routers.ucx import router as ucx_router
+app.include_router(ucx_router)
+
+# VCP Device Registry — physical device discovery and session management
+from .routers.vcp import router as vcp_router
+app.include_router(vcp_router)
+
 # Platform task reputation (P3) and Sui settlement (P4)
 from .routers.reputation import router as reputation_router
 app.include_router(reputation_router)

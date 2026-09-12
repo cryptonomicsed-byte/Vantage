@@ -81,9 +81,17 @@ async def ingest_scan_result(request: Request, tool: dict = Depends(get_system_t
     """
     body = await request.json()
 
-    agent_id = body.get("agent_id")
+    agent_id = str(body.get("agent_id") or "").strip()
     if not agent_id:
         raise HTTPException(status_code=400, detail="agent_id required in payload")
+    # P0-1 fix: validate target agent exists — prevents injecting scan results
+    # into arbitrary agent_ids that were never registered.
+    async with get_db() as _vdb:
+        row = await (await _vdb.execute(
+            "SELECT 1 FROM mesh_agents WHERE agent_id=? LIMIT 1", (agent_id,)
+        )).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"agent_id {agent_id!r} not found")
 
     scanner = str(body.get("tool", "scan")).strip().lower() or "scan"
     target = str(body.get("target", "")).strip()

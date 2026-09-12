@@ -14,9 +14,20 @@ from backend.deps import get_agent, get_system_tool
 from backend.config import settings
 from backend.crypto_utils import encrypt_key_for_agent, decrypt_key_for_agent
 from ..db import get_db
+from ..action_receipt import from_trade_order
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/trading", tags=["trading"])
+
+
+async def _emit_trade_receipt(order: dict, agent_id, outcome: str) -> None:
+    """Fire-and-forget ARP economic receipt for a trade event (P0-7)."""
+    try:
+        receipt = from_trade_order(order, str(agent_id), outcome)
+        logger.info("trade_receipt kind=economic order_id=%s outcome=%s hash=%s",
+                    order.get("id"), outcome, receipt.canonical_hash())
+    except Exception as exc:
+        logger.warning("trade receipt emission failed: %s", exc)
 
 
 async def _sync_to_tracked_wallets(db, agent_id: int, chain: str, address: str, label: str):
@@ -761,6 +772,12 @@ async def create_order(data: OrderCreate, agent: dict = Depends(get_agent)):
         )
         await db.commit()
 
+        asyncio.create_task(_emit_trade_receipt(
+            {"id": order_id, "side": data.side, "quantity": data.quantity,
+             "price": data.price, "chain": data.chain, "order_type": data.order_type,
+             "strategy_id": data.strategy_id, "symbol": data.symbol},
+            agent["id"], "pending",
+        ))
         return {"id": order_id, "status": "pending", "symbol": data.symbol, "side": data.side}
 
 @router.get("/orders")
@@ -908,6 +925,10 @@ async def paper_fill_order(order_id: int, agent: dict = Depends(get_agent)):
     import asyncio as _asyncio
     _asyncio.create_task(post_private_trading_message(
         agent["id"], f"[SIMULATED] Filled {order['side']} {order['quantity']} {order['symbol']} @ {fill_price} ({tx_hash})",
+    ))
+    asyncio.create_task(_emit_trade_receipt(
+        {**order, "avg_fill_price": fill_price, "tx_hash": tx_hash},
+        agent["id"], "success",
     ))
 
     return dict(updated)
@@ -2081,9 +2102,16 @@ async def ingest_signal(request: Request, tool: dict = Depends(get_system_tool))
     """
     body = await request.json()
 
-    agent_id = body.get("agent_id")
+    agent_id = str(body.get("agent_id") or "").strip()
     if not agent_id:
         raise HTTPException(status_code=400, detail="agent_id required in payload")
+    # P0-1 fix: validate the target agent exists before routing a signal to it.
+    async with get_db() as _vdb:
+        _row = await (await _vdb.execute(
+            "SELECT 1 FROM mesh_agents WHERE agent_id=? LIMIT 1", (agent_id,)
+        )).fetchone()
+    if not _row:
+        raise HTTPException(status_code=404, detail=f"agent_id {agent_id!r} not found")
 
     symbol = body.get("symbol", body.get("pair", "UNKNOWN"))
     direction = body.get("direction", body.get("signal", "NEUTRAL"))
@@ -2165,6 +2193,12 @@ async def ingest_signal(request: Request, tool: dict = Depends(get_system_tool))
                     result["order_created"] = cur.lastrowid
                     result["action"] = side
                     result["wallet_address"] = wallet["address"]
+                    asyncio.create_task(_emit_trade_receipt(
+                        {"id": cur.lastrowid, "side": side, "quantity": quantity,
+                         "chain": chain, "order_type": "market", "symbol": symbol,
+                         "strategy_id": strategy_id},
+                        agent_id, "pending",
+                    ))
         else:
             result["warning"] = f"No {chain} wallet configured for agent {agent_id}."
     else:

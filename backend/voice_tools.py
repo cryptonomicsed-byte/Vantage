@@ -80,6 +80,12 @@ DESTRUCTIVE_PATHS = (
     "/api/trading/wallets*",
     "/api/trading/strategies/*/toggle",
     "/api/agents/me/wallets*",
+    # VCP: establishing a physical device session or revoking one is destructive.
+    # An agent inhabiting a drone or robot from a voice command needs explicit confirmation.
+    "/api/vcp/sessions",
+    "/api/vcp/sessions/*/auth",
+    "/api/vcp/sessions/*/grant",
+    "/api/vcp/sessions/*/revoke",
 )
 
 # Gemini function names must be [a-zA-Z0-9_.-]; Vantage operation ids are not.

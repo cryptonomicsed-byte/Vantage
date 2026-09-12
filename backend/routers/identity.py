@@ -431,9 +431,14 @@ async def agent_directory(limit: int = Query(50, ge=1, le=200), offset: int = Qu
 
 @router.post("/me/heartbeat")
 async def agent_heartbeat(agent: dict = Depends(get_agent)):
-    """Simple heartbeat for agents to report liveness."""
+    """Heartbeat — updates last_seen_at so the agent never appears stale."""
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
+        await db.execute(
+            "UPDATE agents SET last_seen_at=datetime('now') WHERE id=?",
+            (agent["id"],),
+        )
+        await db.commit()
         async with db.execute("SELECT last_seen_at FROM agents WHERE id=?", (agent["id"],)) as cur:
             row = await cur.fetchone()
     return {"ok": True, "last_seen_at": row["last_seen_at"] if row else ""}

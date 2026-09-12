@@ -158,12 +158,11 @@ def _validate_and_extract(body: dict) -> dict:
         or None
     )
 
-    # Extract agent_id — from identity chain or top-level.
-    identity = body.get("identity", {})
-    if isinstance(identity, dict):
-        agent_id = identity.get("agent_id") or body.get("agent_id")
-    else:
-        agent_id = body.get("agent_id")
+    # P0-1 fix: the stored agent_id MUST be the authenticated caller.
+    # The receipt body may contain its own identity chain (preserved in raw_json),
+    # but we never trust body-supplied agent_id over the authenticated session.
+    # Body agent_id = provenance record only (already in raw_json).
+    agent_id = None  # populated by the calling endpoint from agent["name"]
 
     # Outcome: snake_case string (validated/partial/falsified/success/failure/etc.)
     outcome = str(body.get("outcome", "")).lower() or None
@@ -200,6 +199,8 @@ async def ingest_twin_receipt(request: Request, agent: dict = Depends(get_agent)
         raise HTTPException(status_code=422, detail={"error": "Request body must be valid JSON"})
 
     fields = _validate_and_extract(body)
+    # Overwrite any body-supplied agent_id with the authenticated caller's identity.
+    fields["agent_id"] = agent["name"]
     raw_json = json.dumps(body)
     accepted_at = datetime.now(timezone.utc).isoformat()
 

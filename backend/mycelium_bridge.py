@@ -73,6 +73,9 @@ import logging
 import os
 import urllib.error
 import urllib.request
+from typing import Optional
+
+from .mycelium_privacy import pseudonymize_agent, pseudonymize_wallet, scrub_payload
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +110,10 @@ def _post_trace(body: dict) -> bool:
 
 def post_observation(
     agent: str, session: str, action: str, target: str, payload: dict, outcome: str = "info",
+    *,
+    execution_id: Optional[str] = None,
+    receipt_id: Optional[str] = None,
+    principal_id: Optional[str] = None,
 ) -> bool:
     """Generic, real, fail-soft observation-trace POST -- the shared
     low-level primitive every Vantage emitter in this module (and
@@ -115,11 +122,29 @@ def post_observation(
     "observation" here (see module docstring) -- every caller of this
     function is a computed summary/detection, never a tool invocation or
     an agent decision. Returns True on a real 200/201, False on any
-    failure -- never raises."""
-    return _post_trace({
-        "agent": agent, "session": session, "kind": "observation",
-        "action": action, "target": target, "outcome": outcome, "payload": payload,
-    })
+    failure -- never raises.
+
+    P0-4: execution_id/receipt_id/principal_id carry the full identity chain.
+    P0-5: agent and payload are pseudonymized before leaving this process.
+    Real wallet addresses / agent IDs MUST NOT appear in Mycelium traces.
+    """
+    body: dict = {
+        "agent": pseudonymize_agent(agent),
+        "session": session,
+        "kind": "observation",
+        "action": action,
+        "target": target,
+        "outcome": outcome,
+        "payload": scrub_payload(payload),
+    }
+    # P0-4: carry identity chain if provided (pseudonymized)
+    if execution_id:
+        body["execution_id"] = execution_id
+    if receipt_id:
+        body["receipt_id"] = receipt_id
+    if principal_id:
+        body["principal_id"] = pseudonymize_agent(principal_id)
+    return _post_trace(body)
 
 
 def emit_source_performance_traces(rows: list[dict]) -> int:
@@ -360,6 +385,8 @@ def emit_wallet_reputation_traces(rows: list[dict], top_n: int = 20) -> int:
         key=lambda r: r["copy_trade_score"], reverse=True,
     )[:top_n]
 
+    # pseudonymize_wallet already imported at module level
+
     emitted = 0
     for row in ranked:
         address = row["wallet_address"]
@@ -370,11 +397,13 @@ def emit_wallet_reputation_traces(rows: list[dict], top_n: int = 20) -> int:
         if _last_emitted.get(key) == value_key:
             continue
 
+        # P0-5: pseudonymize wallet before emitting — real address must not
+        # leave this process into Mycelium's unauthenticated trace substrate.
         ok = post_observation(
             agent="wallet_learner",
             session="wallet-reputation-cycle",
             action="wallet_reputation",
-            target=address,
+            target=pseudonymize_wallet(address),
             payload={
                 "chain": row.get("chain"),
                 "display_name": row.get("display_name"),
@@ -437,4 +466,73 @@ def emit_verified_call_trace(row: dict) -> bool:
             "current_price_usd": row.get("current_price_usd"),
             "pct_change": row.get("pct_change"),
         },
+    )
+
+
+# ── P0-9: Proof binding traces ────────────────────────────────────────────────
+
+def emit_proof_binding_trace(
+    sim_receipt_id: str,
+    witness_round_id: Optional[str],
+    witness_outcome: Optional[str],
+    agent_id: str,
+    *,
+    consensus_output_id: Optional[str] = None,
+    execution_id: Optional[str] = None,
+    receipt_id: Optional[str] = None,
+) -> bool:
+    """Emit a Mycelium trace that binds sim receipt + witness + consensus (P0-9).
+
+    This closes the self-improving physical intelligence loop:
+      ScarabSwarm sim → VCP execution → Witness attestation → Mycelium learns
+
+    The trace is the canonical cross-reference that lets Mycelium correlate:
+    - Was the simulated policy achievable in reality?
+    - Did the witness outcome match the sim prediction?
+    - Which Twelve Thrones consensus approved the policy?
+    """
+    return post_observation(
+        agent=agent_id,
+        session="proof-binding",
+        action="proof_bound",
+        target=sim_receipt_id,
+        outcome=witness_outcome or "pending",
+        payload={
+            "sim_receipt_id":      sim_receipt_id,
+            "witness_round_id":    witness_round_id,
+            "consensus_output_id": consensus_output_id,
+            "binding_kind":        "sim_witness_consensus",
+        },
+        execution_id=execution_id,
+        receipt_id=receipt_id,
+        principal_id=agent_id,
+    )
+
+
+def emit_witness_finalized_trace(
+    round_id: str,
+    outcome: str,
+    submitter_agent_id: str,
+    voter_count: int,
+    sim_receipt_id: Optional[str] = None,
+    *,
+    receipt_id: Optional[str] = None,
+) -> bool:
+    """Emit a Mycelium trace when a witness round finalizes (P0-4 + P0-9)."""
+    payload: dict = {
+        "round_id":     round_id,
+        "outcome":      outcome,
+        "voter_count":  voter_count,
+    }
+    if sim_receipt_id:
+        payload["sim_receipt_id"] = sim_receipt_id
+    return post_observation(
+        agent=submitter_agent_id,
+        session="witness-finalization",
+        action="witness_finalized",
+        target=round_id,
+        outcome=outcome,
+        payload=payload,
+        receipt_id=receipt_id,
+        principal_id=submitter_agent_id,
     )

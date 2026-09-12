@@ -55,6 +55,23 @@ async def join_block(request: Request, agent: dict = Depends(get_agent)):
     if not block_id:
         raise HTTPException(422, "block_id required")
 
+    # P0-1 fix: if caller claims a different agent_id than their Vantage account,
+    # they must prove it with a valid identity signature before the DB row is written.
+    # (The 2026-08-15 fix only protected EXISTING rows; new rows had no guard.)
+    if agent_id != agent["name"]:
+        candidate_signature = str(
+            (capabilities.get("identity_signature") or body.get("identity_signature") or "")
+        )[:256]
+        candidate_pubkey = str(
+            (capabilities.get("public_key") or body.get("public_key") or "")
+        )[:128]
+        if not (candidate_pubkey and verify_identity(candidate_pubkey, agent_id, candidate_signature)):
+            raise HTTPException(
+                403,
+                f"agent_id {agent_id!r} differs from authenticated account "
+                f"{agent['name']!r}; provide a valid identity_signature to claim it",
+            )
+
     # ── Sovereign identity ──────────────────────────────────────────────────
     # ọmọ Kọ́dà birth sends identity inside `capabilities`; accept top-level too.
     def _identity_field(key):
@@ -152,6 +169,9 @@ async def join_block(request: Request, agent: dict = Depends(get_agent)):
 async def leave_block(
     agent_id: str, request: Request, agent: dict = Depends(get_agent)
 ):
+    # P0-6: URL agent_id must match authenticated caller
+    if agent_id != agent["name"]:
+        raise HTTPException(403, "You can only leave your own agent_id")
     block_id = request.query_params.get("block_id", "")
     if not block_id:
         raise HTTPException(422, "block_id query param required")
@@ -170,6 +190,10 @@ async def leave_block(
 async def agent_heartbeat(
     agent_id: str, request: Request, agent: dict = Depends(get_agent)
 ):
+    # P0-1 fix: the URL agent_id must belong to the authenticated caller.
+    # Without this, any valid API key can refresh heartbeat for any agent_id.
+    if agent_id != agent["name"]:
+        raise HTTPException(403, "You can only heartbeat your own agent_id")
     body = await _parse_body(request)
     block_id = str(body.get("block_id", "")).strip()
     if not block_id:
@@ -266,7 +290,7 @@ async def block_events(block_id: str, limit: int = Query(50, ge=1, le=200), agen
 async def create_proposal(request: Request, agent: dict = Depends(get_agent)):
     body = await _parse_body(request)
     block_id = str(body.get("block_id", "")).strip()
-    proposer_id = str(body.get("proposer_id") or agent["name"]).strip()[:128]
+    proposer_id = agent["name"]  # P0-6: never accept caller-supplied proposer_id
     respondent_id = body.get("respondent_id")
     give = body.get("give") or []
     take = body.get("take") or []
@@ -357,7 +381,7 @@ async def respond_to_proposal(
     proposal_id: str, request: Request, agent: dict = Depends(get_agent)
 ):
     body = await _parse_body(request)
-    respondent_id = str(body.get("respondent_id") or agent["name"]).strip()[:128]
+    respondent_id = agent["name"]  # P0-6: never accept caller-supplied respondent_id
     decision = str(body.get("decision", "")).strip().lower()
     counter = body.get("counter")
 
@@ -507,7 +531,8 @@ async def reserve_resource(
     resource_id: str, request: Request, agent: dict = Depends(get_agent)
 ):
     body = await _parse_body(request)
-    agent_id = str(body.get("agent_id") or agent["name"]).strip()[:128]
+    # P0-1 fix: always use the authenticated identity, never body-supplied agent_id.
+    agent_id = agent["name"]
     duration_secs = int(body.get("duration_secs") or 3600)
     purpose = str(body.get("purpose") or "general")[:256]
 
@@ -548,8 +573,9 @@ async def reserve_resource(
 async def release_resource(
     resource_id: str, request: Request, agent: dict = Depends(get_agent)
 ):
+    # P0-1 fix: always use the authenticated identity, never body-supplied agent_id.
+    agent_id = agent["name"]
     body = await _parse_body(request)
-    agent_id = str(body.get("agent_id") or agent["name"]).strip()[:128]
 
     async with get_db() as db:
         db.row_factory = aiosqlite.Row

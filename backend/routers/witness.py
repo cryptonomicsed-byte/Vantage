@@ -33,6 +33,9 @@ class OpenRoundRequest(BaseModel):
     artifact_url: str = ""
     description: str = ""
     pool_size: int | None = None
+    # P0-9: proof binding — link witness round to simulation and consensus receipts
+    sim_receipt_id:      str | None = None
+    consensus_output_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +187,8 @@ async def create_round(
             artifact_url=body.artifact_url,
             description=body.description,
             pool_size=body.pool_size,
+            sim_receipt_id=body.sim_receipt_id,           # P0-9
+            consensus_output_id=body.consensus_output_id, # P0-9
         )
     except Exception as exc:
         logger.error("open_witness_round failed: %s", exc)

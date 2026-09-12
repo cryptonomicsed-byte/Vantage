@@ -52,6 +52,12 @@ class VantageEvent:
     previous_event_hash: Optional[str] = None
     signature: Optional[str] = None
     source: str = "vantage"
+    # P0-4: full identity chain — every event carries these so Mycelium/Zàngbétò
+    # can trace back to the human principal, session, and causal receipt.
+    principal_id:  Optional[str] = None
+    session_id:    Optional[str] = None
+    execution_id:  Optional[str] = None
+    receipt_id:    Optional[str] = None
 
     def __post_init__(self):
         # Auto-compute payload_hash if not provided

@@ -62,6 +62,19 @@ _VALID_KINDS = frozenset({"capability", "message", "evidence", "receipt", "event
 # Valid DipNetwork variants
 _VALID_NETWORKS = frozenset({"vantage", "nostr", "a2a", "mcp", "meshtastic", "freenet", "libp2p"})
 
+# P0-8: SSRF guard — routing hop addresses must not resolve to private/internal IPs.
+_PRIVATE_ADDR_RE = re.compile(
+    r'(^|\b)(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1|localhost\b)',
+    re.IGNORECASE,
+)
+
+def _assert_safe_routing(routing: list) -> None:
+    for hop in routing:
+        node = hop.get("node", {}) if isinstance(hop, dict) else {}
+        addr = str(node.get("address", ""))
+        if addr and _PRIVATE_ADDR_RE.search(addr):
+            raise HTTPException(400, f"Routing hop targets private/internal address: {addr!r}")
+
 
 async def _ensure_table() -> None:
     """Create or migrate dip_envelopes to the canonical schema."""
@@ -190,6 +203,8 @@ def _validate_envelope(body: dict) -> None:
             status_code=422,
             detail={"error": "'routing' must be a list (Vec<DipHop>) — not 'hops' or 'hop_count'"},
         )
+    # P0-8: guard against SSRF via routing hops pointing at internal network
+    _assert_safe_routing(body["routing"])
 
     kind = str(body.get("kind", "")).lower()
     if kind not in _VALID_KINDS:

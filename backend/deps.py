@@ -5,6 +5,8 @@ import hmac
 import json
 import logging
 import time as _time
+import uuid as _uuid
+from dataclasses import dataclass, field
 from typing import Optional
 
 import aiosqlite
@@ -14,6 +16,34 @@ from .config import settings
 from .db import DB_PATH, get_db
 
 logger = logging.getLogger(__name__)
+
+
+# ── P0-2: Universal AuthContext ───────────────────────────────────────────────
+# Every auth path (API key, voice exec token, system tool, human session) stamps
+# the same AuthContext onto request.state.auth_ctx.  Downstream code —
+# event emission, Mycelium traces, ARP receipts — reads this one object
+# instead of guessing identity from "last seen agent".
+#
+# auth_method: "api_key" | "voice_exec" | "system_tool" | "human_session"
+
+@dataclass
+class AuthContext:
+    agent_id:     Optional[str]   = None  # agent name (not DB id)
+    principal_id: Optional[str]   = None  # human or agent who initiated
+    session_id:   Optional[str]   = None  # voice session id, if any
+    execution_id: str             = field(default_factory=lambda: str(_uuid.uuid4()))
+    auth_method:  str             = "unknown"
+    tier:         Optional[str]   = None  # sentencing tier
+
+def _stamp_auth_ctx(request: Request, agent: dict, auth_method: str, session_id: Optional[str] = None) -> None:
+    """Attach a canonical AuthContext to request.state (P0-2 + P0-4)."""
+    request.state.auth_ctx = AuthContext(
+        agent_id     = agent.get("name"),
+        principal_id = agent.get("name"),  # agent is its own principal unless human delegates
+        session_id   = session_id or getattr(request.state, "voice_session_id", None),
+        auth_method  = auth_method,
+        tier         = agent.get("agent_status", "active"),
+    )
 
 # ── Per-agent in-memory rate limiter ──────────────────────────────────────────
 # Sliding window: at most 120 requests per 60 seconds per agent.
@@ -130,6 +160,11 @@ async def get_agent(
     _check_agent_rate(agent["id"])
     asyncio.create_task(_update_last_seen(agent["id"]))
     asyncio.create_task(_log_agent_activity(agent["id"]))
+    # P0-2: stamp canonical AuthContext for event emission + trace identity chain
+    _stamp_auth_ctx(
+        request, agent,
+        auth_method="voice_exec" if (x_voice_exec and not x_agent_key) else "api_key",
+    )
     return agent
 
 
