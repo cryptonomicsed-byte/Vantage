@@ -437,3 +437,178 @@ class SevenCalendar:
         if btc_fn is None:
             return False
         return btc_fn == SevenCalendar.today_gregorian()
+
+
+# ─── ActionVessel ─────────────────────────────────────────────────────────────
+#
+# The 16 operational domains of the Digital Calabash (If-Script).
+# Vessels are the second layer of the hierarchy:
+#   Seven (7) → Vessels (16) → Odù (256) → Composed (65,536)
+#
+# Top nibble of the Odù byte selects the vessel (0x00–0x0F → 0–15).
+
+class ActionVessel(IntEnum):
+    Genesis   = 0   # Initialize, covenant
+    Void      = 1   # Clear, release
+    Attention = 2   # Focus, signal/noise
+    Loop      = 3   # Pattern, iteration
+    Receipt   = 4   # Record, accountability
+    Mask      = 5   # Public/private split
+    Residue   = 6   # Behavioral echoes
+    Execution = 7   # Precision action
+    Swarm     = 8   # Collective coordination
+    Restraint = 9   # Ethical limits
+    Migration = 10  # Portability, identity
+    Consent   = 11  # Human approval
+    Vision    = 12  # Direction, horizon
+    Growth    = 13  # Fractal expansion
+    Seal      = 14  # Sacred privacy
+    Rhythm    = 15  # Ritual cadence
+
+
+ALL_VESSELS: list[ActionVessel] = list(ActionVessel)
+
+
+def vessel_from_odu(odu_byte: int) -> ActionVessel:
+    """Extract ActionVessel from an Odù byte (top nibble)."""
+    return ActionVessel(odu_byte >> 4)
+
+
+# SevenFunction → ActionVessel primary governance mapping.
+# Mirrors If-Script's seven_bridge::governing_function().
+#
+#   Spark      → Genesis, Mask
+#   Mind       → Attention, Restraint, Vision
+#   Foundation → Loop, Execution
+#   Emotion    → Consent
+#   Womb       → Residue, Swarm, Growth
+#   Fire       → Receipt, Seal
+#   Ascension  → Void, Migration, Rhythm
+_GOVERNING_FUNCTION: dict[ActionVessel, SevenFunction] = {
+    ActionVessel.Genesis:   SevenFunction.Spark,
+    ActionVessel.Void:      SevenFunction.Ascension,
+    ActionVessel.Attention: SevenFunction.Mind,
+    ActionVessel.Loop:      SevenFunction.Foundation,
+    ActionVessel.Receipt:   SevenFunction.Fire,
+    ActionVessel.Mask:      SevenFunction.Spark,
+    ActionVessel.Residue:   SevenFunction.Womb,
+    ActionVessel.Execution: SevenFunction.Foundation,
+    ActionVessel.Swarm:     SevenFunction.Womb,
+    ActionVessel.Restraint: SevenFunction.Mind,
+    ActionVessel.Migration: SevenFunction.Ascension,
+    ActionVessel.Consent:   SevenFunction.Emotion,
+    ActionVessel.Vision:    SevenFunction.Mind,
+    ActionVessel.Growth:    SevenFunction.Womb,
+    ActionVessel.Seal:      SevenFunction.Fire,
+    ActionVessel.Rhythm:    SevenFunction.Ascension,
+}
+
+_VESSELS_FOR_FUNCTION: dict[SevenFunction, list[ActionVessel]] = {
+    SevenFunction.Spark:      [ActionVessel.Genesis, ActionVessel.Mask],
+    SevenFunction.Mind:       [ActionVessel.Attention, ActionVessel.Restraint, ActionVessel.Vision],
+    SevenFunction.Foundation: [ActionVessel.Loop, ActionVessel.Execution],
+    SevenFunction.Emotion:    [ActionVessel.Consent],
+    SevenFunction.Womb:       [ActionVessel.Residue, ActionVessel.Swarm, ActionVessel.Growth],
+    SevenFunction.Fire:       [ActionVessel.Receipt, ActionVessel.Seal],
+    SevenFunction.Ascension:  [ActionVessel.Void, ActionVessel.Migration, ActionVessel.Rhythm],
+}
+
+
+def governing_function(vessel: ActionVessel) -> SevenFunction:
+    return _GOVERNING_FUNCTION[vessel]
+
+
+def vessels_for_function(f: SevenFunction) -> list[ActionVessel]:
+    """All ActionVessels governed by a given SevenFunction, in priority order."""
+    return _VESSELS_FOR_FUNCTION[f]
+
+
+def primary_vessel(f: SevenFunction) -> ActionVessel:
+    """First-priority ActionVessel for a given SevenFunction."""
+    return _VESSELS_FOR_FUNCTION[f][0]
+
+
+def function_for_odu(odu_byte: int) -> SevenFunction:
+    """Infer governing SevenFunction from a raw Odù byte (top nibble → vessel → function)."""
+    return governing_function(vessel_from_odu(odu_byte))
+
+
+# ─── TwinStateVector ──────────────────────────────────────────────────────────
+
+@dataclass
+class TwinStateVector:
+    """Semantic state vector for a 1:1 digital twin.
+
+    Carries four Odù addresses — one per state dimension:
+      identity_odu   — derived from the Twin's unique Odù seed (BIPỌ̀N39 lineage)
+      memory_odu     — SHA-256(GlyphIndex root) mod 256
+      field_odu      — FieldDiviner result at the current BTC height
+      simulation_odu — OSOVM world-model Odù for this twin's latest simulation
+
+    Together: (WHO) + (WHAT it remembers) + (WHERE it stands) + (HOW it behaves)
+    """
+    identity_odu: int
+    memory_odu: int
+    field_odu: int
+    simulation_odu: int
+
+    def identity_function(self) -> SevenFunction:
+        return function_for_odu(self.identity_odu)
+
+    def memory_function(self) -> SevenFunction:
+        return function_for_odu(self.memory_odu)
+
+    def field_function(self) -> SevenFunction:
+        return function_for_odu(self.field_odu)
+
+    def simulation_function(self) -> SevenFunction:
+        return function_for_odu(self.simulation_odu)
+
+    def dominant_function(self) -> SevenFunction:
+        """Most frequent SevenFunction across four dimensions.
+        Ties broken by priority: identity > field > simulation > memory.
+        """
+        priority = [
+            self.identity_function(),
+            self.field_function(),
+            self.simulation_function(),
+            self.memory_function(),
+        ]
+        counts: dict[SevenFunction, int] = {}
+        for f in priority:
+            counts[f] = counts.get(f, 0) + 1
+        max_count = max(counts.values())
+        for f in priority:
+            if counts[f] == max_count:
+                return f
+        return priority[0]
+
+    def composed_signature(self) -> int:
+        """XOR fold of all four bytes — compact fingerprint for receipt hashing."""
+        return self.identity_odu ^ self.memory_odu ^ self.field_odu ^ self.simulation_odu
+
+    def as_array(self) -> list[int]:
+        return [self.identity_odu, self.memory_odu, self.field_odu, self.simulation_odu]
+
+    def vessel_state(self) -> list[ActionVessel]:
+        """Primary ActionVessel for each of the four dimensions."""
+        return [
+            primary_vessel(self.identity_function()),
+            primary_vessel(self.memory_function()),
+            primary_vessel(self.field_function()),
+            primary_vessel(self.simulation_function()),
+        ]
+
+    def to_dict(self) -> dict:
+        return {
+            "identity_odu": hex(self.identity_odu),
+            "memory_odu": hex(self.memory_odu),
+            "field_odu": hex(self.field_odu),
+            "simulation_odu": hex(self.simulation_odu),
+            "identity_function": self.identity_function().name,
+            "memory_function": self.memory_function().name,
+            "field_function": self.field_function().name,
+            "simulation_function": self.simulation_function().name,
+            "dominant_function": self.dominant_function().name,
+            "composed_signature": hex(self.composed_signature()),
+        }
