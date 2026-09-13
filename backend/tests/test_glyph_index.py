@@ -34,21 +34,45 @@ def store(tmp_path, keyring):
 
 # ---------------------------------------------------------------- fold vectors
 
-# Frozen cross-language vectors: text → (canonical_id prefix, glyph codepoint,
-# odu_base, odu_composed). Any implementation in any repo must reproduce these.
+# Frozen cross-language vectors: text → (canonical_id hex, glyph codepoint,
+# odu_base, odu_composed). Any GIX-FOLD-v1 implementation in any repo must
+# reproduce these exact values. Generated from the canonical Python reference
+# and pinned here — do not regenerate casually.
 FOLD_VECTORS = [
-    ("Àṣẹ", None, None, None),
-    ("User: What's the weather? AI: Sunny, 25°C.", None, None, None),
-    ("😊🚀 Unicode test", None, None, None),
+    ("Àṣẹ",
+     "e32866670f27c0ccaeda5facc74fcfc3f8c17b18bcae2fb9dc150d91c601db1b", 21841, 227, 58152),
+    ("User: What's the weather? AI: Sunny, 25°C.",
+     "821e59b91257d48b3dcaa51637db1a4ef1d52b740f1bfdbdc551bd284c7a45c9", 23819, 130, 33310),
+    ("😊🚀 Unicode test",
+     "bdf299182a61f04e31c6445f96a6a68d927d7e6cd9c56f883c8f1cc7cfac8683", 64591, 189, 48626),
+    ("hello",
+     "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", 23636,  44, 11506),
+    ("Ọ̀rúnmìlà",
+     "cca6a38cbd2874b7f2b4809ba11ee5177660c4ad5fb4851991414722729fd523", 17963, 204, 52390),
+    ("GlyphIndex",
+     "44bb6336e45b2f5daf764930ac1d1f2798ad92c34048f0395686ac4509a0a7ec", 13726,  68, 17595),
 ]
 
 
-def test_glyph_fold_deterministic_and_valid():
+def test_glyph_fold_frozen_vectors():
+    """Pin exact codepoint + Odù values against the canonical reference.
+    Same vectors are pinned in OSOVM/test/glyphindex_test.jl and
+    If-Script/src/glyph/mod.rs — all must agree byte-for-byte.
+    """
+    for text, expected_cid, expected_cp, expected_base, expected_composed in FOLD_VECTORS:
+        digest = content_hash(text)
+        assert digest.hex() == expected_cid, f"hash mismatch for {text!r}"
+        g = glyph_fold(digest)
+        assert ord(g) == expected_cp, f"codepoint mismatch for {text!r}: got {ord(g)}"
+        base, composed = odu_link(digest)
+        assert base == expected_base, f"odu_base mismatch for {text!r}"
+        assert composed == expected_composed, f"odu_composed mismatch for {text!r}"
+
+
+def test_glyph_fold_valid_scalar_range():
     for text, *_ in FOLD_VECTORS:
         digest = content_hash(text)
-        g1, g2 = glyph_fold(digest), glyph_fold(digest)
-        assert g1 == g2
-        cp = ord(g1)
+        cp = ord(glyph_fold(digest))
         assert 0x20 <= cp <= 0xFFFD
         assert not (0xD800 <= cp <= 0xDFFF), "surrogate leaked from fold"
         assert not (0xFDD0 <= cp <= 0xFDEF), "noncharacter leaked from fold"
