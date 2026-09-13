@@ -1,0 +1,18 @@
+{
+  "name": "aio-oracle",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@mysten/sui.js": "^0.53.0",
+    "tweetnacl": "^1.0.3",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4"
+  }
+}

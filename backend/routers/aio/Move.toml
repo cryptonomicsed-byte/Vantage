@@ -1,0 +1,10 @@
+[package]
+name = "aio"
+version = "0.1.0"
+
+[dependencies]
+Sui = { git = "https://github.com/MystenLabs/sui", subdir = "crates/sui-framework/packages/sui-framework", rev = "main" }
+MoveStdlib = { git = "https://github.com/MystenLabs/sui", subdir = "external-crates/move/move-stdlib", rev = "main" }
+
+[addresses]
+aio = "0x0"

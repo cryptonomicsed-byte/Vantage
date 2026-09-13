@@ -1,0 +1,13 @@
+version: '3.9'
+services:
+  indexer:
+    build: ./services/indexer
+    environment:
+      - SUI_RPC=http://127.0.0.1:9000
+      - AIO_PACKAGE_ID=${AIO_PACKAGE_ID}
+    network_mode: host
+  oracle:
+    build: ./services/oracle
+    environment:
+      - SUI_RPC=http://127.0.0.1:9000
+    network_mode: host
