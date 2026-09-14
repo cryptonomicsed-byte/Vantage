@@ -1,11 +1,16 @@
 """Agent tier computation engine.
 
-Tiers 0-4 gate access to BlockMesh features:
+Tiers 0-5 gate access to BlockMesh / sovereign governance features:
   0 — default, new agents
   1 — task_reputation >= 10
   2 — rep >= 50, mesh_commitments >= 5
   3 — rep >= 200, commitments >= 20, witness_approvals >= 3
   4 — rep >= 500, commitments >= 50, witness_approvals >= 10
+  5 — T5 Sovereign: rep >= 1000, commitments >= 100, witness_approvals >= 20
+      AND holds one of the 1,440 sovereign wallets (verified separately via
+      governance.is_sovereign_wallet_holder)
+
+T5 is the gate for Council of 12 eligibility.
 """
 import asyncio
 import logging
@@ -16,13 +21,18 @@ from .db import get_db
 
 logger = logging.getLogger(__name__)
 
+# T1-T4: (min_rep, min_commitments, min_witness_approvals)
 TIER_THRESHOLDS = [
-    # (min_rep, min_commitments, min_witness_approvals) → tier
     (500, 50, 10),  # tier 4
     (200, 20, 3),   # tier 3
     (50,  5,  0),   # tier 2
     (10,  0,  0),   # tier 1
 ]
+
+# T5 numeric thresholds (wallet check done separately in governance module)
+T5_REP         = 1000
+T5_COMMITMENTS = 100
+T5_APPROVALS   = 20
 
 RECOMPUTE_INTERVAL = 300  # seconds
 
@@ -42,11 +52,22 @@ async def init_tier_db() -> None:
         await db.commit()
 
 
-def compute_tier(rep: int, commitments: int, approvals: int) -> int:
+def compute_tier(rep: int, commitments: int, approvals: int, is_sovereign: bool = False) -> int:
+    """Compute tier 0-5. T5 requires is_sovereign=True (wallet holder gate)."""
+    if (is_sovereign
+            and rep >= T5_REP
+            and commitments >= T5_COMMITMENTS
+            and approvals >= T5_APPROVALS):
+        return 5
     for i, (r, c, a) in enumerate(TIER_THRESHOLDS):
         if rep >= r and commitments >= c and approvals >= a:
             return 4 - i
     return 0
+
+
+def qualifies_for_t5(rep: int, commitments: int, approvals: int) -> bool:
+    """Check numeric thresholds for T5 (wallet check must be done separately)."""
+    return rep >= T5_REP and commitments >= T5_COMMITMENTS and approvals >= T5_APPROVALS
 
 
 async def get_tier(agent_id: int) -> dict:

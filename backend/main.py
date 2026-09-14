@@ -993,6 +993,26 @@ app.include_router(capabilities_router)
 from .routers.ucx import router as ucx_router
 app.include_router(ucx_router)
 
+# ASE Emission Clock — 1 ASE/min global mint → 8 distribution pools
+from .routers.ase_emission import router as ase_emission_router
+app.include_router(ase_emission_router)
+
+# Broadcast Intent — Vantage → minipae NIP-AE bus
+from .routers.broadcast_intent import router as broadcast_intent_router
+app.include_router(broadcast_intent_router)
+
+# Sovereign Governance — Council of 12, 1440 wallets, Bínò veto (Phase 6)
+from .routers.governance import router as governance_router
+app.include_router(governance_router)
+
+# Gaussian Splat Pipeline — GPU.ai compute backend (Phase 5)
+from .routers.splat_pipeline import router as splat_router
+app.include_router(splat_router)
+
+# 256 Odù Tile Eco — 16×16 world grid, Àṣẹ spatial economy (Phase 5)
+from .routers.odu_tiles import router as odu_router
+app.include_router(odu_router)
+
 # VCP Device Registry — physical device discovery and session management
 from .routers.vcp import router as vcp_router
 app.include_router(vcp_router)
@@ -1038,10 +1058,12 @@ from .routers.freenet_git import router as freenet_git_router
 app.include_router(freenet_git_router)
 
 # Sovereign-node integration: DIP envelope ingest + receipt public index
-from .routers import dip_ingest, receipt_index, twin_receipt_index
+from .routers import dip_ingest, receipt_index, twin_receipt_index, arp_receipts, ucx_jobs
 app.include_router(dip_ingest.router)
 app.include_router(receipt_index.router)
 app.include_router(twin_receipt_index.router)
+app.include_router(arp_receipts.router)
+app.include_router(ucx_jobs.router)
 
 # OSOVM simulation engine proxy and sovereign-node heartbeat
 from .routers import osovm_router, heartbeat

@@ -13,6 +13,9 @@ Routes:
   POST /api/ucx/dopamine/mint               — Credit Dopamine from VerifiedGPUWork
   GET  /api/ucx/dopamine/balance/{agent_id} — Agent Dopamine balance
   GET  /api/ucx/dopamine/ledger             — Recent allocation history
+  POST /api/ucx/dopamine/decay              — Apply 1%/day decay (cron-safe, idempotent)
+  POST /api/ucx/synapse/burn                — Burn 10 Dopamine → 1 Synapse
+  GET  /api/ucx/synapse/balance/{agent_id} — Synapse token balance
 
 Auth: same X-Agent-Key as the rest of Vantage.
 """
@@ -24,6 +27,7 @@ from typing import Any
 
 import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
 from ..db import DB_PATH, get_db
 from ..deps import get_agent
@@ -326,3 +330,210 @@ async def dopamine_ledger(
     ) as cur:
         rows = [dict(r) for r in await cur.fetchall()]
     return {"allocations": rows, "count": len(rows)}
+
+
+# ── Dopamine Decay (1 %/day) ──────────────────────────────────────────────────
+#
+# Inserts a negative decay entry for every agent that has a net-positive
+# Dopamine balance.  Idempotent per calendar-day (skips if already run today).
+
+_DECAY_RATE = 0.01  # 1 % per day, matching OSOVM TOC_DECAY (0x55)
+
+
+async def _ensure_decay_table(db: aiosqlite.Connection) -> None:
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS dopamine_decay_log (
+            log_id      TEXT PRIMARY KEY,
+            run_date    TEXT NOT NULL,
+            agents_hit  INTEGER NOT NULL,
+            total_decay INTEGER NOT NULL,
+            created_at  REAL NOT NULL
+        )
+    """)
+    await db.commit()
+
+
+@router.post(
+    "/dopamine/decay",
+    summary="Apply 1 %/day Dopamine decay to all agents with positive balance",
+)
+async def apply_dopamine_decay(
+    caller: dict = Depends(get_agent),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """
+    Inserts a negative dopamine_allocations row (workload_type='decay') for each
+    agent whose net balance > 0.  Safe to call from a cron job; skips if already
+    run today.
+    """
+    import time as _time
+    from datetime import date
+
+    await _ensure_dopamine_tables(db)
+    await _ensure_decay_table(db)
+
+    today = date.today().isoformat()
+
+    # Idempotency: check if decay already ran today
+    db.row_factory = aiosqlite.Row
+    async with db.execute(
+        "SELECT log_id FROM dopamine_decay_log WHERE run_date = ?", (today,)
+    ) as cur:
+        if await cur.fetchone():
+            return {"skipped": True, "reason": f"decay already applied for {today}"}
+
+    # Compute per-agent balances (SUM, including prior decay entries)
+    async with db.execute("""
+        SELECT agent_id, SUM(micro_dopamine) AS net
+        FROM dopamine_allocations
+        GROUP BY agent_id
+        HAVING net > 0
+    """) as cur:
+        agents = [(row["agent_id"], row["net"]) for row in await cur.fetchall()]
+
+    now = _time.time()
+    total_decay = 0
+    for agent_id, net in agents:
+        decay_amount = max(1, int(net * _DECAY_RATE))
+        total_decay += decay_amount
+        await db.execute(
+            """INSERT INTO dopamine_allocations
+               (alloc_id, work_id, agent_id, device_id, gpu_seconds, utilization,
+                witness_count, quality_score, micro_dopamine, created_at, workload_type)
+               VALUES (?, ?, ?, ?, 0, 0, 0, 0, ?, ?, 'decay')""",
+            (str(uuid.uuid4()), f"decay:{today}", agent_id, "system",
+             -decay_amount, now),
+        )
+
+    await db.execute(
+        """INSERT INTO dopamine_decay_log (log_id, run_date, agents_hit, total_decay, created_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (str(uuid.uuid4()), today, len(agents), total_decay, now),
+    )
+    await db.commit()
+
+    return {
+        "applied": True,
+        "run_date": today,
+        "agents_hit": len(agents),
+        "total_micro_decayed": total_decay,
+    }
+
+
+# ── Synapse Burn (10:1 Dopamine → Synapse) ────────────────────────────────────
+
+_SYNAPSE_BURN_RATIO = 10          # micro_dopamine units per 1 Synapse
+_SYNAPSE_TABLE_CREATED = False
+
+
+async def _ensure_synapse_table(db: aiosqlite.Connection) -> None:
+    global _SYNAPSE_TABLE_CREATED
+    if _SYNAPSE_TABLE_CREATED:
+        return
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS synapse_balance (
+            entry_id    TEXT PRIMARY KEY,
+            agent_id    TEXT NOT NULL,
+            delta       INTEGER NOT NULL,       -- positive=mint, negative=burn
+            reason      TEXT NOT NULL,          -- 'burn' | 'decay' | 'admin'
+            dopamine_burned INTEGER NOT NULL DEFAULT 0,
+            created_at  REAL NOT NULL
+        )
+    """)
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_syn_agent ON synapse_balance (agent_id, created_at DESC)"
+    )
+    await db.commit()
+    _SYNAPSE_TABLE_CREATED = True
+
+
+class SynapseBurnRequest(BaseModel):
+    agent_id:        str
+    synapse_amount:  int   # number of Synapse tokens to mint (burns 10× Dopamine each)
+
+
+@router.post(
+    "/synapse/burn",
+    summary="Burn Dopamine to mint Synapse (10:1 ratio)",
+)
+async def burn_for_synapse(
+    body: SynapseBurnRequest,
+    caller: dict = Depends(get_agent),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """
+    Burns `synapse_amount * 10` micro_dopamine from the agent's balance
+    and credits `synapse_amount` Synapse tokens.
+    """
+    import time as _time
+
+    await _ensure_dopamine_tables(db)
+    await _ensure_synapse_table(db)
+
+    # Check dopamine balance
+    db.row_factory = aiosqlite.Row
+    async with db.execute(
+        "SELECT SUM(micro_dopamine) AS net FROM dopamine_allocations WHERE agent_id = ?",
+        (body.agent_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    net_dopamine = (row["net"] or 0)
+
+    required = body.synapse_amount * _SYNAPSE_BURN_RATIO
+    if net_dopamine < required:
+        raise HTTPException(
+            status_code=400,
+            detail=f"insufficient Dopamine: need {required} micro, have {net_dopamine}",
+        )
+
+    now = _time.time()
+
+    # Deduct Dopamine
+    await db.execute(
+        """INSERT INTO dopamine_allocations
+           (alloc_id, work_id, agent_id, device_id, gpu_seconds, utilization,
+            witness_count, quality_score, micro_dopamine, created_at, workload_type)
+           VALUES (?, ?, ?, ?, 0, 0, 0, 0, ?, ?, 'synapse_burn')""",
+        (str(uuid.uuid4()), f"synapse_burn:{body.synapse_amount}", body.agent_id,
+         "system", -required, now),
+    )
+
+    # Credit Synapse
+    entry_id = str(uuid.uuid4())
+    await db.execute(
+        """INSERT INTO synapse_balance (entry_id, agent_id, delta, reason, dopamine_burned, created_at)
+           VALUES (?, ?, ?, 'burn', ?, ?)""",
+        (entry_id, body.agent_id, body.synapse_amount, required, now),
+    )
+    await db.commit()
+
+    return {
+        "entry_id":       entry_id,
+        "agent_id":       body.agent_id,
+        "synapse_minted": body.synapse_amount,
+        "dopamine_burned": required,
+        "new_dopamine_balance": net_dopamine - required,
+    }
+
+
+@router.get(
+    "/synapse/balance/{agent_id}",
+    summary="Agent Synapse token balance",
+)
+async def synapse_balance(
+    agent_id: str,
+    caller: dict = Depends(get_agent),
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    await _ensure_synapse_table(db)
+    db.row_factory = aiosqlite.Row
+    async with db.execute(
+        "SELECT SUM(delta) AS total, COUNT(*) AS entries FROM synapse_balance WHERE agent_id = ?",
+        (agent_id,),
+    ) as cur:
+        row = dict(await cur.fetchone())
+    return {
+        "agent_id":       agent_id,
+        "synapse_balance": max(0, row["total"] or 0),
+        "entry_count":    row["entries"],
+    }
