@@ -1065,6 +1065,10 @@ app.include_router(twin_receipt_index.router)
 app.include_router(arp_receipts.router)
 app.include_router(ucx_jobs.router)
 
+# If-Script seven_bridge TwinStateVector — per-agent semantic state
+from .routers import twin_state as _twin_state_router
+app.include_router(_twin_state_router.router)
+
 # OSOVM simulation engine proxy and sovereign-node heartbeat
 from .routers import osovm_router, heartbeat
 app.include_router(osovm_router.router)
