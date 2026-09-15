@@ -943,6 +943,9 @@ app.include_router(wallets_router)
 from .routers.agent_wallet import router as agent_wallet_router
 app.include_router(agent_wallet_router)
 
+from .routers.hive_mind import router as hive_mind_router
+app.include_router(hive_mind_router)
+
 from .routers.playlists import router as playlists_router
 app.include_router(playlists_router)
 
