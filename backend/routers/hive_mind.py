@@ -25,7 +25,11 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ..db import get_db
-from ..agents import get_current_agent
+from ..deps import get_agent as _get_agent
+
+
+def _agent_id(agent: dict) -> str:
+    return str(agent.get("id", agent.get("name", "unknown")))
 
 router = APIRouter(prefix="/api/hive", tags=["hive-mind"])
 
@@ -186,9 +190,10 @@ async def _recompute_tier(db: aiosqlite.Connection, entity_id: str) -> str:
 @router.post("/entities", status_code=201)
 async def create_entity(
     body: CreateEntityRequest,
-    agent_id: str = Depends(get_current_agent),
+    agent: dict = Depends(_get_agent),
 ):
     """Create a new entity record in the hive mind."""
+    agent_id = _agent_id(agent)
     tier = _validate_tier(body.tier)
     now = int(time.time())
     entity_id = str(uuid.uuid4())
@@ -338,9 +343,10 @@ async def resolve_identifier(
 async def add_identifier(
     entity_id: str,
     body: AddIdentifierRequest,
-    agent_id: str = Depends(get_current_agent),
+    agent: dict = Depends(_get_agent),
 ):
     """Add a new identifier to an existing entity (e.g. discovered their email)."""
+    agent_id = _agent_id(agent)
     kind = _validate_kind(body.kind)
     value = body.value.lower().strip()
     now = int(time.time())
@@ -369,14 +375,15 @@ async def add_identifier(
 @router.post("/encounters", status_code=201)
 async def log_encounter(
     body: LogEncounterRequest,
-    agent_id: str = Depends(get_current_agent),
+    agent: dict = Depends(_get_agent),
 ):
     """
     Log an encounter with an entity to the hive mind (public/shared layer).
 
-    Only the public_summary is stored here. The agent's private EncounterBody
+    Only the public_summary is stored here. The agent's private EncounterBody  # noqa: E501
     (with honest private_note) stays sealed in its own MemoryVault.
     """
+    agent_id = _agent_id(agent)
     kind = _validate_encounter_kind(body.kind)
     outcome = _validate_outcome(body.outcome)
     tier = _validate_tier(body.tier_vote)
@@ -463,13 +470,14 @@ async def list_encounters(
 @router.post("/entities/merge")
 async def merge_entities(
     body: LinkIdentifiersRequest,
-    agent_id: str = Depends(get_current_agent),
+    agent: dict = Depends(_get_agent),
 ):
     """
     Merge source_entity into target_entity (they are the same person).
     All identifiers, encounters, and votes from source move to target.
     Source is then deleted.
     """
+    agent_id = _agent_id(agent)  # noqa: F841
     src, tgt = body.source_entity_id, body.target_entity_id
     if src == tgt:
         raise HTTPException(400, "source and target must differ")
@@ -530,9 +538,10 @@ async def merge_entities(
 async def set_tier(
     entity_id: str,
     tier: str,
-    agent_id: str = Depends(get_current_agent),
+    agent: dict = Depends(_get_agent),
 ):
     """Cast or update this agent's tier vote for an entity."""
+    agent_id = _agent_id(agent)
     tier = _validate_tier(tier)
     now = int(time.time())
     async with get_db() as db:
