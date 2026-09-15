@@ -939,6 +939,10 @@ app.include_router(narratives_router)
 from .routers.wallets import router as wallets_router
 app.include_router(wallets_router)
 
+# Agent compute wallet snapshot — walletd heartbeat sync (PUT/GET /api/agents/{id}/wallet)
+from .routers.agent_wallet import router as agent_wallet_router
+app.include_router(agent_wallet_router)
+
 from .routers.playlists import router as playlists_router
 app.include_router(playlists_router)
 
