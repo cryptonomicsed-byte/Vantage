@@ -41,15 +41,17 @@ router = APIRouter(prefix="/api/ase", tags=["ase-emission"])
 EMISSION_RATE_PER_TICK = 1          # 1 ASE per 60-second tick
 TICK_SECONDS = 60
 
-# 8 distribution pools — percentages must sum to 100.
-# 2 pools are TBD; allocated to Reserve until specified.
+# 8 distribution pools — canonical set from TOC_CONSTANTS.toml [ase.pools]
+# Reconciled 2026-09-15: prior 6-pool set replaced with canonical 8.
 POOL_WEIGHTS: dict[str, float] = {
-    "SimulationPool": 0.30,  # 30% → Proof-of-Simulation contributors
-    "ResearchPool":   0.15,  # 15% → research + open-source
-    "GovernancePool": 0.15,  # 15% → Council + governance operations
-    "ReservePool":    0.20,  # 20% → strategic reserve (includes 2 TBD pools)
-    "GrantPool":      0.10,  # 10% → community grants
-    "UBIPool":        0.10,  # 10% → sovereign wallet UBI distribution
+    "VeilSimPool":    0.20,  # 20% → proof-of-simulation rewards
+    "RndPool":        0.15,  # 15% → R&D fund
+    "GovernancePool": 0.15,  # 15% → Council + 24-sector governance
+    "ReservePool":    0.15,  # 15% → protocol reserve (USDC-backed floor)
+    "ComputePool":    0.15,  # 15% → compute (Dopamine) bootstrap subsidy
+    "StoragePool":    0.10,  # 10% → storage pool (Walrus/Arweave adapters)
+    "WitnessPool":    0.05,  # 5%  → witness + evidence pool
+    "TreasuryPool":   0.05,  # 5%  → Bínò treasury
 }
 
 assert abs(sum(POOL_WEIGHTS.values()) - 1.0) < 1e-9, "Pool weights must sum to 1.0"

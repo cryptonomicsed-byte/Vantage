@@ -36,7 +36,7 @@ from ..supermemory_client import SupermemoryClient
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/code", tags=["code"])
 
-GITEA_URL = settings.GITEA_URL or "http://2.25.70.156:3001"
+GITEA_URL = settings.GITEA_URL or os.environ.get("GITEA_URL", "http://localhost:3001")
 GITEA_API = f"{GITEA_URL}/api/v1"
 # No hardcoded fallback — must come from VANTAGE_GITEA_TOKEN or GITEA_TOKEN env vars.
 # A previous version of this file shipped a live-looking default token here;

@@ -33,7 +33,10 @@ DB = Path("/opt/ares/Vantage/data/vantage.db")
 # would mean an unverified group post could trigger a real buy. This goes
 # to the intel signal pool instead (same target social_tracker.py uses) —
 # visible, scored, not blindly executed.
-INTEL_INGEST_URL = "http://localhost:8001/api/intel/signals/ingest"
+INTEL_INGEST_URL = os.environ.get(
+    "VANTAGE_INTEL_INGEST_URL",
+    f"{os.environ.get('VANTAGE_URL', 'http://localhost:8000').rstrip('/')}/api/intel/signals/ingest",
+)
 TOOL_INTEL_KEY = os.environ.get("VANTAGE_TOOL_INTEL_KEY", os.environ.get("VANTAGE_TOOL_INTEL", ""))
 
 PATTERNS = [

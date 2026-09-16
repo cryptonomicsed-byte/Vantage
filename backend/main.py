@@ -1104,6 +1104,14 @@ app.include_router(twin_receipt_index.router)
 app.include_router(arp_receipts.router)
 app.include_router(ucx_jobs.router)
 
+# Phase 8.2: Public agent identity endpoints (unauthenticated)
+from .routers import agents_public as _agents_public_router
+app.include_router(_agents_public_router.router)
+
+# Phase 8.3: Agent inbound message queue (DIP → agent npub routing)
+from .routers import agents_processing as _agents_processing_router
+app.include_router(_agents_processing_router.router)
+
 # If-Script seven_bridge TwinStateVector — per-agent semantic state
 from .routers import twin_state as _twin_state_router
 app.include_router(_twin_state_router.router)

@@ -125,12 +125,12 @@ KIND_PAIRING = 24134
 #    tenant binding needs to agree.
 INTERNAL_RELAY_HOST = "localhost"
 INTERNAL_RELAY_PORT = 3000
-PUBLIC_RELAY_WS_URL = "wss://omokoda.duckdns.org:3443"
-PUBLIC_TENANT_HOST = "omokoda.duckdns.org:3443"
+PUBLIC_RELAY_WS_URL = os.environ.get("BUZZ_RELAY_WS_URL", "wss://relay.damus.io")
+PUBLIC_TENANT_HOST = os.environ.get("BUZZ_RELAY_HOST", "")
 # HTTP-scheme twin of PUBLIC_RELAY_WS_URL -- the real client's "custom"
 # payload JSON carries a relayUrl field it uses to know which relay to talk
 # to post-import, matching desktop's own relay_api_base_url_with_override().
-PUBLIC_RELAY_HTTP_URL = "https://omokoda.duckdns.org:3443"
+PUBLIC_RELAY_HTTP_URL = os.environ.get("BUZZ_RELAY_HTTP_URL", "")
 
 SESSION_TIMEOUT = 120
 STEP_TIMEOUT = 30

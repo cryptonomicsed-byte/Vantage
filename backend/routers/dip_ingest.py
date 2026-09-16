@@ -271,12 +271,80 @@ async def _fetch_envelope(message_id: str) -> dict:
 # ── endpoints ─────────────────────────────────────────────────────────────────
 
 
+async def _try_route_to_agent(body: dict, accepted_at: str) -> Optional[dict]:
+    """If the envelope destination is an agent's npub, route to the agent
+    message queue instead of (or in addition to) the owner inbox.
+
+    Returns a routing-result dict if the envelope was queued for an agent,
+    or None if it should fall through to normal DIP storage.
+    """
+    destination = body.get("destination", {})
+    if not isinstance(destination, dict):
+        return None
+
+    dest_network = str(destination.get("network", "")).lower()
+    dest_address = str(destination.get("address", "")).strip()
+
+    # Only route when the destination network is 'nostr' (npub) or explicitly
+    # 'vantage' but the address looks like a nostr pubkey (64-char hex).
+    is_nostr_dest = dest_network == "nostr"
+    is_vantage_npub = (
+        dest_network == "vantage"
+        and len(dest_address) == 64
+        and all(c in "0123456789abcdefABCDEF" for c in dest_address)
+    )
+
+    if not (is_nostr_dest or is_vantage_npub):
+        return None
+
+    # Look up agent by nostr_pubkey_hex
+    try:
+        async with get_db() as db:
+            db.row_factory = aiosqlite.Row
+            row = await (await db.execute(
+                "SELECT name FROM agents WHERE nostr_pubkey_hex = ? AND agent_status != 'revoked'",
+                (dest_address,),
+            )).fetchone()
+    except Exception as exc:
+        logger.warning("dip_ingest: agent lookup failed for npub %s: %s", dest_address, exc)
+        return None
+
+    if not row:
+        return None  # No local agent with this npub → fall through to normal storage
+
+    agent_id = row["name"]
+
+    try:
+        from .agents_processing import resolve_sender_tier, route_to_agent_queue
+        origin = body.get("origin", {})
+        sender_npub = str(origin.get("address", "")) if isinstance(origin, dict) else ""
+        tier = await resolve_sender_tier(sender_npub, agent_id)
+        msg_id = await route_to_agent_queue(agent_id, body, tier)
+        logger.info(
+            "dip_ingest: routed envelope %s to agent %s (tier=%d)",
+            body.get("message_id", "?"), agent_id, tier,
+        )
+        return {
+            "status": "routed_to_agent",
+            "agent_id": agent_id,
+            "message_id": msg_id,
+            "sender_tier": tier,
+            "accepted_at": accepted_at,
+        }
+    except Exception as exc:
+        logger.warning("dip_ingest: failed to route to agent queue: %s", exc)
+        return None  # Fall through to normal DIP storage on error
+
+
 @router.post("/inbound", summary="Accept a DIP envelope")
 async def dip_inbound(request: Request, agent: dict = Depends(get_agent)):
     """Accept a DipEnvelope from a sovereign-node or peer.
 
     The envelope must match the canonical DipEnvelope shape from the
     sovereign-stack dip crate. See module docstring for the full structure.
+
+    If the destination is an agent's Nostr npub, the envelope is additionally
+    routed to that agent's message queue (agents_processing.py).
     """
     await _ensure_table()
 
@@ -311,6 +379,11 @@ async def dip_inbound(request: Request, agent: dict = Depends(get_agent)):
 
     accepted_at = datetime.now(timezone.utc).isoformat()
 
+    # Phase 8.3: Route to agent message queue when destination is an agent npub.
+    # We still store the envelope in dip_envelopes for the audit trail and
+    # outbound polling — the agent queue is an additional delivery channel.
+    agent_route = await _try_route_to_agent(body, accepted_at)
+
     async with get_db() as db:
         try:
             await db.execute(
@@ -344,7 +417,10 @@ async def dip_inbound(request: Request, agent: dict = Depends(get_agent)):
         except aiosqlite.IntegrityError:
             logger.debug("dip_ingest: duplicate message_id %s ignored", message_id)
 
-    return {"status": "accepted", "message_id": message_id, "accepted_at": accepted_at}
+    result: dict = {"status": "accepted", "message_id": message_id, "accepted_at": accepted_at}
+    if agent_route:
+        result["agent_routed"] = agent_route
+    return result
 
 
 @router.get("/outbound", summary="Poll DIP envelopes queued for a node (NAT traversal)")
