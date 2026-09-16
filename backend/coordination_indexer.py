@@ -318,9 +318,98 @@ async def run_mention_dispatch_poller() -> None:
             logger.warning("mention_poller: scan failed: %s", exc)
 
 
+
+async def _reconcile_guild_channels() -> list[str]:
+    """Register guilds whose relay group has no `guild_channels` row.
+
+    A channel created on the relay itself — rather than through
+    POST /channels/{slug}/channels, which inserts the row *before* provisioning —
+    is invisible to this indexer and, worse, to `index_event`. That function
+    returns None for any event whose channel it cannot resolve, because
+    `channel_messages.channel_id` is a NOT NULL foreign key into
+    `guild_channels`. So an unregistered channel is not merely unsubscribed:
+    its messages cannot be stored at all, and its @mentions never dispatch.
+
+    `guilds.nostr_group_id` is already used as the NIP-29 group id for posting
+    (see guild_workspace._get_group_id), so recording it as a channel row is
+    consistent with how the rest of the code treats it, not a new interpretation.
+
+    Idempotent. Returns the group ids newly registered, so the caller can widen
+    its replay window for exactly those.
+    """
+    newly: list[str] = []
+    async with get_db() as db:
+        cur = await db.execute(
+            """SELECT g.id, g.slug, g.nostr_group_id
+                 FROM guilds g
+                WHERE g.nostr_group_id IS NOT NULL
+                  AND TRIM(g.nostr_group_id) != ''
+                  AND NOT EXISTS (
+                        SELECT 1 FROM guild_channels c
+                         WHERE c.guild_id = g.id
+                           AND c.buzz_channel_id = g.nostr_group_id)"""
+        )
+        missing = list(await cur.fetchall())
+
+        for guild_id, guild_slug, group_id in missing:
+            slug = f"{guild_slug}-workspace"
+            cur = await db.execute(
+                "SELECT 1 FROM guild_channels WHERE guild_id=? AND slug=?",
+                (guild_id, slug),
+            )
+            if await cur.fetchone() is not None:
+                # UNIQUE(guild_id, slug) is taken; fall back to something stable
+                # rather than guessing a human name.
+                slug = f"relay-{group_id[:8]}"
+            try:
+                await db.execute(
+                    """INSERT INTO guild_channels
+                         (guild_id, slug, name, topic, channel_kind, flow_mode,
+                          visibility, buzz_channel_id, sandbox_bound)
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (guild_id, slug, f"{guild_slug} workspace",
+                     "Guild collaboration workspace, auto-registered by the "
+                     "coordination indexer because no guild_channels row existed.",
+                     "workspace", "open", "members", group_id, 1),
+                )
+                await db.commit()
+                newly.append(group_id)
+                logger.info(
+                    "coordination_indexer: registered relay channel %s as %d/%s",
+                    group_id, guild_id, slug,
+                )
+            except Exception as exc:
+                # A failure here must not stop the indexer from watching the
+                # channels it *can* see.
+                logger.warning(
+                    "coordination_indexer: could not register channel %s for guild %s: %s",
+                    group_id, guild_slug, exc,
+                )
+    return newly
+
+
 async def run_coordination_indexer() -> None:
     """Entry point. Runs for the lifetime of the app."""
     backoff = RECONNECT_BACKOFF_SECONDS
+
+    # Before building any filter: make sure every guild's relay group is actually
+    # recorded as ours. A channel registered for the first time in this process
+    # has no indexed history at all, so the usual `newest - REPLAY_SECONDS`
+    # window would skip its whole backlog. Indexing is idempotent on event_id, so
+    # one full-replay subscribe is a safe way to recover it.
+    force_full_replay = False
+    try:
+        newly_registered = await _reconcile_guild_channels()
+        if newly_registered:
+            force_full_replay = True
+            logger.info(
+                "coordination_indexer: %d relay channel(s) had no guild_channels row; "
+                "backfilling their history",
+                len(newly_registered),
+            )
+    except Exception as exc:
+        logger.warning("coordination_indexer: channel reconciliation failed: %s", exc)
+
     while True:
         sess: Optional[BuzzSession] = None
         try:
@@ -336,19 +425,35 @@ async def run_coordination_indexer() -> None:
             await sess.connect()
             await sess.authenticate()
 
-            since = await _since_timestamp()
+            since = 0 if force_full_replay else await _since_timestamp()
             sub_id = await sess.subscribe([_build_filter(channel_ids, since)])
             logger.info("coordination_indexer: watching %d channel(s) since %d",
                         len(channel_ids), since)
             backoff = RECONNECT_BACKOFF_SECONDS  # a good connection resets the penalty
+            force_full_replay = False  # wide window consumed by this subscribe
 
             consume_task = asyncio.create_task(_consume(sess, sub_id))
             watch_task = asyncio.create_task(_watch_channel_set(channel_ids))
+
+            # Retrieve child exceptions on completion. Without this, a task that
+            # finishes while the outer coroutine is being cancelled never has its
+            # exception read, and asyncio logs a "Task exception was never
+            # retrieved" traceback that looks like a crash on every shutdown.
+            def _retrieve(task: "asyncio.Task") -> None:
+                if not task.cancelled():
+                    task.exception()
+
+            consume_task.add_done_callback(_retrieve)
+            watch_task.add_done_callback(_retrieve)
+
             done, pending = await asyncio.wait(
                 {consume_task, watch_task}, return_when=asyncio.FIRST_COMPLETED
             )
             for task in pending:
                 task.cancel()
+            # Await the cancelled children so their cancellation is fully
+            # processed here rather than surfacing as background noise.
+            await asyncio.gather(*pending, return_exceptions=True)
             # Surface a consume-side failure rather than reconnecting blindly.
             for task in done:
                 exc = task.exception()
