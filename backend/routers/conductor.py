@@ -207,20 +207,30 @@ async def record_work_state(request: Request, _: bool = Depends(require_conducto
     rather than trusting the caller, because the two lists live in different
     languages and drifting apart silently is exactly how a closed vocabulary
     stops being closed.
+
+    `source` distinguishes a principal declaring its own state (the socket's
+    `set_work_state` op) from the Conductor forcing one offline because its
+    socket went away -- see backend/presence.py. Defaults to "declared" so an
+    older Conductor build that never sends the field keeps behaving exactly
+    as it did before this existed.
     """
     body = await _parse_body(request)
     channel_id = body.get("channel_id")
     principal_id = body.get("principal_id")
     state = (body.get("work_state") or "").strip()
+    source = (body.get("source") or presence.DEFAULT_SOURCE).strip()
     if not channel_id or not principal_id:
         raise HTTPException(422, "channel_id and principal_id are required")
     if not presence.is_valid(state):
         raise HTTPException(422, f"unknown work_state {state!r}")
+    if not presence.is_valid_source(source):
+        raise HTTPException(422, f"unknown source {source!r}")
 
     await presence.set_state(
         principal_id=int(principal_id), channel_id=int(channel_id), state=state,
+        source=source,
     )
-    return {"recorded": True, "state": state}
+    return {"recorded": True, "state": state, "source": source}
 
 
 # ── outbound: telling the Conductor what the relay saw ───────────────────────

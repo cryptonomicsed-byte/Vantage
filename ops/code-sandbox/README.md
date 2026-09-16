@@ -103,6 +103,8 @@ All endpoints are POST with a JSON body, except `GET /health`.
 |---|---|---|
 | `/exec` | `command`, `cwd`, `timeout_ms`, `env` | `exit_code`, `stdout`, `stderr`, `timed_out`, `truncated`, `duration_ms` |
 | `/clone` | `repo_url` (https only), `dir`, `full_history` | clone result + `dir` |
+| `/worktree` | `repo_url` (https only), `dir`, `branch`, `timeout_ms` | clone/checkout result + `dir`, `branch` |
+| `/worktree/remove` | `repo_url`, `dir` | remove result + `dir` |
 | `/read` | `path` | `content` |
 | `/write` | `path`, `content` | `bytes` |
 | `/list` | `path` | `entries` |
@@ -110,3 +112,20 @@ All endpoints are POST with a JSON body, except `GET /health`.
 
 A non-zero `exit_code` is returned as a normal 200 response: a failing build is
 information the caller needs, not an error to hide.
+
+## Multi-agent worktrees
+
+`POST /api/workspace/clone` (`backend/routers/workspace.py`) calls `/worktree`
+rather than `/clone`: a shared bare mirror of the repo's object store lives
+under `_shared/` in the workspace volume, fetched once and reused, and each
+agent+task gets its own `git worktree add` off that mirror onto branch
+`agent/{agent_id}/task/{task_id}` (`task_id` defaults to `scratch`). Two
+agents naming the same `repo_url` never share a branch tip, and neither pays
+for a second full clone of a repo the other already has. `_shared/` is not
+reachable through `/read`, `/write` or `/list` — those are always rebased
+under the caller's own `agent-{id}-{name}/` prefix by Vantage — so this
+sharing is invisible to, and cannot be abused by, any individual agent.
+
+`POST /api/workspace/cleanup` calls `/worktree/remove` to prune one agent's
+worktree; the shared mirror and the branch itself are untouched, so the same
+task can be resumed later or by another worktree without re-cloning.

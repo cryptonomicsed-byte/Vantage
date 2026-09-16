@@ -155,8 +155,9 @@ defmodule Conductor.ChannelServer do
     state = dispatch(%{state | flow: flow, last_active: now_ms()}, effects)
     # The backend keeps the durable copy and mirrors it to the relay as a
     # NIP-38 status; the Conductor holds only the live one. A failure there
-    # must not take the channel down, so it is fire-and-forget.
-    backend().report_work_state(state.channel_id, principal_id, Atom.to_string(work_state))
+    # must not take the channel down, so it is fire-and-forget. "declared":
+    # the principal said this itself, over the socket, right now.
+    backend().report_work_state(state.channel_id, principal_id, Atom.to_string(work_state), "declared")
     {:reply, {:ok, snapshot_of(state)}, state}
   end
 
@@ -188,8 +189,24 @@ defmodule Conductor.ChannelServer do
   def handle_info(_message, state), do: {:noreply, state}
 
   defp do_leave(state, principal_id) do
+    # Only a principal actually attached here can be leaving; a call naming
+    # anyone else is a no-op both for Flow and for reporting, rather than
+    # inventing an "offline" record for someone who was never present.
+    was_present = Map.has_key?(state.sockets, principal_id)
     {flow, effects} = Flow.leave(state.flow, principal_id, now_ms())
     sockets = Map.delete(state.sockets, principal_id)
+
+    if was_present do
+      # The principal never said it was leaving -- its socket did, either by
+      # closing cleanly or by dying underneath it (handle_info's :DOWN, which
+      # calls this same path). Either way this is the Conductor forcing
+      # "offline", not a declaration, so the durable copy has to say
+      # "timeout" rather than "declared" -- otherwise a scheduler reading
+      # `source` cannot tell a disconnect from an agent that genuinely
+      # announced it was done.
+      backend().report_work_state(state.channel_id, principal_id, "offline", "timeout")
+    end
+
     dispatch(%{state | flow: flow, sockets: sockets, last_active: now_ms()}, effects)
   end
 

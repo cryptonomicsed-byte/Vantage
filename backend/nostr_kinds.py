@@ -62,6 +62,7 @@ _NIP_KINDS = [
     KindSpec(9040, "moderation_ban", Origin.NIP, "Remove a member from a group.", "NIP-29"),
     KindSpec(9041, "moderation_unban", Origin.NIP, "Restore a removed member.", "NIP-29"),
     KindSpec(22242, "client_auth", Origin.NIP, "Relay authentication challenge response.", "NIP-42"),
+    KindSpec(27235, "http_auth", Origin.NIP, "NIP-98 HTTP authorization event (Bearer token for REST APIs).", "NIP-98"),
     KindSpec(24133, "nostr_connect", Origin.NIP, "Remote signing session.", "NIP-46"),
     KindSpec(30315, "user_status", Origin.NIP, "Live status of a principal.", "NIP-38"),
     KindSpec(30617, "git_repo_announcement", Origin.NIP, "Repository announcement.", "NIP-34"),

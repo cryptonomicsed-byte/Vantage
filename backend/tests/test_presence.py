@@ -51,6 +51,23 @@ async def guild(client, fresh_agent):
     return {"id": guild_id, "slug": slug}
 
 
+@pytest_asyncio.fixture
+async def channel(guild):
+    """A provisioned-on-the-relay channel row, so presence.set_state's
+    _publish_blocked_turn finds a buzz_channel_id and gets as far as trying
+    to sign — which is all these tests need, since the actual signing call
+    is monkeypatched."""
+    async with get_db() as db:
+        cur = await db.execute(
+            """INSERT INTO guild_channels (guild_id, slug, name, channel_kind, flow_mode, buzz_channel_id)
+               VALUES (?,?,?,'workspace','open',?)""",
+            (guild["id"], "build", "Build", f"relay-{secrets.token_hex(4)}"),
+        )
+        channel_id = cur.lastrowid
+        await db.commit()
+    return channel_id
+
+
 # ── the vocabulary ───────────────────────────────────────────────────────────
 
 def test_the_vocabulary_matches_the_conductors():
@@ -212,3 +229,126 @@ def test_work_state_does_not_mint_a_new_event_kind():
     assert presence.KIND_USER_STATUS == buzz_status.KIND_USER_STATUS
     assert presence.KIND_USER_STATUS == nostr_kinds.kind("user_status")
     assert presence.STATUS_D_TAG != "general"
+
+
+# ── source: declared vs observed vs timeout ───────────────────────────────────
+
+def test_an_unknown_source_is_not_valid():
+    assert presence.is_valid_source("declared")
+    assert presence.is_valid_source("observed")
+    assert presence.is_valid_source("timeout")
+    assert not presence.is_valid_source("vibes")
+    assert not presence.is_valid_source(None)
+
+
+@pytest.mark.asyncio
+async def test_source_defaults_to_declared(client, principal_maker):
+    p = await principal_maker()
+    result = await presence.set_state(principal_id=p["id"], state="working", mirror=False)
+    assert result["source"] == "declared"
+    assert (await presence.get_state(p["id"]))["source"] == "declared"
+
+
+@pytest.mark.asyncio
+async def test_source_is_stored_and_read_back(client, principal_maker):
+    p = await principal_maker()
+    await presence.set_state(
+        principal_id=p["id"], state="offline", source="timeout", mirror=False,
+    )
+    assert (await presence.get_state(p["id"]))["source"] == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_an_undeclared_principal_has_no_source(client, principal_maker):
+    p = await principal_maker()
+    assert (await presence.get_state(p["id"]))["source"] is None
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_source_is_refused_rather_than_stored(client, principal_maker):
+    p = await principal_maker()
+    with pytest.raises(ValueError):
+        await presence.set_state(
+            principal_id=p["id"], state="working", source="vibes", mirror=False,
+        )
+
+
+# ── the blocked turn ─────────────────────────────────────────────────────────
+
+@pytest.fixture
+def blocked_turn_calls(monkeypatch):
+    """Stand in for coordination.publish_blocked_message so these tests never
+    need a real relay -- same convention as workspace.py's `sandbox` fixture."""
+    calls = []
+
+    async def fake(**kwargs):
+        calls.append(kwargs)
+        return {"id": "fake-event-id"}
+
+    monkeypatch.setattr(coord, "publish_blocked_message", fake)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_transitioning_into_blocked_publishes_a_turn(
+    client, principal_maker, channel, blocked_turn_calls
+):
+    p = await principal_maker()
+    await presence.set_state(
+        principal_id=p["id"], channel_id=channel, state="blocked",
+        detail="waiting on a human review", mirror=False,
+    )
+    assert len(blocked_turn_calls) == 1
+    call = blocked_turn_calls[0]
+    assert call["state"] == "blocked"
+    assert call["blocking_reason"] == "waiting on a human review"
+    assert call["principal"]["id"] == p["id"]
+
+
+@pytest.mark.asyncio
+async def test_needs_review_also_publishes_a_turn(
+    client, principal_maker, channel, blocked_turn_calls
+):
+    p = await principal_maker()
+    await presence.set_state(
+        principal_id=p["id"], channel_id=channel, state="needs_review", mirror=False,
+    )
+    assert len(blocked_turn_calls) == 1
+    assert blocked_turn_calls[0]["state"] == "needs_review"
+
+
+@pytest.mark.asyncio
+async def test_a_routable_state_does_not_publish_a_turn(
+    client, principal_maker, channel, blocked_turn_calls
+):
+    p = await principal_maker()
+    await presence.set_state(
+        principal_id=p["id"], channel_id=channel, state="working", mirror=False,
+    )
+    assert blocked_turn_calls == []
+
+
+@pytest.mark.asyncio
+async def test_instance_wide_blocked_does_not_publish_a_turn(
+    client, principal_maker, blocked_turn_calls
+):
+    """There is no channel turn stream to put it in without a channel_id."""
+    p = await principal_maker()
+    await presence.set_state(principal_id=p["id"], state="blocked", mirror=False)
+    assert blocked_turn_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_publish_does_not_fail_the_state_change(
+    client, principal_maker, channel, monkeypatch
+):
+    async def boom(**kwargs):
+        raise RuntimeError("relay is down")
+
+    monkeypatch.setattr(coord, "publish_blocked_message", boom)
+    p = await principal_maker()
+    result = await presence.set_state(
+        principal_id=p["id"], channel_id=channel, state="blocked", mirror=False,
+    )
+    assert result["state"] == "blocked"
+    assert (await presence.get_state(p["id"], channel))["state"] == "blocked"

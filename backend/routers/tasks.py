@@ -212,7 +212,18 @@ async def submit_artifact(
     artifact_kind: str = Form("other", description="code|doc|data|eval|tool_output|other"),
     artifact_title: str = Form(..., min_length=1, max_length=200),
     content_text: str = Form("", max_length=100000),
-    content_hash: str = Form("", max_length=128, description="BLAKE3 hex of content"),
+    # Gap (b): content_hash is MANDATORY and verified server-side.
+    # An artifact with no hash is not bound to anything, so a receipt over
+    # it attests to nothing. Format is checked here and the value is
+    # recomputed from content_text below -- a format check alone would let a
+    # submitter paste any well-formed hash.
+    content_hash: str = Form(
+        ...,
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+        description="BLAKE3-256 hex of content_text — required, verified server-side",
+    ),
     agent: dict = Depends(get_agent),
 ):
     guild = await _get_guild(guild_slug)
@@ -229,6 +240,18 @@ async def submit_artifact(
             raise HTTPException(403, "You did not claim this task")
         if task["status"] not in ("claimed", "executing"):
             raise HTTPException(409, f"Task cannot be submitted from status={task['status']}")
+
+        # Gap (b): verify the declared hash actually matches the content.
+        from ..receipts import _blake3_hex
+
+        recomputed = _blake3_hex(content_text.encode())
+        if recomputed != content_hash:
+            raise HTTPException(
+                422,
+                "content_hash does not match content_text "
+                f"(declared={content_hash[:16]}… recomputed={recomputed[:16]}…) — "
+                "the artifact would not be cryptographically bound",
+            )
         artifact_id = secrets.token_hex(16)
         await db.execute(
             """INSERT INTO guild_artifacts (id, task_id, guild_id, agent_id, agent_name, kind, title, content_text, content_hash)

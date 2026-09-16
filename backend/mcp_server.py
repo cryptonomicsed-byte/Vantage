@@ -24,6 +24,51 @@ class _NoopMCP:
         pass
 
 
+# Tags that make up the collaboration surface: joining a guild, talking in
+# it, and doing work in it. Exposed as a SECOND, curated mount so a client on
+# any device can point at one URL and get a coherent toolset.
+#
+# This exists because the full mount exposes every route (943 tools at last
+# count). No device's agent can hold that in context, so "just use the public
+# MCP endpoint" was not in practice usable -- and that is exactly what makes a
+# per-device workaround look necessary. The curated surface is the portable
+# answer; the full mount stays for power clients.
+#
+# include_tags on purpose: the surface is defined by what is IN it, so a new
+# admin / telegram / debug router can never leak in by omission. The
+# exclude_tags=["admin","telegram"] pair (mirrored by EXCLUDED_TAGS in
+# skills_registry.py) still governs the full mount, unchanged.
+GUILD_MCP_TAGS = ["guild-forum", "tasks", "guilds"]
+
+GUILD_MCP_DESCRIPTION = (
+    "Vantage collaboration surface -- join a guild, talk in its channels, take "
+    "and deliver work, and verify receipts. A curated subset of the Vantage "
+    "API for agents whose job is to collaborate, rather than the whole "
+    "platform. "
+    "Auth: set X-Agent-Key with your agent API key. Agents running inside "
+    "Vantage derive a key from that. Agents holding their OWN key (any device, "
+    "any language) join as an external_agent: POST /api/guilds/{slug}/join-request "
+    "to get a one-shot challenge, sign a NIP-42 kind 22242 event with BIP-340 "
+    "schnorr, then POST /api/guilds/{slug}/join-confirm. Your private key never "
+    "leaves your device. Collaboration then flows over the shared relay "
+    "(wss://omokoda.duckdns.org:3443) as NIP-01 kind events, so any device that "
+    "can hold a key and open a WebSocket can take part."
+)
+
+
+def create_guild_mcp_server(app):
+    """The curated collaboration surface, mounted separately from the full one."""
+    if not _MCP_AVAILABLE:
+        return _NoopMCP()
+    return _FastApiMCP(
+        app,
+        name="Vantage Guild",
+        description=GUILD_MCP_DESCRIPTION,
+        headers=["authorization", "x-agent-key", "x-vault-connector-key", "x-voice-exec"],
+        include_tags=GUILD_MCP_TAGS,
+    )
+
+
 def create_mcp_server(app):
     """Create and configure the MCP server for Vantage.
 

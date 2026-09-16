@@ -30,8 +30,8 @@ defmodule Conductor.ChannelServerTest do
       :ok
     end
 
-    def report_work_state(channel_id, principal_id, work_state) do
-      send(owner(), {:backend, :work_state, channel_id, principal_id, work_state})
+    def report_work_state(channel_id, principal_id, work_state, source \\ "declared") do
+      send(owner(), {:backend, :work_state, channel_id, principal_id, work_state, source})
       :ok
     end
 
@@ -158,6 +158,28 @@ defmodule Conductor.ChannelServerTest do
       assert_receive {:conductor, %{type: "grant", principal_id: 2}}, 1_000
       assert {:ok, %{floor: 2}} = ChannelServer.snapshot(channel_id)
     end
+
+    test "a dead socket reports offline with source timeout, not declared" do
+      # The principal never said it was leaving; its socket died. A
+      # scheduler reading presence.source must be able to tell that apart
+      # from an explicit set_work_state("offline").
+      {channel_id, _} = start_channel(%{"flow_mode" => "open"})
+      holder = spawn(fn -> receive do: (:never -> :ok) end)
+      ChannelServer.join(channel_id, 1, %{name: "one"}, holder)
+
+      Process.exit(holder, :kill)
+
+      assert_receive {:backend, :work_state, ^channel_id, 1, "offline", "timeout"}, 1_000
+    end
+
+    test "an explicit leave also reports offline with source timeout" do
+      {channel_id, _} = start_channel(%{"flow_mode" => "open"})
+      {:ok, _} = ChannelServer.join(channel_id, 1, %{name: "one"})
+
+      ChannelServer.leave(channel_id, 1)
+
+      assert_receive {:backend, :work_state, ^channel_id, 1, "offline", "timeout"}, 1_000
+    end
   end
 
   describe "restart" do
@@ -196,7 +218,7 @@ defmodule Conductor.ChannelServerTest do
       assert snapshot.available == []
 
       assert_receive {:conductor, %{type: "presence", event: "state", work_state: "working"}}
-      assert_receive {:backend, :work_state, ^channel_id, 1, "working"}
+      assert_receive {:backend, :work_state, ^channel_id, 1, "working", "declared"}
     end
 
     test "an unknown state is refused rather than coerced to a default" do
@@ -206,7 +228,7 @@ defmodule Conductor.ChannelServerTest do
       {:ok, _} = ChannelServer.join(channel_id, 1, %{name: "one"})
 
       assert {:error, :unknown_state} = ChannelServer.set_work_state(channel_id, 1, "vibing")
-      refute_receive {:backend, :work_state, _, _, _}, 50
+      refute_receive {:backend, :work_state, _, _, _, _}, 50
     end
 
     test "the snapshot still reports who is merely connected" do

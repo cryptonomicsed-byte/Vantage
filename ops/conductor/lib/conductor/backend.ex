@@ -104,18 +104,25 @@ defmodule Conductor.Backend do
   end
 
   @doc """
-  Record a principal's declared work state.
+  Record a principal's work state.
 
   The Conductor holds the live copy; this is the durable one, and the
   backend is also what mirrors it onto the relay as a NIP-38 status — the
   Conductor cannot, because it holds no signing key.
+
+  `source` is "declared" (the default) when the principal said this itself
+  via the `set_work_state` socket op, or "timeout" when the Conductor is
+  forcing a principal offline because its socket went away — see
+  backend/presence.py's SOURCES for why that distinction is recorded rather
+  than collapsed.
   """
-  @spec report_work_state(integer(), integer(), String.t()) :: :ok
-  def report_work_state(channel_id, principal_id, work_state) do
+  @spec report_work_state(integer(), integer(), String.t(), String.t()) :: :ok
+  def report_work_state(channel_id, principal_id, work_state, source \\ "declared") do
     post("/api/conductor/presence", %{
       channel_id: channel_id,
       principal_id: principal_id,
-      work_state: work_state
+      work_state: work_state,
+      source: source
     })
 
     :ok

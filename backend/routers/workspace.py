@@ -104,28 +104,74 @@ async def workspace_status(agent: dict = Depends(get_agent)):
 
 @router.post("/clone")
 async def clone_repository(request: Request, agent: dict = Depends(get_agent)):
-    """Clone a public https repository into this agent's workspace.
+    """Check out a public https repository into this agent's workspace, on a
+    worktree branch scoped to this agent and task.
 
-    Shallow by default — full history is rarely what an agent needs and is much
-    slower on a large repo. Pass full_history=true when it is.
+    Two agents (or the same agent working two tasks) naming the same
+    repo_url each get their own directory and branch --
+    `agent/{agent_id}/task/{task_id}` -- off one shared bare mirror in the
+    sandbox, rather than either paying for a second full clone or, worse,
+    sharing one checkout whose branch a second clone would move out from
+    under the first. Pass task_id to keep two tasks against the same repo
+    from colliding; it defaults to "scratch" for one-off work.
     """
     body = await _body(request)
     repo_url = str(body.get("repo_url") or "").strip()
     if not repo_url:
         raise HTTPException(422, "repo_url is required")
 
-    result = await _sandbox("/clone", {
+    result = await _ensure_worktree(
+        agent, repo_url, body.get("dir"), body.get("task_id"), body.get("timeout_ms"),
+    )
+    logger.info("agent_id=%s cloned %s onto %s", agent["id"], repo_url, result.get("branch"))
+    return _relative(agent, result)
+
+
+@router.post("/cleanup")
+async def cleanup_workspace(request: Request, agent: dict = Depends(get_agent)):
+    """Prune a worktree this agent is done with.
+
+    Removing the worktree drops its checked-out files under this agent's
+    directory; the branch and the shared bare mirror stay in the sandbox, so
+    another agent's worktree on the same repo -- or this agent starting the
+    same task again later -- is unaffected.
+    """
+    body = await _body(request)
+    repo_url = str(body.get("repo_url") or "").strip()
+    if not repo_url:
+        raise HTTPException(422, "repo_url is required")
+
+    result = await _sandbox("/worktree/remove", {
         "repo_url": repo_url,
         "dir": _scoped(agent, body.get("dir") or _default_dir(repo_url)),
-        "full_history": bool(body.get("full_history")),
-        "timeout_ms": body.get("timeout_ms"),
     })
-    logger.info("agent_id=%s cloned %s", agent["id"], repo_url)
+    logger.info("agent_id=%s pruned worktree for %s", agent["id"], repo_url)
     return _relative(agent, result)
 
 
 def _default_dir(repo_url: str) -> str:
     return re.sub(r"\.git$", "", repo_url.rstrip("/")).split("/")[-1] or "repo"
+
+
+def _task_branch(agent: dict, task_id: Optional[str]) -> str:
+    """agent/{agent_id}/task/{task_id} -- unique per agent and task, so two
+    worktrees against the same shared mirror never point at the same branch
+    tip (see ops/code-sandbox/server.js's /worktree)."""
+    safe_task = re.sub(r"[^a-zA-Z0-9_-]", "_", str(task_id or "scratch"))[:60] or "scratch"
+    return f"agent/{agent['id']}/task/{safe_task}"
+
+
+async def _ensure_worktree(
+    agent: dict, repo_url: str, dir_: Optional[str], task_id: Optional[str],
+    timeout_ms,
+) -> dict:
+    branch = _task_branch(agent, task_id)
+    return await _sandbox("/worktree", {
+        "repo_url": repo_url,
+        "dir": _scoped(agent, dir_ or _default_dir(repo_url)),
+        "branch": branch,
+        "timeout_ms": timeout_ms,
+    })
 
 
 @router.post("/exec")

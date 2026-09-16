@@ -25,7 +25,7 @@ socket.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Literal, Optional
 
 import aiosqlite
 
@@ -52,7 +52,25 @@ STATES = ["available", "thinking", "working", "blocked", "needs_review", "offlin
 #: both mean somebody else has to move first.
 ROUTABLE = {"available", "thinking"}
 
+#: The subset of ROUTABLE's complement that is worth a channel turn over --
+#: not `offline` (a departed principal isn't asking anyone to wait on it,
+#: presence-timeout already covers that via `source`).
+BLOCKING_STATES = {"blocked", "needs_review"}
+
 DEFAULT_STATE = "available"
+
+# Where a state came from -- distinct from what the state *is*, because a
+# scheduler that only sees "blocked" cannot tell an agent that said so itself
+# from one the Conductor gave up waiting on. See the module docstring.
+#   * declared -- the principal itself set this (POST /api/presence or the
+#     Conductor's `set_work_state` socket op, both explicit).
+#   * observed -- inferred from socket activity rather than said outright.
+#   * timeout  -- the Conductor forced this because the socket went away
+#     (disconnect, or no heartbeat within its own grace window) -- the
+#     principal never said anything.
+SOURCES = ["declared", "observed", "timeout"]
+PresenceSource = Literal["declared", "observed", "timeout"]
+DEFAULT_SOURCE: PresenceSource = "declared"
 
 
 async def init_presence_db() -> None:
@@ -64,10 +82,19 @@ async def init_presence_db() -> None:
                 state TEXT NOT NULL DEFAULT 'available',
                 detail TEXT DEFAULT '',
                 work_ref TEXT DEFAULT '',
+                source TEXT NOT NULL DEFAULT 'declared',
                 updated_at TEXT DEFAULT (datetime('now')),
                 PRIMARY KEY (principal_id, channel_id)
             )
         """)
+        # Added as an ALTER so an existing deployment picks it up without a
+        # migration step, same convention as guild_channels' repo_* columns.
+        try:
+            await db.execute(
+                "ALTER TABLE principal_presence ADD COLUMN source TEXT NOT NULL DEFAULT 'declared'"
+            )
+        except Exception:
+            pass  # already present
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_presence_channel ON principal_presence(channel_id, state)"
         )
@@ -78,18 +105,30 @@ def is_valid(state: Optional[str]) -> bool:
     return state in STATES
 
 
+def is_valid_source(source: Optional[str]) -> bool:
+    return source in SOURCES
+
+
 async def set_state(
     *, principal_id: int, state: str, channel_id: Optional[int] = None,
     detail: str = "", work_ref: str = "", mirror: bool = True,
+    source: str = DEFAULT_SOURCE,
 ) -> dict:
     """Record a work state, and mirror it to the relay as a NIP-38 status.
 
     `channel_id` of None is the principal's instance-wide state; a channel id
     scopes it to one room, because an agent can be free in one workspace and
     blocked in another and collapsing those loses the only useful part.
+
+    `source` records how this state was learned -- see SOURCES. Every caller
+    that lets an agent explicitly say what it's doing should leave it at the
+    "declared" default; only the Conductor, forcing a disconnected principal
+    offline, should pass "timeout".
     """
     if not is_valid(state):
         raise ValueError(f"unknown presence state: {state!r} (use one of {', '.join(STATES)})")
+    if not is_valid_source(source):
+        raise ValueError(f"unknown presence source: {source!r} (use one of {', '.join(SOURCES)})")
 
     async with get_db() as db:
         # channel_id is part of the primary key and may be NULL, which SQLite
@@ -99,34 +138,72 @@ async def set_state(
         if channel_id is None:
             cur = await db.execute(
                 """UPDATE principal_presence
-                      SET state=?, detail=?, work_ref=?, updated_at=datetime('now')
+                      SET state=?, detail=?, work_ref=?, source=?, updated_at=datetime('now')
                     WHERE principal_id=? AND channel_id IS NULL""",
-                (state, detail[:200], work_ref[:120], principal_id),
+                (state, detail[:200], work_ref[:120], source, principal_id),
             )
             if not cur.rowcount:
                 await db.execute(
                     """INSERT INTO principal_presence
-                         (principal_id, channel_id, state, detail, work_ref)
-                       VALUES (?,NULL,?,?,?)""",
-                    (principal_id, state, detail[:200], work_ref[:120]),
+                         (principal_id, channel_id, state, detail, work_ref, source)
+                       VALUES (?,NULL,?,?,?,?)""",
+                    (principal_id, state, detail[:200], work_ref[:120], source),
                 )
         else:
             await db.execute(
                 """INSERT INTO principal_presence
-                     (principal_id, channel_id, state, detail, work_ref)
-                   VALUES (?,?,?,?,?)
+                     (principal_id, channel_id, state, detail, work_ref, source)
+                   VALUES (?,?,?,?,?,?)
                    ON CONFLICT(principal_id, channel_id) DO UPDATE SET
                      state=excluded.state, detail=excluded.detail,
-                     work_ref=excluded.work_ref, updated_at=datetime('now')""",
-                (principal_id, channel_id, state, detail[:200], work_ref[:120]),
+                     work_ref=excluded.work_ref, source=excluded.source,
+                     updated_at=datetime('now')""",
+                (principal_id, channel_id, state, detail[:200], work_ref[:120], source),
             )
         await db.commit()
 
     if mirror:
         await _mirror_to_relay(principal_id, state, detail, work_ref)
+    if channel_id is not None and state in BLOCKING_STATES:
+        await _publish_blocked_turn(principal_id, channel_id, state, detail)
 
     return {"principal_id": principal_id, "channel_id": channel_id, "state": state,
-            "detail": detail, "work_ref": work_ref, "routable": state in ROUTABLE}
+            "detail": detail, "work_ref": work_ref, "routable": state in ROUTABLE,
+            "source": source}
+
+
+async def _publish_blocked_turn(
+    principal_id: int, channel_id: int, state: str, blocking_reason: str,
+) -> None:
+    """Tell the channel's turn stream this principal just became unroutable.
+
+    A coordinator watching the transcript (rather than polling presence
+    separately) sees a `vt=blocked` turn the moment this happens, signed with
+    the instance key so it cannot be spoofed by another relay member -- see
+    coordination.publish_blocked_message. Never raises: the durable presence
+    row above is already written regardless, and GET /api/presence/{agent_id}
+    still answers correctly even if this best-effort publish is skipped.
+    """
+    try:
+        from . import coordination as coord
+
+        principal = await coord.get_principal(principal_id)
+        channel = await coord.get_channel_by_id(channel_id)
+        if principal is None or channel is None:
+            return
+        async with get_db() as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT slug FROM guilds WHERE id=?", (channel["guild_id"],))
+            guild_row = await cur.fetchone()
+        if guild_row is None:
+            return
+        await coord.publish_blocked_message(
+            channel=channel, guild_slug=dict(guild_row)["slug"], principal=principal,
+            state=state, blocking_reason=blocking_reason,
+        )
+    except Exception as exc:
+        logger.debug("presence: blocked turn skipped for principal=%s channel=%s: %s",
+                     principal_id, channel_id, exc)
 
 
 async def _mirror_to_relay(principal_id: int, state: str, detail: str, work_ref: str) -> None:
@@ -188,11 +265,12 @@ async def get_state(principal_id: int, channel_id: Optional[int] = None) -> dict
             row = await cur.fetchone()
     if row is None:
         return {"principal_id": principal_id, "state": DEFAULT_STATE, "detail": "",
-                "work_ref": "", "routable": True, "declared": False}
+                "work_ref": "", "routable": True, "declared": False, "source": None}
     row = dict(row)
     return {"principal_id": principal_id, "state": row["state"], "detail": row["detail"] or "",
             "work_ref": row["work_ref"] or "", "routable": row["state"] in ROUTABLE,
-            "declared": True, "updated_at": row["updated_at"]}
+            "declared": True, "updated_at": row["updated_at"],
+            "source": row["source"] or DEFAULT_SOURCE}
 
 
 async def channel_presence(channel_id: int) -> list[dict]:

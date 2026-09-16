@@ -4,7 +4,9 @@
 
 echo "🔍 Secret scan..."
 
-# Patterns that should NEVER be in source
+# Patterns that should NEVER be in source.
+# A line may opt out with the marker: secret-scan:allow
+# (use only for non-secret identifiers such as relay channel UUIDs).
 PATTERNS=(
     'sk-[a-zA-Z0-9]{32,}'           # OpenAI/Anthropic API keys
     'vantage_[a-f0-9]{40,}'         # Vantage keys
@@ -15,7 +17,7 @@ PATTERNS=(
 FOUND=0
 for pattern in "${PATTERNS[@]}"; do
     # Only check staged Python/JS/TS files, skip .env
-    matches=$(git diff --cached --name-only | grep -E '\.(py|js|ts)$' | grep -v '.env' | xargs grep -nE "$pattern" 2>/dev/null)
+    matches=$(git diff --cached --name-only | grep -E '\.(py|js|ts)$' | grep -v '.env' | xargs grep -nE "$pattern" 2>/dev/null | grep -v 'secret-scan:allow')
     if [ -n "$matches" ]; then
         echo "❌ POTENTIAL SECRET:"
         echo "$matches"

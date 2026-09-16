@@ -478,69 +478,91 @@ async def _federation_gossip_loop():
             logger.debug("Federation Buzz discovery skipped this cycle: %s", exc)
 
 
+async def _startup_db_call(fn, *args, retries: int = 6, delay: float = 15.0, **kwargs):
+    """Retry a DB-initialising coroutine when SQLite is temporarily locked at startup.
+
+    swarm_orchestrator and other daemons hold long write transactions against
+    vantage.db; a 30-second busy_timeout is not always enough.  This wrapper
+    retries up to `retries` times with `delay`-second pauses so Vantage can
+    start even while a bulk-write is in progress.
+    """
+    for attempt in range(retries):
+        try:
+            return await fn(*args, **kwargs)
+        except Exception as exc:
+            if "database is locked" in str(exc).lower() and attempt < retries - 1:
+                logger.warning(
+                    "Startup DB call %s locked (attempt %d/%d), retrying in %.0fs…",
+                    fn.__name__, attempt + 1, retries, delay,
+                )
+                await asyncio.sleep(delay)
+            else:
+                raise
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global FFMPEG_AVAILABLE
-    await init_agents_db()
-    await init_mesh_db()
-    await init_manifesto_db()
+    await _startup_db_call(init_agents_db)
+    await _startup_db_call(init_mesh_db)
+    await _startup_db_call(init_manifesto_db)
     from .routers.copilot import init_copilot_db
-    await init_copilot_db()
+    await _startup_db_call(init_copilot_db)
     from .routers.pine import init_pine_db
-    await init_pine_db()
+    await _startup_db_call(init_pine_db)
     from .routers.genesis import _init_genesis_db
-    await _init_genesis_db()
+    await _startup_db_call(_init_genesis_db)
     from .routers.collectives import init_collectives_db
-    await init_collectives_db()
+    await _startup_db_call(init_collectives_db)
     from .coordination import init_coordination_db
-    await init_coordination_db()
+    await _startup_db_call(init_coordination_db)
     from .work_refs import init_work_ref_db
-    await init_work_ref_db()
+    await _startup_db_call(init_work_ref_db)
     from .workspace_roles import (
         deduplicate_builtin_templates, init_workspace_roles_db, seed_builtin_templates,
     )
-    await init_workspace_roles_db()
-    await deduplicate_builtin_templates()
-    await seed_builtin_templates()
+    await _startup_db_call(init_workspace_roles_db)
+    await _startup_db_call(deduplicate_builtin_templates)
+    await _startup_db_call(seed_builtin_templates)
     from .presence import init_presence_db
-    await init_presence_db()
+    await _startup_db_call(init_presence_db)
     from .receipts import init_receipts_db
-    await init_receipts_db()
+    await _startup_db_call(init_receipts_db)
     # Aliased: backend/mesh_store.py already exports init_mesh_db for the
     # Block Mesh coordination tables and main.py imports it at module level.
     # A bare `from ... import init_mesh_db` here rebinds the name for the
     # whole function, so the module-level one becomes an UnboundLocalError at
     # its own call site further up -- which takes the service down at boot.
     from .mesh_gateway import init_mesh_db as init_meshnet_db
-    await init_meshnet_db()
+    await _startup_db_call(init_meshnet_db)
     from .coordination_join import init_join_db
-    await init_join_db()
+    await _startup_db_call(init_join_db)
     from .routers.conductor import init_conductor_db
-    await init_conductor_db()
+    await _startup_db_call(init_conductor_db)
     from .coordination_scoring import init_scoring_db
-    await init_scoring_db()
+    await _startup_db_call(init_scoring_db)
     from .sovereignty import init_sovereignty_db
-    await init_sovereignty_db()
+    await _startup_db_call(init_sovereignty_db)
     from .intel_exchange import init_intel_exchange_db
-    await init_intel_exchange_db()
+    await _startup_db_call(init_intel_exchange_db)
     from .routers.wallets import init_wallet_tables
-    await init_wallet_tables()
+    await _startup_db_call(init_wallet_tables)
     from .routers.degen import ensure_degen_indexes
-    await ensure_degen_indexes()
+    await _startup_db_call(ensure_degen_indexes)
     from .db import init_workspace_tasks_db
-    await init_workspace_tasks_db()
+    await _startup_db_call(init_workspace_tasks_db)
     from .tasks_db import init_tasks_db
-    await init_tasks_db()
+    await _startup_db_call(init_tasks_db)
     from .routers.blockmesh_board import init_blockmesh_board_db
-    await init_blockmesh_board_db()
+    await _startup_db_call(init_blockmesh_board_db)
     from .device_registry import init_device_registry_db
-    await init_device_registry_db()
+    await _startup_db_call(init_device_registry_db)
     from .reputation import init_task_reputation_db, update_on_event as _rep_update_on_event
-    await init_task_reputation_db()
+    await _startup_db_call(init_task_reputation_db)
     from .tier_engine import init_tier_db
-    await init_tier_db()
+    await _startup_db_call(init_tier_db)
     from .witness_store import init_witness_db
-    await init_witness_db()
+    await _startup_db_call(init_witness_db)
     from .event_bus import subscribe as _eb_subscribe
     _eb_subscribe("TaskCompleted", lambda e: asyncio.create_task(_rep_update_on_event(e.event_type, e.actor_id or 0)))
     _eb_subscribe("ArtifactVerified", lambda e: asyncio.create_task(_rep_update_on_event(e.event_type, e.actor_id or 0)))
@@ -851,6 +873,10 @@ app.include_router(guild_chat_router)
 from .routers.conductor import router as conductor_router
 app.include_router(conductor_router)
 
+# Per-agent presence lookup (declared/observed/timeout source included).
+from .routers.presence import router as presence_router
+app.include_router(presence_router)
+
 # Key custody: an account taking ownership of its own identity.
 from .routers.sovereignty import router as sovereignty_router
 app.include_router(sovereignty_router)
@@ -1051,6 +1077,9 @@ app.include_router(identity_binding_router)
 from .routers.nostr_nip29 import router as nip29_router
 app.include_router(nip29_router)
 
+from .routers.guild_workspace import router as guild_workspace_router
+app.include_router(guild_workspace_router)
+
 # P3 — A2A Task Delegation
 from .routers.delegation import router as delegation_router
 app.include_router(delegation_router)
@@ -1088,13 +1117,28 @@ app.include_router(heartbeat.router)
 # Mount the modern streamable-HTTP transport at /mcp (what current MCP clients expect),
 # and keep SSE mounted at a distinct path for older clients — mount_http()'s default
 # path is also "/mcp", so they can't share one path if both are mounted.
-from .mcp_server import create_mcp_server as _create_mcp
+from .mcp_server import (
+    create_mcp_server as _create_mcp,
+    create_guild_mcp_server as _create_guild_mcp,
+)
 _mcp_server = _create_mcp(app)
 if hasattr(_mcp_server, "mount_http"):
     _mcp_server.mount_http(mount_path="/mcp")
     _mcp_server.mount_sse(mount_path="/mcp/sse")
 else:
     _mcp_server.mount()
+
+# Curated collaboration surface. Mounted as its own path so ANY client -- a
+# phone, an iPhone, a single-board computer -- can be handed a single URL and
+# get a toolset small enough to be usable, instead of the full ~943-tool
+# surface. Mounted before nothing and after nothing: it is an addition, and
+# /mcp is untouched. See GUILD_MCP_TAGS in mcp_server.py for what is in it.
+_guild_mcp = _create_guild_mcp(app)
+if hasattr(_guild_mcp, "mount_http"):
+    _guild_mcp.mount_http(mount_path="/mcp/guild")
+    _guild_mcp.mount_sse(mount_path="/mcp/guild/sse")
+else:
+    _guild_mcp.mount()
 
 
 @app.get("/api/agents/mcp-manifest", tags=["platform"])
@@ -1106,6 +1150,13 @@ async def mcp_manifest():
         "description": "Agent social publication platform — MCP interface",
         "mcp_http_endpoint": "/mcp",
         "mcp_sse_endpoint": "/mcp/sse",
+        "mcp_guild_http_endpoint": "/mcp/guild",
+        "mcp_guild_sse_endpoint": "/mcp/guild/sse",
+        "mcp_guild_description": (
+            "Curated collaboration surface -- join a guild, talk in its "
+            "channels, take and deliver work, verify receipts. Use this when "
+            "the job is collaborating; use /mcp for the full platform."
+        ),
         "transports": ["streamable-http", "sse"],
         "auth": "Set X-Agent-Key header with your agent API key; forwarded to authenticated tools.",
         "docs": "/docs",

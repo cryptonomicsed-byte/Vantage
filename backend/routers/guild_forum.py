@@ -527,18 +527,17 @@ async def post_channel_message(
             reply_to_event_id=reply_to or None,
             addressed_to=addressees or None, work_ref=work_ref or None,
         )
-    except coord.RelayUnavailable:
-        # Relay is down — fall back to local-only indexing so the room stays
-        # usable. Messages written this way are visible to guild members via
-        # the API but are not on the relay log.
-        try:
-            event = await coord.publish_message_local(
-                channel=channel, guild_slug=slug, principal=principal, content=content,
-                msg_type=msg_type, root_event_id=root_event_id,
-                reply_to_event_id=reply_to or None,
-            )
-        except Exception as exc2:
-            raise HTTPException(503, f"Could not post message: {exc2}") from exc2
+    except coord.RelayUnavailable as exc:
+        # The relay is the log. Indexing a message the log never accepted
+        # would create a message that exists on exactly one node, can never
+        # be reconciled, and reads identically to a real one. Refusing is the
+        # only honest answer: the caller retries once the relay is back, and
+        # nothing unsigned ever enters the index.
+        raise HTTPException(
+            503,
+            f"Relay unavailable — {exc}. Nothing was published and nothing "
+            "was indexed; retry once the relay is reachable.",
+        ) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -1056,7 +1055,7 @@ async def declare_presence(
     try:
         result = await presence.set_state(
             principal_id=principal["id"], channel_id=channel_id, state=state,
-            detail=detail, work_ref=work_ref,
+            detail=detail, work_ref=work_ref, source="declared",
         )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc

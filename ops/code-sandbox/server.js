@@ -48,6 +48,56 @@ function confine(relative = '.') {
   return target;
 }
 
+/**
+ * The one shared bare mirror for a given https repo URL, used by /worktree
+ * so N agents cloning the same repo pay for the network fetch once. Lives
+ * under _shared/, outside every agent's own confine()d directory -- Vantage
+ * never lets a caller name a path outside its own agent-{id}-{name}/ prefix
+ * (see _scoped() in workspace.py), so this is reachable only through
+ * /worktree and /worktree/remove, never through /read, /write, /list or the
+ * plain /clone.
+ */
+function sharedRepoDir(repoUrl) {
+  const slug = repoUrl
+    .replace(/^https?:\/\//, '')
+    .replace(/\.git$/, '')
+    .replace(/[^a-zA-Z0-9_-]+/g, '_');
+  return confine(path.join('_shared', `${slug}.git`));
+}
+
+/**
+ * Is `target` a worktree currently registered to this shared mirror?
+ *
+ * git refuses to add a worktree over an existing directory, so a second task
+ * claiming the same dir used to fail with exit 128 and leave the PREVIOUS
+ * task's branch checked out. Before reusing a path we have to know whether it
+ * is ours to unregister, or somebody's actual files.
+ */
+async function isRegisteredWorktree(shared, target, timeoutMs) {
+  const res = await runCommand({
+    command: 'git',
+    args: ['--git-dir', shared, 'worktree', 'list', '--porcelain'],
+    cwd: confine('.'),
+    timeoutMs: Math.min(timeoutMs || 30_000, MAX_TIMEOUT_MS),
+  });
+  if (res.exit_code !== 0) return false;
+  const want = path.resolve(target);
+  return String(res.stdout || '')
+    .split('\n')
+    .filter((line) => line.startsWith('worktree '))
+    .map((line) => path.resolve(line.slice('worktree '.length).trim()))
+    .some((p) => p === want);
+}
+
+async function exists(target) {
+  try {
+    await fs.access(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Environment variables inherited from the container.
 //
 // Commands get a deliberately minimal environment rather than the container's,
@@ -201,6 +251,151 @@ const routes = {
       args: ['clone', ...depth, body.repo_url, target],
       cwd: confine('.'),
       timeoutMs: Math.min(parseInt(body.timeout_ms || 300_000, 10), MAX_TIMEOUT_MS),
+    });
+    return { ...result, dir: path.relative(confine('.'), target) || '.' };
+  },
+
+  // POST /worktree and /worktree/remove -- the multi-agent form of /clone.
+  //
+  // Vantage already confines every agent to its own directory (dir is always
+  // caller-agent-prefixed by workspace.py, never by the caller itself), so
+  // two agents cloning the same repo were never at risk of clobbering each
+  // other's files -- but they were each paying for a full clone of the same
+  // history, and there was no way to tell "agent 3's checkout of task 7" from
+  // "agent 3's checkout of task 8" apart from the directory name. A worktree
+  // fixes both: one shared bare mirror of the repo's (public, https-only)
+  // object store under _shared/, and a cheap `git worktree add` per
+  // agent+task pointing a dedicated branch at it. Sharing the object store is
+  // safe -- it's exactly the history `git clone` would hand any caller of the
+  // same https URL anyway, nothing agent-specific lives in it.
+  'POST /worktree': async (body) => {
+    if (!body.repo_url) throw new Error('repo_url is required');
+    if (!/^https:\/\//.test(body.repo_url)) {
+      throw new Error('repo_url must be an https:// URL');
+    }
+    if (!body.branch) throw new Error('branch is required');
+    const dir = body.dir || body.repo_url.replace(/\.git$/, '').split('/').pop();
+    const target = confine(dir);
+    const shared = sharedRepoDir(body.repo_url);
+    const timeoutMs = Math.min(parseInt(body.timeout_ms || 300_000, 10), MAX_TIMEOUT_MS);
+
+    let result;
+    if (await exists(shared)) {
+      // Already mirrored by some earlier clone/worktree call (this agent's or
+      // another's) -- refresh it rather than paying for a second full clone.
+      result = await runCommand({
+        command: 'git', args: ['--git-dir', shared, 'fetch', 'origin', '--prune'],
+        cwd: confine('.'), timeoutMs,
+      });
+    } else {
+      await fs.mkdir(path.dirname(shared), { recursive: true });
+      result = await runCommand({
+        command: 'git', args: ['clone', '--bare', body.repo_url, shared],
+        cwd: confine('.'), timeoutMs,
+      });
+    }
+    if (result.exit_code !== 0) {
+      return { ...result, dir: path.relative(confine('.'), target) || '.', branch: body.branch };
+    }
+
+    const dirRelative = path.relative(confine('.'), target) || '.';
+
+    // git refuses to add a worktree over an existing directory. Reusing a dir
+    // for a NEW task used to fail here with exit 128 -- and the failed call
+    // still reported body.branch, so the caller believed it was on the new
+    // branch while the tree held the previous task's checkout. Reconcile the
+    // path before adding.
+    let relocated = false;
+    if (await exists(target)) {
+      if (!(await isRegisteredWorktree(shared, target, timeoutMs))) {
+        // Not ours: a plain /clone, or files this agent wrote by hand.
+        // Deleting it could destroy uncommitted work, so refuse and say so.
+        return {
+          exit_code: 128,
+          stdout: '',
+          stderr:
+            `${dirRelative} already exists and is not a worktree of this mirror. ` +
+            'Refusing to delete it -- remove it first if you did not mean to keep it.',
+          dir: dirRelative,
+          branch: body.branch,
+          relocated: false,
+          refused: true,
+        };
+      }
+      await runCommand({
+        command: 'git', args: ['--git-dir', shared, 'worktree', 'remove', '--force', target],
+        cwd: confine('.'), timeoutMs,
+      });
+      await runCommand({
+        command: 'git', args: ['--git-dir', shared, 'worktree', 'prune'],
+        cwd: confine('.'), timeoutMs: 30_000,
+      });
+      // Same task re-claiming its own dir, or a new task taking it over.
+      // Nothing here is committed yet, but it is all in the shared object
+      // store, so dropping the directory loses no history.
+      if (await exists(target)) await fs.rm(target, { recursive: true, force: true });
+      relocated = true;
+    }
+
+    const branchExists = await runCommand({
+      command: 'git', args: ['--git-dir', shared, 'rev-parse', '--verify', '--quiet', body.branch],
+      cwd: confine('.'), timeoutMs: 10_000,
+    });
+    const worktreeArgs = branchExists.exit_code === 0
+      ? ['--git-dir', shared, 'worktree', 'add', '--force', target, body.branch]
+      : ['--git-dir', shared, 'worktree', 'add', '--force', '-b', body.branch, target, 'HEAD'];
+
+    result = await runCommand({ command: 'git', args: worktreeArgs, cwd: confine('.'), timeoutMs });
+    if (result.exit_code !== 0) {
+      return { ...result, dir: dirRelative, branch: body.branch, relocated };
+    }
+
+    // Report the branch that is ACTUALLY checked out, not the one requested.
+    const head = await runCommand({
+      command: 'git', args: ['-C', target, 'rev-parse', '--abbrev-ref', 'HEAD'],
+      cwd: confine('.'), timeoutMs: 10_000,
+    });
+    const actualBranch = head.exit_code === 0 ? String(head.stdout).trim() : body.branch;
+    return { ...result, dir: dirRelative, branch: actualBranch, relocated };
+  },
+
+  // POST /worktree/prune -- explicit orphan cleanup, for task close.
+  // The spec is that a closed task leaves no worktree behind; because a
+  // worktree is only unregistered by an explicit call, that has to be
+  // reachable rather than assumed.
+  'POST /worktree/prune': async (body) => {
+    if (!body.repo_url) throw new Error('repo_url is required');
+    const shared = sharedRepoDir(body.repo_url);
+    if (!(await exists(shared))) {
+      return { pruned: false, reason: 'no shared mirror for that repo_url' };
+    }
+    const prune = await runCommand({
+      command: 'git', args: ['--git-dir', shared, 'worktree', 'prune', '--expire', 'now'],
+      cwd: confine('.'), timeoutMs: 60_000,
+    });
+    const list = await runCommand({
+      command: 'git', args: ['--git-dir', shared, 'worktree', 'list', '--porcelain'],
+      cwd: confine('.'), timeoutMs: 30_000,
+    });
+    return {
+      pruned: prune.exit_code === 0,
+      stdout: prune.stdout,
+      stderr: prune.stderr,
+      worktrees: String(list.stdout || '')
+        .split('\n')
+        .filter((line) => line.startsWith('worktree '))
+        .map((line) => line.slice('worktree '.length).trim()),
+    };
+  },
+
+  'POST /worktree/remove': async (body) => {
+    if (!body.repo_url) throw new Error('repo_url is required');
+    if (!body.dir) throw new Error('dir is required');
+    const shared = sharedRepoDir(body.repo_url);
+    const target = confine(body.dir);
+    const result = await runCommand({
+      command: 'git', args: ['--git-dir', shared, 'worktree', 'remove', '--force', target],
+      cwd: confine('.'), timeoutMs: 60_000,
     });
     return { ...result, dir: path.relative(confine('.'), target) || '.' };
   },

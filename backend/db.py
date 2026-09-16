@@ -35,7 +35,7 @@ _DB_CONN_LIMIT = asyncio.Semaphore(8)
 async def get_db():
     async with _DB_CONN_LIMIT:
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("PRAGMA busy_timeout=30000")
+            await db.execute("PRAGMA busy_timeout=90000")
             yield db
 
 
@@ -55,7 +55,7 @@ async def connect_bounded():
     await _DB_CONN_LIMIT.acquire()
     try:
         conn = await aiosqlite.connect(DB_PATH)
-        await conn.execute("PRAGMA busy_timeout=30000")
+        await conn.execute("PRAGMA busy_timeout=90000")
     except BaseException:
         _DB_CONN_LIMIT.release()
         raise

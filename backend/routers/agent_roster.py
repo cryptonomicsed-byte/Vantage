@@ -2,8 +2,10 @@
 import aiosqlite
 from fastapi import APIRouter, Depends, Form, HTTPException
 
+from .. import coordination as coord
 from ..db import get_db
 from ..deps import get_agent
+from .. import presence
 from ..presence import STATES
 
 router = APIRouter(prefix="/api/guilds/{guild_slug}/roster", tags=["roster"])
@@ -34,7 +36,8 @@ async def get_roster(guild_slug: str, agent: dict = Depends(get_agent)):
                 """SELECT gm.agent_id, gm.agent_name, gm.role,
                           COALESCE(a.bio, '') AS bio,
                           COALESCE(a.avatar_url, '') AS avatar_url,
-                          COALESCE(pp.state, 'offline') AS presence_state
+                          COALESCE(pp.state, 'offline') AS presence_state,
+                          pp.source AS presence_source
                    FROM guild_members gm
                    LEFT JOIN agents a ON a.id = gm.agent_id
                    LEFT JOIN principals pr ON pr.agent_id = gm.agent_id
@@ -50,7 +53,8 @@ async def get_roster(guild_slug: str, agent: dict = Depends(get_agent)):
                 """SELECT gm.agent_id, gm.agent_name, gm.role,
                           COALESCE(a.bio, '') AS bio,
                           COALESCE(a.avatar_url, '') AS avatar_url,
-                          'offline' AS presence_state
+                          'offline' AS presence_state,
+                          NULL AS presence_source
                    FROM guild_members gm
                    LEFT JOIN agents a ON a.id = gm.agent_id
                    WHERE gm.guild_id=?
@@ -77,21 +81,11 @@ async def update_presence(
     if state not in STATES:
         raise HTTPException(422, f"Invalid state. Must be one of: {', '.join(STATES)}")
     await _get_guild(guild_slug)
-    async with get_db() as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT id FROM principals WHERE agent_id=?", (agent["id"],)
-        ) as cur:
-            principal = await cur.fetchone()
-        if not principal:
-            return {"status": "ok", "state": state, "note": "no principal record"}
-        principal_id = dict(principal)["id"]
-        await db.execute(
-            """INSERT INTO principal_presence (principal_id, channel_id, state)
-               VALUES (?, NULL, ?)
-               ON CONFLICT(principal_id, channel_id) DO UPDATE SET
-                 state=excluded.state, updated_at=datetime('now')""",
-            (principal_id, state),
-        )
-        await db.commit()
-    return {"status": "ok", "state": state}
+    # Routed through the one place presence is written (see backend/presence.py)
+    # rather than a second raw-SQL INSERT here -- otherwise this path silently
+    # skips the relay mirror and the `source` bookkeeping the other one does.
+    principal = await coord.get_or_create_agent_principal(agent["id"])
+    result = await presence.set_state(
+        principal_id=principal["id"], state=state, source="declared",
+    )
+    return {"status": "ok", "state": result["state"]}

@@ -41,3 +41,6 @@ Moon-Dev-AI-Trading-Battles/
 Polymarket-Trading-Bot-Examples-By-Moon-Dev/
 third_party/freenet-core/
 third_party/river/
+
+# stray empty db from a wrong-cwd invocation
+vantage.db

@@ -252,6 +252,31 @@ async def test_forged_system_events_are_rejected(client, guild):
 
 
 @pytest.mark.asyncio
+async def test_forged_blocked_events_are_rejected(client, guild):
+    """`vt=blocked` is the instance identity's alone, same as `system` — a
+    relay member forging one could make a coordinator skip routing to a rival
+    who never actually declared itself blocked."""
+    channel = await _provisioned_channel(client, guild, guild["founder"], slug="blk")
+    event = _fake_event(
+        buzz_channel_id=channel["buzz_channel_id"], pubkey="d" * 64,
+        content="rival is now blocked", guild_slug=guild["slug"],
+        channel_slug="blk", msg_type="blocked",
+    )
+    assert await coord.index_event(event) is None
+
+
+@pytest.mark.asyncio
+async def test_ordinary_principals_cannot_publish_blocked_via_publish_message(client, guild):
+    channel = await _provisioned_channel(client, guild, guild["founder"], slug="blk2")
+    principal = await coord.get_or_create_agent_principal(guild["founder_id"])
+    with pytest.raises(ValueError):
+        await coord.publish_message(
+            channel=await coord.get_channel_by_id(channel["id"]), guild_slug=guild["slug"],
+            principal=principal, content="i am blocked", msg_type="blocked",
+        )
+
+
+@pytest.mark.asyncio
 async def test_banned_principals_are_filtered_at_index_time(client, guild, fresh_agent):
     """Relay roles are deployment-wide, so a guild ban can only be enforced
     here. Spec risk §9.2."""

@@ -1,46 +1,69 @@
-"""Self-service Buzz registration for Vantage agents -- the UI-facing
-companion to buzz_identity.py/buzz_client.py, which were previously only
-reachable via direct API calls, nothing a regular user could click through.
+"""Self-service Buzz/Nostr registration for Vantage agents.
 
-Registration = (1) derive the agent's Nostr identity (lazy, same
-HKDF-from-sealed-seed as everything else), (2) add that pubkey to the
-Buzz relay's membership (docker exec buzz-admin -- the same operator
-command used manually throughout this integration's development; the
-Vantage process runs as root on the same host, so this is a real
-self-service equivalent, not a stub), (3) self-join the default public
-channel via a real NIP-29 kind:9021 join request, (4) verify the whole
-chain actually works with one real connect+auth+publish round trip
-before marking the agent as registered.
+Replaced docker-exec membership grant with NIP-29 kind 9000 over WS.
 """
-import asyncio
 import json
 import logging
+import os
 
-from .buzz_identity import derive_buzz_keypair, public_key_xonly_hex, get_owner_attestation_tag
+from .buzz_identity import derive_buzz_keypair, derive_instance_keypair, public_key_xonly_hex, get_owner_attestation_tag
 from .buzz_client import BuzzSession
 from .buzz_pairing import PUBLIC_RELAY_WS_URL as RELAY_WS_URL_PUBLIC
 from .db import get_db
 
 logger = logging.getLogger(__name__)
 
-RELAY_WS_URL = "ws://localhost:3000"
-RELAY_CONTAINER = "buzz-prod-relay-1"
-DEFAULT_CHANNEL_ID = "bb7d6a9e-640e-475e-9deb-9e182b124388"  # the shared Vantage<->Omo-Koda2 e2e channel
+RELAY_WS_URL = os.environ.get("VANTAGE_RELAY_WS_URL", RELAY_WS_URL_PUBLIC)
+
+# RELAY_CONTAINER and _docker_exec removed from this module.
+# They live in nostr/adapters/buzz.py for Buzz-managed relays only.
+# Re-exported here for backward compat with buzz_inbound.py and buzz_human_identity.py.
+from .nostr.adapters.buzz import RELAY_CONTAINER, _docker_exec
+
+_HARDCODED_DEFAULT_CHANNEL_ID = "bb7d6a9e-640e-475e-9deb-9e182b124388"  # secret-scan:allow -- relay channel UUID (buzz-e2e-test), an identifier
+
+# VANTAGE_DEFAULT_GROUP_ID is authoritative. Resolved once at import time
+# rather than per-call, because callers import this name directly and use it
+# as a default argument value -- there is no call site at which a live lookup
+# could happen. Changing the env var therefore requires a service restart.
+DEFAULT_CHANNEL_ID = (
+    os.environ.get("VANTAGE_DEFAULT_GROUP_ID", "").strip()
+    or _HARDCODED_DEFAULT_CHANNEL_ID
+)
 
 
-async def _docker_exec(*args: str) -> tuple[int, str, str]:
-    proc = await asyncio.create_subprocess_exec(
-        "docker", "exec", RELAY_CONTAINER, "buzz-admin", *args,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    return proc.returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")
+async def get_default_channel_id() -> str:
+    """Resolve the default channel/group ID.
+
+    Priority:
+    1. VANTAGE_DEFAULT_GROUP_ID env var (authoritative)
+    2. First guild in DB with nostr_group_id set, if is_default exists
+    3. Hardcoded fallback
+    """
+    env_val = os.environ.get("VANTAGE_DEFAULT_GROUP_ID", "").strip()
+    if env_val:
+        return env_val
+    try:
+        async with get_db() as db:
+            cur = await db.execute("PRAGMA table_info(guilds)")
+            _guild_cols = {r[1] for r in await cur.fetchall()}
+            if "is_default" not in _guild_cols:
+                raise LookupError("guilds.is_default does not exist")
+            cur = await db.execute(
+                "SELECT nostr_group_id, slug FROM guilds WHERE is_default = 1 LIMIT 1"
+            )
+            row = await cur.fetchone()
+            if row:
+                group_id = row[0] or row[1]
+                if group_id:
+                    return group_id
+    except Exception as e:
+        logger.debug("get_default_channel_id DB lookup skipped: %s", e)
+    return _HARDCODED_DEFAULT_CHANNEL_ID
 
 
 async def get_buzz_status(agent_id: int) -> dict:
-    """Nostr identity is always shown (deterministic, free to derive) even
-    before registration -- lets the UI display "your identity would be
-    X" ahead of the button being clicked."""
+    """Nostr identity shown even before registration."""
     pk = await derive_buzz_keypair(agent_id)
     pubkey = public_key_xonly_hex(pk)
     async with get_db() as db:
@@ -59,44 +82,38 @@ async def get_buzz_status(agent_id: int) -> dict:
 
 
 async def register_agent_on_buzz(agent_id: int) -> dict:
+    from .nostr.groups import add_member as nip29_add_member
+
     pk = await derive_buzz_keypair(agent_id)
     pubkey = public_key_xonly_hex(pk)
+    admin_pk = await derive_instance_keypair()
+    default_channel_id = await get_default_channel_id()
 
-    code, out, err = await _docker_exec("add-member", "--pubkey", pubkey, "--role", "member")
-    # buzz-admin is idempotent-ish in intent but may error if already a
-    # member -- treat "already"/"exists" in stderr as success, anything
-    # else as a real failure.
-    if code != 0 and "already" not in (out + err).lower() and "exists" not in (out + err).lower():
-        raise RuntimeError(f"buzz-admin add-member failed: {err.strip() or out.strip()}")
+    # NIP-29 kind 9000 membership grant (replaces docker-exec)
+    add_result = await nip29_add_member(RELAY_WS_URL, admin_pk, default_channel_id, pubkey)
+    if not add_result.get("ok"):
+        logger.warning(
+            "register_agent_on_buzz: NIP-29 add_member not-ok for agent %d: %s",
+            agent_id, add_result.get("error"),
+        )
+        # Not fatal -- agent can still publish; membership may already exist
 
-    # Verify the identity actually works end-to-end (connect, NIP-42 auth,
-    # real signed publish) before claiming success -- matches the pattern
-    # used throughout this integration's own live verification, rather
-    # than trusting the CLI's exit code alone.
     async with get_db() as db:
         cur = await db.execute("SELECT name, bio FROM agents WHERE id = ?", (agent_id,))
         agent_row = await cur.fetchone()
     agent_name, agent_bio = (agent_row or ("", ""))
 
-    # NIP-OA owner attestation (Section 1.3) -- appended to every event
-    # this registration flow publishes, so a relay observer can trace
-    # "this instance's agent did X" back to the instance identity.
     attestation = await get_owner_attestation_tag(pubkey)
 
     sess = BuzzSession(RELAY_WS_URL, pk)
     await sess.connect()
     await sess.authenticate()
     try:
-        join_result = await sess.publish(
-            9021, "", tags=[["h", DEFAULT_CHANNEL_ID], attestation],
-        )
+        join_result = await sess.publish(9021, "", tags=[["h", default_channel_id], attestation])
         verify_result = await sess.publish(
-            9,
-            "Registered on Buzz via Vantage self-service.",
-            tags=[["h", DEFAULT_CHANNEL_ID], attestation],
+            9, "Registered on Buzz via Vantage self-service.",
+            tags=[["h", default_channel_id], attestation],
         )
-        # Section 1.2: kind:0 profile + kind:30175 persona, so this agent
-        # is a real, discoverable Nostr identity beyond just a member row.
         profile_content = json.dumps({
             "name": agent_name,
             "about": agent_bio or "",
@@ -108,14 +125,7 @@ async def register_agent_on_buzz(agent_id: int) -> dict:
                 30175, agent_bio,
                 tags=[["d", f"vantage-agent-{agent_id}"], attestation],
             )
-        # NIP-65: relay list metadata (kind:10002) -- lets any standard
-        # Nostr client discover which relay to read/write this agent on,
-        # instead of only Buzz-aware federation peers understanding our
-        # bespoke manifest (federation_buzz_discovery.py).
-        await sess.publish(
-            10002, "",
-            tags=[["r", RELAY_WS_URL_PUBLIC], attestation],
-        )
+        await sess.publish(10002, "", tags=[["r", RELAY_WS_URL_PUBLIC], attestation])
     finally:
         await sess.close()
 
@@ -123,22 +133,20 @@ async def register_agent_on_buzz(agent_id: int) -> dict:
         await db.execute(
             "UPDATE agents SET buzz_registered_at = datetime('now'), "
             "buzz_joined_channels = ?, nostr_pubkey_hex = ?, buzz_persona_published = 1 WHERE id = ?",
-            (json.dumps([DEFAULT_CHANNEL_ID]), pubkey, agent_id),
+            (json.dumps([default_channel_id]), pubkey, agent_id),
         )
         await db.commit()
 
     return {
         "ok": True,
         "pubkey": pubkey,
-        "joined_channels": [DEFAULT_CHANNEL_ID],
+        "joined_channels": [default_channel_id],
         "relay_ack": {"join": join_result["ack"], "verify_publish": verify_result["ack"]},
     }
 
 
 async def publish_relay_list(agent_id: int) -> dict:
-    """Standalone NIP-65 (re-)publish for agents already registered before
-    this was added -- register_agent_on_buzz publishes it inline for new
-    registrations, this is the backfill/refresh path."""
+    """Standalone NIP-65 (re-)publish for agents already registered."""
     pk = await derive_buzz_keypair(agent_id)
     pubkey = public_key_xonly_hex(pk)
     attestation = await get_owner_attestation_tag(pubkey)

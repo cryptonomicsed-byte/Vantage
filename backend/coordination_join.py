@@ -25,7 +25,7 @@ from typing import Optional
 import aiosqlite
 from coincurve import PublicKeyXOnly
 
-from .buzz_registration import RELAY_WS_URL, _docker_exec
+from .buzz_registration import RELAY_WS_URL
 from .db import get_db
 
 logger = logging.getLogger(__name__)
@@ -232,19 +232,22 @@ def check_proof(event: dict, expected_pubkey: str, expected_challenge: str) -> N
 async def register_pubkey_on_relay(pubkey: str) -> bool:
     """Grant relay membership to a pubkey Vantage does not hold the key for.
 
-    Same admin path buzz_registration.register_agent_on_buzz and
-    buzz_human_identity use — the only mechanism this relay actually offers,
-    since a plain member cannot add members itself. Returns False rather than
-    raising: a join whose relay registration failed is still a real Vantage
-    membership, and the agent can be registered later.
+    Uses NIP-29 kind 9000 (put-user) over WS instead of docker-exec.
+    Returns False rather than raising: a join whose relay registration failed
+    is still a real Vantage membership, and the agent can be registered later.
     """
     try:
-        code, out, err = await _docker_exec("add-member", "--pubkey", pubkey, "--role", "member")
+        from .nostr.groups import add_member as nip29_add_member
+        from .buzz_identity import derive_instance_keypair
+        from .buzz_registration import get_default_channel_id
+
+        admin_pk = await derive_instance_keypair()
+        group_id = await get_default_channel_id()
+        result = await nip29_add_member(RELAY_WS_URL, admin_pk, group_id, pubkey)
+        if result.get("ok"):
+            return True
+        logger.warning("join: NIP-29 add_member failed for %s: %s", pubkey[:8], result.get("error"))
+        return False
     except Exception as exc:
         logger.warning("join: relay registration unavailable for %s: %s", pubkey[:8], exc)
         return False
-    blob = (out + err).lower()
-    if code == 0 or "already" in blob or "exists" in blob:
-        return True
-    logger.warning("join: buzz-admin add-member failed for %s: %s", pubkey[:8], err.strip() or out.strip())
-    return False

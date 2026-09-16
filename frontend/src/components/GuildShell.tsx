@@ -1441,6 +1441,59 @@ export default function GuildShell() {
       .finally(() => setLoading(false))
   }, [slug, agentName]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Live presence for the agent rail. Independent of the chat WS further
+  // down (that one only connects once a channel is selected, and only cares
+  // about type==='channel_message') -- this one is scoped to the whole
+  // guild for the lifetime of the page, because the rail has to update
+  // whether or not the viewer has a channel open. declare_presence already
+  // broadcasts {type:'presence', principal, state, channel} to `guild.{slug}`
+  // on every state change; this just listens instead of only fetching once.
+  useEffect(() => {
+    if (!slug) return
+    let socket: WebSocket | null = null
+    let pollTimer: ReturnType<typeof setInterval> | null = null
+
+    const applyPresence = (principal: string, state: string) => {
+      setRoster(prev => prev.map(r => (
+        r.agent_name === principal ? { ...r, presence_state: state } : r
+      )))
+    }
+
+    const refetchPresence = () => {
+      fetch(`/api/guilds/${encodeURIComponent(slug)}/roster`, { headers: headers() })
+        .then(r => r.ok ? r.json() : null)
+        .then(d => { if (d) setRoster(d.roster || []) })
+        .catch(() => {})
+    }
+
+    try {
+      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+      const key = apiKey ? `&key=${encodeURIComponent(apiKey)}` : ''
+      socket = new WebSocket(`${proto}://${window.location.host}/ws/gossip?channel=guild.${slug}${key}`)
+      socket.onmessage = evt => {
+        try {
+          const data = JSON.parse(evt.data)
+          // Only instance-wide declarations (channel: null) reflect what the
+          // rail shows -- a per-channel state change on some other channel
+          // isn't this agent's guild-wide badge.
+          if (data.type === 'presence' && !data.channel && data.principal) {
+            applyPresence(data.principal, data.state)
+          }
+        } catch { /* ignore */ }
+      }
+      socket.onerror = () => {
+        pollTimer = setInterval(refetchPresence, 15000)
+      }
+    } catch {
+      pollTimer = setInterval(refetchPresence, 15000)
+    }
+
+    return () => {
+      socket?.close()
+      if (pollTimer) clearInterval(pollTimer)
+    }
+  }, [slug, apiKey]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // load task summary (guild-level)
   useEffect(() => {
     if (!slug || !guild) return

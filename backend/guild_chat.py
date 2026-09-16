@@ -182,20 +182,16 @@ async def dispatch_to_mentioned(
             continue
 
         try:
-            try:
-                event = await coord.publish_message(
-                    channel=channel, guild_slug=guild_slug, principal=principal,
-                    content=reply_text, msg_type="say",
-                    root_event_id=root_event_id,
-                    addressed_to=author_principal.get("pubkey"),
-                    extra_tags=[["vdepth", str(depth + 1)]],
-                )
-            except coord.RelayUnavailable:
-                event = await coord.publish_message_local(
-                    channel=channel, guild_slug=guild_slug, principal=principal,
-                    content=reply_text, msg_type="say",
-                    root_event_id=root_event_id,
-                )
+            # No local fallback: a reply the relay refused must not be
+            # indexed as if it had been said. The outer handler logs the
+            # failure and the turn is simply not recorded.
+            event = await coord.publish_message(
+                channel=channel, guild_slug=guild_slug, principal=principal,
+                content=reply_text, msg_type="say",
+                root_event_id=root_event_id,
+                addressed_to=author_principal.get("pubkey"),
+                extra_tags=[["vdepth", str(depth + 1)]],
+            )
             replies.append({
                 "agent": principal["display_name"],
                 "event_id": event["id"],

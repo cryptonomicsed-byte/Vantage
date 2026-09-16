@@ -42,9 +42,13 @@ logger = logging.getLogger(__name__)
 KIND_MESSAGE = 9
 KIND_CREATE_CHANNEL = 9007
 
-# The orchestration vocabulary. `system` is reserved for the Conductor and is
-# rejected from every other publisher (see publish_message).
-MSG_TYPES = {"say", "propose", "claim", "handoff", "artifact", "system"}
+# The orchestration vocabulary. `system` and `blocked` are reserved for the
+# deployment's own instance identity and rejected from every other publisher
+# (see publish_message) -- `blocked` announces that some *other* principal
+# just became unroutable, so it has to carry the same forgery resistance
+# `system` does, for the same reason: a coordinator trusting the turn stream
+# to say who not to route work to must not be spoofable by any relay member.
+MSG_TYPES = {"say", "propose", "claim", "handoff", "artifact", "system", "blocked"}
 
 CHANNEL_KINDS = {"forum", "workspace"}
 FLOW_MODES = {"open", "round_robin", "moderated"}
@@ -489,12 +493,27 @@ async def provision_channel_on_relay(channel: dict, principal: dict, guild_slug:
         sess = BuzzSession(RELAY_WS_URL, pk)
         await sess.connect()
         await sess.authenticate()
+        # The relay's vocabulary is open | private (see
+        # handlers/side_effects.rs, which rejects anything else). Vantage's is
+        # public | members | private. Sending "public" verbatim made every
+        # PUBLIC channel unprovisionable -- kind 9007 came back
+        # "invalid visibility: public", buzz_channel_id stayed NULL, and the
+        # channel could never be talked in. members maps to open because
+        # member-only reads are enforced by can_read_channel() in Python (the
+        # relay's per-channel subscription ACL is documented as UNVERIFIED),
+        # so the tag must not be relied on for that.
+        relay_visibility = "private" if channel["visibility"] == "private" else "open"
+        # Vantage never sent channel_type, so every channel landed on the
+        # relay's default ("stream"). Its kinds are forum | workspace; the
+        # relay's are stream | forum.
+        relay_channel_type = "forum" if channel.get("channel_kind") == "forum" else "stream"
         await sess.publish(
             KIND_CREATE_CHANNEL, "",
             tags=[
                 ["h", buzz_channel_id],
                 ["name", f"{guild_slug}-{channel['slug']}"],
-                ["visibility", "private" if channel["visibility"] != "public" else "public"],
+                ["visibility", relay_visibility],
+                ["channel_type", relay_channel_type],
                 ["about", channel.get("topic") or channel["name"]],
             ],
         )
@@ -637,11 +656,12 @@ async def index_event(event: dict, channel: Optional[dict] = None) -> Optional[i
                         parsed["event_id"][:8], principal_id)
             return None
 
-    # `system` is the Conductor's alone. Accepting it from anyone else would
-    # let any relay member forge floor grants into the transcript.
-    if parsed["msg_type"] == "system" and not await _is_system_publisher(parsed["pubkey"]):
-        logger.warning("coordination: rejecting forged system event %s from %s",
-                       parsed["event_id"][:8], parsed["pubkey"][:8])
+    # `system` and `blocked` are the instance identity's alone. Accepting
+    # either from anyone else would let any relay member forge floor grants,
+    # or another principal's blocked/needs_review status, into the transcript.
+    if parsed["msg_type"] in ("system", "blocked") and not await _is_system_publisher(parsed["pubkey"]):
+        logger.warning("coordination: rejecting forged %s event %s from %s",
+                       parsed["msg_type"], parsed["event_id"][:8], parsed["pubkey"][:8])
         return None
 
     async with get_db() as db:
@@ -732,7 +752,7 @@ async def publish_message(
     Raises RelayUnavailable if the relay does not accept the event, and
     writes nothing — the index must never contain a message the log doesn't.
     """
-    if msg_type not in MSG_TYPES or msg_type == "system":
+    if msg_type not in MSG_TYPES or msg_type in ("system", "blocked"):
         raise ValueError(f"invalid message type: {msg_type}")
     content = (content or "").strip()
     if not content:
@@ -780,15 +800,27 @@ async def publish_message(
 async def publish_message_local(
     *, channel: dict, guild_slug: str, principal: dict, content: str,
     msg_type: str = "say", root_event_id: Optional[str] = None,
-    reply_to_event_id: Optional[str] = None,
+    reply_to_event_id: Optional[str] = None, allow_unlogged: bool = False,
 ) -> dict:
     """Write a message directly to the index when the relay is unavailable.
+
+    NOT reachable from any request path. This is a seed / offline-test helper:
+    it writes an unsigned event that exists on this node only, so using it to
+    answer a request would put a message in the index that the log does not
+    have — the one thing the index must never contain. Callers must opt in
+    deliberately with allow_unlogged=True.
 
     Produces a synthetic Nostr-shaped event (no real signature, no relay
     record) so the rest of the stack — read queries, thread flattening,
     GuildChat frontend — works unchanged. The event_id is sha256 of the
     content + timestamp, unique enough for local use.
     """
+    if not allow_unlogged:
+        raise RuntimeError(
+            "publish_message_local is not usable from a request path — the "
+            "index must never contain a message the relay log does not. Pass "
+            "allow_unlogged=True only in seed / offline tests."
+        )
     import hashlib, time as _time
     content = (content or "").strip()
     if not content:
@@ -870,6 +902,72 @@ async def publish_system_message(*, channel: dict, guild_slug: str, text: str) -
     if not (len(ack) > 2 and ack[0] == "OK" and ack[2]):
         reason = ack[3] if len(ack) > 3 else "relay rejected the event"
         raise RelayUnavailable(f"relay rejected the system message: {reason}")
+
+    await index_event(result["event"], channel=channel)
+    return result["event"]
+
+
+async def publish_blocked_message(
+    *, channel: dict, guild_slug: str, principal: dict, state: str, blocking_reason: str = "",
+) -> dict:
+    """Publish a `vt=blocked` event announcing that `principal` just became
+    unroutable, signed with the deployment's instance key.
+
+    Same shape as publish_system_message and for the same reason: the
+    Conductor / a scheduler watching this channel's turn stream needs to
+    know, without polling presence separately, that a principal should not
+    be handed new work right now -- and it needs that to be unforgeable, so
+    it is signed as the instance rather than as `principal` itself.
+    Fields ride in tags (agent_id/state/blocking_reason/ts), the same
+    convention as `vw`/`vg` elsewhere, so a plain Nostr client still renders
+    readable content and only a Vantage-aware reader needs the tags.
+    """
+    import time as _time
+    from .buzz_identity import derive_instance_keypair
+
+    if state not in ("blocked", "needs_review"):
+        raise ValueError(f"not a blocking state: {state!r}")
+    if not channel.get("buzz_channel_id"):
+        raise RelayUnavailable("channel is not provisioned on the relay yet")
+
+    ts = int(_time.time())
+    blocking_reason = (blocking_reason or "")[:200]
+    content = f"{principal.get('display_name', 'agent')} is now {state}"
+    if blocking_reason:
+        content += f": {blocking_reason}"
+
+    pk = await derive_instance_keypair()
+    tags = build_message_tags(
+        buzz_channel_id=channel["buzz_channel_id"], guild_slug=guild_slug,
+        channel_slug=channel["slug"], msg_type="blocked",
+        addressed_to=principal.get("pubkey"),
+        extra_tags=[
+            ["agent_id", str(principal.get("agent_id") or principal.get("id") or "")],
+            ["state", state],
+            ["blocking_reason", blocking_reason],
+            ["ts", str(ts)],
+        ],
+    )
+
+    sess = None
+    try:
+        sess = BuzzSession(RELAY_WS_URL, pk)
+        await sess.connect()
+        await sess.authenticate()
+        result = await sess.publish(KIND_MESSAGE, content[:MAX_CONTENT_CHARS], tags=tags)
+    except Exception as exc:
+        raise RelayUnavailable(f"relay publish failed: {exc}") from exc
+    finally:
+        if sess is not None:
+            try:
+                await sess.close()
+            except Exception as exc:
+                logger.debug("silenced relay session close: %s", exc)
+
+    ack = result.get("ack") or []
+    if not (len(ack) > 2 and ack[0] == "OK" and ack[2]):
+        reason = ack[3] if len(ack) > 3 else "relay rejected the event"
+        raise RelayUnavailable(f"relay rejected the blocked message: {reason}")
 
     await index_event(result["event"], channel=channel)
     return result["event"]

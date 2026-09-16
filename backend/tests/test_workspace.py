@@ -50,10 +50,46 @@ async def test_status_reports_unavailable_rather_than_pretending(client, fresh_a
     assert body["reason"]
 
 
+class _FakeHealthResponse:
+    def __init__(self, status_code):
+        self.status_code = status_code
+
+
+class _FakeHealthClient:
+    def __init__(self, status_code):
+        self._status_code = status_code
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def get(self, url):
+        return _FakeHealthResponse(self._status_code)
+
+
+async def test_status_is_200_once_the_sandbox_is_configured_and_healthy(
+    client, fresh_agent, monkeypatch
+):
+    """The Gap A acceptance case: CODE_SANDBOX_URL set and the container
+    reachable turns the hard gate off — /status must report available, not 503."""
+    monkeypatch.setattr(workspace, "CODE_SANDBOX_URL", "http://sandbox.test")
+    monkeypatch.setattr(workspace.httpx, "AsyncClient", lambda **kw: _FakeHealthClient(200))
+    agent = await fresh_agent()
+
+    r = await client.get("/api/workspace/status", headers=_h(agent))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["available"] is True
+    assert body["workspace"].startswith("agent-")
+
+
 async def test_every_endpoint_requires_an_agent_key(client):
     for path, payload in [
         ("/api/workspace/exec", {"command": "ls"}),
         ("/api/workspace/clone", {"repo_url": "https://example.com/x.git"}),
+        ("/api/workspace/cleanup", {"repo_url": "https://example.com/x.git"}),
         ("/api/workspace/read", {"path": "a"}),
         ("/api/workspace/write", {"path": "a", "content": ""}),
         ("/api/workspace/list", {}),
@@ -121,16 +157,43 @@ async def test_clone_defaults_the_directory_to_the_repo_name(client, fresh_agent
     await client.post("/api/workspace/clone", headers=_h(agent),
                       json={"repo_url": "https://github.com/owner/my-project.git"})
 
-    _endpoint, payload = sandbox["calls"][-1]
+    endpoint, payload = sandbox["calls"][-1]
+    assert endpoint == "/worktree"
     assert payload["dir"].endswith("/my-project")
-    assert payload["full_history"] is False
+    assert payload["branch"].endswith("/task/scratch"), "task_id defaults to 'scratch'"
 
 
-async def test_clone_can_ask_for_full_history(client, fresh_agent, sandbox):
+async def test_clone_scopes_the_branch_to_the_given_task_id(client, fresh_agent, sandbox):
     agent = await fresh_agent()
     await client.post("/api/workspace/clone", headers=_h(agent),
-                      json={"repo_url": "https://x/y.git", "full_history": True})
-    assert sandbox["calls"][-1][1]["full_history"] is True
+                      json={"repo_url": "https://x/y.git", "task_id": "fix-123"})
+    assert sandbox["calls"][-1][1]["branch"].endswith("/task/fix-123")
+
+
+async def test_two_agents_cloning_the_same_repo_get_different_branches(client, fresh_agent, sandbox):
+    a, b = await fresh_agent(), await fresh_agent()
+    await client.post("/api/workspace/clone", headers=_h(a), json={"repo_url": "https://x/y.git"})
+    a_branch = sandbox["calls"][-1][1]["branch"]
+    await client.post("/api/workspace/clone", headers=_h(b), json={"repo_url": "https://x/y.git"})
+    b_branch = sandbox["calls"][-1][1]["branch"]
+
+    assert a_branch != b_branch
+
+
+async def test_cleanup_requires_a_url(client, fresh_agent, sandbox):
+    agent = await fresh_agent()
+    r = await client.post("/api/workspace/cleanup", headers=_h(agent), json={})
+    assert r.status_code == 422
+
+
+async def test_cleanup_prunes_the_named_worktree(client, fresh_agent, sandbox):
+    agent = await fresh_agent()
+    await client.post("/api/workspace/cleanup", headers=_h(agent),
+                      json={"repo_url": "https://github.com/owner/my-project.git"})
+
+    endpoint, payload = sandbox["calls"][-1]
+    assert endpoint == "/worktree/remove"
+    assert payload["dir"].endswith("/my-project")
 
 
 # ── Exec ─────────────────────────────────────────────────────────────────────
