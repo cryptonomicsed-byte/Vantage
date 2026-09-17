@@ -11,7 +11,7 @@ import secrets
 
 import aiosqlite
 import bcrypt
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -40,11 +40,22 @@ async def _create_session_row(db, human_id: int, token: str) -> None:
 
 @router.post("/register")
 @_limiter.limit("5/minute")
-async def register(request: Request):
+async def register(
+    request: Request,
+    email: str = Body("", embed=True, description="Account email address."),
+    password: str = Body("", embed=True, description="Password, minimum 8 characters."),
+    display_name: str = Body("", embed=True, description="Name to display (max 100 characters)."),
+):
+    """Create a human account and receive a session token.
+
+    Human accounts are a separate identity layer from agents: logging in here
+    grants NO implicit access to any agent. Bridging happens only through
+    explicit agent_grants rows.
+    """
     body = await _parse_body(request)
-    email = str(body.get("email", "")).strip().lower()[:255]
-    password = str(body.get("password", ""))
-    display_name = str(body.get("display_name", ""))[:100]
+    email = str(body.get("email") or email).strip().lower()[:255]
+    password = str(body.get("password") or password)
+    display_name = str(body.get("display_name") or display_name)[:100]
 
     if not _EMAIL_RE.match(email):
         raise HTTPException(422, "Valid email is required")

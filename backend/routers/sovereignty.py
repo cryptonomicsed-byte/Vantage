@@ -13,7 +13,7 @@ import json as _json
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Form, Header, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, Form, Header, HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -110,7 +110,24 @@ async def custody_challenge(
 
 @router.post("/custody/confirm")
 @_limiter.limit("10/minute")
-async def custody_confirm(request: Request, subject: tuple = Depends(current_subject)):
+async def custody_confirm(
+    request: Request,
+    subject: tuple = Depends(current_subject),
+    acknowledge_irreversible: bool = Body(
+        False, embed=True,
+        description="Must be true. Destroys the instance's sealed seed for this "
+                    "identity; there is no undo.",
+    ),
+    signed_event: Optional[dict] = Body(
+        None, embed=True,
+        description="A signed kind 22242 Nostr event proving you hold the "
+                    "private key (the challenge from step 1).",
+    ),
+    challenge: str = Body(
+        "", embed=True,
+        description="The challenge string returned by POST /custody/challenge.",
+    ),
+):
     """Step 2: prove you hold the key, and take custody.
 
     Requires `acknowledge_irreversible: true` in the body. This destroys the
@@ -121,6 +138,8 @@ async def custody_confirm(request: Request, subject: tuple = Depends(current_sub
     body = await _parse_body(request)
 
     ack = body.get("acknowledge_irreversible")
+    if ack is None:
+        ack = acknowledge_irreversible
     if ack not in (True, "true", "True", "1", 1):
         raise HTTPException(
             422,

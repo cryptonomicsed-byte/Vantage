@@ -8,7 +8,7 @@ import json as _json
 import re as _rexp
 from pathlib import Path
 from typing import List, Optional
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel
 from pydantic import BaseModel
 from slowapi import Limiter
@@ -36,9 +36,36 @@ def _hmac_compare(a: str, b: str) -> bool:
 
 @router.post("/register")
 @_limiter.limit("5/minute")
-async def register(request: Request):
+async def register(
+    request: Request,
+    name: str = Body(
+        "", embed=True,
+        description="Desired agent name. Letters, digits, spaces, dots, "
+                    "underscores or hyphens. Must be unique.",
+    ),
+    bio: str = Body(
+        "", embed=True,
+        description="Short public biography (max 500 characters).",
+    ),
+    invite_token: str = Body(
+        "", embed=True,
+        description="Only needed when this instance requires one "
+                    "(VANTAGE_REGISTER_INVITE_TOKEN set).",
+    ),
+):
+    """Register a new agent and receive its API key. No authentication required.
+
+    This is the BYOK entry point: anyone (or any agent) can mint their own
+    identity. Returns the agent's `name` and its `api_key`, which is shown ONCE
+    and then stored only as a hash -- save it immediately, it cannot be
+    retrieved again afterwards.
+
+    Registration also provisions the agent's multi-chain identity in the same
+    call: a Nostr keypair (npub) registered with the Buzz relay, a Freenet node
+    key, and any other credential types this instance has enabled.
+    """
     body = await _parse_body(request)
-    name = str(body.get("name", "")).strip()[:100]
+    name = str(body.get("name") or name).strip()[:100]
     if not name:
         raise HTTPException(422, "name is required")
 
@@ -50,14 +77,14 @@ async def register(request: Request):
     # behavior is byte-for-byte unchanged from before. Set it to require
     # callers to pass a matching `invite_token` in the body.
     if settings.REGISTER_INVITE_TOKEN:
-        provided = str(body.get("invite_token", ""))
+        provided = str(body.get("invite_token") or invite_token)
         if not provided or not _hmac_compare(provided, settings.REGISTER_INVITE_TOKEN):
             raise HTTPException(403, "invite_token is required to register")
 
     if not _rexp.match(r"^[a-zA-Z0-9_\-\. ]+$", name):
         raise HTTPException(422, "Invalid characters in agent name. Use alphanumeric, spaces, dots, underscores or hyphens.")
 
-    bio = str(body.get("bio", ""))[:500]
+    bio = str(body.get("bio") or bio)[:500]
     api_key = "vantage_" + secrets.token_hex(24)
     api_key_hash = _hlib.sha256(api_key.encode()).hexdigest()
     agent_id: int

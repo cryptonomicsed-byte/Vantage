@@ -26,7 +26,7 @@ from typing import Optional
 
 import aiosqlite
 
-from .db import DB_PATH
+from .db import DB_PATH, get_db
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +56,7 @@ def _rand(prefix: str, nbytes: int = 32) -> str:
 # ── schema ─────────────────────────────────────────────────────────────────────
 
 async def _create_tables() -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA busy_timeout=30000")
+    async with get_db() as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS oauth_identities (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -179,8 +178,7 @@ async def audit(event: str, platform: str = "", client_id: str = "",
     """Append-only trail. Every authorize/code/token/refresh/revoke lands here —
     without it, 'who minted this token' is unanswerable after an incident."""
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("PRAGMA busy_timeout=10000")
+        async with get_db() as db:
             await db.execute(
                 "INSERT INTO oauth_audit (event, platform, client_id, agent_id, detail)"
                 " VALUES (?,?,?,?,?)",
@@ -195,7 +193,7 @@ async def audit(event: str, platform: str = "", client_id: str = "",
 
 @_ensures_tables
 async def get_client(client_id: str) -> Optional[dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM oauth_clients WHERE client_id = ?", (client_id,)
@@ -217,8 +215,7 @@ async def upsert_client(client_id: str, *, platform: str, registration_method: s
                         scopes: str = "", metadata_url: Optional[str] = None,
                         client_secret: Optional[str] = None) -> dict:
     secret_hash = _sha256(client_secret) if client_secret else None
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA busy_timeout=30000")
+    async with get_db() as db:
         await db.execute(
             """INSERT INTO oauth_clients
                  (client_id, client_secret_hash, client_name, platform,
@@ -245,8 +242,7 @@ async def upsert_client(client_id: str, *, platform: str, registration_method: s
 
 async def touch_client(client_id: str) -> None:
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("PRAGMA busy_timeout=10000")
+        async with get_db() as db:
             await db.execute(
                 "UPDATE oauth_clients SET last_used_at=datetime('now') WHERE client_id=?",
                 (client_id,),
@@ -260,7 +256,7 @@ async def touch_client(client_id: str) -> None:
 
 @_ensures_tables
 async def lookup_identity(platform: str, subject: str) -> Optional[dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM oauth_identities WHERE platform=? AND subject=?",
@@ -273,8 +269,7 @@ async def lookup_identity(platform: str, subject: str) -> Optional[dict]:
 @_ensures_tables
 async def bind_identity(platform: str, subject: str, agent_id: int,
                         display_name: str = "") -> dict:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA busy_timeout=30000")
+    async with get_db() as db:
         await db.execute(
             """INSERT INTO oauth_identities (platform, subject, agent_id, display_name)
                VALUES (?,?,?,?)
@@ -290,8 +285,7 @@ async def bind_identity(platform: str, subject: str, agent_id: int,
 
 async def touch_identity(platform: str, subject: str) -> None:
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("PRAGMA busy_timeout=10000")
+        async with get_db() as db:
             await db.execute(
                 "UPDATE oauth_identities SET last_seen_at=datetime('now')"
                 " WHERE platform=? AND subject=?",
@@ -325,8 +319,7 @@ async def create_agent_account(name: str, bio: str = "") -> tuple[int, str]:
     api_key = "vantage_" + secrets.token_urlsafe(32)
     hashed = _sha256(api_key)
     base = _slugify(name)
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA busy_timeout=30000")
+    async with get_db() as db:
         for attempt in range(0, 6):
             candidate = base if attempt == 0 else f"{base}-{secrets.token_hex(2)}"
             try:
@@ -343,7 +336,7 @@ async def create_agent_account(name: str, bio: str = "") -> tuple[int, str]:
 
 @_ensures_tables
 async def agent_by_id(agent_id: int) -> Optional[dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM agents WHERE id=?", (agent_id,)) as cur:
             row = await cur.fetchone()
@@ -353,7 +346,7 @@ async def agent_by_id(agent_id: int) -> Optional[dict]:
 @_ensures_tables
 async def agent_by_key(plaintext_key: str) -> Optional[dict]:
     """Resolve a plaintext agent key (vantage_...) to its agent row."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM agents WHERE api_key=?", (_sha256(plaintext_key),)
@@ -370,8 +363,7 @@ async def create_code(*, client_id: str, agent_id: int, redirect_uri: str,
                       scope: str, resource: Optional[str],
                       platform: str) -> str:
     code = _rand(CODE_PREFIX, 32)
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA busy_timeout=30000")
+    async with get_db() as db:
         await db.execute(
             """INSERT INTO oauth_codes
                  (code_hash, client_id, agent_id, redirect_uri, code_challenge,
@@ -388,23 +380,29 @@ async def create_code(*, client_id: str, agent_id: int, redirect_uri: str,
 async def consume_code(code: str) -> Optional[dict]:
     """Single-use. Marks used in the same statement that reads it, so two
     concurrent redemptions cannot both succeed."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    h = _sha256(code)
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
-        await db.execute("PRAGMA busy_timeout=30000")
-        async with db.execute(
-            "SELECT * FROM oauth_codes WHERE code_hash=?", (_sha256(code),)
-        ) as cur:
-            row = await cur.fetchone()
-        if not row:
-            return None
-        rec = dict(row)
-        if rec["used"] or rec["expires_at"] < _now():
-            return None
-        await db.execute(
-            "UPDATE oauth_codes SET used=1 WHERE code_hash=?", (_sha256(code),)
+        # Write first, then read. The previous SELECT-then-UPDATE opened a
+        # deferred read transaction that had to be promoted to a write, and
+        # under contention that promotion fails with "database is locked"
+        # regardless of busy_timeout -- which is how this 500'd in production.
+        # Claiming the row with a single conditional UPDATE is also what makes
+        # redemption genuinely single-use: two concurrent redemptions cannot
+        # both see used=0.
+        cur = await db.execute(
+            "UPDATE oauth_codes SET used=1"
+            " WHERE code_hash=? AND used=0 AND expires_at>?",
+            (h, _now()),
         )
         await db.commit()
-    return rec
+        if cur.rowcount != 1:
+            return None
+        async with db.execute(
+            "SELECT * FROM oauth_codes WHERE code_hash=?", (h,)
+        ) as c:
+            row = await c.fetchone()
+    return dict(row) if row else None
 
 
 # ── tokens ─────────────────────────────────────────────────────────────────────
@@ -416,8 +414,7 @@ async def issue_token(*, client_id: str, agent_id: int, scope: str,
     access = _rand(ACCESS_PREFIX, 32)
     refresh = _rand(REFRESH_PREFIX, 32) if with_refresh else None
     now = _now()
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA busy_timeout=30000")
+    async with get_db() as db:
         await db.execute(
             """INSERT INTO oauth_tokens
                  (token_hash, refresh_hash, client_id, agent_id, scope, resource,
@@ -445,7 +442,7 @@ async def resolve_access_token(token: str) -> Optional[dict]:
     if not token:
         return None
     th = _sha256(token)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM oauth_tokens WHERE token_hash=?", (th,)
@@ -461,8 +458,7 @@ async def resolve_access_token(token: str) -> Optional[dict]:
 
 async def touch_token(token: str) -> None:
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("PRAGMA busy_timeout=10000")
+        async with get_db() as db:
             await db.execute(
                 "UPDATE oauth_tokens SET last_used_at=? WHERE token_hash=?",
                 (_now(), _sha256(token)),
@@ -478,9 +474,8 @@ async def refresh_access_token(refresh_token: str, client_id: str) -> Optional[d
     Reuse of a rotated token therefore fails closed instead of granting a
     second live session."""
     rh = _sha256(refresh_token)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with get_db() as db:
         db.row_factory = aiosqlite.Row
-        await db.execute("PRAGMA busy_timeout=30000")
         async with db.execute(
             "SELECT * FROM oauth_tokens WHERE refresh_hash=?", (rh,)
         ) as cur:
@@ -508,8 +503,7 @@ async def refresh_access_token(refresh_token: str, client_id: str) -> Optional[d
 
 @_ensures_tables
 async def revoke_token(token: str) -> bool:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA busy_timeout=30000")
+    async with get_db() as db:
         h = _sha256(token)
         cur = await db.execute(
             "UPDATE oauth_tokens SET revoked=1 WHERE token_hash=? OR refresh_hash=?",
@@ -523,8 +517,7 @@ async def revoke_token(token: str) -> bool:
 async def revoke_agent_tokens(agent_id: int) -> int:
     """Kill every connector session for one agent — the 'revoke this ChatGPT
     user's access' button that a shared-key design cannot offer."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA busy_timeout=30000")
+    async with get_db() as db:
         cur = await db.execute(
             "UPDATE oauth_tokens SET revoked=1 WHERE agent_id=? AND revoked=0",
             (agent_id,),
