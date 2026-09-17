@@ -24,7 +24,9 @@ logger = logging.getLogger(__name__)
 # event emission, Mycelium traces, ARP receipts — reads this one object
 # instead of guessing identity from "last seen agent".
 #
-# auth_method: "api_key" | "voice_exec" | "system_tool" | "human_session"
+# auth_method: "api_key" | "voice_exec" | "oauth_token" | "system_tool" | "human_session"
+# "oauth_token" = an MCP connector session (ChatGPT / Codex / Claude / Grok ...)
+# whose bearer token resolved to this agent via backend/oauth_store.py.
 
 @dataclass
 class AuthContext:
@@ -99,6 +101,7 @@ async def get_agent(
     request: Request,
     x_agent_key: Optional[str] = Header(None),
     x_voice_exec: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
 ) -> dict:
     # A live voice session can act as its agent, so the model can actually use
     # the agent's tools. The credential is NOT the ws token the browser holds:
@@ -122,17 +125,46 @@ async def get_agent(
         # revoked or jailed agent must not regain access just by speaking.
         request.state.voice_session_id = session["id"]
     else:
-        if not x_agent_key:
-            raise HTTPException(status_code=401, detail="X-Agent-Key header required")
-        hashed_key = _hlib.sha256(x_agent_key.encode()).hexdigest()
-        async with get_db() as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT * FROM agents WHERE api_key = ?", (hashed_key,)
-            ) as cur:
-                row = await cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=401, detail="Invalid API key")
+        # ── OAuth connector tokens (ChatGPT / Codex / Claude / Grok / any MCP client) ──
+        # Tried after X-Agent-Key so every existing caller behaves identically.
+        # The token proves the credential only; the sentencing and rate-limit
+        # checks below still run, so a jailed or revoked agent cannot regain
+        # access by holding a valid token.
+        _bearer = ""
+        if authorization and authorization.lower().startswith("bearer "):
+            _bearer = authorization[7:].strip()
+        if _bearer and not x_agent_key:
+            from .oauth_store import resolve_access_token, touch_token
+            rec = await resolve_access_token(_bearer)
+            if not rec:
+                raise HTTPException(status_code=401, detail="Invalid or expired access token")
+            async with get_db() as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT * FROM agents WHERE id = ?", (int(rec["agent_id"]),)
+                ) as cur:
+                    row = await cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=401, detail="Access token's agent no longer exists")
+            request.state.oauth_token = _bearer
+            request.state.oauth_scope = rec.get("scope", "")
+            request.state.oauth_platform = rec.get("platform", "")
+            try:
+                await touch_token(_bearer)
+            except Exception:
+                pass
+        else:
+            if not x_agent_key:
+                raise HTTPException(status_code=401, detail="X-Agent-Key header required")
+            hashed_key = _hlib.sha256(x_agent_key.encode()).hexdigest()
+            async with get_db() as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT * FROM agents WHERE api_key = ?", (hashed_key,)
+                ) as cur:
+                    row = await cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=401, detail="Invalid API key")
     agent = dict(row)
     # Sentencing tiers (AIO citizenship): active -> notice -> probation (jail_mode)
     # -> suspended -> revoked. Notice warns without blocking; revoked is a
@@ -163,7 +195,11 @@ async def get_agent(
     # P0-2: stamp canonical AuthContext for event emission + trace identity chain
     _stamp_auth_ctx(
         request, agent,
-        auth_method="voice_exec" if (x_voice_exec and not x_agent_key) else "api_key",
+        auth_method=(
+            "voice_exec" if (x_voice_exec and not x_agent_key)
+            else "oauth_token" if getattr(request.state, "oauth_token", None)
+            else "api_key"
+        ),
     )
     return agent
 

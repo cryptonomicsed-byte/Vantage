@@ -1167,9 +1167,65 @@ async def mcp_manifest():
         ),
         "transports": ["streamable-http", "sse"],
         "auth": "Set X-Agent-Key header with your agent API key; forwarded to authenticated tools.",
+        "oauth": {
+            "protected_resource_metadata": "/.well-known/oauth-protected-resource",
+            "authorization_server_metadata": "/.well-known/oauth-authorization-server",
+            "authorize_endpoint": "/oauth/authorize",
+            "token_endpoint": "/oauth/token",
+            "registration_endpoint": "/oauth/register",
+            "profiles_endpoint": "/oauth/connectors",
+            "flow": "authorization_code + PKCE (S256)",
+            "client_registration": ["cimd", "dcr", "predefined"],
+            "note": (
+                "Any MCP client that speaks OAuth 2.1 can connect, create its own "
+                "Vantage agent on first authorization, and receive a scoped, "
+                "revocable bearer token. Per-platform behaviour is served by "
+                "connector profiles -- see /oauth/connectors."
+            ),
+        },
         "docs": "/docs",
         "openapi": "/openapi.json",
     }
+
+
+# ── OAuth connectors (ChatGPT / Codex / Claude / Grok / any MCP client) ───────
+# Discovery, authorization-code + PKCE, dynamic client registration and
+# introspection. The mounts above already forward the "authorization" header,
+# so a bearer token minted here reaches every authenticated route with no
+# change to the MCP layer.
+from .routers import oauth as _oauth_router
+app.include_router(_oauth_router.router)
+
+from . import oauth_store as _oauth_store
+
+
+@app.on_event("startup")
+async def _ensure_oauth_tables() -> None:
+    try:
+        await _oauth_store.ensure_oauth_tables()
+    except Exception as _exc:  # must never stop the platform from booting
+        import logging as _log
+        _log.getLogger(__name__).warning("oauth table init failed: %s", _exc)
+
+
+@app.middleware("http")
+async def _oauth_challenge(request, call_next):
+    """Attach RFC 9728 resource metadata to any 401 on an OAuth-protected path.
+
+    ChatGPT reads this header to discover where to send the user; without it,
+    or with the metadata endpoint missing, the connector shows no sign-in flow
+    at all and every tool call just fails silently.
+    """
+    response = await call_next(request)
+    if response.status_code == 401:
+        proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+        base = f"{proto}://{host}"
+        response.headers["WWW-Authenticate"] = (
+            f'Bearer realm="{base}", '
+            f'resource_metadata="{base}/.well-known/oauth-protected-resource"'
+        )
+    return response
 
 
 @app.websocket("/api/agents/me/voice/ws")
