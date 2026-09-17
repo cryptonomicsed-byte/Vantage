@@ -15,6 +15,8 @@ readable prefix (vgt_/vgr_/vgc_) and are stored ONLY as sha256 hex — the same
 convention agents.api_key already uses (db.py's one-time plaintext->hash
 migration). A database read therefore never yields a usable credential.
 """
+import asyncio
+import functools
 import hashlib
 import json
 import logging
@@ -53,7 +55,7 @@ def _rand(prefix: str, nbytes: int = 32) -> str:
 
 # ── schema ─────────────────────────────────────────────────────────────────────
 
-async def ensure_oauth_tables() -> None:
+async def _create_tables() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("PRAGMA busy_timeout=30000")
         await db.execute("""
@@ -132,7 +134,44 @@ async def ensure_oauth_tables() -> None:
             "CREATE INDEX IF NOT EXISTS idx_oauth_identities_agent ON oauth_identities(agent_id)"
         )
         await db.commit()
-    logger.info("oauth tables ensured")
+    logger.info("oauth tables created")
+
+
+_TABLES_READY = False
+_TABLE_LOCK = asyncio.Lock()
+
+
+async def ensure_oauth_tables(force: bool = False) -> None:
+    """Create the tables if needed. Idempotent and cached in-process.
+
+    Do NOT wire this only to FastAPI's `on_event("startup")`. main.py passes an
+    explicit `lifespan=lifespan` to FastAPI(), and Starlette does not run
+    `on_event("startup")` handlers when a lifespan is supplied -- the hook
+    silently never fires, and every subsequent query then fails with
+    `sqlite3.OperationalError: no such table: oauth_clients` (observed live on
+    2026-09-17, surfaced as a 500 from /oauth/authorize).
+
+    Instead every DB entry point below is wrapped by `_ensures_tables`, so the
+    tables exist on first use regardless of startup ordering -- and equally in
+    tests and one-off scripts that never start an app at all.
+    """
+    global _TABLES_READY
+    if _TABLES_READY and not force:
+        return
+    async with _TABLE_LOCK:
+        if _TABLES_READY and not force:
+            return
+        await _create_tables()
+        _TABLES_READY = True
+
+
+def _ensures_tables(fn):
+    """Guarantee the schema exists before any query runs."""
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        await ensure_oauth_tables()
+        return await fn(*args, **kwargs)
+    return wrapper
 
 
 async def audit(event: str, platform: str = "", client_id: str = "",
@@ -154,6 +193,7 @@ async def audit(event: str, platform: str = "", client_id: str = "",
 
 # ── clients ────────────────────────────────────────────────────────────────────
 
+@_ensures_tables
 async def get_client(client_id: str) -> Optional[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -171,6 +211,7 @@ async def get_client(client_id: str) -> Optional[dict]:
     return c
 
 
+@_ensures_tables
 async def upsert_client(client_id: str, *, platform: str, registration_method: str,
                         client_name: str = "", redirect_uris: Optional[list] = None,
                         scopes: str = "", metadata_url: Optional[str] = None,
@@ -217,6 +258,7 @@ async def touch_client(client_id: str) -> None:
 
 # ── identities (platform account -> Vantage agent) ─────────────────────────────
 
+@_ensures_tables
 async def lookup_identity(platform: str, subject: str) -> Optional[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -228,6 +270,7 @@ async def lookup_identity(platform: str, subject: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
+@_ensures_tables
 async def bind_identity(platform: str, subject: str, agent_id: int,
                         display_name: str = "") -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
@@ -269,6 +312,7 @@ def _slugify(name: str) -> str:
     return slug.strip("-")[:40] or "agent"
 
 
+@_ensures_tables
 async def create_agent_account(name: str, bio: str = "") -> tuple[int, str]:
     """Create a Vantage agent and return (agent_id, plaintext_api_key).
 
@@ -297,6 +341,7 @@ async def create_agent_account(name: str, bio: str = "") -> tuple[int, str]:
     raise RuntimeError("could not allocate a unique agent name")
 
 
+@_ensures_tables
 async def agent_by_id(agent_id: int) -> Optional[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -305,6 +350,7 @@ async def agent_by_id(agent_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+@_ensures_tables
 async def agent_by_key(plaintext_key: str) -> Optional[dict]:
     """Resolve a plaintext agent key (vantage_...) to its agent row."""
     async with aiosqlite.connect(DB_PATH) as db:
@@ -318,6 +364,7 @@ async def agent_by_key(plaintext_key: str) -> Optional[dict]:
 
 # ── authorization codes ────────────────────────────────────────────────────────
 
+@_ensures_tables
 async def create_code(*, client_id: str, agent_id: int, redirect_uri: str,
                       code_challenge: str, code_challenge_method: str,
                       scope: str, resource: Optional[str],
@@ -337,6 +384,7 @@ async def create_code(*, client_id: str, agent_id: int, redirect_uri: str,
     return code
 
 
+@_ensures_tables
 async def consume_code(code: str) -> Optional[dict]:
     """Single-use. Marks used in the same statement that reads it, so two
     concurrent redemptions cannot both succeed."""
@@ -361,6 +409,7 @@ async def consume_code(code: str) -> Optional[dict]:
 
 # ── tokens ─────────────────────────────────────────────────────────────────────
 
+@_ensures_tables
 async def issue_token(*, client_id: str, agent_id: int, scope: str,
                       resource: Optional[str], platform: str,
                       with_refresh: bool = True) -> dict:
@@ -388,6 +437,7 @@ async def issue_token(*, client_id: str, agent_id: int, scope: str,
     }
 
 
+@_ensures_tables
 async def resolve_access_token(token: str) -> Optional[dict]:
     """Validate an access token. Returns the token row, or None if unknown,
     expired or revoked. Callers must still apply platform policy (sentencing,
@@ -422,6 +472,7 @@ async def touch_token(token: str) -> None:
         pass
 
 
+@_ensures_tables
 async def refresh_access_token(refresh_token: str, client_id: str) -> Optional[dict]:
     """Rotate: the old refresh token is revoked as the new pair is issued.
     Reuse of a rotated token therefore fails closed instead of granting a
@@ -455,6 +506,7 @@ async def refresh_access_token(refresh_token: str, client_id: str) -> Optional[d
     return out
 
 
+@_ensures_tables
 async def revoke_token(token: str) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("PRAGMA busy_timeout=30000")
@@ -467,6 +519,7 @@ async def revoke_token(token: str) -> bool:
         return cur.rowcount > 0
 
 
+@_ensures_tables
 async def revoke_agent_tokens(agent_id: int) -> int:
     """Kill every connector session for one agent — the 'revoke this ChatGPT
     user's access' button that a shared-key design cannot offer."""

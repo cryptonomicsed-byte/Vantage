@@ -72,7 +72,9 @@ async def make_sandbox_schema():
             )
         """)
         await db.commit()
-    await store.ensure_oauth_tables()
+    # OAuth tables are deliberately NOT created here. The store must
+    # self-initialize on first use -- creating them up front in the harness
+    # would hide the lifespan/on_event bug that broke this in production.
 
 
 # ── build an app with the real router + a route guarded by the real get_agent ──
@@ -91,8 +93,30 @@ asyncio.get_event_loop().run_until_complete(make_sandbox_schema())
 client = TestClient(app, base_url="http://127.0.0.1:9999", follow_redirects=False)
 print(f"sandbox: {SANDBOX}\n")
 
-# ── 1. profile validation ──────────────────────────────────────────────────────
-print("1. profile allowlists")
+# ── 0. the store must self-initialize (regression guard) ──────────────────────
+print("0. schema self-initialization")
+
+
+async def _oauth_tables():
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'oauth%'"
+        ) as c:
+            return sorted(r[0] for r in await c.fetchall())
+
+
+before = asyncio.get_event_loop().run_until_complete(_oauth_tables())
+check("no oauth tables before first use", before == [], str(before))
+# a plain read is enough to trigger initialization -- no app startup involved
+asyncio.get_event_loop().run_until_complete(store.get_client("does-not-exist"))
+after = asyncio.get_event_loop().run_until_complete(_oauth_tables())
+check("store self-initialized its schema on first query", len(after) >= 5, str(after))
+check("all five tables present",
+      {"oauth_clients", "oauth_codes", "oauth_tokens", "oauth_identities",
+       "oauth_audit"}.issubset(set(after)), str(after))
+
+# ── 1. profile validation ─────────────────────────────────────────────────────
+print("\n1. profile allowlists")
 check("chatgpt redirect accepted",
       validate_redirect("chatgpt", "https://chatgpt.com/connector/oauth/abc123"))
 check("chatgpt redirect rejected on other host",

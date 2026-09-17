@@ -132,6 +132,20 @@ async def auth_server_metadata(request: Request):
 # ── client resolution / registration ───────────────────────────────────────────
 
 async def _resolve_client(request: Request, client_id: str, redirect_uri: str) -> dict:
+    """Resolve a client, converting an unexpected store failure into a clean
+    OAuth error. A raw 500 tells an OAuth client nothing and it will not retry;
+    a 503 is something it understands. (This is the guard that would have made
+    the missing-table bug legible instead of a traceback.)"""
+    try:
+        return await _resolve_client_inner(request, client_id, redirect_uri)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("client resolution failed: %s", exc)
+        raise HTTPException(503, "authorization server temporarily unavailable")
+
+
+async def _resolve_client_inner(request: Request, client_id: str, redirect_uri: str) -> dict:
     """Return a client record, registering-on-first-sight for CIMD clients.
 
     CIMD: client_id IS an https metadata-document URL. We enforce the platform's

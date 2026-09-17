@@ -1196,16 +1196,14 @@ async def mcp_manifest():
 from .routers import oauth as _oauth_router
 app.include_router(_oauth_router.router)
 
-from . import oauth_store as _oauth_store
-
-
-@app.on_event("startup")
-async def _ensure_oauth_tables() -> None:
-    try:
-        await _oauth_store.ensure_oauth_tables()
-    except Exception as _exc:  # must never stop the platform from booting
-        import logging as _log
-        _log.getLogger(__name__).warning("oauth table init failed: %s", _exc)
+# NOTE: tables are NOT created from an on_event("startup") hook here.
+# main.py passes an explicit `lifespan=lifespan` to FastAPI(), and Starlette
+# does not run `on_event("startup")` handlers when a lifespan is supplied -- the
+# hook never fires and every OAuth query then dies with
+# `sqlite3.OperationalError: no such table: oauth_clients` (which surfaced as a
+# 500 from /oauth/authorize on 2026-09-17). oauth_store self-initializes on
+# first use instead. To pre-create them eagerly, call
+# `await oauth_store.ensure_oauth_tables()` from inside `lifespan` -- not here.
 
 
 @app.middleware("http")
