@@ -391,6 +391,10 @@ async def init_agents_db() -> None:
             # means the agent has no server of its own; callers fall back to
             # Vantage's own agent-profile page for that agent.
             ("public_endpoint", "TEXT DEFAULT NULL"),
+            # Privacy layer (privacy-layer.md §4): 0=aggregate-only (default),
+            # 1=full pseudonymized traces. Bridge reads this before emitting to
+            # Mycelium substrate. Never exposes raw addresses regardless of flag.
+            ("mycelium_opt_in", "INTEGER NOT NULL DEFAULT 0"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE agents ADD COLUMN {col} {ddl}")

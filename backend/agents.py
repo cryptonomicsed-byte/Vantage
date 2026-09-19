@@ -728,6 +728,25 @@ async def my_broadcasts(agent: dict = Depends(get_agent)):
     return [dict(r) for r in rows]
 
 
+@router.get("/me/privacy")
+async def get_privacy_settings(agent: dict = Depends(get_agent)):
+    """Return this agent's Mycelium substrate privacy setting."""
+    return {"mycelium_opt_in": bool(agent.get("mycelium_opt_in", 0))}
+
+
+@router.put("/me/privacy")
+async def update_privacy_settings(body: dict, agent: dict = Depends(get_agent)):
+    """Toggle Mycelium trace opt-in (false=aggregate-only, true=full pseudonymized)."""
+    opt_in = 1 if body.get("mycelium_opt_in") else 0
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE agents SET mycelium_opt_in=? WHERE id=?",
+            (opt_in, agent["id"]),
+        )
+        await db.commit()
+    return {"ok": True, "mycelium_opt_in": bool(opt_in)}
+
+
 @router.get("/me/identity")
 async def my_identity_manifest(agent: dict = Depends(get_agent)):
     """Full multi-chain identity manifest for this agent.
@@ -10372,3 +10391,120 @@ async def get_instance_info(agent: dict = Depends(get_agent)):
         "federation_enabled": settings.FEDERATION_ENABLED,
         "instance_name": settings.APP_NAME,
     }
+
+
+# ── Phase 13.2 — Genealogy / Lineage Registry ─────────────────────────────────
+
+@router.get("/{npub}/lineage")
+async def get_agent_lineage(
+    npub: str,
+    depth: int = 3,
+    agent: dict = Depends(get_agent),
+):
+    """
+    GET /api/agents/{npub}/lineage
+
+    Returns the birther→child lineage tree for a given agent npub.
+    Queries the local Vantage DB (mirrored from on-chain genealogy.move).
+    depth: how many generations to walk (default 3, max 10).
+    """
+    depth = min(depth, 10)
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+
+        # Resolve agent_id from npub
+        row = await (await db.execute(
+            "SELECT id, npub, created_at FROM agents WHERE npub = ?", (npub,)
+        )).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Agent {npub} not found")
+
+        root = dict(row)
+
+        async def walk_lineage(current_npub: str, gen: int) -> dict:
+            if gen > depth:
+                return {}
+            row = await (await db.execute(
+                """SELECT a.npub, a.id, a.created_at,
+                          g.birther_npub, g.birth_block, g.birth_ts_ms, g.royalty_rate
+                   FROM agents a
+                   LEFT JOIN agent_genealogy g ON g.child_npub = a.npub
+                   WHERE a.npub = ?""",
+                (current_npub,),
+            )).fetchone()
+            if not row:
+                return {"npub": current_npub, "children": []}
+
+            node = dict(row)
+            children_rows = await (await db.execute(
+                """SELECT child_npub FROM agent_genealogy
+                   WHERE birther_npub = ?""",
+                (current_npub,),
+            )).fetchall()
+
+            node["generation"] = gen
+            node["children"] = [
+                await walk_lineage(r["child_npub"], gen + 1)
+                for r in children_rows
+            ]
+            return node
+
+        tree = await walk_lineage(npub, 0)
+        return {
+            "root_npub": npub,
+            "depth_queried": depth,
+            "tree": tree,
+        }
+
+
+@router.post("/{npub}/lineage")
+async def register_birth_lineage(
+    npub: str,
+    payload: dict,
+    agent: dict = Depends(get_agent),
+):
+    """
+    POST /api/agents/{npub}/lineage
+
+    Record a birther→child relationship. Called by the Omo-Koda2 birth flow
+    after soul::forge() on Sui. Mirrors the on-chain genealogy.move state.
+
+    Body: {birther_npub, child_agent_id, birther_agent_id, birth_block, birth_ts_ms}
+    """
+    birther_npub = payload.get("birther_npub", "")
+    if not birther_npub:
+        raise HTTPException(status_code=400, detail="birther_npub required")
+
+    async with get_db() as db:
+        try:
+            await db.execute(
+                """CREATE TABLE IF NOT EXISTS agent_genealogy (
+                    child_npub        TEXT PRIMARY KEY,
+                    birther_npub      TEXT NOT NULL,
+                    child_agent_id    TEXT,
+                    birther_agent_id  TEXT,
+                    birth_block       INTEGER DEFAULT 0,
+                    birth_ts_ms       INTEGER DEFAULT 0,
+                    royalty_rate      INTEGER DEFAULT 100,
+                    created_at        REAL DEFAULT (unixepoch())
+                )""",
+            )
+            await db.execute(
+                """INSERT OR IGNORE INTO agent_genealogy
+                   (child_npub, birther_npub, child_agent_id, birther_agent_id,
+                    birth_block, birth_ts_ms)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    npub,
+                    birther_npub,
+                    payload.get("child_agent_id", ""),
+                    payload.get("birther_agent_id", ""),
+                    payload.get("birth_block", 0),
+                    payload.get("birth_ts_ms", 0),
+                ),
+            )
+            await db.commit()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    return {"registered": True, "child_npub": npub, "birther_npub": birther_npub}
