@@ -219,3 +219,92 @@ async def fold_text(text: str):
 async def health():
     """GlyphIndex API health check."""
     return {"status": "ok", "version": "1.0.0"}
+
+
+# ── Phase 8E — store projection ──────────────────────────────────────────────
+
+class ProjectionRequest(BaseModel):
+    """Compute a public-projection Merkle commitment over a set of GIX envelopes.
+
+    `canonical_ids` must be hex-encoded SHA-256 values already registered in the
+    caller's store.  The response is stateless — Vantage does not persist the
+    projection; it only verifies the Merkle root and derives the agent fingerprint.
+
+    `agent_bytes` (optional hex): if supplied, the response includes a
+    GixAgentProjection fingerprint = SHA-256(agent_bytes ‖ merkle_root_bytes).
+    """
+    canonical_ids: list[str]
+    agent_bytes: Optional[str] = None   # hex-encoded agent canonical identity
+
+
+class ProjectionResponse(BaseModel):
+    canonical_ids: list[str]            # sorted
+    merkle_root: str                    # hex
+    object_count: int
+    # present only when agent_bytes was supplied
+    agent_fingerprint: Optional[str] = None
+    agent_glyph: Optional[str] = None
+    agent_odu_base: Optional[int] = None
+    agent_odu_composed: Optional[int] = None
+
+
+@router.post("/projection")
+async def compute_projection(request: ProjectionRequest):
+    """Compute a GIX store projection commitment (Phase 8E).
+
+    Stateless computation — no DB write.  Takes a list of canonical_ids,
+    sorts them, computes the GIX1 Merkle root, and optionally derives an
+    agent-level identity fingerprint.
+
+    This is the federation discovery endpoint: a remote node can send its
+    public canonical_ids; Vantage verifies the Merkle commitment and resolves
+    the agent fingerprint for cross-realm routing.
+    """
+    import hashlib
+
+    if not request.canonical_ids:
+        return ProjectionResponse(
+            canonical_ids=[],
+            merkle_root="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            object_count=0,
+        )
+
+    # Validate all IDs are 64-char hex.
+    for cid in request.canonical_ids:
+        if len(cid) != 64:
+            raise HTTPException(
+                status_code=422,
+                detail=f"canonical_id must be 64 hex chars, got: {cid!r}",
+            )
+        try:
+            bytes.fromhex(cid)
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"invalid hex in canonical_id: {cid!r}")
+
+    sorted_ids = sorted(request.canonical_ids)
+
+    # GIX1 Merkle root: SHA-256 of sorted IDs joined with newlines
+    # (matches gix_types::gix1_merkle_root canonical algorithm).
+    root_input = "\n".join(sorted_ids).encode()
+    merkle_root = hashlib.sha256(root_input).hexdigest()
+
+    resp = ProjectionResponse(
+        canonical_ids=sorted_ids,
+        merkle_root=merkle_root,
+        object_count=len(sorted_ids),
+    )
+
+    if request.agent_bytes:
+        try:
+            agent_raw = bytes.fromhex(request.agent_bytes)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="agent_bytes must be hex-encoded")
+
+        digest = hashlib.sha256(agent_raw + merkle_root.encode()).digest()
+        resp.agent_fingerprint = digest.hex()
+        resp.agent_glyph = glyph_fold(digest)
+        base, composed = odu_link(digest)
+        resp.agent_odu_base = base
+        resp.agent_odu_composed = composed
+
+    return resp
