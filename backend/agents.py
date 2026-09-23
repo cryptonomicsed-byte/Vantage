@@ -2762,6 +2762,29 @@ async def send_message(
         )
         await db.commit()
     asyncio.create_task(_fire_webhooks(recipient["id"], "new_message", {"message_id": msg_id, "subject": subject, "from": agent["name"]}))
+
+    # ── agent-phone relay: deliver over NIP-44 / Reticulum if recipient has a
+    # nostr pubkey registered.  Fire-and-forget — never blocks the response.
+    async def _relay_via_agent_phone() -> None:
+        try:
+            async with get_db() as _db:
+                _db.row_factory = aiosqlite.Row
+                async with _db.execute(
+                    "SELECT nostr_pubkey_hex FROM agents WHERE id=?", (recipient["id"],)
+                ) as _cur:
+                    _row = await _cur.fetchone()
+            _pubkey = _row["nostr_pubkey_hex"] if _row else None
+            if _pubkey:
+                from .agent_phone_client import send_message as _ap_send
+                await _ap_send(
+                    from_id=agent["name"],
+                    to_pubkey=_pubkey,
+                    content=content,
+                )
+        except Exception as _exc:  # pragma: no cover
+            logger.debug("agent-phone relay skipped: %s", _exc)
+
+    asyncio.create_task(_relay_via_agent_phone())
     return {"message_id": msg_id, "to": recipient_name}
 
 

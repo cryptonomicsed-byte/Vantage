@@ -1,13 +1,22 @@
-"""Council of 12 store — seats, sectors, staggered quarterly rotation.
-Ported from sovereign-node council_store.rs."""
+"""Council of 12 — canonical implementation lives in routers/governance.py.
 
-import time
-from dataclasses import dataclass, field
-from threading import Lock
-from typing import Optional
+This module re-exports the shared constants and the in-memory CouncilSeat /
+CouncilStore types (ported from sovereign-node council_store.rs) that are used
+by tests and internal tooling.  For all HTTP-facing Council of 12 logic — seat
+nomination, rotation, proposal voting, Bínò veto — use the DB-backed router in
+``routers/governance.py``.
 
-COUNCIL_SEAT_COUNT = 12
-SECTOR_COUNT = 24
+Import from here only when you need the lightweight in-memory representation
+(e.g. simulation / unit-test scaffolding).  Production reads/writes go through
+``routers.governance``.
+"""
+
+# ── Re-export canonical constants from the authoritative source ───────────────
+# These must stay in sync with routers/governance.py.
+# If you change them there, change them here too (and vice versa).
+
+COUNCIL_SEAT_COUNT = 12   # matches routers/governance.COUNCIL_SIZE
+SECTOR_COUNT = 24          # matches routers/governance.TOTAL_SECTORS
 TERM_DURATION_MS = 91 * 24 * 60 * 60 * 1000  # 91 days
 
 SECTOR_DOMAINS = [
@@ -24,6 +33,14 @@ SECTOR_DOMAINS = [
     "Emergency & Incident Response", "International Expansion",
     "Environmental Stewardship",     "Cultural & Heritage Preservation",
 ]
+
+# ── In-memory types (Rust port — for simulation / unit tests only) ────────────
+# For production council state, query routers.governance (DB-backed, async).
+
+import time
+from dataclasses import dataclass, field
+from threading import Lock
+from typing import Optional
 
 
 @dataclass
@@ -49,6 +66,13 @@ class Sector:
 
 
 class CouncilStore:
+    """Lightweight in-memory council store used for simulation / testing.
+
+    Production code MUST use ``routers.governance`` (DB-backed, async).
+    This class exists for unit-test scaffolding and sovereign-node simulations
+    that do not have a live database.
+    """
+
     def __init__(self):
         self._seats: dict[int, CouncilSeat] = {}
         self._sectors: dict[int, Sector] = {}
@@ -97,6 +121,7 @@ class CouncilStore:
             return sorted(self._sectors.values(), key=lambda s: s.sector_index)
 
     def rotate(self, seat_index: int, new_councilor_did: str) -> CouncilSeat:
+        """Rotate a seat. NOTE: for production use routers.governance.rotate_council."""
         with self._lock:
             seat = self._seats.get(seat_index)
             if seat is None:
