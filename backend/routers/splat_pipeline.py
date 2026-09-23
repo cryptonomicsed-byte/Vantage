@@ -47,7 +47,7 @@ router = APIRouter(prefix="/api/splat", tags=["splat-pipeline"])
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-_GPUAI_KEY     = os.environ.get("GPUAI_API_KEY", "gpuai_live_yxOFo45nCboRVOU6ak8lduNJ")
+_GPUAI_KEY     = os.environ.get("GPUAI_API_KEY", "")
 _GPUAI_BASE    = os.environ.get("GPUAI_BASE_URL", "https://api.gpu.ai/v1").rstrip("/")
 _GPU_TYPE      = os.environ.get("GPUAI_GPU_TYPE", "a100_40gb")
 _SSH_KEY_ID    = os.environ.get("GPUAI_SSH_KEY_ID", "")
@@ -92,6 +92,11 @@ async def _ensure_tables(db: aiosqlite.Connection) -> None:
 
 def _gpuai_request(method: str, path: str, body: Optional[dict] = None) -> dict:
     """Synchronous GPU.ai API call (used in executor-thread pattern)."""
+    if not _GPUAI_KEY:
+        raise RuntimeError(
+            "GPUAI_API_KEY is not set — refusing to call GPU.ai with an empty bearer token. "
+            "Set the key in the environment (never in source)."
+        )
     url  = f"{_GPUAI_BASE}/{path.lstrip('/')}"
     data = json.dumps(body).encode() if body else None
     headers = {
