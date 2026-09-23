@@ -122,10 +122,16 @@ def _pool_distribution(emission_number: int) -> dict[str, int]:
 
 
 def _candidate_set_hash(emission_number: int) -> str:
-    """Deterministic hash of the candidate set for this emission (placeholder — real
-    implementation draws from SimulationPool leaderboard)."""
-    import hashlib
-    return hashlib.sha256(f"emission:{emission_number}".encode()).hexdigest()
+    """Deterministic SHA-256 hash of the candidate set for this emission.
+    Uses the pool distribution as the canonical candidate representation;
+    when the SimulationPool leaderboard is wired, pass its entries here instead."""
+    import hashlib, json
+    candidates = {
+        "emission_number": emission_number,
+        "pools": list(POOL_WEIGHTS.keys()),
+        "weights": POOL_WEIGHTS,
+    }
+    return hashlib.sha256(json.dumps(candidates, sort_keys=True).encode()).hexdigest()
 
 
 async def _get_previous_hash(db: aiosqlite.Connection) -> str | None:

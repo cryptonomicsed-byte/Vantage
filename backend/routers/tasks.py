@@ -1,4 +1,5 @@
 """Sovereign agent task lifecycle API — exposed as MCP tools via fastapi-mcp."""
+import asyncio
 import logging
 import secrets
 from typing import Optional
@@ -8,6 +9,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Query
 
 from ..db import get_db
 from ..deps import get_agent
+from ..waggle_client import emit_signal
 
 logger = logging.getLogger(__name__)
 

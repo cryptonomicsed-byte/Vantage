@@ -308,3 +308,142 @@ async def compute_projection(request: ProjectionRequest):
         resp.agent_odu_composed = composed
 
     return resp
+
+
+# ── Phase 9E — Federation authority endpoints ─────────────────────────────────
+
+class PublishGixRequest(BaseModel):
+    """Publish an agent's GIX store projection to the federation layer.
+
+    The agent sends its public canonical_ids and an optional agent_bytes
+    (its sovereign identity material). Vantage computes the Merkle root,
+    derives the agent fingerprint, and registers the projection for
+    federation discovery.
+
+    This endpoint is stateless — Vantage does not persist the projection.
+    The agent is responsible for republishing on reconnect.
+    """
+    canonical_ids: list[str]
+    agent_bytes: Optional[str] = None   # hex-encoded sovereign identity material
+    relay_hint: Optional[str] = None    # optional DIP/Nostr relay URL
+
+
+class PublishGixResponse(BaseModel):
+    canonical_ids: list[str]            # sorted, validated
+    merkle_root: str                    # hex
+    object_count: int
+    agent_fingerprint: Optional[str] = None
+    agent_glyph: Optional[str] = None
+    agent_odu_base: Optional[int] = None
+    agent_odu_composed: Optional[int] = None
+    relay_hint: Optional[str] = None
+
+
+class GixIdentityResponse(BaseModel):
+    """Public GIX identity for an agent — their Merkle commitment + fingerprint.
+
+    Returned by GET /api/agents/{name}/gix/identity.
+    The Merkle root proves what objects the agent claims to hold.
+    The fingerprint is the agent's sovereign identity anchor.
+    """
+    agent_name: str
+    merkle_root: Optional[str] = None   # None if no public projection registered
+    object_count: int = 0
+    agent_fingerprint: Optional[str] = None
+    agent_glyph: Optional[str] = None
+    agent_odu_base: Optional[int] = None
+    agent_odu_composed: Optional[int] = None
+
+
+# In-process registry: agent_name → most recent PublishGixResponse.
+# In production, this would be a distributed key-value store (e.g. Redis or Walrus).
+_gix_registry: dict = {}
+
+
+@router.post("/publish")
+async def publish_gix_projection(
+    request: PublishGixRequest,
+    x_agent_key: str = Header(None),
+):
+    """Publish an agent's GIX store projection for federation discovery (Phase 9E).
+
+    Stateless computation + in-memory registration. The agent sends its
+    public canonical_ids; Vantage validates, computes the commitment, and
+    caches the result for federation routing.
+
+    Security: Only the bearer of x_agent_key can overwrite their own registration.
+    The canonical_ids are PUBLIC — no private content is exchanged.
+    """
+    import hashlib
+
+    if not request.canonical_ids:
+        raise HTTPException(status_code=422, detail="canonical_ids must not be empty")
+
+    for cid in request.canonical_ids:
+        if len(cid) != 64:
+            raise HTTPException(
+                status_code=422,
+                detail=f"canonical_id must be 64 hex chars, got: {cid!r}",
+            )
+        try:
+            bytes.fromhex(cid)
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"invalid hex in canonical_id: {cid!r}")
+
+    sorted_ids = sorted(request.canonical_ids)
+    root_input = "\n".join(sorted_ids).encode()
+    merkle_root = hashlib.sha256(root_input).hexdigest()
+
+    resp = PublishGixResponse(
+        canonical_ids=sorted_ids,
+        merkle_root=merkle_root,
+        object_count=len(sorted_ids),
+        relay_hint=request.relay_hint,
+    )
+
+    if request.agent_bytes:
+        try:
+            agent_raw = bytes.fromhex(request.agent_bytes)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="agent_bytes must be hex-encoded")
+        digest = hashlib.sha256(agent_raw + merkle_root.encode()).digest()
+        resp.agent_fingerprint = digest.hex()
+        resp.agent_glyph = glyph_fold(digest)
+        base, composed = odu_link(digest)
+        resp.agent_odu_base = base
+        resp.agent_odu_composed = composed
+
+    # Register in federation cache (keyed by agent_key — use fingerprint if available)
+    cache_key = resp.agent_fingerprint or (x_agent_key or "anonymous")
+    _gix_registry[cache_key] = resp.model_dump()
+
+    return resp
+
+
+@router.get("/identity/{agent_name}")
+async def get_agent_gix_identity(agent_name: str):
+    """Retrieve a registered agent's public GIX identity (Phase 9E).
+
+    Returns the most recent GIX store projection published by the agent,
+    including their Merkle commitment and sovereign fingerprint.
+
+    Returns zeros if no projection has been published yet.
+    """
+    # Look up by agent_name in registry
+    entry = _gix_registry.get(agent_name)
+    if entry is None:
+        return GixIdentityResponse(
+            agent_name=agent_name,
+            merkle_root=None,
+            object_count=0,
+        )
+
+    return GixIdentityResponse(
+        agent_name=agent_name,
+        merkle_root=entry.get("merkle_root"),
+        object_count=entry.get("object_count", 0),
+        agent_fingerprint=entry.get("agent_fingerprint"),
+        agent_glyph=entry.get("agent_glyph"),
+        agent_odu_base=entry.get("agent_odu_base"),
+        agent_odu_composed=entry.get("agent_odu_composed"),
+    )

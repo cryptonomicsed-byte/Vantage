@@ -10,14 +10,15 @@ from typing import Optional
 
 
 class DistributionPool(str, Enum):
-    Simulation  = "Simulation"
-    Research    = "Research"
-    Governance  = "Governance"
-    Reserve     = "Reserve"
-    Grants      = "Grants"
-    Ubi         = "Ubi"
-    LotteryBurn = "LotteryBurn"
-    Sabbath     = "Sabbath"
+    # Canonical 8-pool taxonomy from TOC_CONSTANTS.toml [ase.pools] — aligned 2026-09-23
+    VeilSimPool    = "VeilSimPool"    # 20% → proof-of-simulation rewards
+    RndPool        = "RndPool"        # 15% → R&D fund
+    GovernancePool = "GovernancePool" # 15% → Council + 24-sector governance
+    ReservePool    = "ReservePool"    # 15% → protocol reserve
+    ComputePool    = "ComputePool"    # 15% → compute (Dopamine) bootstrap subsidy
+    StoragePool    = "StoragePool"    # 10% → storage pool (Walrus/Arweave adapters)
+    WitnessPool    = "WitnessPool"    # 5%  → witness + evidence pool
+    TreasuryPool   = "TreasuryPool"   # 5%  → Bínò treasury
 
 
 @dataclass

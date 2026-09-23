@@ -21,11 +21,59 @@ router = APIRouter(prefix="/api/trading", tags=["trading"])
 
 
 async def _emit_trade_receipt(order: dict, agent_id, outcome: str) -> None:
-    """Fire-and-forget ARP economic receipt for a trade event (P0-7)."""
+    """Fire-and-forget ARP economic receipt for a trade event (P0-7).
+    Persists the receipt envelope to the arp_receipts table."""
+    import json as _json
+    from datetime import datetime, timezone
     try:
         receipt = from_trade_order(order, str(agent_id), outcome)
+        receipt_hash = receipt.canonical_hash()
+        receipt_dict = receipt.to_dict()
+        accepted_at = datetime.now(timezone.utc).isoformat()
+        action = receipt_dict.get("action", {})
+        async with get_db() as db:
+            await db.execute(
+                """CREATE TABLE IF NOT EXISTS arp_receipts (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    receipt_id    TEXT NOT NULL UNIQUE,
+                    kind          TEXT NOT NULL,
+                    kind_ext      TEXT,
+                    agent_id      TEXT NOT NULL,
+                    action_kind   TEXT,
+                    target        TEXT,
+                    outcome       TEXT,
+                    timestamp     INTEGER,
+                    previous_hash TEXT,
+                    raw_json      TEXT NOT NULL,
+                    accepted_at   TEXT NOT NULL
+                )"""
+            )
+            try:
+                await db.execute(
+                    """INSERT INTO arp_receipts
+                         (receipt_id, kind, kind_ext, agent_id, action_kind,
+                          target, outcome, timestamp, previous_hash, raw_json, accepted_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        receipt.receipt_id,
+                        receipt_dict.get("kind", "economic"),
+                        receipt_dict.get("kind_ext"),
+                        str(agent_id),
+                        action.get("kind"),
+                        action.get("target"),
+                        action.get("outcome"),
+                        receipt_dict.get("timestamp"),
+                        receipt_dict.get("previous_hash"),
+                        _json.dumps(receipt_dict),
+                        accepted_at,
+                    ),
+                )
+                await db.commit()
+            except Exception as insert_exc:
+                if "UNIQUE constraint" not in str(insert_exc):
+                    logger.warning("arp_receipt insert failed: %s", insert_exc)
         logger.info("trade_receipt kind=economic order_id=%s outcome=%s hash=%s",
-                    order.get("id"), outcome, receipt.canonical_hash())
+                    order.get("id"), outcome, receipt_hash)
     except Exception as exc:
         logger.warning("trade receipt emission failed: %s", exc)
 
