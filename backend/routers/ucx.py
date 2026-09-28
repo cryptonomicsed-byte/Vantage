@@ -242,6 +242,15 @@ async def mint_dopamine(
     if gpu_seconds <= 0:
         raise HTTPException(400, "gpu_seconds must be positive")
 
+    # Replay guard: reject duplicate work_id claims for the same agent
+    db.row_factory = aiosqlite.Row
+    async with db.execute(
+        "SELECT 1 FROM dopamine_allocations WHERE work_id = ? AND agent_id = ? AND workload_type != 'synapse_burn'",
+        (work_id, agent_id),
+    ) as cur:
+        if await cur.fetchone():
+            raise HTTPException(409, f"work_id {work_id!r} already recorded for agent {agent_id}")
+
     # Require at least one witness (chain integrity gate)
     if witness_count == 0:
         raise HTTPException(422, "at least 1 witness receipt required for Dopamine allocation")
@@ -466,6 +475,9 @@ async def burn_for_synapse(
     and credits `synapse_amount` Synapse tokens.
     """
     import time as _time
+
+    if body.synapse_amount <= 0:
+        raise HTTPException(400, "synapse_amount must be a positive integer")
 
     await _ensure_dopamine_tables(db)
     await _ensure_synapse_table(db)
