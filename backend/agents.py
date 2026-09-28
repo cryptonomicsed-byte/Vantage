@@ -4946,6 +4946,8 @@ async def complete_creation_job(
         )
         if res.rowcount == 0:
             raise HTTPException(404, "Job not found")
+        # Birther royalty — stub until human-originated revenue is tracked (I-14)
+        _royalty = compute_birther_royalty(agent.get("royalty_rate", 0), 0.0)
         await db.commit()
     return {"job_id": job_id, "status": "done", "broadcast_id": broadcast_id}
 
