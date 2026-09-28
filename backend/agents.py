@@ -4946,10 +4946,16 @@ async def complete_creation_job(
         )
         if res.rowcount == 0:
             raise HTTPException(404, "Job not found")
-        # Birther royalty — stub until human-originated revenue is tracked (I-14)
-        _royalty = compute_birther_royalty(agent.get("royalty_rate", 0), 0.0)
+        # Birther royalty: only compute when human-originated revenue is reported.
+        # Caller may pass revenue_ase in the body for external job settlements.
+        # When absent, skip the royalty (no revenue → no royalty, per I-53).
+        _revenue_ase = float(body.get("revenue_ase") or 0.0)
+        _royalty_payout: float = 0.0
+        if _revenue_ase > 0.0:
+            _royalty_payout = compute_birther_royalty(agent.get("royalty_rate", 0), _revenue_ase)
         await db.commit()
-    return {"job_id": job_id, "status": "done", "broadcast_id": broadcast_id}
+    return {"job_id": job_id, "status": "done", "broadcast_id": broadcast_id,
+            "royalty_payout": _royalty_payout}
 
 
 @router.get("/me/creation-jobs")
