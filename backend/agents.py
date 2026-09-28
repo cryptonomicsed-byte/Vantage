@@ -10480,6 +10480,25 @@ async def get_agent_lineage(
         }
 
 
+def compute_birther_royalty(royalty_rate: int, revenue_ase: float) -> float:
+    """
+    Compute the birther royalty payout (ASE) owed on external revenue.
+
+    royalty_rate: basis-point integer stored in agent_genealogy (e.g. 100 = 1%).
+    revenue_ase:  the qualifying human-originated external revenue for this epoch
+                  (only; agent-to-agent settlements are excluded per TOC_CONSTANTS
+                  [birthright].qualifying_fraction = 0.10).
+
+    Returns the ASE amount due to the birther.
+
+    STATUS: STUB — birther_royalty payments are not yet triggered by any
+    real settlement path. When wired, call this from the job-settlement handler
+    and record the royalty_payout on the agent_genealogy row.
+    """
+    rate_fraction = royalty_rate / 10_000.0  # basis points → fraction
+    return revenue_ase * rate_fraction
+
+
 @router.post("/{npub}/lineage")
 async def register_birth_lineage(
     npub: str,
