@@ -170,6 +170,22 @@ async def init_coordination_db() -> None:
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_cm_principal ON channel_messages(principal_id, created_at DESC)"
         )
+
+        # Loop-guard depth, persisted so it survives a restart. The mention poller
+        # re-scans channel_messages and used to hardcode depth=0, so an agent's own
+        # reply -- msg_type='say', containing '@', and so matching that scan's own
+        # filter -- was re-dispatched with the guard reset, and two agents that
+        # mentioned each other could ping-pong until the 10-minute lookback
+        # expired, on real model calls. Reading the persisted vdepth is what makes
+        # the guard real on the poller path. Idempotent: ADD COLUMN raises when the
+        # column already exists, which is the same pattern db.py uses for its own
+        # schema growth.
+        try:
+            await db.execute(
+                "ALTER TABLE channel_messages ADD COLUMN dispatch_depth INTEGER DEFAULT 0"
+            )
+        except Exception:
+            pass
         await db.commit()
 
     await _migrate_guild_members()
@@ -664,17 +680,29 @@ async def index_event(event: dict, channel: Optional[dict] = None) -> Optional[i
                        parsed["msg_type"], parsed["event_id"][:8], parsed["pubkey"][:8])
         return None
 
+    # Persist the loop-guard depth so the mention poller can read it back instead
+    # of assuming 0. Inlined rather than importing guild_chat.dispatch_depth, which
+    # would put coordination.py into a module-level cycle with guild_chat.
+    _depth = 0
+    for _tag in (event.get("tags") or []):
+        if _tag and len(_tag) >= 2 and _tag[0] == "vdepth":
+            try:
+                _depth = int(_tag[1])
+            except (TypeError, ValueError):
+                _depth = 0
+            break
+
     async with get_db() as db:
         cur = await db.execute(
             """INSERT OR IGNORE INTO channel_messages
                  (event_id, channel_id, buzz_channel_id, pubkey, principal_id,
                   thread_root_event_id, reply_to_event_id, msg_type, work_ref,
-                  content, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                  content, created_at, dispatch_depth)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (parsed["event_id"], channel["id"], parsed["buzz_channel_id"], parsed["pubkey"],
              principal_id, parsed["thread_root_event_id"], parsed["reply_to_event_id"],
              parsed["msg_type"], parsed["work_ref"], parsed["content"][:MAX_CONTENT_CHARS],
-             parsed["created_at"]),
+             parsed["created_at"], _depth),
         )
         await db.commit()
         row_id = cur.lastrowid

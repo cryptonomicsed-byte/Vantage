@@ -1,16 +1,29 @@
 """Agent Audio Platform — clean working router."""
-import json, uuid, subprocess
+import json, uuid, subprocess, logging
 from pathlib import Path
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, HTTPException, Header
 
 from ..deps import get_agent as _get_agent_dep
 from ..db import get_db
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/audio", tags=["audio"])
 AUDIO_DIR = Path("/opt/ares/media/audio")
 COVER_DIR = Path("/opt/ares/media/audio/covers")
-AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-COVER_DIR.mkdir(parents=True, exist_ok=True)
+# Importing the app must not require a writable path outside the deployment.
+# These two mkdir calls ran at import time, so on any host without /opt (a test
+# runner, a dev machine, a device) the entire application failed to import --
+# every route, not just audio. Warn and carry on; a route that genuinely needs
+# the directory still fails at call time, which is where that belongs.
+for _media_dir in (AUDIO_DIR, COVER_DIR):
+    try:
+        _media_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as _exc:
+        logger.warning(
+            "audio: media dir %s not writable (%s); audio routes will fail until it is",
+            _media_dir, _exc,
+        )
 DB = Path("/opt/ares/Vantage/data/vantage.db")
 
 def get_duration(path):

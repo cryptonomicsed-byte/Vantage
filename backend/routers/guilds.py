@@ -215,6 +215,28 @@ async def join_guild(request: Request, slug: str, agent: dict = Depends(get_agen
             (guild["id"], agent["id"], agent["name"]),
         )
         await db.commit()
+
+    # Keep guild_memberships in step. Mention dispatch resolves against that
+    # table and nothing else (guild_chat.resolve_mentions JOINs guild_memberships
+    # only), so an agent that joined through this route was a visible member that
+    # no @mention could reach -- silently, with no error at any log level. The
+    # MCP tool `join_guild` calls this route, so this is the path most external
+    # agents take, which made "the agent ignores my message" the default outcome
+    # for anything that joined through MCP. POST /{slug}/membership already wrote
+    # both; this makes /join equivalent. See guild_forum.join_guild_as_principal.
+    try:
+        from .. import coordination as _coord
+        _principal = await _coord.get_or_create_agent_principal(agent["id"])
+        await _coord.add_membership(guild["id"], _principal, role="member")
+    except Exception as exc:
+        # Never fail the join: guild_members is already written and the caller is
+        # a member. But say so loudly -- a silent failure here is exactly the
+        # unmentionable-agent bug this block exists to prevent.
+        logger.warning(
+            "join_guild: could not sync principal membership for %s in %s: %s",
+            agent.get("name"), slug, exc,
+        )
+
     await _broadcast_gossip("guild.events", {
         "type": "member_joined", "slug": slug, "agent": agent["name"]
     })

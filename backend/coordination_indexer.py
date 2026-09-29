@@ -92,6 +92,18 @@ async def _dispatch_guild_mentions(event: dict) -> None:
     if not mentions:
         return
 
+    # Share the poller's dedup set -- both paths live in this module. The poller
+    # skips only events it has itself marked, or ones whose thread already has a
+    # reply, so without this the live indexer and the 30 s poller can each invoke
+    # the same mentioned agent: two model calls per @mention and two rows in the
+    # transcript. Harmless against an echo backend, a doubled bill against any
+    # metered one.
+    import time as _time
+    event_id = event.get("id") or ""
+    if event_id:
+        _dispatched_event_ids.add(event_id)
+        _dispatched_timestamps[event_id] = _time.time()
+
     parsed = parse_message_event(event)
     channel = await get_channel_by_buzz_id(parsed["buzz_channel_id"])
     if channel is None:
@@ -120,6 +132,16 @@ async def _dispatch_guild_mentions(event: dict) -> None:
 
     mentioned = await resolve_mentions(channel["guild_id"], mentions)
     if not mentioned:
+        # Say why, at a level visible in normal operation. This used to be a bare
+        # `return`, and that is how "the agent ignored my @mention" became
+        # undebuggable: a mention resolving to nothing left no trace at any log
+        # level. resolve_mentions scopes to guild_memberships, so this is nearly
+        # always "not a member of this guild" or a display_name mismatch.
+        logger.info(
+            "coordination_indexer: @mentions %s in %s/%s resolved to no guild member "
+            "(guild_id=%s) -- dropped without dispatch",
+            mentions, guild_slug, channel["slug"], channel["guild_id"],
+        )
         return
 
     logger.info(
@@ -230,7 +252,7 @@ async def run_mention_dispatch_poller() -> None:
                 db.row_factory = aiosqlite.Row
                 cur = await db.execute(
                     """SELECT cm.event_id, cm.content, cm.pubkey, cm.channel_id,
-                              cm.thread_root_event_id,
+                              cm.thread_root_event_id, cm.dispatch_depth,
                               gc.slug as channel_slug, gc.buzz_channel_id, gc.guild_id,
                               g.slug as guild_slug
                          FROM channel_messages cm
@@ -293,11 +315,17 @@ async def run_mention_dispatch_poller() -> None:
 
                 mentioned = await resolve_mentions(row["guild_id"], mentions)
                 if not mentioned:
+                    logger.info(
+                        "mention_poller: @mentions %s in %s/%s resolved to no guild "
+                        "member (guild_id=%s) -- dropped without dispatch",
+                        mentions, row["guild_slug"], row["channel_slug"], row["guild_id"],
+                    )
                     continue
 
                 logger.info(
-                    "mention_poller: dispatching unanswered @mentions %s in %s/%s",
+                    "mention_poller: dispatching unanswered @mentions %s in %s/%s (depth=%s)",
                     mentions, row["guild_slug"], row["channel_slug"],
+                    row.get("dispatch_depth") or 0,
                 )
                 try:
                     await dispatch_to_mentioned(
@@ -306,7 +334,14 @@ async def run_mention_dispatch_poller() -> None:
                         content=row["content"],
                         author_principal=author_principal,
                         mentioned=mentioned,
-                        depth=0,
+                        # Read the persisted loop-guard depth instead of assuming 0.
+                        # Hardcoding 0 reset the guard on every poller pass, so an
+                        # agent's own reply -- msg_type='say', containing '@', and so
+                        # matching this scan's own filter -- was re-dispatched as if it
+                        # were a fresh human message. Two agents mentioning each other
+                        # could ping-pong across a restart until the 10-minute lookback
+                        # expired, on real model calls.
+                        depth=row.get("dispatch_depth") or 0,
                         root_event_id=row.get("thread_root_event_id"),
                     )
                 except Exception as exc:

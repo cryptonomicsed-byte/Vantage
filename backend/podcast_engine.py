@@ -38,7 +38,14 @@ logger = logging.getLogger(__name__)
 EDGE_TTS_BIN = str(Path(sys.executable).with_name("edge-tts"))
 
 SCRATCH_DIR = Path("/opt/ares/media/podcasts")  # per-turn TTS + concat intermediates, not web-served
-SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
+# Import-time mkdir on a path outside the deployment. On any host without /opt
+# (test runner, dev machine, device) this raised during import and took the whole
+# application down with it, not just podcasting. Warn instead; a route that needs
+# the scratch dir still fails at call time, which is where that belongs.
+try:
+    SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
+except OSError as _exc:
+    logger.warning("podcast_engine: scratch dir %s not writable (%s)", SCRATCH_DIR, _exc)
 
 # Final output lands directly in the already-mounted static dirs (see
 # main.py's app.mount calls) so no new mount/route is needed.
