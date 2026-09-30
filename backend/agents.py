@@ -39,6 +39,7 @@ limiter = Limiter(key_func=get_remote_address)
 
 from .config import settings
 from .db import DB_PATH, MEDIA_ROOT, init_agents_db, get_db
+from . import osovm_client as _osovm
 from .memory_enrichment import MemoryIntelligence
 from .skills_registry import build_skills_registry
 from .deps import (
@@ -9293,14 +9294,21 @@ async def admin_jobs_overview(_: str = Depends(get_admin)):
 
 @admin_router.patch("/agents/{agent_id}/tier")
 async def admin_set_tier(agent_id: int, request: Request, _: str = Depends(get_admin)):
-    """Manually set an agent's tier (0-5)."""
+    """Manually set an agent's tier (0-5). Pushes the new tier to OSOVM."""
     body = await _parse_body(request)
     tier = int(body.get("tier", 0))
     if not (0 <= tier <= 5):
         raise HTTPException(422, "tier must be 0-5")
     async with get_db() as db:
+        res = await db.execute(
+            "SELECT name FROM agents WHERE id=?", (agent_id,)
+        )
+        row = await res.fetchone()
         await db.execute("UPDATE agents SET tier=? WHERE id=?", (tier, agent_id))
         await db.commit()
+    agent_name = row[0] if row else str(agent_id)
+    # Notify OSOVM so sim_to_real tier gate can evaluate without a live Vantage query
+    await _osovm.push_tier(agent_name, tier)
     return {"ok": True, "agent_id": agent_id, "tier": tier}
 
 

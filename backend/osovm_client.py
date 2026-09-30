@@ -134,6 +134,33 @@ async def attest_receipt(receipt_id: str, agent_ref: str, work_ref: str = "") ->
     return await run_opcode("RECEIPT", args, agent_ref)
 
 
+async def push_tier(agent_id: str, tier: int) -> bool:
+    """Notify OSOVM of an agent's current trust tier.
+
+    Called by Vantage whenever an agent's tier changes so OSOVM's
+    _TIER_REGISTRY_GLOBAL stays current without live Vantage queries.
+    Fails silently (returns False) when OSOVM is not configured.
+    """
+    if not _configured():
+        return False
+    payload = {"agent_id": agent_id, "tier": tier}
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            r = await client.post(
+                f"{OSOVM_URL.rstrip('/')}/v1/tier-update",
+                json=payload,
+                headers=_headers(),
+            )
+            if r.status_code == 200:
+                logger.debug("OSOVM tier push: agent=%s tier=%d", agent_id, tier)
+                return True
+            logger.warning("OSOVM tier push failed: %s %s", r.status_code, r.text[:200])
+            return False
+    except Exception as exc:
+        logger.warning("OSOVM tier push error: %s", exc)
+        return False
+
+
 # ── Legacy compatibility shim ─────────────────────────────────────────────────
 # The original osovm_client.py (pre-2026-09 stub) exported `enabled()` and
 # `get_proof()`. Keep them so any existing callers don't break while the new

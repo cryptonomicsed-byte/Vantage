@@ -18,8 +18,21 @@ import logging
 import aiosqlite
 
 from .db import get_db
+from . import osovm_client as _osovm
 
 logger = logging.getLogger(__name__)
+
+
+async def _notify_tier_change(agent_id: int, tier: int) -> None:
+    """Fire-and-forget: push new tier to OSOVM registry. Never raises."""
+    try:
+        async with get_db() as db:
+            cur = await db.execute("SELECT name FROM agents WHERE id=?", (agent_id,))
+            row = await cur.fetchone()
+        if row:
+            await _osovm.push_tier(row[0], tier)
+    except Exception as exc:
+        logger.debug("OSOVM tier notify failed for agent %d: %s", agent_id, exc)
 
 # T1-T4: (min_rep, min_commitments, min_witness_approvals)
 TIER_THRESHOLDS = [
@@ -102,6 +115,7 @@ async def increment_reputation(agent_id: int, delta: int = 1) -> None:
         if row:
             t = compute_tier(row["task_reputation"], row["mesh_commitments"], row["witness_approvals"])
             await db.execute("UPDATE agent_tiers SET tier=? WHERE agent_id=?", (t, agent_id))
+            asyncio.create_task(_notify_tier_change(agent_id, t))
         await db.commit()
 
 
@@ -123,6 +137,7 @@ async def increment_commitments(agent_id: int, delta: int = 1) -> None:
         if row:
             t = compute_tier(row["task_reputation"], row["mesh_commitments"], row["witness_approvals"])
             await db.execute("UPDATE agent_tiers SET tier=? WHERE agent_id=?", (t, agent_id))
+            asyncio.create_task(_notify_tier_change(agent_id, t))
         await db.commit()
 
 
@@ -144,6 +159,7 @@ async def increment_witness_approvals(agent_id: int, delta: int = 1) -> None:
         if row:
             t = compute_tier(row["task_reputation"], row["mesh_commitments"], row["witness_approvals"])
             await db.execute("UPDATE agent_tiers SET tier=? WHERE agent_id=?", (t, agent_id))
+            asyncio.create_task(_notify_tier_change(agent_id, t))
         await db.commit()
 
 
