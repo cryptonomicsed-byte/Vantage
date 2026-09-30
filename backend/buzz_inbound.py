@@ -17,7 +17,13 @@ import aiosqlite
 
 from .buzz_client import BuzzSession
 from .buzz_identity import derive_instance_keypair, public_key_xonly_hex
-from .buzz_registration import RELAY_CONTAINER, RELAY_WS_URL
+from .buzz_registration import RELAY_WS_URL
+# docker-exec is Buzz-specific and belongs in exactly one place: the Buzz
+# adapter. This module carried its own copy, which is how a non-portable
+# implementation detail spreads. Behaviour is unchanged; the portable NIP-29
+# equivalent (nostr.groups.add_member, a kind-9000 event signed by the group
+# owner) is the follow-up that removes the dependency on hosting the relay.
+from .nostr.adapters.buzz import _docker_exec
 from .buzz_bridge import get_main_feed_channel
 from .db import get_db
 
@@ -25,15 +31,6 @@ logger = logging.getLogger(__name__)
 
 RECONNECT_BACKOFF_SECONDS = 2
 MAX_RECONNECT_BACKOFF_SECONDS = 60
-
-
-async def _docker_exec(*args: str) -> tuple[int, str, str]:
-    proc = await asyncio.create_subprocess_exec(
-        "docker", "exec", RELAY_CONTAINER, "buzz-admin", *args,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    return proc.returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")
 
 
 async def _ensure_instance_relay_membership() -> None:

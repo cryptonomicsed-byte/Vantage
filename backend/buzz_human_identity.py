@@ -26,19 +26,12 @@ from typing import Optional
 
 from .buzz_client import BuzzSession
 from .buzz_identity import derive_human_buzz_keypair, public_key_xonly_hex, get_owner_attestation_tag
-from .buzz_registration import RELAY_WS_URL, RELAY_CONTAINER
+from .buzz_registration import RELAY_WS_URL
+# See buzz_inbound.py: docker-exec lives in the Buzz adapter and nowhere else.
+from .nostr.adapters.buzz import _docker_exec
 from .db import get_db
 
 logger = logging.getLogger(__name__)
-
-
-async def _docker_exec(*args: str) -> tuple[int, str, str]:
-    proc = await asyncio.create_subprocess_exec(
-        "docker", "exec", RELAY_CONTAINER, "buzz-admin", *args,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    return proc.returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")
 
 
 async def get_human_buzz_status(human_id: int) -> dict:
