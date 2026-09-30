@@ -134,6 +134,34 @@ async def attest_receipt(receipt_id: str, agent_ref: str, work_ref: str = "") ->
     return await run_opcode("RECEIPT", args, agent_ref)
 
 
+async def sync_tiers(agent_tiers: list[dict]) -> bool:
+    """Bulk-push all agent tiers to OSOVM at startup.
+
+    agent_tiers: list of {agent_id: str, tier: int}.
+    Replaces the entire OSOVM _TIER_REGISTRY_GLOBAL — stale entries from
+    the previous process are cleared.
+    Fails silently (returns False) when OSOVM is not configured.
+    """
+    if not _configured() or not agent_tiers:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            r = await client.post(
+                f"{OSOVM_URL.rstrip('/')}/v1/tier-sync",
+                json=agent_tiers,
+                headers=_headers(),
+            )
+            if r.status_code == 200:
+                count = r.json().get("count", 0)
+                logger.info("OSOVM tier sync: %d agents pushed", count)
+                return True
+            logger.warning("OSOVM tier sync failed: %s %s", r.status_code, r.text[:200])
+            return False
+    except Exception as exc:
+        logger.warning("OSOVM tier sync error: %s", exc)
+        return False
+
+
 async def push_tier(agent_id: str, tier: int) -> bool:
     """Notify OSOVM of an agent's current trust tier.
 

@@ -612,6 +612,17 @@ async def lifespan(app: FastAPI):
     from .tier_engine import run_tier_recompute_loop as _run_tier_recompute_loop
     tier_recompute_task = asyncio.create_task(_run_tier_recompute_loop())
 
+    # Warm OSOVM tier registry on startup so the sim_to_real gate doesn't start
+    # fail-closed for all agents after an OSOVM process restart (E-tier-registry).
+    try:
+        from .tier_engine import _bulk_tier_snapshot
+        from . import osovm_client as _osovm_startup
+        snapshot = await _bulk_tier_snapshot()
+        if snapshot:
+            asyncio.create_task(_osovm_startup.sync_tiers(snapshot))
+    except Exception as _te:
+        logger.debug("OSOVM tier warmup skipped: %s", _te)
+
     # Execution engine was built + tested but never actually started anywhere
     # (an audit on 2026-08-17 found it dead code, unimported outside tests).
     # Gated on its own settings flag so a fresh deploy with the flag unset

@@ -181,6 +181,23 @@ async def bulk_recompute_tiers() -> int:
     return count
 
 
+async def _bulk_tier_snapshot() -> list[dict]:
+    """Return [{agent_id: name, tier: int}] for all agents with a tier row.
+
+    Used by main.py lifespan to warm the OSOVM tier registry after restart.
+    """
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """SELECT a.name, at.tier
+               FROM agent_tiers at
+               JOIN agents a ON a.id = at.agent_id
+               WHERE at.tier > 0"""
+        )
+        rows = await cur.fetchall()
+    return [{"agent_id": r["name"], "tier": r["tier"]} for r in rows]
+
+
 async def run_tier_recompute_loop() -> None:
     """Background task: periodic bulk tier recompute."""
     while True:
