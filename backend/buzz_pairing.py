@@ -125,13 +125,11 @@ KIND_PAIRING = 24134
 #    tenant binding needs to agree.
 INTERNAL_RELAY_HOST = "localhost"
 INTERNAL_RELAY_PORT = 3000
-PUBLIC_RELAY_WS_URL = os.environ.get("BUZZ_RELAY_WS_URL", "wss://relay.damus.io")
-PUBLIC_TENANT_HOST = os.environ.get("BUZZ_RELAY_HOST", "")
-# HTTP-scheme twin of PUBLIC_RELAY_WS_URL -- the real client's "custom"
-# payload JSON carries a relayUrl field it uses to know which relay to talk
-# to post-import, matching desktop's own relay_api_base_url_with_override().
-PUBLIC_RELAY_HTTP_URL = os.environ.get("BUZZ_RELAY_HTTP_URL", "")
-
+# Relay URLs sourced from registry -- edit NOSTR_RELAY_REGISTRY env var to override
+from .nostr_gateway import gateway as _nostr_gateway
+PUBLIC_RELAY_WS_URL: str = _nostr_gateway.primary_ws_url
+PUBLIC_RELAY_HTTP_URL: str = _nostr_gateway.primary_http_url
+PUBLIC_TENANT_HOST: str = PUBLIC_RELAY_WS_URL.removeprefix("wss://").removeprefix("ws://")
 SESSION_TIMEOUT = 120
 STEP_TIMEOUT = 30
 

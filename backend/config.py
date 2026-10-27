@@ -325,6 +325,10 @@ class Settings(BaseSettings):
     NIPAE_NSEC: str = ""
     NIPAE_OWNER: str = ""
     NIPAE_RELAY: str = "wss://relay.damus.io"
+    # JSON list of relay entries consumed by nostr_gateway.NostrGateway.
+    # Each entry: {"url": str, "role": "primary"|"backup"|"nipae"|"publish-only", "nips": [...]}
+    # Leave empty to use built-in defaults (omokoda primary + damus nipae).
+    NOSTR_RELAY_REGISTRY: str = ""
 
 
 settings = Settings()

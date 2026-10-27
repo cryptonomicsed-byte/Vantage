@@ -10,10 +10,11 @@ from typing import Optional
 from .buzz_client import BuzzSession, build_event
 from .buzz_identity import derive_instance_keypair, public_key_xonly_hex
 from .config import settings
+from .nostr_gateway import gateway as _nostr_gw
 
 logger = logging.getLogger(__name__)
 
-_RELAY = settings.NIPAE_RELAY
+_RELAY = _nostr_gw.nipae_url
 
 
 async def _get_platform_key():

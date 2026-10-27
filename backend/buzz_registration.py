@@ -8,7 +8,8 @@ import os
 
 from .buzz_identity import derive_buzz_keypair, derive_instance_keypair, public_key_xonly_hex, get_owner_attestation_tag
 from .buzz_client import BuzzSession
-from .buzz_pairing import PUBLIC_RELAY_WS_URL as RELAY_WS_URL_PUBLIC
+from .nostr_gateway import gateway as _nostr_gateway
+RELAY_WS_URL_PUBLIC: str = _nostr_gateway.primary_ws_url
 from .db import get_db
 
 logger = logging.getLogger(__name__)
