@@ -926,6 +926,8 @@ from .routers.production import router as production_router
 app.include_router(production_router)
 from .routers.alpha import router as alpha_router
 app.include_router(alpha_router)
+from .routers.galaxy_ext import router as galaxy_ext_router
+app.include_router(galaxy_ext_router)
 from .routers.intel import router as intel_router
 from .routers.code import router as code_router
 from .routers.audio import router as audio_router

@@ -24,6 +24,7 @@ from backend.db import DB_PATH
 from backend.deps import get_agent
 from backend.alpha_engine import composite_alpha_score, assemble_features
 from backend import wallet_blacklist as wb
+from backend import social_linker as _slinker, early_buyer as _eb, wallet_cluster_engine as _wce
 from ..db import get_db
 
 router = APIRouter(prefix="/api", tags=["alpha"])
@@ -404,6 +405,12 @@ async def money_flow(
     include_counterparties: bool = Query(True, description="Fold in wallet_edges (all /trace + watchlist counterparty activity, not just on-chain trades)"),
     edge_limit: int = Query(600, le=2000, description="Max wallet_edges rows to fold in"),
     exclude_exchanges: bool = Query(True, description="Exclude major exchange/custodian wallets — they're false hubs (everything routes through them) with no follow-the-money value"),
+    # ── Galaxy extension params ─────────────────────────────────
+    twitter_handle: Optional[str] = Query(None, description="Social handle to link into graph (triggers social_linker on first call)"),
+    mint_backtrack: Optional[str] = Query(None, description="Token mint to backtrack early buyers for (cached after first call)"),
+    cluster_id: Optional[str] = Query(None, description="Filter graph to wallets in this cluster_id"),
+    early_buyers_only: bool = Query(False, description="Show only early-buyer tagged nodes"),
+    show_clusters: bool = Query(True, description="Decorate wallet nodes with cluster_id and category"),
 ):
     """Money Flow Galaxy graph: wallets + tokens + social accounts as nodes,
     capital flows and mentions as edges.
@@ -430,6 +437,31 @@ async def money_flow(
     """
     now = int(time.time())
     since = now - hours * 3600
+
+    # ── On-demand social linking ──────────────────────────────────
+    if twitter_handle:
+        try:
+            await _slinker.link_handle(twitter_handle)
+        except Exception as _e:
+            logger.warning('social_linker failed for %s: %s', twitter_handle, _e)
+
+    # ── On-demand early-buyer backtracking ────────────────────────
+    if mint_backtrack:
+        try:
+            cached = await _eb.get_cached_early_buyers(mint_backtrack)
+            if not cached:
+                await _eb.backtrack_early_buyers(mint_backtrack)
+        except Exception as _e:
+            logger.warning('early_buyer backtrack failed for %s: %s', mint_backtrack, _e)
+
+    # ── Load cluster map for node decoration ──────────────────────
+    _cluster_map: dict = {}
+    if show_clusters or cluster_id or early_buyers_only:
+        try:
+            _cluster_map = await _wce.load_cluster_map()
+        except Exception as _e:
+            logger.debug('cluster_map load failed: %s', _e)
+
     async with get_db() as db:
         await db.execute(_WALLET_TRADES_DDL)
         await db.execute(_SOCIAL_SIGNALS_DDL)
@@ -899,6 +931,33 @@ async def money_flow(
         if e["source"] not in dropped_ids and e["target"] not in dropped_ids
     ]
 
+    # ── Cluster decoration + filtering ───────────────────────────
+    if _cluster_map:
+        for n in node_list:
+            if n["type"] == "wallet":
+                addr = n["id"].removeprefix("wallet:")
+                cm = _cluster_map.get(addr, {})
+                n["cluster_id"] = cm.get("cluster_id")
+                n["cluster_tags"] = cm.get("cluster_tags", [])
+                n["wallet_category"] = cm.get("wallet_category", "unknown")
+                n["cluster_label"] = cm.get("cluster_label")
+
+    if cluster_id:
+        keep = {n["id"] for n in node_list
+                if n.get("cluster_id") == cluster_id or n["type"] != "wallet"}
+        node_list = [n for n in node_list if n["id"] in keep]
+        edge_list = [e for e in edge_list
+                     if e["source"] in keep and e["target"] in keep]
+
+    if early_buyers_only:
+        keep = {n["id"] for n in node_list
+                if "first_buyer" in n.get("cluster_tags", []) or
+                   "early_buyer" in n.get("cluster_tags", []) or
+                   n["type"] != "wallet"}
+        node_list = [n for n in node_list if n["id"] in keep]
+        edge_list = [e for e in edge_list
+                     if e["source"] in keep and e["target"] in keep]
+
     return {
         "nodes": node_list,
         "edges": edge_list,
@@ -907,6 +966,10 @@ async def money_flow(
         "social": sum(1 for n in node_list if n["type"] == "social"),
         "window_hours": hours,
         "generated_at": now,
+        "cluster_filter": cluster_id,
+        "early_buyers_only": early_buyers_only,
+        "social_handle": twitter_handle,
+        "mint_backtrack": mint_backtrack,
     }
 
 
