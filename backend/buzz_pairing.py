@@ -130,6 +130,7 @@ from .nostr_gateway import gateway as _nostr_gateway
 PUBLIC_RELAY_WS_URL: str = _nostr_gateway.primary_ws_url
 PUBLIC_RELAY_HTTP_URL: str = _nostr_gateway.primary_http_url
 PUBLIC_TENANT_HOST: str = PUBLIC_RELAY_WS_URL.removeprefix("wss://").removeprefix("ws://")
+
 SESSION_TIMEOUT = 120
 STEP_TIMEOUT = 30
 
