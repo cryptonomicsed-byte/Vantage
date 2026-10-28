@@ -201,16 +201,55 @@ async def trades(mint: str, limit: int=20, x_agent_key: str=Header(...)):
 @router.get("/risk/{mint}")
 async def risk(mint: str, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
+    risks = []
+    price = 0.0
+
+    # Birdeye price check
     try:
         d = await _fetch(f"https://public-api.birdeye.so/defi/price?address={mint}", {"X-API-KEY": BIRDEYE})
-        price = float(d.get("data",{}).get("value",0))
-        risks = []
-        if price < 0.000001: risks.append({"type":"MICRO_CAP","severity":"HIGH","detail":"Price < $0.000001"})
-        if price == 0: risks.append({"type":"NO_PRICE","severity":"HIGH","detail":"No price data"})
-        score = len([r for r in risks if r["severity"]=="HIGH"]) * 50
-        return {"mint":mint,"price":price,"risks":risks,"risk_score":min(100,score),"safe":len(risks)==0}
-    except:
-        return {"mint":mint,"risk_score":50,"safe":False}
+        price = float(d.get("data", {}).get("value", 0))
+        if price < 0.000001:
+            risks.append({"type": "MICRO_CAP", "severity": "HIGH", "detail": "Price < $0.000001"})
+        if price == 0:
+            risks.append({"type": "NO_PRICE", "severity": "HIGH", "detail": "No price data"})
+    except Exception:
+        risks.append({"type": "PRICE_FETCH_FAILED", "severity": "MEDIUM", "detail": "Birdeye unavailable"})
+
+    # Helius mint/freeze authority check
+    if HELIUS:
+        try:
+            import urllib.request as _ur
+            payload = json.dumps({
+                "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+                "params": [mint, {"encoding": "jsonParsed"}],
+            }).encode()
+            req = _ur.Request(
+                f"https://mainnet.helius-rpc.com/?api-key={HELIUS}",
+                data=payload, headers={"Content-Type": "application/json"},
+            )
+            with _ur.urlopen(req, timeout=8) as resp:
+                rj = json.loads(resp.read())
+            info = (rj.get("result") or {}).get("value") or {}
+            parsed = ((info.get("data") or {}).get("parsed") or {}).get("info") or {}
+            mint_auth = parsed.get("mintAuthority")
+            freeze_auth = parsed.get("freezeAuthority")
+            if mint_auth:
+                risks.append({"type": "MINT_AUTHORITY_SET", "severity": "HIGH",
+                               "detail": f"mintAuthority={mint_auth[:20]}... — supply can be inflated"})
+            if freeze_auth:
+                risks.append({"type": "FREEZE_AUTHORITY_SET", "severity": "HIGH",
+                               "detail": f"freezeAuthority={freeze_auth[:20]}... — tokens can be frozen"})
+        except Exception as _e:
+            risks.append({"type": "HELIUS_CHECK_FAILED", "severity": "LOW", "detail": str(_e)[:80]})
+
+    score = (
+        len([r for r in risks if r["severity"] == "HIGH"]) * 40 +
+        len([r for r in risks if r["severity"] == "MEDIUM"]) * 15
+    )
+    return {
+        "mint": mint, "price": price, "risks": risks,
+        "risk_score": min(100, score), "safe": score == 0,
+    }
 
 @router.get("/watchlist")
 async def watchlist(x_agent_key: str=Header(...)):
@@ -238,24 +277,21 @@ async def add_watchlist(mint: str=Query(...), label: str=Query(""), x_agent_key:
     return {"status":"added","mint":mint}
 
 @router.get("/signals")
-async def signals(limit: int=20, x_agent_key: str=Header(...)):
-    # Was querying `WHERE type='pumpfun' ORDER BY timestamp` -- trading_signals
-    # has neither column (real columns: source, created_at), so this has
-    # been an unconditional 500 on every call, same class of bug already
-    # found and fixed for /graduations in this file. There's no signal
-    # source actually tagged "pumpfun" in the live data yet either (checked
-    # live: only "vantage-predictor" rows exist today) -- LIKE match is
-    # forward-compatible with whatever a future pumpfun-specific pipeline
-    # tags itself, and correctly returns an honest empty list today rather
-    # than fabricating rows.
+async def signals(limit: int = 20, x_agent_key: str = Header(...)):
+    # pumpfun_launch_radar posts to /api/intel/signals/ingest which writes
+    # to signal_pool; query there by source, not trading_signals.
     if not await get_agent(x_agent_key): raise HTTPException(401)
     async with _db() as db:
-        cur = await db.execute(
-            "SELECT * FROM trading_signals WHERE source LIKE '%pumpfun%' ORDER BY created_at DESC LIMIT ?",
-            (limit,),
-        )
-        rows = await cur.fetchall()
-    return {"signals":[dict(r) for r in rows],"count":len(rows),"source":"pumpfun"}
+        try:
+            cur = await db.execute(
+                "SELECT * FROM signal_pool WHERE source LIKE '%pumpfun%' ORDER BY ts DESC LIMIT ?",
+                (limit,),
+            )
+            rows = await cur.fetchall()
+        except Exception:
+            rows = []
+    return {"signals": [dict(r) for r in rows], "count": len(rows), "source": "pumpfun"}
+
 
 @router.get("/detect")
 async def detect(address: str = Query(...), x_agent_key: str = Header(...)):
