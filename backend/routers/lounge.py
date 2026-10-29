@@ -282,6 +282,77 @@ async def lounge_handoff(slug: str, request: Request, principal: dict = Depends(
     return await execute_slash("handoff", args, principal=principal, guild=guild, lounge=lounge)
 
 
+# ── hybrid pipeline: MCP connectors + skills (native fallbacks remain) ────────
+
+@router.post("/{slug}/lounge/connectors", operation_id="connector_register")
+async def register_mcp_connector(slug: str, request: Request, principal: dict = Depends(current_principal)):
+    """Register a guild-shared MCP connector. Credentials are sealed at rest
+    (AES-256-GCM, key env-only) and injected at call time — never returned."""
+    guild = await _guild(slug)
+    if not await _require_lounge_member(guild, principal):
+        raise HTTPException(403, "You are not a member of this guild")
+    body = await request.json()
+    from .. import lounge_mcp
+    conn = await lounge_mcp.register_connector(
+        guild["id"],
+        name=str(body.get("name") or "").strip(),
+        server_url=str(body.get("server_url") or "").strip(),
+        capability_tag=str(body.get("capability_tag") or "").strip(),
+        credentials=body.get("credentials") or None,
+        created_by_id=principal.get("agent_id") or principal.get("id"),
+        created_by_name=principal.get("display_name") or "",
+    )
+    return {"executed": True, "connector": conn,
+            "note": "Credentials were sealed and are never returned."}
+
+
+@router.get("/{slug}/lounge/connectors", operation_id="connectors")
+async def get_mcp_connectors(slug: str, principal: dict = Depends(current_principal)):
+    guild = await _guild(slug)
+    if not await _require_lounge_member(guild, principal):
+        return {"executed": False, "output": "Only guild members can list connectors",
+                "invite_hint": f"/api/guilds/{slug}/join-request"}
+    from .. import lounge_mcp
+    return {"executed": True, "connectors": await lounge_mcp.list_connectors(guild["id"])}
+
+
+@router.post("/{slug}/lounge/skills", operation_id="skill_register")
+async def register_mode_skill(slug: str, request: Request, principal: dict = Depends(current_principal)):
+    """Register a skill for a mode — a pipeline of MCP tool calls that the
+    lounge runs instead of the native fallback for callers with access."""
+    guild = await _guild(slug)
+    if not await _require_lounge_member(guild, principal):
+        raise HTTPException(403, "You are not a member of this guild")
+    body = await request.json()
+    from .. import lounge_mcp
+    try:
+        skill = await lounge_mcp.register_skill(
+            guild["id"],
+            mode=str(body.get("mode") or "").strip().lower(),
+            name=str(body.get("name") or "").strip(),
+            description=str(body.get("description") or "").strip(),
+            steps=body.get("steps") or [],
+            capability_tag=str(body.get("capability_tag") or "").strip(),
+            created_by_id=principal.get("agent_id") or principal.get("id"),
+            created_by_name=principal.get("display_name") or "",
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"executed": True, "skill": skill,
+            "note": f"Running /{skill['mode']} now invokes this skill for callers with access; "
+                    "native pipeline remains the fallback."}
+
+
+@router.get("/{slug}/lounge/skills", operation_id="skills")
+async def get_mode_skills(slug: str, principal: dict = Depends(current_principal)):
+    guild = await _guild(slug)
+    if not await _require_lounge_member(guild, principal):
+        return {"executed": False, "output": "Only guild members can list skills",
+                "invite_hint": f"/api/guilds/{slug}/join-request"}
+    from .. import lounge_mcp
+    return {"executed": True, "skills": await lounge_mcp.list_skills(guild["id"])}
+
+
 # ── structured envelopes + offline queue (P5) ─────────────────────────────────
 
 VALID_ENVELOPE_TYPES = {"handoff", "request", "result", "status"}

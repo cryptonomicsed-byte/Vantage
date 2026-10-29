@@ -62,14 +62,17 @@ async def _membership(guild_id: int, agent_id: int, name: str, role: str = "memb
 
 @pytest_asyncio.fixture(scope="module")
 async def client():
-    """Minimal app: guild-forum (auth deps) + chat palette + lounge routers."""
-    from fastapi import FastAPI
+    """Minimal app: guild-forum (auth deps) + chat palette + lounge routers +
+    agents rooms + a mock MCP server (in-process ASGI) for skill tests."""
+    from fastapi import APIRouter as MockRouter
+    from fastapi import FastAPI, Request
 
     from backend.db import init_agents_db
     from backend.capability_registry import _ensure_registry_table
     from backend.agents import router as agents_router  # rooms/scratchpad endpoints
     from backend.routers.guild_forum import router as gf_router, chat_router
     from backend.routers.lounge import router as lounge_router, invites_router
+    from backend import lounge_mcp
 
     await init_agents_db()
     await coord.init_coordination_db()
@@ -77,13 +80,41 @@ async def client():
     await init_lounge_db()
     await init_tasks_db()
     await _ensure_registry_table()
+    await lounge_mcp.init_mcp_db()
+
+    mock = MockRouter()
+
+    @mock.post("/mcp")
+    async def mock_mcp(request: Request):
+        """Minimal Streamable HTTP MCP: initialize + tools/call, echoing the
+        injected credentials header to prove credential injection happened."""
+        body = await request.json()
+        method = body.get("method")
+        if method == "initialize":
+            return {"jsonrpc": "2.0", "id": body.get("id"),
+                    "result": {"protocolVersion": "2024-11-05", "capabilities": {},
+                               "serverInfo": {"name": "mock-mcp", "version": "1.0"}}}
+        if method == "tools/call":
+            params = body.get("params") or {}
+            name = params.get("name")
+            args = params.get("arguments") or {}
+            auth = request.headers.get("x-api-key", "(no x-api-key header)")
+            return {"jsonrpc": "2.0", "id": body.get("id"),
+                    "result": {"content": [{"type": "text",
+                                            "text": f"mock-{name}:{json.dumps(args)} auth={auth}"}]}}
+        return {"jsonrpc": "2.0", "id": body.get("id"),
+                "error": {"code": -32601, "message": "unknown method"}}
 
     app = FastAPI()
+    app.include_router(mock)
     app.include_router(agents_router)
     app.include_router(gf_router)
     app.include_router(chat_router)
     app.include_router(lounge_router)
     app.include_router(invites_router)
+
+    # The MCP client talks to the mock server through this same app.
+    lounge_mcp.set_test_transport(ASGITransport(app=app))
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
@@ -307,7 +338,8 @@ async def test_palette_lists_commands(client, lounge_member):
     assert r.status_code == 200, r.text
     commands = {c["command"] for c in r.json()["commands"]}
     for expected in ("/status", "/video", "/code", "/trade", "/invite", "/task",
-                     "/auto", "/tasks", "/reassign", "/handoff", "/lounge"):
+                     "/auto", "/tasks", "/reassign", "/handoff", "/lounge",
+                     "/connectors", "/skills"):
         assert expected in commands, f"{expected} missing from palette"
 
 
@@ -325,18 +357,117 @@ async def test_non_member_soft_error(client, lounge_member, fresh_agent):
     assert "join-request" in d.get("invite_hint", "")
 
 
-async def test_connector_graceful_unconfigured(client, lounge_member):
-    """P7 gate: connector invocation posts a result without any external key
-    configured — native path stays the default."""
+async def test_native_fallback_code(client, lounge_member):
+    """Hybrid model: with no skill registered, /code runs the native pipeline
+    (routers/code.py Gitea/Strix surface) — native=True, nothing removed."""
+    h = lounge_member["headers"]
+    from backend.capability_registry import register_capabilities
+    await register_capabilities(lounge_member["agent_id"], ["code"], tools=[],
+                                runtime="test", agent_name=lounge_member["agent"]["name"])
+    r = await client.post(f"/api/guilds/{lounge_member['slug']}/lounge/commands",
+                          headers=h, json={"content": "/code"})
+    d = r.json()
+    assert d["executed"] is True, d
+    assert d.get("native") is True
+    assert "code" in d.get("active_modes", [])
+
+
+async def test_skill_override_and_creds_encrypted(client, lounge_member):
+    """Hybrid model: a registered skill overrides the native fallback, runs MCP
+    tools, injects sealed credentials as headers, and never stores plaintext."""
     h = lounge_member["headers"]
     slug = lounge_member["slug"]
     from backend.capability_registry import register_capabilities
     await register_capabilities(lounge_member["agent_id"], ["video"], tools=[],
                                 runtime="test", agent_name=lounge_member["agent"]["name"])
+
+    # Register a guild-shared MCP connector with credentials.
+    r = await client.post(f"/api/guilds/{slug}/lounge/connectors", headers=h,
+                          json={"name": "guild-renderer", "server_url": "http://test/mcp",
+                                "capability_tag": "video",
+                                "credentials": {"X-Api-Key": "sekret-value"}})
+    assert r.status_code == 200, r.text
+    cid = r.json()["connector"]["id"]
+
+    # Credentials are sealed at rest — no plaintext anywhere in the row.
+    from backend.db import DB_PATH
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT creds_encrypted FROM mcp_connectors WHERE id=?", (cid,))
+        blob = dict(await cur.fetchone())["creds_encrypted"]
+    assert "sekret-value" not in blob and blob
+
+    # Register a skill for video mode referencing the connector.
+    r = await client.post(f"/api/guilds/{slug}/lounge/skills", headers=h,
+                          json={"mode": "video", "name": "render-episode",
+                                "steps": [{"connector_id": cid, "tool": "generate",
+                                           "arguments": {"prompt": "episode 12"}}]})
+    assert r.status_code == 200, r.text
+
+    # /video now runs the skill (not the native AgentTV fallback).
     r = await client.post(f"/api/guilds/{slug}/lounge/commands", headers=h,
-                          json={"content": "/video --connector higgsfield a dragon over the bay"})
+                          json={"content": "/video"})
     d = r.json()
     assert d["executed"] is True, d
-    assert d.get("connector") == "higgsfield"
-    assert d["connector_result"].get("configured") is False
-    assert "Higgsfield not configured" in d["output"]
+    assert d.get("skill") == "render-episode"
+    assert "mock-generate" in d["output"]
+    assert "auth=sekret-value" in d["output"], "credentials were not injected at call time"
+
+
+async def test_skill_scope_requires_capability(client, lounge_member):
+    """Hybrid model: a skill with a capability tag runs only for callers with
+    that capability; everyone else gets the native fallback."""
+    h = lounge_member["headers"]
+    slug = lounge_member["slug"]
+    from backend.capability_registry import register_capabilities
+    await register_capabilities(lounge_member["agent_id"], ["video"], tools=[],
+                                runtime="test", agent_name=lounge_member["agent"]["name"])
+
+    r = await client.post(f"/api/guilds/{slug}/lounge/connectors", headers=h,
+                          json={"name": "analytics", "server_url": "http://test/mcp",
+                                "capability_tag": "analytics"})
+    cid = r.json()["connector"]["id"]
+    r = await client.post(f"/api/guilds/{slug}/lounge/skills", headers=h,
+                          json={"mode": "video", "name": "scoped-skill",
+                                "capability_tag": "analytics",
+                                "steps": [{"connector_id": cid, "tool": "analyze",
+                                           "arguments": {}}]})
+    assert r.status_code == 200, r.text
+
+    # Member has video (mode gate passes) but NOT analytics (skill gate fails)
+    # → native fallback, not the skill, not an error.
+    r = await client.post(f"/api/guilds/{slug}/lounge/commands", headers=h,
+                          json={"content": "/video"})
+    d = r.json()
+    assert d["executed"] is True, d
+    assert d.get("skill") is None
+    assert d.get("native") is True
+
+    # Grant analytics → the skill runs now.
+    await register_capabilities(lounge_member["agent_id"], ["video", "analytics"], tools=[],
+                                runtime="test", agent_name=lounge_member["agent"]["name"])
+    r = await client.post(f"/api/guilds/{slug}/lounge/commands", headers=h,
+                          json={"content": "/video"})
+    d = r.json()
+    assert d["executed"] is True, d
+    assert d.get("skill") == "scoped-skill"
+
+
+async def test_slash_skill_registration(client, lounge_member):
+    """Skill creation via slash: /skill <mode> <name> <connector_id> [tool]."""
+    h = lounge_member["headers"]
+    slug = lounge_member["slug"]
+    r = await client.post(f"/api/guilds/{slug}/lounge/connectors", headers=h,
+                          json={"name": "writer", "server_url": "http://test/mcp"})
+    cid = r.json()["connector"]["id"]
+    r = await client.post(f"/api/guilds/{slug}/lounge/commands", headers=h,
+                          json={"content": f"/skill social social-writer {cid} draft"})
+    d = r.json()
+    assert d["executed"] is True, d
+    # /social now invokes the skill.
+    r = await client.post(f"/api/guilds/{slug}/lounge/commands", headers=h,
+                          json={"content": "/social"})
+    d = r.json()
+    assert d["executed"] is True
+    assert d.get("skill") == "social-writer"
+    assert "mock-draft" in d["output"]

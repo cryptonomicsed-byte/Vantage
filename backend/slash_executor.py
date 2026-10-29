@@ -250,53 +250,21 @@ async def cmd_mode(ctx: dict, args: str = "", mode: str = "") -> dict:
     if scope and not await principal_has_scope(ctx["principal"], scope):
         return soft_denied(scope, guild["slug"])
 
-    # ── P7 optional connectors (additive) ────────────────────────────────────
-    # /video --connector higgsfield <prompt>  → external generation backend
-    # /trade --connector tradingview <symbol> → external signal inbox
-    connector = None
-    args = (args or "").strip()
-    if "--connector" in args:
-        parts = args.split()
-        idx = parts.index("--connector")
-        if idx + 1 < len(parts):
-            connector = parts[idx + 1].lower()
-            rest = [p for i, p in enumerate(parts) if i not in (idx, idx + 1)]
-            args = " ".join(rest)
-    if connector and connector not in ("higgsfield", "tradingview"):
-        return {"executed": False, "output": f"Unknown connector '{connector}' — known: higgsfield, tradingview"}
+    # ── Hybrid dispatch: registered skill first, native pipeline fallback ────
+    # A guild may register a skill for this mode; when one exists AND the
+    # caller has the required capability, the skill runs (MCP tools under
+    # hood). Otherwise the native pipeline stays the default. No provider
+    # names live in this layer.
+    from . import lounge_mcp
 
-    if mode == "video" and connector == "higgsfield":
-        from .connectors import higgsfield
-        gen = await higgsfield.generate_text_to_video(args or "default lounge scene")
-        await _broadcast_gossip(f"room:{lounge['id']}", {
-            "type": "connector_result", "connector": "higgsfield", "result": gen,
-            "actor": ctx["principal"].get("display_name"),
-        })
-        if gen.get("configured") is False:
-            output = f"Higgsfield not configured — {gen.get('note')}. Native AgentTV pipeline remains active."
-        elif gen.get("ok"):
-            output = f"Higgsfield job {gen.get('job_id')} complete: {gen.get('video_url')}"
-        else:
-            output = f"Higgsfield job failed: {gen.get('error')}"
-        return {"executed": True, "command": mode, "connector": "higgsfield",
-                "connector_result": gen, "output": output}
-
-    if mode == "trade" and connector == "tradingview":
-        from .connectors import tradingview
-        symbol = args.split()[0] if args.split() else ""
-        sig = await tradingview.forward_signal(symbol)
-        await _broadcast_gossip(f"room:{lounge['id']}", {
-            "type": "connector_result", "connector": "tradingview", "result": sig,
-            "actor": ctx["principal"].get("display_name"),
-        })
-        if sig.get("configured") is False:
-            output = f"TradingView connector not configured — {sig.get('note')}"
-        elif sig.get("ok"):
-            output = f"Signal forwarded for {sig.get('symbol')} {sig.get('side')}"
-        else:
-            output = f"Signal forward failed: {sig.get('error')}"
-        return {"executed": True, "command": mode, "connector": "tradingview",
-                "connector_result": sig, "output": output}
+    result = None
+    skill = await lounge_mcp.get_skill(guild["id"], mode)
+    if skill:
+        tag = await lounge_mcp.skill_scope_tag(skill, guild["id"])
+        if not tag or await principal_has_scope(ctx["principal"], tag):
+            result = await lounge_mcp.run_skill(skill, guild["id"], ctx["principal"])
+    if result is None:
+        result = await _native_mode(ctx, mode)
 
     key = f"lounge:active_modes"
     full_key = f"room:{lounge['id']}:{key}"
@@ -322,8 +290,93 @@ async def cmd_mode(ctx: dict, args: str = "", mode: str = "") -> dict:
         "type": "mode_changed", "mode": mode, "active_modes": modes,
         "actor": ctx["principal"].get("display_name"),
     })
-    return {"executed": True, "command": mode, "mode": mode, "active_modes": modes,
-            "output": f"Mode '{mode}' active. Active modes: {', '.join(modes)}"}
+    result["command"] = mode
+    result["mode"] = mode
+    result["active_modes"] = modes
+    return result
+
+
+async def _native_mode(ctx: dict, mode: str) -> dict:
+    """The existing native pipelines, surfaced by the lounge. Never removed;
+    they are the default whenever no skill is registered for the mode."""
+    principal = ctx["principal"]
+    if mode == "code":
+        # Native code surface: Gitea repos + Strix scans (routers/code.py).
+        try:
+            from .routers.code import code_overview
+            agent = await _agent_row(principal)
+            overview = await code_overview(agent or {})
+            repos = overview.get("repos", []) if isinstance(overview, dict) else []
+            output = (f"Native code pipeline: {len(repos)} repo(s) on the Gitea surface. "
+                      f"Create/push/PR/scan via /api/code/repo/* (Gitea + Strix).")
+            return {"executed": True, "native": True, "mode": mode, "output": output,
+                    "overview": {"repo_count": len(repos),
+                                 "endpoints": ["/api/code/overview", "/api/code/repo/create",
+                                               "/api/code/repo/{owner}/{name}/push",
+                                               "/api/code/repo/{owner}/{name}/scan"]}}
+        except Exception as exc:
+            return {"executed": True, "native": True, "mode": mode,
+                    "output": f"Native code pipeline (routers/code.py, Gitea + Strix) — surface listed; overview unavailable: {exc}",
+                    "endpoints": ["/api/code/overview", "/api/code/repo/create"]}
+    if mode == "video":
+        # Native AgentTV pipeline: always-on channel + per-agent rotations.
+        try:
+            from .agenttv_channel import channel, list_channels
+            now = channel.now_playing() if channel else {}
+            channels = await list_channels()
+            output = (f"Native video pipeline: AgentTV channel live "
+                      f"({len(channels) if channels else 0} channel(s) in the guide). "
+                      f"Generation/publishing via the AgentTV and video project routes.")
+            return {"executed": True, "native": True, "mode": mode, "output": output,
+                    "now_playing": (now or {}).get("title") if isinstance(now, dict) else None}
+        except Exception as exc:
+            return {"executed": True, "native": True, "mode": mode,
+                    "output": f"Native AgentTV pipeline (agenttv_channel.py) — always-on rotation; status unavailable: {exc}"}
+    if mode == "trade":
+        # Native signal bus: per-agent private trading channel (kind 9007).
+        # Surface-only by design — the lounge never creates orders.
+        agent_id = principal.get("agent_id")
+        channel_ref = None
+        if agent_id:
+            async with get_db() as db:
+                db.row_factory = aiosqlite.Row
+                cur = await db.execute(
+                    "SELECT channel_id FROM trading_channel_map WHERE agent_id=?", (agent_id,),
+                )
+                row = await cur.fetchone()
+                if row:
+                    channel_ref = dict(row)["channel_id"]
+        output = (f"Native trading surface: private per-agent signal channel"
+                  + (f" {channel_ref}" if channel_ref else " (none provisioned yet)")
+                  + ". Fills/signals via the signal bus; orders stay behind the "
+                    "paper/live daemon toggles — the lounge never creates orders.")
+        return {"executed": True, "native": True, "mode": mode, "output": output,
+                "trading_channel_id": channel_ref}
+    if mode == "social":
+        async with get_db() as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT slug, name, channel_kind, flow_mode FROM guild_channels WHERE guild_id=? ORDER BY created_at",
+                (ctx["guild"]["id"],),
+            )
+            channels = [dict(r) for r in await cur.fetchall()]
+        names = ", ".join(c["slug"] for c in channels) or "none"
+        return {"executed": True, "native": True, "mode": mode,
+                "output": f"Native social surface: guild channels — {names}. "
+                          f"Broadcasts, handshakes and negotiations flow through the existing channel primitives."}
+    return {"executed": True, "native": True, "mode": mode,
+            "output": f"Mode '{mode}' active (native surface)."}
+
+
+async def _agent_row(principal: dict) -> dict | None:
+    agent_id = principal.get("agent_id")
+    if not agent_id:
+        return None
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM agents WHERE id=?", (agent_id,))
+        row = await cur.fetchone()
+    return dict(row) if row else None
 
 
 async def cmd_invite(ctx: dict, args: str) -> dict:
@@ -535,6 +588,41 @@ async def cmd_handoff(ctx: dict, args: str) -> dict:
             "output": f"Handoff queued for @{target_name}: {text or '(no summary)'}"}
 
 
+async def cmd_connectors(ctx: dict, args: str = "") -> dict:
+    from . import lounge_mcp
+    guild = ctx["guild"]
+    rows = await lounge_mcp.list_connectors(guild["id"])
+    lines = [f"- {r['name']} ({r['id']}) tag={r['capability_tag'] or '-'} → {r['server_url']}"
+             for r in rows]
+    return {"executed": True, "command": "connectors", "connectors": rows,
+            "output": "Guild MCP connectors:\n" + ("\n".join(lines) if lines else "(none registered)")}
+
+
+async def cmd_skill(ctx: dict, args: str = "") -> dict:
+    """Register a one-step skill: /skill <mode> <name> <connector_id> [tool]."""
+    from . import lounge_mcp
+    guild = ctx["guild"]
+    parts = (args or "").split()
+    if len(parts) < 3:
+        return {"executed": False,
+                "output": "Usage: /skill <mode> <name> <connector_id> [tool]  — modes: video, code, trade, social"}
+    mode, name, cid = parts[0].lower(), parts[1], parts[2]
+    tool = parts[3] if len(parts) > 3 else "run"
+    try:
+        skill = await lounge_mcp.register_skill(
+            guild["id"], mode=mode, name=name,
+            description=f"registered via /skill by {ctx['principal'].get('display_name')}",
+            steps=[{"connector_id": cid, "tool": tool, "arguments": {}}],
+            created_by_id=ctx["principal"].get("agent_id") or ctx["principal"].get("id"),
+            created_by_name=ctx["principal"].get("display_name") or "",
+        )
+    except ValueError as exc:
+        return {"executed": False, "output": str(exc)}
+    return {"executed": True, "command": "skill", "skill": skill,
+            "output": f"Skill '{skill['name']}' registered for mode '{mode}' ({skill['id']}). "
+                      f"Running /{mode} will now invoke it for callers with access."}
+
+
 HANDLERS = {
     "status": (cmd_status, {}),
     "video": (cmd_mode, {"mode": "video"}),
@@ -547,6 +635,8 @@ HANDLERS = {
     "tasks": (cmd_tasks, {}),
     "reassign": (cmd_reassign, {}),
     "handoff": (cmd_handoff, {}),
+    "connectors": (cmd_connectors, {}),
+    "skill": (cmd_skill, {}),
 }
 
 
