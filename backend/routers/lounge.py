@@ -478,3 +478,74 @@ async def slash_command(
         await _get_lounge(db, guild_slug, lounge_id)
         await _assert_member(db, lounge_id, agent["id"])
     return await handle_slash(guild_slug, lounge_id, body.text, agent)
+
+
+# ── Channel link ──────────────────────────────────────────────────────────────
+
+class ChannelLink(BaseModel):
+    channel_slug: str  # slug of the guild_channel to bind to this lounge
+
+
+@router.put("/{lounge_id}/channel")
+async def link_channel(
+    guild_slug: str,
+    lounge_id: str,
+    body: ChannelLink,
+    agent=Depends(get_current_agent),
+):
+    """Bind a guild channel to this lounge by storing its id as nostr_channel_id.
+    Once set, messages starting with '/' posted to that channel are routed to
+    the lounge slash handler instead of the Nostr relay."""
+    async with get_db() as db:
+        lounge = await _get_lounge(db, guild_slug, lounge_id)
+        await _assert_member(db, lounge_id, agent["id"])
+
+        # Resolve channel slug → integer id via guild membership
+        guild_row = await (await db.execute(
+            "SELECT id FROM guilds WHERE slug=?", (guild_slug,)
+        )).fetchone()
+        if not guild_row:
+            raise HTTPException(404, "Guild not found")
+
+        channel_row = await (await db.execute(
+            "SELECT id FROM guild_channels WHERE guild_id=? AND slug=?",
+            (guild_row["id"], body.channel_slug),
+        )).fetchone()
+        if not channel_row:
+            raise HTTPException(404, f"Channel '{body.channel_slug}' not found in guild")
+
+        channel_id_str = str(channel_row["id"])
+
+        # Prevent two lounges sharing the same channel
+        existing = await (await db.execute(
+            "SELECT id FROM guild_lounges WHERE guild_slug=? AND nostr_channel_id=? AND id!=?",
+            (guild_slug, channel_id_str, lounge_id),
+        )).fetchone()
+        if existing:
+            raise HTTPException(409, f"Channel '{body.channel_slug}' is already linked to another lounge")
+
+        await db.execute(
+            "UPDATE guild_lounges SET nostr_channel_id=?, updated_ts=unixepoch() WHERE id=?",
+            (channel_id_str, lounge_id),
+        )
+        await db.commit()
+
+    return {"lounge_id": lounge_id, "linked_channel_slug": body.channel_slug, "channel_id": channel_id_str}
+
+
+@router.delete("/{lounge_id}/channel")
+async def unlink_channel(
+    guild_slug: str,
+    lounge_id: str,
+    agent=Depends(get_current_agent),
+):
+    """Remove the channel binding from this lounge."""
+    async with get_db() as db:
+        await _get_lounge(db, guild_slug, lounge_id)
+        await _assert_member(db, lounge_id, agent["id"])
+        await db.execute(
+            "UPDATE guild_lounges SET nostr_channel_id='', updated_ts=unixepoch() WHERE id=?",
+            (lounge_id,),
+        )
+        await db.commit()
+    return {"lounge_id": lounge_id, "unlinked": True}

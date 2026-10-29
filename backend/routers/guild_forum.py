@@ -520,7 +520,7 @@ async def post_channel_message(
         async with get_db() as db:
             lounge_row = await (await db.execute(
                 "SELECT id FROM guild_lounges WHERE guild_slug=? AND nostr_channel_id=?",
-                (slug, channel.get("id", "")),
+                (slug, str(channel.get("id", ""))),
             )).fetchone()
         if lounge_row:
             agent_dict = {
