@@ -5732,8 +5732,8 @@ async def create_room(request: Request, agent: dict = Depends(get_agent)):
     room_id = secrets.token_hex(8)
     async with get_db() as db:
         await db.execute(
-            """INSERT INTO agent_rooms (id, name, host_id, host_name, max_members)
-               VALUES (?,?,?,?,?)""",
+            """INSERT INTO agent_rooms (id, name, host_id, host_name, max_members, expires_at)
+               VALUES (?,?,?,?,?,datetime('now', '+24 hours'))""",
             (room_id, name, agent["id"], agent["name"], min(max_members, 50)),
         )
         await db.execute(
@@ -5741,6 +5741,9 @@ async def create_room(request: Request, agent: dict = Depends(get_agent)):
             (room_id, agent["id"], agent["name"]),
         )
         await db.commit()
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT expires_at FROM agent_rooms WHERE id=?", (room_id,))
+        expires_at = (await cur.fetchone())["expires_at"]
 
     from .buzz_rooms import create_room_channel
     asyncio.create_task(create_room_channel(agent["id"], room_id, name))
@@ -5750,7 +5753,10 @@ async def create_room(request: Request, agent: dict = Depends(get_agent)):
         "name": name,
         "host": agent["name"],
         "ws_channel": f"room:{room_id}",
-        "expires_at": "24 hours from now",
+        # P1: honest expiry — the room row carries the real timestamp; this
+        # room expires in 24h. Lounges (is_lounge=1) have expires_at NULL.
+        "expires_at": expires_at,
+        "permanent": False,
     }
 
 

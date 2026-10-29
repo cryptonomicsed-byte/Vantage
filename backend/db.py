@@ -1409,7 +1409,7 @@ CREATE TABLE IF NOT EXISTS external_iranti_memories (
         except Exception:
             pass
 
-        # Feature: Multi-agent rooms (ephemeral workspaces)
+        # Feature: Multi-agent rooms (ephemeral workspaces + guild lounges)
         try:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS agent_rooms (
@@ -1422,9 +1422,22 @@ CREATE TABLE IF NOT EXISTS external_iranti_memories (
                     max_members INTEGER DEFAULT 10,
                     created_at TEXT DEFAULT (datetime('now')),
                     expires_at TEXT DEFAULT (datetime('now', '+24 hours')),
+                    guild_id INTEGER,
+                    is_lounge INTEGER DEFAULT 0,
                     FOREIGN KEY (host_id) REFERENCES agents(id)
                 )
             """)
+            # P1 lounge linkage — columns for pre-existing databases.
+            try:
+                await db.execute("ALTER TABLE agent_rooms ADD COLUMN guild_id INTEGER")
+            except Exception:
+                pass
+            try:
+                await db.execute("ALTER TABLE agent_rooms ADD COLUMN is_lounge INTEGER DEFAULT 0")
+            except Exception:
+                pass
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_agent_rooms_guild_lounge "
+                             "ON agent_rooms(guild_id, is_lounge)")
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS trading_channel_map (
                     agent_id INTEGER PRIMARY KEY,

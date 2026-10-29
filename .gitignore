@@ -44,3 +44,6 @@ third_party/river/
 
 # stray empty db from a wrong-cwd invocation
 vantage.db
+
+# guild-lounge build artifacts (PYTHONPATH coincurve shim copy)
+/shimpath/

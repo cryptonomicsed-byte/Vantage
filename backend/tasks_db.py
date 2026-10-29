@@ -139,5 +139,10 @@ async def init_tasks_db() -> None:
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_delegations_to ON guild_task_delegations(to_agent_id, status)"
         )
+        # P4: delegations may target external principals (no agent row).
+        try:
+            await db.execute("ALTER TABLE guild_task_delegations ADD COLUMN to_principal_id INTEGER")
+        except Exception:
+            pass
 
         await db.commit()
