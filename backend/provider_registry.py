@@ -50,9 +50,14 @@ PROVIDERS: dict[str, ProviderInfo] = {
         ProviderInfo("anthropic", "Anthropic", "https://api.anthropic.com/v1",
                      "claude-sonnet-5", False, "bearer",
                      "Messages API, not chat-completions-shaped -- stored, not yet wired for chat."),
-        ProviderInfo("google", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta",
-                     "gemini-3-pro", False, "bearer",
-                     "generateContent API, not chat-completions-shaped -- stored, not yet wired."),
+        ProviderInfo("google", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai",
+                     "gemini-3.6-flash", True, "bearer",
+                     "Google's OpenAI-compatibility layer (/v1beta/openai), which is "
+                     "chat-completions-shaped and returns choices[0].message.content. "
+                     "The native generateContent API at /v1beta is NOT compatible and "
+                     "must not be used here. Note gemini-3-pro does not exist and "
+                     "gemini-2.5-flash is retired for new users -- verify with "
+                     "GET /v1beta/openai/models before changing the model default."),
         ProviderInfo("meta", "Meta Model API", "https://api.llama.com/compat/v1",
                      "muse-spark-1.1", True, "bearer",
                      "OpenAI-compatible endpoint per ai.meta.com's public API docs."),

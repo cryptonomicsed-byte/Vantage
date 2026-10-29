@@ -48,6 +48,18 @@ async def run_bridge(agent_id: int, relay_ws_url: str, channel_id: str, max_mess
     handled = 0
     while max_messages is None or handled < max_messages:
         msg = await sess._recv_json()
+        # A REQ the relay rejects arrives as ["CLOSED", sub_id, reason]
+        # per NIP-01 -- not as an error, and not as EVENT/EOSE. Skipping
+        # these silently makes a subscription that was NEVER ACTIVE look
+        # identical to a quiet channel: that is how a cross-community
+        # relay URL became a 4-day zombie service (2026-09-18). Raise
+        # instead, so run_bridge_forever's reconnect loop reports it.
+        if (isinstance(msg, list) and len(msg) > 1
+                and msg[0] == "CLOSED" and msg[1] == sub):
+            raise RuntimeError(
+                "relay closed subscription %s: %s"
+                % (sub, msg[2] if len(msg) > 2 else "<no reason given>")
+            )
         if msg[0] != "EVENT" or msg[1] != sub:
             continue
         event = msg[2]

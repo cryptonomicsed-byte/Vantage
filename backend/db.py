@@ -36,6 +36,8 @@ async def get_db():
     async with _DB_CONN_LIMIT:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("PRAGMA busy_timeout=90000")
+            await db.execute("PRAGMA cache_size=-131072")  # 128 MB per connection
+            await db.execute("PRAGMA mmap_size=2147483648")  # 2 GB mmap
             yield db
 
 
@@ -56,6 +58,8 @@ async def connect_bounded():
     try:
         conn = await aiosqlite.connect(DB_PATH)
         await conn.execute("PRAGMA busy_timeout=90000")
+        await conn.execute("PRAGMA cache_size=-131072")  # 128 MB per connection
+        await conn.execute("PRAGMA mmap_size=2147483648")  # 2 GB mmap
     except BaseException:
         _DB_CONN_LIMIT.release()
         raise
@@ -77,7 +81,9 @@ async def init_agents_db() -> None:
         # WAL mode for concurrent reads
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA synchronous=NORMAL")
-        await db.execute("PRAGMA cache_size=-64000")
+        await db.execute("PRAGMA cache_size=-131072")  # 128 MB
+        await db.execute("PRAGMA mmap_size=2147483648")  # 2 GB mmap — survives page-cache eviction
+        await db.execute("PRAGMA temp_store=MEMORY")
         await db.execute("PRAGMA foreign_keys = ON")
 
         await db.execute("""
