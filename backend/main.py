@@ -1091,6 +1091,10 @@ app.include_router(nip29_router)
 from .routers.guild_workspace import router as guild_workspace_router
 app.include_router(guild_workspace_router)
 
+from .routers.lounge import router as lounge_router
+app.include_router(lounge_router)
+
+
 # P3 — A2A Task Delegation
 from .routers.delegation import router as delegation_router
 app.include_router(delegation_router)

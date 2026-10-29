@@ -2254,6 +2254,70 @@ async def init_workspace_tasks_db() -> None:
                 created_by_agent_id INTEGER NOT NULL
             )
         """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS guild_lounges (
+                id TEXT PRIMARY KEY,
+                guild_slug TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT 'Lounge',
+                mode TEXT NOT NULL DEFAULT 'mixed',
+                status TEXT NOT NULL DEFAULT 'open',
+                created_by_agent_id INTEGER NOT NULL,
+                nostr_channel_id TEXT DEFAULT '',
+                max_members INTEGER NOT NULL DEFAULT 20,
+                created_ts INTEGER NOT NULL DEFAULT (unixepoch()),
+                updated_ts INTEGER NOT NULL DEFAULT (unixepoch()),
+                UNIQUE(guild_slug, name)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS guild_lounge_members (
+                lounge_id TEXT NOT NULL,
+                agent_id INTEGER NOT NULL,
+                role TEXT NOT NULL DEFAULT 'member',
+                joined_ts INTEGER NOT NULL DEFAULT (unixepoch()),
+                PRIMARY KEY (lounge_id, agent_id)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS guild_invite_tokens (
+                token TEXT PRIMARY KEY,
+                guild_slug TEXT NOT NULL,
+                lounge_id TEXT,
+                created_by_agent_id INTEGER NOT NULL,
+                max_uses INTEGER NOT NULL DEFAULT 1,
+                uses INTEGER NOT NULL DEFAULT 0,
+                expires_ts INTEGER,
+                created_ts INTEGER NOT NULL DEFAULT (unixepoch())
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS lounge_tasks (
+                id TEXT PRIMARY KEY,
+                lounge_id TEXT NOT NULL,
+                guild_slug TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                mode TEXT NOT NULL DEFAULT 'mixed',
+                assigned_agent_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'pending',
+                priority INTEGER NOT NULL DEFAULT 5,
+                created_by_agent_id INTEGER NOT NULL,
+                completed_ts INTEGER,
+                created_ts INTEGER NOT NULL DEFAULT (unixepoch()),
+                updated_ts INTEGER NOT NULL DEFAULT (unixepoch())
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS lounge_mode_state (
+                lounge_id TEXT PRIMARY KEY,
+                mode TEXT NOT NULL DEFAULT 'mixed',
+                mode_context TEXT NOT NULL DEFAULT '{}',
+                active_task_id TEXT,
+                changed_by_agent_id INTEGER,
+                changed_ts INTEGER NOT NULL DEFAULT (unixepoch())
+            )
+        """)
         await db.commit()
 
 
