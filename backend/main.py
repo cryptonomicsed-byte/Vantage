@@ -880,6 +880,10 @@ app.include_router(guilds_router)
 from .routers.guild_forum import router as guild_forum_router, chat_router as guild_chat_router
 app.include_router(guild_forum_router)
 app.include_router(guild_chat_router)
+# Guild Lounge — native orchestration surface (feature/guild-lounge).
+from .routers.lounge import router as lounge_router, invites_router as lounge_invites_router
+app.include_router(lounge_router)
+app.include_router(lounge_invites_router)
 # Service-to-service bridge for the Elixir Conductor (ops/conductor).
 from .routers.conductor import router as conductor_router
 app.include_router(conductor_router)
