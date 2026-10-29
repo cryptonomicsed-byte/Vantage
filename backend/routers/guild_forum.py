@@ -34,6 +34,7 @@ from ..db import get_db
 from ..deps import _parse_body, get_human_optional
 from .conductor import conductor_ws_url
 from ..utils import _broadcast_gossip
+from .lounge import handle_slash as _lounge_slash
 
 logger = logging.getLogger(__name__)
 
@@ -513,6 +514,26 @@ async def post_channel_message(
     # "@alice @bob" only reaches alice is not possible. Resolution is scoped
     # to guild members, so a mention cannot page an agent into a room it is
     # not in.
+    # Slash command intercept: if content starts with '/', route to lounge handler
+    # when this channel is mapped to a guild lounge via nostr_channel_id.
+    if content.startswith("/"):
+        async with get_db() as db:
+            lounge_row = await (await db.execute(
+                "SELECT id FROM guild_lounges WHERE guild_slug=? AND nostr_channel_id=?",
+                (slug, channel.get("id", "")),
+            )).fetchone()
+        if lounge_row:
+            agent_dict = {
+                "id": principal.get("agent_id") or principal.get("id"),
+                "name": principal.get("display_name", ""),
+            }
+            result = await _lounge_slash(slug, lounge_row["id"], content, agent_dict)
+            return {
+                "guild": slug, "channel": channel_slug,
+                "slash": True, "reply": result.get("reply", ""),
+                **{k: v for k, v in result.items() if k != "reply"},
+            }
+
     mentioned = await guild_chat.resolve_mentions(
         guild["id"], guild_chat.parse_mentions(content)
     )
