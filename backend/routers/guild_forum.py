@@ -454,6 +454,30 @@ async def post_channel_message(
     membership = await _require_member(guild, principal)
     await _require_readable(channel, principal)
 
+    # ── Guild Lounge slash commands (feature/guild-lounge) ──────────────────
+    # P0 finding: slash commands were autocomplete-only. This is the executor:
+    # a `/`-prefixed message runs the command instead of being posted as chat.
+    if content.lstrip().startswith("/"):
+        from ..slash_executor import handle_slash_message, parse_slash
+        from .lounge import resolve_lounge
+        lounge = await resolve_lounge(guild, principal)
+        result = await handle_slash_message(content, principal=principal, guild=guild, lounge=lounge)
+        if result is None:  # defensive: never subscript a None result
+            result = {"executed": False, "output": "Command did not produce a result"}
+        cmd_name = (parse_slash(content) or ("", ""))[0] or "?"
+        result["ws_channel"] = f"room:{lounge['id']}"
+        # Best-effort: record the command outcome in the channel log so the
+        # room keeps a visible trace. Relay failure must not fail the command.
+        try:
+            await coord.publish_message(
+                channel=channel, guild_slug=slug, principal=principal,
+                content=(f"[{cmd_name}] {result.get('output') or 'done'}")[:coord.MAX_CONTENT_CHARS],
+                msg_type="say",
+            )
+        except Exception:
+            pass
+        return result
+
     # Posting, claiming and delivering are separate capabilities, so a
     # principal put on a workspace as an observer can follow the work
     # without being able to take any of it.
@@ -567,11 +591,27 @@ async def post_channel_message(
                 "transitioned": bool(match[0]["transitioned"]), "note": match[0]["note"],
             }
 
+    # ── P6 coordinator helper (feature/guild-lounge) ─────────────────────────
+    # A mention of someone who is NOT a guild member mints a single-use scoped
+    # invite and surfaces the link — the room answers "how do I bring them in".
+    resolved_names = {p["display_name"].lower() for p in mentioned}
+    unknown = [n for n in guild_chat.parse_mentions(content) if n.lower() not in resolved_names]
+    minted = []
+    if unknown:
+        from ..slash_executor import mint_invite
+        for name in unknown[:3]:  # bounded; parse_mentions already caps at 8
+            inv = await mint_invite(
+                guild["id"], principal.get("agent_id") or principal.get("id"),
+                principal.get("display_name") or "", ["lounge"],
+            )
+            minted.append({"mention": name, "invite_url": inv["url"], "token": inv["token"]})
+
     return {
         "guild": slug, "channel": channel_slug, "event_id": event["id"],
         "msg_type": msg_type, "thread_root_event_id": root_event_id,
         "created_at": event["created_at"],
         "mentioned": [p["display_name"] for p in mentioned],
+        "invites_minted": minted,
         "replies": replies,
         "work_ref_link": link,
     }
@@ -728,6 +768,32 @@ async def join_confirm(request: Request, slug: str):
         raise HTTPException(403, "This identity is banned from the guild")
     await coord.add_membership(guild["id"], principal, role="member")
 
+    # ── Guild Lounge onboarding (feature/guild-lounge) ──────────────────────
+    # P2: map the challenge's capabilities into the registry (hosted agents)
+    # and seat the new member in the guild lounge. Gitea is provisioned on
+    # first join; credentials are returned once, below.
+    join_capabilities = _json.loads(pending["capabilities"] or "[]")
+    if principal.get("agent_id"):
+        from ..capability_registry import register_capabilities
+        try:
+            await register_capabilities(principal["agent_id"], join_capabilities,
+                                        tools=[], runtime="join-confirm",
+                                        agent_name=principal.get("display_name"))
+        except Exception:
+            pass
+
+    from .lounge import resolve_lounge as _resolve_lounge
+    lounge = await _resolve_lounge(guild, principal)
+
+    gitea = {}
+    try:
+        from ..gitea_provision import provision_gitea_user
+        gitea = await provision_gitea_user(
+            principal_id=principal["id"], name=principal.get("display_name") or principal.get("pubkey", "")[:8],
+        )
+    except Exception:
+        pass
+
     relay_registered = await join_mod.register_pubkey_on_relay(pending["pubkey"])
 
     async with get_db() as db:
@@ -755,6 +821,9 @@ async def join_confirm(request: Request, slug: str):
         "relay_registered": relay_registered,
         "conductor_ws_url": conductor_ws_url(),
         "channels": channels,
+        "lounge": {"room_id": lounge["id"], "ws_channel": f"room:{lounge['id']}",
+                   "permanent": True},
+        "gitea": gitea,
         "next": (
             "Connect to relay_ws_url, authenticate with NIP-42 using your own key, "
             "and subscribe to the buzz_channel_id values above with an 'h' tag filter. "
