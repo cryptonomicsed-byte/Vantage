@@ -248,6 +248,62 @@ def default_name() -> str:
     return chosen
 
 
+
+class GoRelayTransport:
+    """Relay transport backed by the Go ares-nostr-transport service (port 7700).
+    Falls back to RelayTransport on connection error — no message loss."""
+
+    name = "go"
+    GO_URL = "http://localhost:7700"
+
+    def info(self) -> TransportInfo:
+        import httpx
+        try:
+            r = httpx.get(f"{self.GO_URL}/health", timeout=3)
+            if r.status_code == 200:
+                return TransportInfo(
+                    name=self.name, can_publish=True, can_receive=False,
+                    configured=True, proven=True, detail="go transport active",
+                )
+        except Exception:
+            pass
+        return TransportInfo(
+            name=self.name, can_publish=True, can_receive=False,
+            configured=True, proven=False, detail="go service unreachable; fallback active",
+        )
+
+    async def publish(self, *, principal: dict, channel: dict, guild_slug: str,
+                      content: str, msg_type: str = "say", **kwargs) -> dict:
+        import httpx
+        import json as _json
+        event_payload = _json.dumps({
+            "principal": principal,
+            "channel": channel,
+            "guild_slug": guild_slug,
+            "content": content,
+            "msg_type": msg_type,
+        })
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.post(
+                    f"{self.GO_URL}/publish",
+                    json={"event_json": event_payload, "relay_url": ""},
+                )
+                if r.status_code == 200:
+                    return r.json()
+        except (httpx.ConnectError, httpx.TimeoutException) as e:
+            logger.warning(
+                "[GoRelayTransport] Go service unreachable (%s), falling back to RelayTransport", e
+            )
+        # Fallback to Python relay transport
+        fallback = RelayTransport()
+        return await fallback.publish(
+            principal=principal, channel=channel, guild_slug=guild_slug,
+            content=content, msg_type=msg_type, **kwargs,
+        )
+
+
 register(RelayTransport())
 register(MeshnetTransport())
 register(FreenetTransport())
+register(GoRelayTransport())
