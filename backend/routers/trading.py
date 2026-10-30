@@ -2167,6 +2167,10 @@ async def ingest_signal(request: Request, tool: dict = Depends(get_system_tool))
     chain = body.get("chain", "solana")
     source = body.get("source", "unknown")
 
+    # P4-1: reject test signals before they enter the production feed
+    if source.lower() in ("test", "test-signal", "test_signal"):
+        return {"ok": False, "skipped": True, "reason": "test signals are not ingested to production feed"}
+
     direction_upper = direction.upper()
     if conviction > 0.7 and direction_upper in ("BUY", "LONG", "BULLISH"):
         side = "BUY"
