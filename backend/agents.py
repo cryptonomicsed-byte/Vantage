@@ -4610,8 +4610,6 @@ def _verify_nostr_challenge_event(event: dict) -> str:
     a hardening here (e.g. tightening kind/timestamp checks later) covers
     all three at once instead of drifting between copies."""
     import hashlib as _hl, json as _js
-    from coincurve import PublicKeyXOnly
-
     required = ["id", "pubkey", "created_at", "kind", "tags", "content", "sig"]
     if not all(k in event for k in required):
         raise HTTPException(400, f"event must include: {', '.join(required)}")
@@ -4638,10 +4636,22 @@ def _verify_nostr_challenge_event(event: dict) -> str:
         raise HTTPException(401, "Event id does not match its serialized content")
 
     try:
-        xonly = PublicKeyXOnly(bytes.fromhex(event["pubkey"]))
-        sig_ok = xonly.verify(bytes.fromhex(event["sig"]), bytes.fromhex(event["id"]))
+        # _verify_nostr_challenge_event is a sync def, so we call steward via httpx.Client sync
+        import httpx as _httpx, os as _os
+        _steward = _os.environ.get("STEWARD_URL", "http://localhost:7702")
+        with _httpx.Client(timeout=2) as _c:
+            _r = _c.post(f"{_steward}/verify",
+                json={"pubkey_hex": event["pubkey"],
+                      "message_hex": event["id"],
+                      "sig_hex": event["sig"]})
+        sig_ok = _r.json().get("valid", False)
     except Exception:
-        sig_ok = False
+        try:
+            from coincurve import PublicKeyXOnly as _PK
+            sig_ok = _PK(bytes.fromhex(event["pubkey"])).verify(
+                bytes.fromhex(event["sig"]), bytes.fromhex(event["id"]))
+        except Exception:
+            sig_ok = False
     if not sig_ok:
         raise HTTPException(401, "Schnorr signature does not verify against the claimed pubkey")
 

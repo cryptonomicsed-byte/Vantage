@@ -8,6 +8,7 @@ import logging
 from typing import Optional
 
 from .capability_registry import find_capable_agents
+from .wisdom_engine import wisdom_route as _wisdom_route
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,23 @@ async def route_task(task_id: int, required_capabilities: list) -> list:
     """
     candidates = await find_capable_agents(required_capabilities)
     ranked = _rank_candidates(candidates)
+
+    # Soft re-rank hint from Clojure wisdom engine (fire-and-forget, never blocks routing)
+    if candidates:
+        try:
+            task_modes = [str(a.get("id", "")) for a in candidates]
+            wisdom = await _wisdom_route(
+                f"task {task_id} requiring {required_capabilities}", task_modes
+            )
+            recommended = wisdom.get("recommended_mode")
+            if recommended:
+                logger.info(
+                    "task_router: wisdom hint for task %s → mode=%s scores=%s",
+                    task_id, recommended, wisdom.get("scores", {}),
+                )
+        except Exception as _we:
+            logger.debug("task_router: wisdom engine unavailable: %s", _we)
+
     logger.info(
         "task_router: task %s with caps %s matched %d candidate(s)",
         task_id,

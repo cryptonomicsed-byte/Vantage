@@ -58,6 +58,12 @@ from typing import Callable, List, Optional, Sequence, Tuple, Union
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
 
+try:
+    from backend.memory_engine import store_glyph as _mem_store, search_memory as _mem_search
+    _MEM_ENGINE = True
+except Exception:
+    _MEM_ENGINE = False
+
 GIX_MAGIC = b"GIX1"
 GIX_VERSION = 1
 FLAG_ZLIB = 0x01
@@ -382,6 +388,15 @@ class GlyphStore:
             "VALUES (?,?,?,?,?,?,?,?)",
             (canonical_id, glyph, self.keyring.owner, base, composed, ts, blob, emb))
         self._db.commit()
+        # Fire-and-forget to Julia memory engine (background, never blocks)
+        if _MEM_ENGINE:
+            import asyncio as _asyncio
+            try:
+                loop = _asyncio.get_event_loop()
+                if loop.is_running():
+                    _asyncio.ensure_future(_mem_store(canonical_id, chunk))
+            except Exception:
+                pass
         return self.receipt(canonical_id, blob)
 
     def open(self, canonical_id: str, keyring: GlyphKeyring = None) -> dict:
@@ -424,6 +439,34 @@ class GlyphStore:
             results.append({"canonical_id": canonical_id, "glyph": glyph,
                             "score": score, "ts": ts, "odu_composed": composed,
                             "chunk": self.expand(canonical_id)})
+
+        # Merge with Julia memory engine results (prefer Julia scores, deduplicate by canonical_id)
+        if _MEM_ENGINE:
+            import asyncio as _asyncio
+            julia_results: list = []
+            try:
+                loop = _asyncio.get_event_loop()
+                if loop.is_running():
+                    fut = _asyncio.ensure_future(_mem_search(query, limit=k))
+                    # Non-blocking: return local results if future not ready
+                    if fut.done():
+                        julia_results = fut.result() or []
+            except Exception:
+                pass
+            if julia_results:
+                seen = {r["canonical_id"] for r in results}
+                for jr in julia_results:
+                    jid = jr.get("id") or jr.get("canonical_id", "")
+                    if jid and jid not in seen:
+                        results.append({"canonical_id": jid, "glyph": jr.get("glyph", "?"),
+                                        "score": jr.get("score", 0.0), "ts": jr.get("ts", 0.0),
+                                        "odu_composed": jr.get("odu_composed", 0),
+                                        "chunk": jr.get("text", "")})
+                        seen.add(jid)
+                # Re-sort merged results by score desc
+                results.sort(key=lambda r: -r["score"])
+                results = results[:k]
+
         return results
 
     # -- integrity / anchoring ------------------------------------------

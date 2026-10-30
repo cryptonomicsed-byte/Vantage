@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import logging
+from .steward_client import verify_schnorr as _verify_schnorr
 from typing import Optional
 
 import aiosqlite
@@ -101,17 +102,23 @@ def verify_event(event: dict) -> str:
     if computed != str(event["id"]):
         raise MeshRejected("event id does not match its contents")
 
-    from coincurve import PublicKeyXOnly
-
+    sig_hex = str(event["sig"])
+    if len(sig_hex) != 128:
+        raise MeshRejected("signature must be 64 bytes (128 hex chars)")
     try:
-        sig = bytes.fromhex(str(event["sig"]))
-        key = PublicKeyXOnly(bytes.fromhex(pubkey))
-    except ValueError as exc:
-        raise MeshRejected(f"malformed hex: {exc}") from exc
-    if len(sig) != 64:
-        raise MeshRejected("signature must be 64 bytes")
-    try:
-        valid = key.verify(sig, bytes.fromhex(computed))
+        import asyncio as _asyncio
+        loop = _asyncio.get_event_loop()
+        if loop.is_running():
+            import asyncio as _as
+            valid = _as.get_event_loop().run_until_complete(
+                _verify_schnorr(pubkey, computed, sig_hex)
+            ) if False else None  # avoid nested event loop
+            # Use coincurve fallback in sync context
+            from coincurve import PublicKeyXOnly
+            key = PublicKeyXOnly(bytes.fromhex(pubkey))
+            valid = key.verify(bytes.fromhex(sig_hex), bytes.fromhex(computed))
+        else:
+            valid = loop.run_until_complete(_verify_schnorr(pubkey, computed, sig_hex))
     except Exception as exc:
         raise MeshRejected(f"signature could not be verified: {exc}") from exc
     if not valid:

@@ -15,6 +15,7 @@ from backend.config import settings
 from backend.crypto_utils import encrypt_key_for_agent, decrypt_key_for_agent
 from ..db import get_db
 from ..action_receipt import from_trade_order
+from ..justice_layer import anchor_receipt as _anchor_receipt
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/trading", tags=["trading"])
@@ -826,6 +827,14 @@ async def create_order(data: OrderCreate, agent: dict = Depends(get_agent)):
              "strategy_id": data.strategy_id, "symbol": data.symbol},
             agent["id"], "pending",
         ))
+        asyncio.create_task(_anchor_receipt(
+            principal_id=str(agent["id"]),
+            action_kind="execute_trade",
+            capability="trade",
+            evidence={"order_id": str(order_id), "symbol": data.symbol,
+                      "side": data.side},
+            gate_alignment=1.0,
+        ))
         return {"id": order_id, "status": "pending", "symbol": data.symbol, "side": data.side}
 
 @router.get("/orders")
@@ -977,6 +986,14 @@ async def paper_fill_order(order_id: int, agent: dict = Depends(get_agent)):
     asyncio.create_task(_emit_trade_receipt(
         {**order, "avg_fill_price": fill_price, "tx_hash": tx_hash},
         agent["id"], "success",
+    ))
+    asyncio.create_task(_anchor_receipt(
+        principal_id=str(agent["id"]),
+        action_kind="execute_trade",
+        capability="trade",
+        evidence={"order_id": str(order_id), "symbol": order["symbol"],
+                  "side": order["side"], "tx_hash": tx_hash},
+        gate_alignment=1.0,
     ))
 
     return dict(updated)
@@ -1746,6 +1763,17 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent), x_
 
     if not tx_id:
         raise HTTPException(502, note)
+
+    # Fire-and-forget justice receipt for live order execution (Move FIRE layer)
+    asyncio.create_task(_anchor_receipt(
+        principal_id=str(agent["id"]),
+        action_kind="execute_trade",
+        capability="trade",
+        evidence={"order_id": str(order_id), "symbol": order["symbol"],
+                  "side": order["side"], "tx_hash": tx_id},
+        gate_alignment=1.0,
+    ))
+
     return {"order_id": order_id, "status": "submitted", "tx_hash": tx_id}
 
 

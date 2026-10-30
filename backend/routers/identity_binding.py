@@ -22,7 +22,7 @@ import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from coincurve import PublicKeyXOnly
+from ..steward_client import verify_schnorr as _verify_schnorr
 
 from ..db import get_db
 from ..deps import get_agent
@@ -57,10 +57,16 @@ def _verify_binding_signature(
     """
     try:
         msg = f"{vantage_agent_id}:{omokoda_agent_id}".encode("utf-8")
-        msg_hash = hashlib.sha256(msg).digest()
+        msg_hash = hashlib.sha256(msg).hexdigest()
 
-        pk = PublicKeyXOnly(bytes.fromhex(runtime_pubkey_hex))
-        return pk.verify(bytes.fromhex(sig_hex), msg_hash)
+        import asyncio as _asyncio
+        try:
+            loop = _asyncio.get_event_loop()
+            return loop.run_until_complete(_verify_schnorr(runtime_pubkey_hex, msg_hash, sig_hex))
+        except RuntimeError:
+            from coincurve import PublicKeyXOnly as _PK
+            return _PK(bytes.fromhex(runtime_pubkey_hex)).verify(
+                bytes.fromhex(sig_hex), bytes.fromhex(msg_hash))
     except Exception as exc:
         logger.debug("binding sig verify failed: %s", exc)
         return False

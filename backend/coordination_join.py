@@ -23,7 +23,7 @@ import time
 from typing import Optional
 
 import aiosqlite
-from coincurve import PublicKeyXOnly
+from .steward_client import verify_schnorr as _verify_schnorr
 
 from .buzz_registration import RELAY_WS_URL
 from .db import get_db
@@ -106,18 +106,20 @@ def verify_signed_event(event: dict) -> None:
     if computed != str(event["id"]):
         raise JoinRejected("event id does not match its contents")
 
-    try:
-        sig = bytes.fromhex(str(event["sig"]))
-        key = PublicKeyXOnly(bytes.fromhex(pubkey))
-        message = bytes.fromhex(computed)
-    except ValueError as exc:
-        raise JoinRejected(f"malformed hex in signed_event: {exc}") from exc
-
-    if len(sig) != 64:
+    sig_hex = str(event["sig"])
+    if len(bytes.fromhex(sig_hex) if sig_hex else b"") != 64:
         raise JoinRejected("signature must be 64 bytes")
 
     try:
-        valid = key.verify(sig, message)
+        # Verify via Rust steward (BIP-340 schnorr); falls back to coincurve internally
+        import asyncio as _asyncio
+        try:
+            loop = _asyncio.get_event_loop()
+            valid = loop.run_until_complete(_verify_schnorr(pubkey, computed, sig_hex))
+        except RuntimeError:
+            # Already in an event loop — use coincurve fallback directly
+            from coincurve import PublicKeyXOnly as _PK
+            valid = _PK(bytes.fromhex(pubkey)).verify(bytes.fromhex(sig_hex), bytes.fromhex(computed))
     except Exception as exc:
         raise JoinRejected(f"signature could not be verified: {exc}") from exc
     if not valid:
