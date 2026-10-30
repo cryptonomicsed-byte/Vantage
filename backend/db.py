@@ -2424,4 +2424,31 @@ async def init_workspace_tasks_db() -> None:
                 scored INTEGER DEFAULT 0
             )
         """)
+
+        # ── Justice layer: ARP on-chain receipt anchoring ──────────────────
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS action_receipts (
+                id           TEXT PRIMARY KEY,
+                principal_id TEXT NOT NULL,
+                kind         TEXT DEFAULT 'custom',
+                capability   TEXT DEFAULT '',
+                action_kind  TEXT NOT NULL,
+                action_target TEXT DEFAULT '',
+                action_outcome TEXT DEFAULT 'success',
+                evidence_json JSON DEFAULT '{}',
+                gate_alignment REAL DEFAULT 1.0,
+                receipt_hash TEXT NOT NULL,
+                chain        TEXT DEFAULT 'local',
+                tx_digest    TEXT,
+                created_ts   INTEGER NOT NULL
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_action_receipts_principal"
+            " ON action_receipts(principal_id)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_action_receipts_kind"
+            " ON action_receipts(kind)"
+        )
         await db.commit()
