@@ -1093,6 +1093,8 @@ app.include_router(guild_workspace_router)
 
 from .routers.lounge import router as lounge_router
 app.include_router(lounge_router)
+from .routers.guild_skills import router as guild_skills_router
+app.include_router(guild_skills_router)
 
 
 # P3 — A2A Task Delegation

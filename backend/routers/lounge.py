@@ -385,6 +385,31 @@ Available slash commands:
   /help                            — show this message
 """
 
+async def _check_mode_skill(db, guild_slug: str, lounge_id: str, mode: str, agent: dict):
+    """Check if a guild skill is registered for this mode. Returns skill dict or None."""
+    try:
+        import json as _json
+        row = await (await db.execute(
+            "SELECT * FROM guild_skills WHERE guild_slug=? AND mode=? AND enabled=1 LIMIT 1",
+            (guild_slug, mode)
+        )).fetchone()
+        if not row:
+            return None
+        skill = dict(row)
+        if skill.get("capability_required"):
+            caps = agent.get("capabilities", [])
+            if isinstance(caps, str):
+                try:
+                    caps = _json.loads(caps)
+                except Exception:
+                    caps = []
+            if skill["capability_required"] not in caps:
+                return None
+        return skill
+    except Exception:
+        return None
+
+
 async def handle_slash(
     guild_slug: str,
     lounge_id: str,
@@ -403,6 +428,15 @@ async def handle_slash(
         elif cmd == "/mode":
             if arg not in VALID_MODES:
                 return {"reply": f"Unknown mode '{arg}'. Valid: {', '.join(VALID_MODES)}"}
+            # Check for registered guild skill before native mode switch
+            _skill = await _check_mode_skill(db, guild_slug, lounge_id, arg, agent)
+            if _skill:
+                return {
+                    "reply": f"Mode {arg} → skill '{_skill['name']}' invoked.",
+                    "skill_invoked": True,
+                    "skill_name": _skill["name"],
+                    "skill_id": _skill["id"],
+                }
             await db.execute(
                 """INSERT INTO lounge_mode_state (lounge_id, mode, changed_by_agent_id, changed_ts)
                    VALUES (?,?,?,unixepoch())
