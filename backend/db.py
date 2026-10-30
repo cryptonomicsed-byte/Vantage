@@ -2318,6 +2318,33 @@ async def init_workspace_tasks_db() -> None:
                 changed_ts INTEGER NOT NULL DEFAULT (unixepoch())
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS prediction_signals (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                market_id TEXT NOT NULL,
+                question TEXT DEFAULT '',
+                yes_price REAL DEFAULT 0.0,
+                no_price REAL DEFAULT 0.0,
+                volume_24h REAL DEFAULT 0.0,
+                end_date TEXT DEFAULT '',
+                category TEXT DEFAULT '',
+                raw_json JSON DEFAULT '{}',
+                ingested_ts INTEGER NOT NULL,
+                processed INTEGER DEFAULT 0
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS sniper_targets (
+                id TEXT PRIMARY KEY,
+                wallet TEXT NOT NULL,
+                mint TEXT DEFAULT '',
+                context_json JSON DEFAULT '{}',
+                queued_ts INTEGER NOT NULL,
+                status TEXT DEFAULT 'pending',
+                UNIQUE(wallet, mint)
+            )
+        """)
         await db.commit()
 
 
@@ -2332,3 +2359,56 @@ async def init_workspace_tasks_db() -> None:
             await db.execute("UPDATE agents SET api_key=? WHERE id=?", (hashed, row_id))
         if rows:
             await db.commit()
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS smart_money_scores (
+            id TEXT PRIMARY KEY,
+            wallet TEXT NOT NULL,
+            score REAL DEFAULT 0.0,
+            win_rate REAL DEFAULT 0.0,
+            avg_roi REAL DEFAULT 0.0,
+            trade_count INT DEFAULT 0,
+            cluster_id TEXT DEFAULT '',
+            tags JSON DEFAULT '[]',
+            computed_ts INTEGER NOT NULL,
+            UNIQUE(wallet)
+        )
+    """)
+
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS guild_skills (
+            id TEXT PRIMARY KEY,
+            guild_slug TEXT NOT NULL,
+            name TEXT NOT NULL,
+            mode TEXT DEFAULT '',
+            mcp_tool_tag TEXT DEFAULT '',
+            fallback_router TEXT DEFAULT '',
+            capability_required TEXT DEFAULT '',
+            created_by_agent_id INTEGER,
+            enabled INTEGER DEFAULT 1,
+            created_ts INTEGER NOT NULL,
+            UNIQUE(guild_slug, name)
+        )
+    """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS guild_skill_connectors (
+            id TEXT PRIMARY KEY,
+            guild_slug TEXT NOT NULL,
+            skill_id TEXT NOT NULL,
+            connector_type TEXT NOT NULL CHECK(connector_type IN ('mcp','native','external')),
+            config_encrypted TEXT DEFAULT '',
+            created_by_agent_id INTEGER,
+            FOREIGN KEY(skill_id) REFERENCES guild_skills(id)
+        )
+    """)
+
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS brier_predictions (
+            signal_id TEXT PRIMARY KEY,
+            verdict TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            predicted_ts INTEGER NOT NULL,
+            outcome TEXT,
+            scored INTEGER DEFAULT 0
+        )
+    """)
+    await db.commit()
