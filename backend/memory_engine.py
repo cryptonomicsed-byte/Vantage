@@ -26,3 +26,22 @@ async def resonance(text_a: str, text_b: str) -> float:
             return r.json().get("score", 0.0)
     except Exception:
         return 0.0
+
+
+async def aggregate_score(signals: dict, weights: dict) -> float:
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            r = await client.post(f"{MEMORY_URL}/score/aggregate", json={"signals": signals, "weights": weights})
+            return r.json().get("score", 0.0)
+    except Exception:
+        return sum(weights.get(k, 0) * v for k, v in signals.items())
+
+async def brier_score(predictions: list, outcomes: list) -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            r = await client.post(f"{MEMORY_URL}/score/brier", json={"predictions": predictions, "outcomes": outcomes})
+            return r.json()
+    except Exception:
+        import statistics
+        s = statistics.mean((p-o)**2 for p,o in zip(predictions, outcomes)) if predictions else 0.0
+        return {"brier_score": s, "gated": s > 0.35}

@@ -1,4 +1,5 @@
 import uuid, time, json
+from backend.memory_engine import aggregate_score as _julia_score
 from backend.db import get_db
 
 async def compute_smart_money_score(wallet: str, trades: list) -> dict:
@@ -7,7 +8,12 @@ async def compute_smart_money_score(wallet: str, trades: list) -> dict:
     wins = [t for t in trades if t.get("roi", 0) > 0]
     win_rate = len(wins) / len(trades)
     avg_roi = sum(t.get("roi", 0) for t in trades) / len(trades)
-    score = (win_rate * 0.5 + min(avg_roi / 100, 1.0) * 0.3 + min(len(trades) / 50, 1.0) * 0.2)
+    volume_score = min(len(trades) / 50, 1.0)
+    roi_score = min(avg_roi / 100, 1.0)
+    score = await _julia_score(
+        signals={"win_rate": win_rate, "roi": roi_score, "volume": volume_score},
+        weights={"win_rate": 0.5, "roi": 0.3, "volume": 0.2}
+    )
     return {"wallet": wallet, "score": round(score, 4), "win_rate": round(win_rate, 4),
             "avg_roi": round(avg_roi, 4), "trade_count": len(trades)}
 

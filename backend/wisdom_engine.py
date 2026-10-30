@@ -45,3 +45,23 @@ async def wisdom_route(context: str, available_modes: list = None) -> dict:
             return r.json()
     except Exception:
         return {"ok": False, "recommended_mode": "mixed"}
+
+
+async def mode_route(context: str, agent_capabilities: list, available_modes: list = None) -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            r = await client.post(f"{WISDOM_URL}/mode-route",
+                json={"context": context, "agent_capabilities": agent_capabilities,
+                      "available_modes": available_modes or ["code","trade","video","mixed"]})
+            return r.json()
+    except Exception:
+        return {"ok": False, "recommended_mode": "mixed"}
+
+async def filter_capabilities(requirements: list, candidates: list) -> list:
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            r = await client.post(f"{WISDOM_URL}/capability/filter",
+                json={"requirements": requirements, "candidates": candidates})
+            return r.json().get("ranked", candidates)
+    except Exception:
+        return candidates

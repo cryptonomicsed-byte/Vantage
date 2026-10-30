@@ -1,6 +1,7 @@
 """Brier score calibration gate: tracks rolling prediction accuracy, gates signals when degraded."""
 import time, json
 from backend.db import get_db
+from backend.memory_engine import brier_score as _julia_brier
 
 BRIER_WINDOW = 100  # last N predictions
 BRIER_THRESHOLD = 0.35  # gate closes if rolling Brier > threshold (0=perfect, 1=worst)
@@ -38,12 +39,10 @@ async def compute_rolling_brier() -> float:
             return 0.0
     if not rows:
         return 0.0
-    total = 0.0
-    for r in rows:
-        actual = 1.0 if r[2] == "yes" else 0.0
-        forecast = r[1] if r[0] == "yes" else (1.0 - r[1])
-        total += (forecast - actual) ** 2
-    return total / len(rows)
+    preds = [r[1] if r[0] == "yes" else (1.0 - r[1]) for r in rows]
+    outcomes = [1.0 if r[2] == "yes" else 0.0 for r in rows]
+    result = await _julia_brier(predictions=preds, outcomes=outcomes)
+    return result.get("brier_score", 0.0)
 
 async def should_gate() -> tuple:
     """Returns (gated: bool, brier_score: float). If gated, do not emit signals."""
