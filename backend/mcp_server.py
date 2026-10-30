@@ -38,7 +38,7 @@ class _NoopMCP:
 # admin / telegram / debug router can never leak in by omission. The
 # exclude_tags=["admin","telegram"] pair (mirrored by EXCLUDED_TAGS in
 # skills_registry.py) still governs the full mount, unchanged.
-GUILD_MCP_TAGS = ["guild-forum", "tasks", "guilds"]
+GUILD_MCP_TAGS = ["guild-forum", "tasks", "guilds", "alpha", "intel"]
 
 GUILD_MCP_DESCRIPTION = (
     "Vantage collaboration surface -- join a guild, talk in its channels, take "

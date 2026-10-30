@@ -938,3 +938,52 @@ async def refresh_smart_money():
             await upsert_score(wallet, score_data)
     asyncio.create_task(run_refresh())
     return {"status": "scheduled"}
+
+
+# --- P1-6: Alpha service health endpoint ---
+@router.get("/alpha/status", operation_id="alpha_status")
+async def alpha_status(_caller: dict = Depends(get_agent)):
+    """Service health and row counts for each alpha subsystem."""
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        status: dict = {"ok": True, "subsystems": {}}
+
+        subsystems = {
+            "clusters":     "alpha_clusters",
+            "smart_money":  "smart_money_scores",
+        }
+        for name, table in subsystems.items():
+            try:
+                row = await (await db.execute(
+                    f"SELECT COUNT(*) AS cnt FROM {table}"
+                )).fetchone()
+                status["subsystems"][name] = {
+                    "available": True,
+                    "count": row["cnt"] if row else 0,
+                }
+            except Exception:
+                status["subsystems"][name] = {"available": False, "count": 0}
+
+        # early_buyers: table created by smart_money_daemon, may not exist yet
+        try:
+            row = await (await db.execute(
+                "SELECT COUNT(*) AS cnt FROM alpha_early_buyers"
+            )).fetchone()
+            status["subsystems"]["early_buyers"] = {
+                "available": True,
+                "count": row["cnt"] if row else 0,
+            }
+        except Exception:
+            status["subsystems"]["early_buyers"] = {"available": False, "count": 0}
+
+        # signals in the last hour
+        try:
+            row = await (await db.execute(
+                "SELECT COUNT(*) AS c FROM trading_signals WHERE ts > ?",
+                (int(time.time()) - 3600,),
+            )).fetchone()
+            status["signals_last_hour"] = row["c"] if row else 0
+        except Exception:
+            status["signals_last_hour"] = 0
+
+        return status
