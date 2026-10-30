@@ -468,6 +468,18 @@ async def agent_heartbeat(agent: dict = Depends(get_agent)):
         await db.commit()
         async with db.execute("SELECT last_seen_at FROM agents WHERE id=?", (agent["id"],)) as cur:
             row = await cur.fetchone()
+    # Fire-and-forget heartbeat to swarm supervisor
+    import os as _os, asyncio as _asyncio
+    _sup_url = _os.environ.get("SWARM_SUPERVISOR_URL", "")
+    if _sup_url:
+        async def _ping_sup(aid: str):
+            try:
+                import httpx as _hx
+                async with _hx.AsyncClient(timeout=2) as _c:
+                    await _c.post(f"{_sup_url}/agents/{aid}/heartbeat")
+            except Exception:
+                pass
+        _asyncio.create_task(_ping_sup(str(agent.get("id", ""))))
     return {"ok": True, "last_seen_at": row["last_seen_at"] if row else ""}
 
 @router.get("/profile/{name}/capabilities")

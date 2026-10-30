@@ -99,6 +99,21 @@ async def _pick_best_agent(db, lounge_id: str, guild_slug: str, mode: str) -> Op
            ORDER BY glm.joined_ts ASC""",
         (lounge_id,)
     )).fetchall()
+    # Swarm supervisor: filter agents with stale heartbeat (>120s)
+    import os as _os, time as _t
+    _sup_url = _os.environ.get("SWARM_SUPERVISOR_URL", "")
+    if _sup_url and rows:
+        import httpx as _hx
+        _stale = set()
+        for _r in rows:
+            try:
+                async with _hx.AsyncClient(timeout=2) as _c:
+                    _rs = await _c.get(f"{_sup_url}/agents/{_r['agent_id']}/status")
+                    if _rs.status_code == 200 and _t.time() - _rs.json().get("last_heartbeat_ts", 0) > 120:
+                        _stale.add(_r["agent_id"])
+            except Exception:
+                pass
+        rows = [r for r in rows if r["agent_id"] not in _stale]
     if not rows:
         return None
     scored = []
