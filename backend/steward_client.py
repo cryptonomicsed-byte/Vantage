@@ -26,10 +26,6 @@ async def verify_schnorr(pubkey_hex: str, message_hex: str, sig_hex: str) -> boo
 
 
 async def check_rate_limit(key: str) -> bool:
-    Consume one unit from the Rust steward rate limiter for key.
-
-
-async def check_rate_limit(key: str) -> bool:
     """Consume one unit from the Rust steward rate limiter for key.
     Returns True if allowed, False if over limit.
     On connection error raises so caller falls through to local check."""

@@ -1,17 +1,25 @@
 """Guild Lounge — persistent orchestration rooms with slash commands and mode dispatch."""
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import os as _os
 import secrets
 import time
 import uuid
 from typing import Any, Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from backend.db import get_db
 from backend.deps import get_agent as get_current_agent
+from backend.justice_layer import anchor_receipt as _anchor_justice
+
+logger = logging.getLogger(__name__)
+_SUPERVISOR_URL = _os.environ.get("SWARM_SUPERVISOR_URL", "")
 
 router = APIRouter(prefix="/api/guilds/{guild_slug}/lounge", tags=["lounge"])
 
@@ -88,6 +96,20 @@ async def _capability_score(db, agent_id: int, mode: str) -> float:
         return 0.5
     hits = sum(1 for c in caps if any(k in str(c).lower() for k in keywords))
     return min(hits / max(len(keywords), 1), 1.0)
+
+
+async def _notify_supervisor(agent_id, task_id: str, mode: str) -> None:
+    """Fire-and-forget: POST assign to Elixir Creation supervisor. Fail-open."""
+    if not _SUPERVISOR_URL:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=3) as _c:
+            await _c.post(
+                f"{_SUPERVISOR_URL}/agents/{agent_id}/assign",
+                json={"task_id": task_id, "mode": mode},
+            )
+    except Exception as _e:
+        logger.warning("[lounge] supervisor assign failed (agent=%s task=%s): %s", agent_id, task_id, _e)
 
 
 async def _pick_best_agent(db, lounge_id: str, guild_slug: str, mode: str) -> Optional[int]:
@@ -343,6 +365,18 @@ async def create_task(
              body.mode, assigned, body.priority, agent["id"])
         )
         await db.commit()
+    # Fire-and-forget: notify Elixir Creation supervisor of assignment
+    if assigned:
+        asyncio.create_task(_notify_supervisor(assigned, task_id, body.mode))
+    # Fire-and-forget: anchor receipt to justice layer
+    asyncio.create_task(_anchor_justice(
+        principal_id=str(agent.get("id", "")),
+        action_kind="lounge_task_create",
+        capability="lounge",
+        evidence={"task_id": task_id, "lounge_id": lounge_id,
+                  "assigned_agent_id": assigned, "mode": body.mode},
+        gate_alignment=1.0,
+    ))
     return {"task_id": task_id, "assigned_agent_id": assigned}
 
 
@@ -465,6 +499,16 @@ async def handle_slash(
                 (arg, lounge_id)
             )
             await db.commit()
+            # Fire-and-forget: re-assign active task with new mode if supervisor is configured
+            if _SUPERVISOR_URL:
+                active_task = await (await db.execute(
+                    "SELECT id, assigned_agent_id FROM lounge_tasks WHERE lounge_id=? AND status='pending' ORDER BY priority DESC LIMIT 1",
+                    (lounge_id,)
+                )).fetchone()
+                if active_task and active_task["assigned_agent_id"]:
+                    asyncio.create_task(_notify_supervisor(
+                        active_task["assigned_agent_id"], active_task["id"], arg
+                    ))
             return {"reply": f"Mode switched to **{arg}**"}
 
         elif cmd == "/task":
@@ -483,6 +527,17 @@ async def handle_slash(
                 (task_id, lounge_id, guild_slug, arg, mode, assigned, agent["id"])
             )
             await db.commit()
+            # Fire-and-forget: notify supervisor + anchor receipt
+            if assigned:
+                asyncio.create_task(_notify_supervisor(assigned, task_id, mode))
+            asyncio.create_task(_anchor_justice(
+                principal_id=str(agent.get("id", "")),
+                action_kind="lounge_slash_task",
+                capability="lounge",
+                evidence={"task_id": task_id, "lounge_id": lounge_id,
+                          "assigned_agent_id": assigned, "mode": mode},
+                gate_alignment=1.0,
+            ))
             assigned_name = "(unassigned)"
             if assigned:
                 row = await (await db.execute("SELECT name FROM agents WHERE id=?", (assigned,))).fetchone()
