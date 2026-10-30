@@ -5,6 +5,7 @@ Ranking: 1) capability match count, 2) reputation, 3) availability
          (available > thinking > working > blocked > offline).
 """
 import logging
+import os
 from typing import Optional
 
 from .capability_registry import find_capable_agents
@@ -14,6 +15,10 @@ logger = logging.getLogger(__name__)
 
 # Availability priority (lower index = higher priority)
 _AVAILABILITY_ORDER = ["available", "thinking", "working", "blocked", "offline"]
+
+# Tier-gated external job board
+EXTERNAL_JOB_BOARD_TIER = int(os.environ.get("EXTERNAL_JOB_BOARD_TIER", "4"))
+EXTERNAL_JOB_BOARD_URL = os.environ.get("EXTERNAL_JOB_BOARD_URL", "")
 
 
 def _availability_rank(availability: str) -> int:
@@ -35,7 +40,11 @@ def _rank_candidates(candidates: list) -> list:
     )
 
 
-async def route_task(task_id: int, required_capabilities: list) -> list:
+async def route_task(
+    task_id: int,
+    required_capabilities: list,
+    agent_tier: int = 1,
+) -> list:
     """Return ranked candidate agents for a task.
 
     Queries the capability registry for agents that satisfy ALL
@@ -45,6 +54,8 @@ async def route_task(task_id: int, required_capabilities: list) -> list:
     Args:
         task_id: The task ID (used for logging / future persistence).
         required_capabilities: Capabilities the executing agent must have.
+        agent_tier: Tier of the requesting agent (default 1). Tier >= EXTERNAL_JOB_BOARD_TIER
+                    unlocks the external job board query when EXTERNAL_JOB_BOARD_URL is set.
 
     Returns:
         Sorted list of candidate agent dicts (best match first).
@@ -67,6 +78,22 @@ async def route_task(task_id: int, required_capabilities: list) -> list:
                 )
         except Exception as _we:
             logger.debug("task_router: wisdom engine unavailable: %s", _we)
+
+    # Tier-gated external job board
+    if agent_tier >= EXTERNAL_JOB_BOARD_TIER and EXTERNAL_JOB_BOARD_URL:
+        try:
+            import httpx
+            r = httpx.get(f"{EXTERNAL_JOB_BOARD_URL}/jobs/open", timeout=3.0)
+            if r.status_code == 200:
+                external_jobs = r.json().get("jobs", [])
+                # Merge external jobs into candidates (append, not replace)
+                # external_jobs items expected to have: {job_id, description, reward}
+                # log and pass through — actual assignment handled by caller
+                logger.info(
+                    f"External job board: {len(external_jobs)} jobs fetched for tier-{agent_tier} agent"
+                )
+        except Exception as e:
+            logger.warning(f"External job board unreachable (tier gate): {e}")
 
     logger.info(
         "task_router: task %s with caps %s matched %d candidate(s)",

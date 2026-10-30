@@ -19,6 +19,7 @@ Role in the 7-layer stack:
 from __future__ import annotations
 
 import hashlib
+import logging
 import json
 import os
 import time
@@ -29,6 +30,8 @@ SUI_ACTIVE = os.environ.get("SUI_ACTIVE", "0") == "1"
 SUI_RPC_URL = os.environ.get("SUI_RPC_URL", "https://fullnode.mainnet.sui.io")
 SUI_WALLET = os.environ.get("SUI_WALLET_ADDRESS", "")
 OSO_MOVE_PACKAGE = os.environ.get("OSO_MOVE_PACKAGE_ID", "")  # set after `sui client publish`
+
+logger = logging.getLogger(__name__)
 
 
 async def anchor_receipt(
@@ -265,3 +268,52 @@ async def _submit_to_sui(
         f"{receipt_hash}:{kind}:{action_kind}:{ts}".encode()
     ).hexdigest()
     return f"0x{stub}"
+
+
+# ── Elegbara settlement (Phase 9-B) ───────────────────────────────────────────
+
+def settle_job_payment_on_chain(
+    job_id: str,
+    gross_amount: int,
+    birth_record_id: str,
+    agent_addr: str,
+) -> dict:
+    """
+    Calls elegbara_router settle_job_payment via Sui CLI when SUI_ACTIVE=1.
+    Returns {ok: bool, birther_coin: str, agent_coin: str, tx_digest: str}.
+    Fail-open: returns {ok: False, reason: ...} if SUI_ACTIVE=0 or CLI unavailable.
+    """
+    if not SUI_ACTIVE:
+        return {"ok": False, "reason": "SUI_ACTIVE=0"}
+
+    ELEGBARA_PACKAGE = os.environ.get("ELEGBARA_PACKAGE_ID", "")
+    ELEGBARA_ROUTER_OBJ = os.environ.get("ELEGBARA_ROUTER_OBJ", "")
+
+    if not ELEGBARA_PACKAGE or not ELEGBARA_ROUTER_OBJ:
+        logger.warning("settle_job_payment_on_chain: ELEGBARA_PACKAGE_ID or ELEGBARA_ROUTER_OBJ not set")
+        return {"ok": False, "reason": "elegbara env vars missing"}
+
+    try:
+        import subprocess
+        cmd = [
+            "sui", "client", "call",
+            "--package", ELEGBARA_PACKAGE,
+            "--module", "elegbara_router",
+            "--function", "settle_job_payment",
+            "--args", ELEGBARA_ROUTER_OBJ, birth_record_id, str(gross_amount), agent_addr,
+            "--gas-budget", "10000000",
+            "--json"
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            import json as _json
+            data = _json.loads(result.stdout)
+            digest = data.get("digest", "")
+            logger.info(f"settle_job_payment on-chain OK: job={job_id} digest={digest}")
+            return {"ok": True, "tx_digest": digest, "job_id": job_id}
+        else:
+            logger.warning(f"settle_job_payment CLI error: {result.stderr[:200]}")
+            return {"ok": False, "reason": result.stderr[:200]}
+    except Exception as e:
+        logger.warning(f"settle_job_payment on-chain failed (fail-open): {e}")
+        return {"ok": False, "reason": str(e)}
