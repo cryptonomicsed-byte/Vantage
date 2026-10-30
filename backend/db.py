@@ -2350,15 +2350,14 @@ async def init_workspace_tasks_db() -> None:
 
     # One-time migration: hash any plaintext API keys still stored as "vantage_..." (idempotent)
     import hashlib as _hlib_key
-    async with get_db() as db:
-        rows = await (await db.execute(
-            "SELECT id, api_key FROM agents WHERE api_key LIKE 'vantage_%'"
-        )).fetchall()
-        for row_id, raw_key in rows:
-            hashed = _hlib_key.sha256(raw_key.encode()).hexdigest()
-            await db.execute("UPDATE agents SET api_key=? WHERE id=?", (hashed, row_id))
-        if rows:
-            await db.commit()
+    rows = await (await db.execute(
+        "SELECT id, api_key FROM agents WHERE api_key LIKE 'vantage_%'"
+    )).fetchall()
+    for row_id, raw_key in rows:
+        hashed = _hlib_key.sha256(raw_key.encode()).hexdigest()
+        await db.execute("UPDATE agents SET api_key=? WHERE id=?", (hashed, row_id))
+    if rows:
+        await db.commit()
     await db.execute("""
         CREATE TABLE IF NOT EXISTS smart_money_scores (
             id TEXT PRIMARY KEY,
@@ -2373,6 +2372,19 @@ async def init_workspace_tasks_db() -> None:
             UNIQUE(wallet)
         )
     """)
+
+    # P1-5 migration: add quality-tag columns to alpha_clusters if not present
+    for _col, _ddl in [
+        ("bundle_detected", "INTEGER DEFAULT 0"),
+        ("fresh_wallet",    "INTEGER DEFAULT 0"),
+        ("concentration_pct", "REAL DEFAULT 0.0"),
+    ]:
+        try:
+            await db.execute(
+                f"ALTER TABLE alpha_clusters ADD COLUMN {_col} {_ddl}"
+            )
+        except Exception:
+            pass  # column already exists
 
     await db.execute("""
         CREATE TABLE IF NOT EXISTS guild_skills (
