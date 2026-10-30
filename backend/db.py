@@ -2350,77 +2350,78 @@ async def init_workspace_tasks_db() -> None:
 
     # One-time migration: hash any plaintext API keys still stored as "vantage_..." (idempotent)
     import hashlib as _hlib_key
-    rows = await (await db.execute(
-        "SELECT id, api_key FROM agents WHERE api_key LIKE 'vantage_%'"
-    )).fetchall()
-    for row_id, raw_key in rows:
-        hashed = _hlib_key.sha256(raw_key.encode()).hexdigest()
-        await db.execute("UPDATE agents SET api_key=? WHERE id=?", (hashed, row_id))
-    if rows:
-        await db.commit()
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS smart_money_scores (
-            id TEXT PRIMARY KEY,
-            wallet TEXT NOT NULL,
-            score REAL DEFAULT 0.0,
-            win_rate REAL DEFAULT 0.0,
-            avg_roi REAL DEFAULT 0.0,
-            trade_count INT DEFAULT 0,
-            cluster_id TEXT DEFAULT '',
-            tags JSON DEFAULT '[]',
-            computed_ts INTEGER NOT NULL,
-            UNIQUE(wallet)
-        )
-    """)
-
-    # P1-5 migration: add quality-tag columns to alpha_clusters if not present
-    for _col, _ddl in [
-        ("bundle_detected", "INTEGER DEFAULT 0"),
-        ("fresh_wallet",    "INTEGER DEFAULT 0"),
-        ("concentration_pct", "REAL DEFAULT 0.0"),
-    ]:
-        try:
-            await db.execute(
-                f"ALTER TABLE alpha_clusters ADD COLUMN {_col} {_ddl}"
+    async with get_db() as db:
+        rows = await (await db.execute(
+            "SELECT id, api_key FROM agents WHERE api_key LIKE 'vantage_%'"
+        )).fetchall()
+        for row_id, raw_key in rows:
+            hashed = _hlib_key.sha256(raw_key.encode()).hexdigest()
+            await db.execute("UPDATE agents SET api_key=? WHERE id=?", (hashed, row_id))
+        if rows:
+            await db.commit()
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS smart_money_scores (
+                id TEXT PRIMARY KEY,
+                wallet TEXT NOT NULL,
+                score REAL DEFAULT 0.0,
+                win_rate REAL DEFAULT 0.0,
+                avg_roi REAL DEFAULT 0.0,
+                trade_count INT DEFAULT 0,
+                cluster_id TEXT DEFAULT '',
+                tags JSON DEFAULT '[]',
+                computed_ts INTEGER NOT NULL,
+                UNIQUE(wallet)
             )
-        except Exception:
-            pass  # column already exists
+        """)
 
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS guild_skills (
-            id TEXT PRIMARY KEY,
-            guild_slug TEXT NOT NULL,
-            name TEXT NOT NULL,
-            mode TEXT DEFAULT '',
-            mcp_tool_tag TEXT DEFAULT '',
-            fallback_router TEXT DEFAULT '',
-            capability_required TEXT DEFAULT '',
-            created_by_agent_id INTEGER,
-            enabled INTEGER DEFAULT 1,
-            created_ts INTEGER NOT NULL,
-            UNIQUE(guild_slug, name)
-        )
-    """)
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS guild_skill_connectors (
-            id TEXT PRIMARY KEY,
-            guild_slug TEXT NOT NULL,
-            skill_id TEXT NOT NULL,
-            connector_type TEXT NOT NULL CHECK(connector_type IN ('mcp','native','external')),
-            config_encrypted TEXT DEFAULT '',
-            created_by_agent_id INTEGER,
-            FOREIGN KEY(skill_id) REFERENCES guild_skills(id)
-        )
-    """)
+        # P1-5 migration: add quality-tag columns to alpha_clusters if not present
+        for _col, _ddl in [
+            ("bundle_detected", "INTEGER DEFAULT 0"),
+            ("fresh_wallet",    "INTEGER DEFAULT 0"),
+            ("concentration_pct", "REAL DEFAULT 0.0"),
+        ]:
+            try:
+                await db.execute(
+                    f"ALTER TABLE alpha_clusters ADD COLUMN {_col} {_ddl}"
+                )
+            except Exception:
+                pass  # column already exists
 
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS brier_predictions (
-            signal_id TEXT PRIMARY KEY,
-            verdict TEXT NOT NULL,
-            confidence REAL NOT NULL,
-            predicted_ts INTEGER NOT NULL,
-            outcome TEXT,
-            scored INTEGER DEFAULT 0
-        )
-    """)
-    await db.commit()
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS guild_skills (
+                id TEXT PRIMARY KEY,
+                guild_slug TEXT NOT NULL,
+                name TEXT NOT NULL,
+                mode TEXT DEFAULT '',
+                mcp_tool_tag TEXT DEFAULT '',
+                fallback_router TEXT DEFAULT '',
+                capability_required TEXT DEFAULT '',
+                created_by_agent_id INTEGER,
+                enabled INTEGER DEFAULT 1,
+                created_ts INTEGER NOT NULL,
+                UNIQUE(guild_slug, name)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS guild_skill_connectors (
+                id TEXT PRIMARY KEY,
+                guild_slug TEXT NOT NULL,
+                skill_id TEXT NOT NULL,
+                connector_type TEXT NOT NULL CHECK(connector_type IN ('mcp','native','external')),
+                config_encrypted TEXT DEFAULT '',
+                created_by_agent_id INTEGER,
+                FOREIGN KEY(skill_id) REFERENCES guild_skills(id)
+            )
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS brier_predictions (
+                signal_id TEXT PRIMARY KEY,
+                verdict TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                predicted_ts INTEGER NOT NULL,
+                outcome TEXT,
+                scored INTEGER DEFAULT 0
+            )
+        """)
+        await db.commit()
