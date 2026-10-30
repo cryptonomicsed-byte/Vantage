@@ -1,0 +1,40 @@
+name: MCP Exposure Check
+on:
+  push:
+    paths:
+      - 'backend/routers/alpha.py'
+      - 'backend/routers/trading.py'
+      - 'backend/skills_registry.py'
+      - 'backend/mcp_server.py'
+  pull_request:
+    paths:
+      - 'backend/routers/alpha.py'
+      - 'backend/routers/trading.py'
+
+jobs:
+  check-mcp-tags:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check alpha routes have MCP tags
+        run: |
+          python3 - <<'EOF'
+          import ast, sys, pathlib
+
+          def check_file(path, tag):
+              src = pathlib.Path(path).read_text()
+              if f'"{tag}"' not in src and f"'{tag}'" not in src:
+                  print(f"WARNING: {path} has no '{tag}' tag reference")
+                  return False
+              return True
+
+          ok = True
+          ok &= check_file("backend/skills_registry.py", "alpha")
+          ok &= check_file("backend/skills_registry.py", "intel")
+          ok &= check_file("backend/mcp_server.py", "alpha")
+          ok &= check_file("backend/mcp_server.py", "intel")
+          if not ok:
+              print("MCP exposure check failed — alpha/intel tags missing from MCP surface")
+              sys.exit(1)
+          print("MCP exposure check passed")
+          EOF
