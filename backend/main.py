@@ -831,9 +831,23 @@ async def payload_size_limit_middleware(request: Request, call_next):
 # API Key rate limiting middleware (100 requests per minute per API key)
 @app.middleware("http")
 async def api_key_rate_limit_middleware(request: Request, call_next):
-    """Rate limit /api/* endpoints by API key (100 requests/minute)."""
+    """Rate limit /api/* endpoints by API key (100 requests/minute).
+    Attempts Rust steward rate-limit first; falls back to local in-memory check."""
     if request.url.path.startswith("/api/"):
         api_key = request.headers.get("X-Agent-Key", "")
+        # Try Rust steward first (fail-open: on error, fall through to local)
+        steward_allowed = True
+        if api_key:
+            try:
+                from .steward_client import check_rate_limit as _steward_rl
+                steward_allowed = await _steward_rl(api_key)
+            except Exception:
+                pass  # steward unreachable — fall through to local
+        if not steward_allowed:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Rate limit exceeded (steward)"},
+            )
         if not await _check_api_key_rate_limit(api_key):
             return JSONResponse(
                 status_code=429,

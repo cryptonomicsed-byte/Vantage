@@ -45,3 +45,13 @@ async def brier_score(predictions: list, outcomes: list) -> dict:
         import statistics
         s = statistics.mean((p-o)**2 for p,o in zip(predictions, outcomes)) if predictions else 0.0
         return {"brier_score": s, "gated": s > 0.35}
+
+
+async def embed_text(text: str) -> list:
+    """Call Julia Memory /embed endpoint; returns float vector or [] on error."""
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            r = await client.post(f"{MEMORY_URL}/embed", json={"text": text})
+            return r.json().get("vector", [])
+    except Exception:
+        return []

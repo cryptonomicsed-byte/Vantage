@@ -59,7 +59,7 @@ from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
 
 try:
-    from backend.memory_engine import store_glyph as _mem_store, search_memory as _mem_search
+    from backend.memory_engine import store_glyph as _mem_store, search_memory as _mem_search, embed_text as _mem_embed
     _MEM_ENGINE = True
 except Exception:
     _MEM_ENGINE = False
@@ -277,6 +277,21 @@ class HashingEmbedder:
         self.dim = dim
 
     def __call__(self, text: str) -> List[float]:
+        # Try Julia Memory embed first; fall back to local 3-gram hash on error/empty
+        if _MEM_ENGINE:
+            import asyncio as _asyncio
+            try:
+                loop = _asyncio.get_event_loop()
+                if loop.is_running():
+                    import concurrent.futures as _cf
+                    fut = _asyncio.ensure_future(_mem_embed(text))
+                    if fut.done():
+                        julia_vec = fut.result()
+                        if julia_vec:
+                            return julia_vec
+            except Exception:
+                pass
+        # Local 3-gram hashing fallback
         vec = [0.0] * self.dim
         lowered = text.lower()
         for i in range(max(len(lowered) - 2, 1)):

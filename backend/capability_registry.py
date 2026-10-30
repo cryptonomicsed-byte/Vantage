@@ -23,6 +23,18 @@ import aiosqlite
 
 from .db import DB_PATH
 
+try:
+    from .wisdom_engine import filter_capabilities as _wisdom_filter_capabilities
+    _WISDOM_ENGINE = True
+except Exception:
+    _WISDOM_ENGINE = False
+
+try:
+    from .wisdom_engine import filter_capabilities as _wisdom_filter_capabilities
+    _WISDOM_ENGINE = True
+except Exception:
+    _WISDOM_ENGINE = False
+
 logger = logging.getLogger(__name__)
 
 VALID_AVAILABILITY = {"available", "working", "thinking", "blocked", "offline"}
@@ -156,6 +168,53 @@ async def find_capable_agents(
         record["_match_count"] = match_count
         results.append(record)
 
+    # Attempt Clojure Wisdom capability filter; fail-open if unavailable
+    if _WISDOM_ENGINE and results:
+        import asyncio as _asyncio
+        try:
+            loop = _asyncio.get_event_loop()
+            if loop.is_running():
+                wisdom_candidates = [
+                    {id: r[agent_id], capabilities: r.get(capabilities, [])}
+                    for r in results
+                ]
+                required_list = list(required_capabilities)
+                fut = _asyncio.ensure_future(
+                    _wisdom_filter_capabilities(required_list, wisdom_candidates)
+                )
+                if fut.done():
+                    ranked = fut.result()
+                    if ranked:
+                        # Re-order results by Clojure ranking (matched by id)
+                        id_to_result = {r[agent_id]: r for r in results}
+                        reordered = [id_to_result[c[id]] for c in ranked if c.get(id) in id_to_result]
+                        if len(reordered) == len(results):
+                            return reordered
+        except Exception:
+            pass  # fall through to local ordering
+    # Attempt Clojure Wisdom capability filter; fail-open if unavailable
+    if _WISDOM_ENGINE and results:
+        import asyncio as _asyncio
+        try:
+            loop = _asyncio.get_event_loop()
+            if loop.is_running():
+                wisdom_candidates = [
+                    {"id": r["agent_id"], "capabilities": r.get("capabilities", [])}
+                    for r in results
+                ]
+                required_list = list(required_capabilities)
+                fut = _asyncio.ensure_future(
+                    _wisdom_filter_capabilities(required_list, wisdom_candidates)
+                )
+                if fut.done():
+                    ranked = fut.result()
+                    if ranked:
+                        id_to_result = {r["agent_id"]: r for r in results}
+                        reordered = [id_to_result[c["id"]] for c in ranked if c.get("id") in id_to_result]
+                        if len(reordered) == len(results):
+                            return reordered
+        except Exception:
+            pass  # fall through to local ordering
     return results
 
 
@@ -184,15 +243,4 @@ async def get_all_capabilities() -> list:
     """Return the full capability directory — all registered agents."""
     await _ensure_registry_table()
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA busy_timeout=10000")
-        db.row_factory = aiosqlite.Row
-        rows = await (await db.execute(
-            "SELECT * FROM capability_registry ORDER BY reputation DESC, agent_name ASC"
-        )).fetchall()
-    results = []
-    for row in rows:
-        record = dict(row)
-        record["capabilities"] = json.loads(record.get("capabilities") or "[]")
-        record["tools"] = json.loads(record.get("tools") or "[]")
-        results.append(record)
-    return results
+        await db.execute("PRAGMA busy_timeout
