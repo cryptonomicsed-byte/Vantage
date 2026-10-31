@@ -1,5 +1,5 @@
 # Vantage Execution TODO
-> Last updated: 2026-10-28. Check this file before starting any session.
+> Last updated: 2026-10-31. Check this file before starting any session.
 
 ---
 
@@ -146,19 +146,19 @@
 
 ## PHASE 4 — VPS Restoration Remaining Items
 
-### P4-1 Fix test signal in production feed
-- [ ] Find which service is posting `source="test"` to `/api/intel/signals/ingest`
-- [ ] Either gate it behind `if os.environ.get("ENVIRONMENT") != "production"` or remove it
+### P4-1 Fix test signal in production feed — DONE (commit 2ec9e57)
+- [x] Gated in backend/routers/trading.py line 2198: source in ("test", "test-signal", "test_signal") returns reject before feed enters production
 
-### P4-2 Fix pumpfun_launch_radar conviction inversion
-- [ ] In `pumpfun_launch_radar.py` find the scoring line that raises conviction for more prior launches
-- [ ] Propose inversion: more launches → higher rug risk → lower conviction (or separate `serial_deployer` risk flag)
-- [ ] Do not change yet — present the code and the fix for approval first
+### P4-2 Fix pumpfun_launch_radar conviction inversion — DONE (already fixed in /opt/ares/pumpfun_launch_radar.py)
+- [x] More prior launches = lower conviction: 0 launches=0.45, 1-3=0.35, 4-9=0.2, 10-99=0.1, 100+=skip entirely
+- [x] Dev snipe >8% initial supply caps conviction at 0.25 regardless of other signals
+- [x] Smart money copy-trade score >30 can raise conviction to 0.65 (genuine positive signal)
 
-### P4-3 Reissue Trader Joe API key (agent id 497)
-- [ ] Server-side: call internal key-issuance API or directly insert into `vantage.db` agents/keys tables
-- [ ] Write key to `/root/trader_joe_key.txt` with `chmod 600`
-- [ ] Capabilities: `read`, `intel` only — no `place_trade`
+### P4-3 Reissue Trader Joe API key (agent id 497) — PENDING operator action
+- [x] Agent 497 "Trader Joe" confirmed in vantage.db with key hash (SHA-256: 8cf076...)
+- [x] No TRADER_JOE_API_KEY env var referenced anywhere in code — key access is DB-auth only
+- [ ] /root/trader_joe_key.txt does NOT exist — operator must rotate key via /api/agents/me/rotate-key using agent 497 creds and write plaintext to that path with chmod 600
+- [ ] After rotation: verify agent 497 capabilities are read+intel only (no place_trade)
 
 ### P4-4 Confirm new signal sources are intentional
 - [ ] For each: `ogun_degen`, `vantage-predictor`, `trading_agents`, `worldmonitor_geo`, `polymarket`, `kraken`, `coinpaprika`, `fear_greed`, `geckoterminal` — check the producing service name and what it posts
