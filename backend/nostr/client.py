@@ -8,6 +8,7 @@ import time
 import uuid
 from typing import Optional
 
+import asyncio
 import websockets
 from coincurve import PrivateKey
 
@@ -57,12 +58,12 @@ class NostrSession:
             await self.ws.close()
 
     async def _recv_json(self, timeout=10):
-        raw = await self.ws.recv()
+        raw = await asyncio.wait_for(self.ws.recv(), timeout=timeout)
         return json.loads(raw)
 
-    async def authenticate(self, extra_tags: Optional[list] = None):
-        """NIP-42 auth handshake."""
-        msg = await self._recv_json()
+    async def authenticate(self, extra_tags: Optional[list] = None, timeout: float = 15.0):
+        """NIP-42 auth handshake. Raises asyncio.TimeoutError if relay sends no AUTH within timeout."""
+        msg = await self._recv_json(timeout=timeout)
         if msg[0] != "AUTH":
             raise RuntimeError(f"expected proactive AUTH challenge, got: {msg}")
         challenge = msg[1]
