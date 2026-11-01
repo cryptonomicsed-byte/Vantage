@@ -11,7 +11,7 @@ import os
 from typing import List
 
 # Default from buzz_pairing (imported lazily to avoid circular import at top level)
-_FALLBACK = "wss://omokoda.duckdns.org:3443"
+_FALLBACK = "wss://omokoda.duckdns.org:3443/relay"
 
 
 def get_relay_urls() -> List[str]:
