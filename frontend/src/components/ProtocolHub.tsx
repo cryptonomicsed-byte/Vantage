@@ -36,7 +36,7 @@ function NostrCenter({ apiKey }: { apiKey: string }) {
   const [tab, setTab] = useState<'identity' | 'relays' | 'feed' | 'publish' | 'zaps' | 'nips'>('identity')
   const [status, setStatus] = useState<any>(null)
   const [relays, setRelays] = useState<NostrRelay[]>([
-    { url: 'wss://omokoda.duckdns.org:3443', status: 'disconnected', latency: null, read: true, write: true },
+    { url: 'wss://omokoda.duckdns.org:3443/relay', status: 'disconnected', latency: null, read: true, write: true },
     { url: 'wss://relay.damus.io', status: 'disconnected', latency: null, read: true, write: false },
     { url: 'wss://nos.lol', status: 'disconnected', latency: null, read: true, write: false },
     { url: 'wss://relay.nostr.band', status: 'disconnected', latency: null, read: true, write: false },
@@ -81,14 +81,54 @@ function NostrCenter({ apiKey }: { apiKey: string }) {
   }
 
   function pingRelay(url: string) {
-    const start = Date.now()
-    const ws = new WebSocket(url)
-    ws.onopen = () => {
-      const ms = Date.now() - start
-      setRelays(r => r.map(x => x.url === url ? { ...x, status: 'connected', latency: ms } : x))
-      ws.close()
+    // For the own relay (ends in /relay) we require NIP-11 + a NIP-42 AUTH frame
+    // within 5 s; a raw socket-open is not sufficient proof the relay is healthy.
+    const isOwn = url.includes('omokoda.duckdns.org')
+    if (isOwn) {
+      const httpUrl = url.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+      const nip11Check = fetch(httpUrl, {
+        headers: { 'Accept': 'application/nostr+json' },
+      }).then(r => r.ok ? r.json() : Promise.reject('nip11-fetch-failed'))
+      nip11Check.then(doc => {
+        if (!Array.isArray(doc.supported_nips) || !doc.supported_nips.includes(42)) {
+          setRelays(r => r.map(x => x.url === url ? { ...x, status: 'error', latency: null } : x))
+          return
+        }
+        // NIP-11 ok — now open WS and wait for AUTH frame within 5 s
+        const start = Date.now()
+        const ws = new WebSocket(url)
+        let authSeen = false
+        const timer = setTimeout(() => {
+          if (!authSeen) {
+            setRelays(r => r.map(x => x.url === url ? { ...x, status: 'error', latency: null } : x))
+          }
+          ws.close()
+        }, 5000)
+        ws.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(ev.data)
+            if (msg[0] === 'AUTH') {
+              authSeen = true
+              clearTimeout(timer)
+              const ms = Date.now() - start
+              setRelays(r => r.map(x => x.url === url ? { ...x, status: 'connected', latency: ms } : x))
+              ws.close()
+            }
+          } catch {}
+        }
+        ws.onerror = () => { clearTimeout(timer); setRelays(r => r.map(x => x.url === url ? { ...x, status: 'error', latency: null } : x)) }
+      }).catch(() => setRelays(r => r.map(x => x.url === url ? { ...x, status: 'error', latency: null } : x)))
+    } else {
+      // External relays: simple latency ping (socket-open)
+      const start = Date.now()
+      const ws = new WebSocket(url)
+      ws.onopen = () => {
+        const ms = Date.now() - start
+        setRelays(r => r.map(x => x.url === url ? { ...x, status: 'connected', latency: ms } : x))
+        ws.close()
+      }
+      ws.onerror = () => setRelays(r => r.map(x => x.url === url ? { ...x, status: 'error', latency: null } : x))
     }
-    ws.onerror = () => setRelays(r => r.map(x => x.url === url ? { ...x, status: 'error', latency: null } : x))
   }
 
   async function publishNote() {
@@ -346,39 +386,22 @@ function NostrCenter({ apiKey }: { apiKey: string }) {
       {tab === 'zaps' && (
         <div>
           <SectionTitle>Lightning / Zaps (NIP-57)</SectionTitle>
-          <div className="stat-card" style={{ marginBottom: 12 }}>
-            <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>
-              Zaps require a lightning wallet with LNURL support. Connect a lightning address to enable receiving zaps.
-            </div>
-            <div style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 10, color: 'var(--muted)', marginBottom: 3 }}>Lightning Address</div>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <input className="search-page-input" placeholder="you@getalby.com" style={{ flex: 1, fontSize: 12 }} />
-                <button className="btn btn-primary btn-sm">Save</button>
-              </div>
-            </div>
+          <div className="stat-card" style={{ display: 'flex', alignItems: 'flex-start', gap: 14, padding: '18px 20px' }}>
+            <AlertCircle size={22} style={{ color: '#f59e0b', flexShrink: 0, marginTop: 2 }} />
             <div>
-              <div style={{ fontSize: 10, color: 'var(--muted)', marginBottom: 3 }}>LNURL</div>
-              <input className="search-page-input" placeholder="lnurl1dp..." style={{ width: '100%', fontSize: 11, fontFamily: 'monospace' }} />
-            </div>
-          </div>
-
-          <SectionTitle>Send Zap</SectionTitle>
-          <div className="stat-card">
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <div>
-                <div style={{ fontSize: 10, color: 'var(--muted)', marginBottom: 3 }}>Recipient (npub or lightning address)</div>
-                <input className="search-page-input" placeholder="npub1..." style={{ width: '100%', fontSize: 12 }} />
+              <div style={{ fontWeight: 700, fontSize: 13, color: '#f59e0b', marginBottom: 6 }}>
+                Zaps not supported yet
               </div>
-              <div>
-                <div style={{ fontSize: 10, color: 'var(--muted)', marginBottom: 3 }}>Amount (sats)</div>
-                <input className="search-page-input" type="number" placeholder="21" style={{ fontSize: 12, width: 120 }} />
+              <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.6 }}>
+                NIP-57 Lightning zaps require an LNURL-pay compatible lightning node and a zap-receipt relay.
+                This capability is <strong style={{ color: 'var(--text)' }}>parked</strong> — no lightning node is provisioned
+                on this server. This panel is read-only; inputs are disabled.
               </div>
-              <div>
-                <div style={{ fontSize: 10, color: 'var(--muted)', marginBottom: 3 }}>Message (optional)</div>
-                <input className="search-page-input" placeholder="⚡" style={{ width: '100%', fontSize: 12 }} />
+              <div style={{ marginTop: 10, display: 'flex', gap: 10, fontSize: 11, color: 'var(--muted)' }}>
+                <span style={{ padding: '2px 8px', borderRadius: 4, background: 'var(--surface)', border: '1px solid var(--border)' }}>NIP-57 ✗</span>
+                <span style={{ padding: '2px 8px', borderRadius: 4, background: 'var(--surface)', border: '1px solid var(--border)' }}>NIP-47 ✗</span>
+                <span style={{ padding: '2px 8px', borderRadius: 4, background: 'var(--surface)', border: '1px solid var(--border)' }}>LNURL ✗</span>
               </div>
-              <button className="btn btn-primary btn-sm" style={{ alignSelf: 'flex-start' }}><Zap size={11} /> Zap</button>
             </div>
           </div>
         </div>
@@ -469,6 +492,21 @@ function MeshtasticCenter({ apiKey }: { apiKey: string }) {
 
   return (
     <div>
+      {/* — Not-live-yet banner — */}
+      <div className="stat-card" style={{ display: 'flex', alignItems: 'flex-start', gap: 14, padding: '14px 18px', marginBottom: 18, borderLeft: '3px solid #6b7280' }}>
+        <AlertCircle size={18} style={{ color: '#6b7280', flexShrink: 0, marginTop: 2 }} />
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 12, color: '#9ca3af', marginBottom: 4 }}>
+            Meshtastic — not live yet
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.55 }}>
+            No Meshtastic hardware is connected to this server. The UI below is a preview.
+            Packet ingest is available via <code style={{ color: 'var(--cyan)', fontSize: 11 }}>/api/meshnet/meshtastic</code> when hardware is present.
+            Live node data and mesh messaging will activate automatically once a device is attached.
+          </div>
+        </div>
+      </div>
+
       <div style={{ display: 'flex', gap: 4, marginBottom: 20, flexWrap: 'wrap' }}>
         {TABS.map(t => (
           <button key={t.key} onClick={() => setTab(t.key)}

@@ -9,6 +9,7 @@ import uuid
 from typing import Optional
 
 import asyncio
+from urllib.parse import urlparse
 import websockets
 from coincurve import PrivateKey
 
@@ -67,11 +68,16 @@ class NostrSession:
         if msg[0] != "AUTH":
             raise RuntimeError(f"expected proactive AUTH challenge, got: {msg}")
         challenge = msg[1]
+        # NIP-42 relay tag must match what the relay validates: scheme+host only,
+        # no path (buzz-relay derives wss://host from the tenant Host header,
+        # not from the WS path). Strip any path from the connection URL.
+        _parsed = urlparse(self.relay_ws_url)
+        _nip42_relay = f"{_parsed.scheme}://{_parsed.netloc}"
         auth_event = build_event(
             self.pk,
             kind=22242,
             content="",
-            tags=[["relay", self.relay_ws_url], ["challenge", challenge]] + (extra_tags or []),
+            tags=[["relay", _nip42_relay], ["challenge", challenge]] + (extra_tags or []),
         )
         await self.ws.send(json.dumps(["AUTH", auth_event]))
         ack = await self._recv_json()
