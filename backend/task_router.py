@@ -9,9 +9,14 @@ import os
 from typing import Optional
 
 from .capability_registry import find_capable_agents
-from .wisdom_engine import wisdom_route as _wisdom_route
+from .wisdom_engine import wisdom_route as _wisdom_route, mode_route as _mode_route
 
 logger = logging.getLogger(__name__)
+
+# Minimum Clojure wisdom confidence to use as primary routing decision (else fall through)
+_WISDOM_CONFIDENCE_THRESHOLD = float(
+    os.environ.get("WISDOM_CONFIDENCE_THRESHOLD", "0.5")
+)
 
 # Availability priority (lower index = higher priority)
 _AVAILABILITY_ORDER = ["available", "thinking", "working", "blocked", "offline"]
@@ -63,21 +68,33 @@ async def route_task(
     candidates = await find_capable_agents(required_capabilities)
     ranked = _rank_candidates(candidates)
 
-    # Soft re-rank hint from Clojure wisdom engine (fire-and-forget, never blocks routing)
+    # PRIMARY: Clojure wisdom engine as routing decision-maker
+    # mode_route returns {recommended_mode, confidence, reasoning, ok}
+    # If confidence > threshold, use wisdom result directly as the ranked list.
+    # Fall through to local Python capability scoring when wisdom is unavailable.
     if candidates:
         try:
-            task_modes = [str(a.get("id", "")) for a in candidates]
-            wisdom = await _wisdom_route(
-                f"task {task_id} requiring {required_capabilities}", task_modes
+            agent_ids = [str(a.get("agent_id") or a.get("id", "")) for a in candidates]
+            context = f"task {task_id} requiring {required_capabilities}"
+            wisdom = await _mode_route(context, agent_ids, agent_ids)
+            confidence = float(wisdom.get("confidence", 0.0))
+            recommended = wisdom.get("recommended_mode") or wisdom.get("mode")
+            logger.info(
+                "task_router: wisdom decision for task %s → agent=%s confidence=%.2f reasoning=%s",
+                task_id, recommended, confidence, wisdom.get("reasoning", ""),
             )
-            recommended = wisdom.get("recommended_mode")
-            if recommended:
+            if recommended and confidence >= _WISDOM_CONFIDENCE_THRESHOLD:
+                # Re-order ranked so the wisdom-recommended agent is first
+                primary = [a for a in ranked
+                           if str(a.get("agent_id") or a.get("id", "")) == recommended]
+                rest = [a for a in ranked
+                        if str(a.get("agent_id") or a.get("id", "")) != recommended]
+                ranked = primary + rest
                 logger.info(
-                    "task_router: wisdom hint for task %s → mode=%s scores=%s",
-                    task_id, recommended, wisdom.get("scores", {}),
+                    "task_router: wisdom primary routing accepted (confidence=%.2f)", confidence
                 )
         except Exception as _we:
-            logger.debug("task_router: wisdom engine unavailable: %s", _we)
+            logger.debug("task_router: wisdom engine unavailable, using local ranking: %s", _we)
 
     # Tier-gated external job board
     if agent_tier >= EXTERNAL_JOB_BOARD_TIER and EXTERNAL_JOB_BOARD_URL:

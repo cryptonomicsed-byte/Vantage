@@ -277,21 +277,27 @@ class HashingEmbedder:
         self.dim = dim
 
     def __call__(self, text: str) -> List[float]:
-        # Try Julia Memory embed first; fall back to local 3-gram hash on error/empty
+        # PRIMARY: Julia Memory /embed endpoint
         if _MEM_ENGINE:
             import asyncio as _asyncio
             try:
                 loop = _asyncio.get_event_loop()
                 if loop.is_running():
+                    # Running inside an async context — use a thread executor with its own loop
                     import concurrent.futures as _cf
-                    fut = _asyncio.ensure_future(_mem_embed(text))
-                    if fut.done():
-                        julia_vec = fut.result()
-                        if julia_vec:
-                            return julia_vec
+                    with _cf.ThreadPoolExecutor(max_workers=1) as pool:
+                        julia_vec = pool.submit(
+                            lambda: _asyncio.run(_mem_embed(text))
+                        ).result(timeout=3)
+                    if julia_vec:
+                        return julia_vec
+                else:
+                    julia_vec = loop.run_until_complete(_mem_embed(text))
+                    if julia_vec:
+                        return julia_vec
             except Exception:
-                pass
-        # Local 3-gram hashing fallback
+                pass  # fall through to local fallback
+        # FALLBACK: deterministic 3-gram hash embedding (no external deps)
         vec = [0.0] * self.dim
         lowered = text.lower()
         for i in range(max(len(lowered) - 2, 1)):
@@ -437,7 +443,39 @@ class GlyphStore:
         return chunk
 
     def search(self, query: str, k: int = 3) -> List[dict]:
-        """Exact cosine top-k over the vault, decrypting only the winners."""
+        """Semantic search: PRIMARY via Julia Memory /search, fallback to local cosine."""
+        # PRIMARY: Julia Memory engine semantic search
+        if _MEM_ENGINE:
+            import asyncio as _asyncio
+            julia_results: list = []
+            try:
+                loop = _asyncio.get_event_loop()
+                if loop.is_running():
+                    import concurrent.futures as _cf
+                    with _cf.ThreadPoolExecutor(max_workers=1) as pool:
+                        julia_results = pool.submit(
+                            lambda: _asyncio.run(_mem_search(query, limit=k))
+                        ).result(timeout=5) or []
+                else:
+                    julia_results = loop.run_until_complete(_mem_search(query, limit=k)) or []
+            except Exception:
+                julia_results = []
+
+            if julia_results:
+                results = []
+                seen: set = set()
+                for jr in julia_results:
+                    jid = jr.get("id") or jr.get("canonical_id", "")
+                    if jid and jid not in seen:
+                        results.append({"canonical_id": jid, "glyph": jr.get("glyph", "?"),
+                                        "score": jr.get("score", 0.0), "ts": jr.get("ts", 0.0),
+                                        "odu_composed": jr.get("odu_composed", 0),
+                                        "chunk": jr.get("text", "")})
+                        seen.add(jid)
+                results.sort(key=lambda r: -r["score"])
+                return results[:k]
+
+        # FALLBACK: local cosine similarity over SQLite embeddings
         qvec = self.embedder(query)
         rows = self._db.execute(
             "SELECT canonical_id, glyph, ts, odu_composed, embedding FROM glyphs "
@@ -454,34 +492,6 @@ class GlyphStore:
             results.append({"canonical_id": canonical_id, "glyph": glyph,
                             "score": score, "ts": ts, "odu_composed": composed,
                             "chunk": self.expand(canonical_id)})
-
-        # Merge with Julia memory engine results (prefer Julia scores, deduplicate by canonical_id)
-        if _MEM_ENGINE:
-            import asyncio as _asyncio
-            julia_results: list = []
-            try:
-                loop = _asyncio.get_event_loop()
-                if loop.is_running():
-                    fut = _asyncio.ensure_future(_mem_search(query, limit=k))
-                    # Non-blocking: return local results if future not ready
-                    if fut.done():
-                        julia_results = fut.result() or []
-            except Exception:
-                pass
-            if julia_results:
-                seen = {r["canonical_id"] for r in results}
-                for jr in julia_results:
-                    jid = jr.get("id") or jr.get("canonical_id", "")
-                    if jid and jid not in seen:
-                        results.append({"canonical_id": jid, "glyph": jr.get("glyph", "?"),
-                                        "score": jr.get("score", 0.0), "ts": jr.get("ts", 0.0),
-                                        "odu_composed": jr.get("odu_composed", 0),
-                                        "chunk": jr.get("text", "")})
-                        seen.add(jid)
-                # Re-sort merged results by score desc
-                results.sort(key=lambda r: -r["score"])
-                results = results[:k]
-
         return results
 
     # -- integrity / anchoring ------------------------------------------
