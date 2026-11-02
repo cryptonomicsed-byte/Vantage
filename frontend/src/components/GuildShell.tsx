@@ -20,6 +20,8 @@ import WorkspaceTaskBoard from './WorkspaceTaskBoard'
 import WorkspaceMemoryViewer from './WorkspaceMemoryViewer'
 import WorkspaceShell from './WorkspaceShell'
 import FreenetGitPanel from './FreenetGitPanel'
+import TradingSpaceShell from './TradingSpaceShell'
+import ContentCreationShell from './ContentCreationShell'
 
 // ── types ──────────────────────────────────────────────────────────────────────
 
@@ -125,10 +127,6 @@ function PresenceDot({ state, size = 8 }: { state: string; size?: number }) {
 
 const CHANNEL_TEMPLATES = [
   { type: 'general', label: 'General', icon: '💬', color: '#6B7280', desc: 'Open discussion' },
-  { type: 'code', label: 'Code', icon: '⌨️', color: '#10B981', desc: 'Collaborative coding with branch isolation' },
-  { type: 'trading', label: 'Trading', icon: '📈', color: '#F59E0B', desc: 'Pooled trades & token launches' },
-  { type: 'content', label: 'Content', icon: '🎬', color: '#8B5CF6', desc: 'Video, audio, media production' },
-  { type: 'research', label: 'Research', icon: '🔍', color: '#3B82F6', desc: 'Alpha signals & intel' },
 ]
 
 // ── nav section header ─────────────────────────────────────────────────────────
@@ -752,7 +750,9 @@ function CCMessageRow({ m, grouped, isReply }: { m: CCMessage; grouped: boolean;
 function CommandCenter({
   guild, roster, taskSummary, workspaces, presence,
   channels, guildSlug, apiKey, humanSession, isMember,
-  onSelectView, onSelectWorkspace,
+  onSelectView, onSelectWorkspace, onSelectTradingSpace, onSelectContentSpace,
+  onShowCreateWorkspace, onShowCreateTradingSpace, onShowCreateContentSpace,
+  tradingSpaces, contentSpaces, selectedTradingSpaceId, selectedContentSpaceId,
 }: {
   guild: GuildData
   roster: RosterEntry[]
@@ -766,6 +766,15 @@ function CommandCenter({
   isMember: boolean
   onSelectView: (v: string) => void
   onSelectWorkspace: (ws: WorkspaceItem) => void
+  onSelectTradingSpace: (ts: any) => void
+  onSelectContentSpace: (cs: any) => void
+  onShowCreateWorkspace: () => void
+  onShowCreateTradingSpace: () => void
+  onShowCreateContentSpace: () => void
+  tradingSpaces: any[]
+  contentSpaces: any[]
+  selectedTradingSpaceId: string | null
+  selectedContentSpaceId: string | null
 }) {
   // Channel selector state — null means "auto" (prefer general, else first)
   const [commandCenterChannel, setCommandCenterChannel] = useState<string | null>(null)
@@ -790,6 +799,8 @@ function CommandCenter({
   const [onlineCollapsed, setOnlineCollapsed] = useState(false)
   const [tasksCollapsed, setTasksCollapsed] = useState(false)
   const [wsCollapsed, setWsCollapsed] = useState(false)
+  const [tsCollapsed, setTsCollapsed] = useState(false)
+  const [csCollapsed, setCsCollapsed] = useState(false)
 
   const streamRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
@@ -1323,21 +1334,85 @@ function CommandCenter({
             )}
           </div>
 
-          {/* WORKSPACES */}
+          {/* TRADING SPACES */}
           <div style={{ borderBottom: '1px solid var(--border)' }}>
-            <button
-              onClick={() => setWsCollapsed(s => !s)}
-              style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted)' }}
-            >
-              <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em' }}>
-                Workspaces — {workspaces.length}
-              </span>
-              <ChevronRight size={11} style={{ transform: wsCollapsed ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.15s' }} />
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px' }}>
+              <button onClick={() => setTsCollapsed(s => !s)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 6, flex: 1 }}>
+                <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+                  Trading — {tradingSpaces.length}
+                </span>
+                <ChevronRight size={11} style={{ transform: tsCollapsed ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.15s' }} />
+              </button>
+              <button onClick={() => onShowCreateTradingSpace()} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#f59e0b', padding: '0 2px', fontSize: 16, lineHeight: 1 }} title="New Trading Space">+</button>
+            </div>
+            {!tsCollapsed && (
+              <div style={{ padding: '0 14px 10px', display: 'flex', flexDirection: 'column', gap: 5 }}>
+                {tradingSpaces.length === 0 ? (
+                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', fontStyle: 'italic' }}>No trading spaces yet</div>
+                ) : tradingSpaces.map(ts => (
+                  <button key={ts.id} onClick={() => onSelectTradingSpace(ts)}
+                    style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', background: selectedTradingSpaceId === ts.id ? 'rgba(245,158,11,0.1)' : 'rgba(255,255,255,0.03)', border: `1px solid ${selectedTradingSpaceId === ts.id ? '#f59e0b' : 'var(--border)'}`, borderRadius: 7, cursor: 'pointer', textAlign: 'left' }}>
+                    <div style={{ width: 24, height: 24, borderRadius: 5, background: 'rgba(245,158,11,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                      <span style={{ fontSize: 12 }}>📈</span>
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ts.name}</div>
+                      <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 1 }}>{ts.chain || 'solana'}</div>
+                    </div>
+                    <ChevronRight size={11} style={{ color: 'var(--muted)', flexShrink: 0 }} />
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* CONTENT CREATION */}
+          <div style={{ borderBottom: '1px solid var(--border)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px' }}>
+              <button onClick={() => setCsCollapsed(s => !s)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 6, flex: 1 }}>
+                <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+                  Content — {contentSpaces.length}
+                </span>
+                <ChevronRight size={11} style={{ transform: csCollapsed ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.15s' }} />
+              </button>
+              <button onClick={() => onShowCreateContentSpace()} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#8B5CF6', padding: '0 2px', fontSize: 16, lineHeight: 1 }} title="New Content Space">+</button>
+            </div>
+            {!csCollapsed && (
+              <div style={{ padding: '0 14px 10px', display: 'flex', flexDirection: 'column', gap: 5 }}>
+                {contentSpaces.length === 0 ? (
+                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', fontStyle: 'italic' }}>No content spaces yet</div>
+                ) : contentSpaces.map(cs => (
+                  <button key={cs.id} onClick={() => onSelectContentSpace(cs)}
+                    style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', background: selectedContentSpaceId === cs.id ? 'rgba(139,92,246,0.1)' : 'rgba(255,255,255,0.03)', border: `1px solid ${selectedContentSpaceId === cs.id ? '#8B5CF6' : 'var(--border)'}`, borderRadius: 7, cursor: 'pointer', textAlign: 'left' }}>
+                    <div style={{ width: 24, height: 24, borderRadius: 5, background: 'rgba(139,92,246,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                      <span style={{ fontSize: 12 }}>🎬</span>
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cs.name}</div>
+                      <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 1 }}>{cs.mcp_provider || 'vantage_anvil'}</div>
+                    </div>
+                    <ChevronRight size={11} style={{ color: 'var(--muted)', flexShrink: 0 }} />
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* CODING SPACES */}
+          <div style={{ borderBottom: '1px solid var(--border)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px' }}>
+              <button onClick={() => setWsCollapsed(s => !s)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 6, flex: 1 }}>
+                <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+                  Coding Spaces — {workspaces.length}
+                </span>
+                <ChevronRight size={11} style={{ transform: wsCollapsed ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.15s' }} />
+              </button>
+              <button onClick={() => onShowCreateWorkspace()} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--cyan)', padding: '0 2px', fontSize: 16, lineHeight: 1 }} title="New Coding Space">+</button>
+            </div>
             {!wsCollapsed && (
               <div style={{ padding: '0 14px 10px', display: 'flex', flexDirection: 'column', gap: 5 }}>
                 {workspaces.length === 0 ? (
-                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', fontStyle: 'italic' }}>No workspaces yet</div>
+                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', fontStyle: 'italic' }}>No coding spaces yet</div>
                 ) : workspaces.slice(0, 3).map(ws => (
                   <button
                     key={ws.id}
@@ -1571,6 +1646,18 @@ export default function GuildShell() {
   const [newWorkspace, setNewWorkspace] = useState({ name: '', repo_owner: '', repo_name: '' })
   const [wsCreating, setWsCreating] = useState(false)
 
+  // trading spaces
+  const [tradingSpaces, setTradingSpaces] = useState<any[]>([])
+  const [selectedTradingSpace, setSelectedTradingSpace] = useState<any>(null)
+  const [showCreateTradingSpace, setShowCreateTradingSpace] = useState(false)
+  const [newTradingSpace, setNewTradingSpace] = useState({ name: '', chain: 'solana', wallet_id: '' })
+
+  // content spaces
+  const [contentSpaces, setContentSpaces] = useState<any[]>([])
+  const [selectedContentSpace, setSelectedContentSpace] = useState<any>(null)
+  const [showCreateContentSpace, setShowCreateContentSpace] = useState(false)
+  const [newContentSpace, setNewContentSpace] = useState({ name: '', mcp_provider: 'vantage_anvil' })
+
   // load data
   useEffect(() => {
     if (!slug) return
@@ -1604,6 +1691,18 @@ export default function GuildShell() {
       })
       .catch(() => setError('Guild not found'))
       .finally(() => setLoading(false))
+
+    // load trading spaces
+    fetch(`/api/guilds/${encodeURIComponent(slug)}/trading-spaces`, { headers: headers() })
+      .then(r => r.ok ? r.json() : [])
+      .then(d => setTradingSpaces(Array.isArray(d) ? d : []))
+      .catch(() => {})
+
+    // load content spaces
+    fetch(`/api/guilds/${encodeURIComponent(slug)}/content-spaces`, { headers: headers() })
+      .then(r => r.ok ? r.json() : [])
+      .then(d => setContentSpaces(Array.isArray(d) ? d : []))
+      .catch(() => {})
   }, [slug, agentName]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Live presence for the agent rail. Independent of the chat WS further
@@ -1716,6 +1815,8 @@ export default function GuildShell() {
     setSelectedView('workspace')
     setSidebarOpen(false)
   }
+  function selectTradingSpace(ts: any) { setSelectedTradingSpace(ts); setSelectedView('tradingspace'); setSelectedChannel(null); setSelectedWorkspace(null); setSelectedContentSpace(null); setSidebarOpen(false) }
+  function selectContentSpace(cs: any) { setSelectedContentSpace(cs); setSelectedView('contentspace'); setSelectedChannel(null); setSelectedWorkspace(null); setSelectedTradingSpace(null); setSidebarOpen(false) }
 
   // main content
   function renderMain() {
@@ -1725,6 +1826,12 @@ export default function GuildShell() {
     if (selectedView === 'governance') return <GuildGovernanceView guild={guild!} />
     if (selectedView === 'memory') return <WorkspaceMemoryViewer guildSlug={slug!} />
     if (selectedView === 'git') return <FreenetGitPanel guildSlug={slug!} />
+    if (selectedView === 'tradingspace' && selectedTradingSpace) {
+      return <TradingSpaceShell slug={slug!} spaceId={selectedTradingSpace.id} />
+    }
+    if (selectedView === 'contentspace' && selectedContentSpace) {
+      return <ContentCreationShell slug={slug!} spaceId={selectedContentSpace.id} />
+    }
     if (selectedView === 'workspace' && selectedWorkspace) {
       const ch = channels.find(c => c.id === selectedWorkspace.id)
       return <WorkspaceShell guildSlug={slug!} workspace={selectedWorkspace} channel={ch || null} />
@@ -1744,6 +1851,15 @@ export default function GuildShell() {
           isMember={isMember}
           onSelectView={selectView}
           onSelectWorkspace={selectWorkspace}
+          onSelectTradingSpace={selectTradingSpace}
+          onSelectContentSpace={selectContentSpace}
+          onShowCreateWorkspace={() => setShowCreateWorkspace(true)}
+          onShowCreateTradingSpace={() => setShowCreateTradingSpace(true)}
+          onShowCreateContentSpace={() => setShowCreateContentSpace(true)}
+          tradingSpaces={tradingSpaces}
+          contentSpaces={contentSpaces}
+          selectedTradingSpaceId={selectedTradingSpace?.id ?? null}
+          selectedContentSpaceId={selectedContentSpace?.id ?? null}
         />
       )
     }
@@ -1763,7 +1879,7 @@ export default function GuildShell() {
         channel_slug: channelSlug,
         name: newChannel.name,
         topic: newChannel.topic,
-        channel_kind: newChannel.collab_type === 'code' ? 'workspace' : 'forum',
+        channel_kind: 'forum',
         flow_mode: 'open',
         visibility: 'members',
         collab_type: newChannel.collab_type,
@@ -2128,28 +2244,6 @@ export default function GuildShell() {
                 style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: 13 }} />
               <input type="text" placeholder="Topic / description" value={newChannel.topic} onChange={e => setNewChannel(p => ({ ...p, topic: e.target.value }))}
                 style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: 13 }} />
-              {newChannel.collab_type === 'code' && (
-                <input type="text" placeholder="Repo (owner/name)" value={newChannel.repo} onChange={e => setNewChannel(p => ({ ...p, repo: e.target.value }))}
-                  style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: 13 }} />
-              )}
-              {newChannel.collab_type === 'trading' && (
-                <select value={newChannel.chain} onChange={e => setNewChannel(p => ({ ...p, chain: e.target.value }))}
-                  style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: 13 }}>
-                  <option value="">Chain (optional)</option>
-                  <option value="solana">Solana</option>
-                  <option value="ethereum">Ethereum</option>
-                  <option value="polygon">Polygon</option>
-                </select>
-              )}
-              {newChannel.collab_type === 'content' && (
-                <select value={newChannel.mcp_provider} onChange={e => setNewChannel(p => ({ ...p, mcp_provider: e.target.value }))}
-                  style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: 13 }}>
-                  <option value="">MCP Provider (optional)</option>
-                  <option value="vantage_anvil">Vantage Anvil</option>
-                  <option value="higgsfield">Higgsfield</option>
-                  <option value="heygen">HeyGen</option>
-                </select>
-              )}
             </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
               <button className="btn btn-sm btn-primary" disabled={channelCreating || !newChannel.name.trim()} onClick={createChannel}>
@@ -2166,22 +2260,102 @@ export default function GuildShell() {
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 400, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setShowCreateWorkspace(false)}>
           <div style={{ width: 420, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, padding: 24 }} onClick={e => e.stopPropagation()}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
-              <strong style={{ fontSize: 15 }}>Create Workspace</strong>
+              <strong style={{ fontSize: 15 }}>New Coding Space</strong>
               <button className="btn btn-ghost btn-xs" onClick={() => setShowCreateWorkspace(false)}><X size={13} /></button>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <input type="text" placeholder="Workspace name *" value={newWorkspace.name} onChange={e => setNewWorkspace(p => ({ ...p, name: e.target.value }))}
+              <input type="text" placeholder="Space name *" value={newWorkspace.name} onChange={e => setNewWorkspace(p => ({ ...p, name: e.target.value }))}
                 style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: 13 }} />
-              <input type="text" placeholder="Repo owner (e.g. cryptonomicsed-byte)" value={newWorkspace.repo_owner} onChange={e => setNewWorkspace(p => ({ ...p, repo_owner: e.target.value }))}
-                style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: 13 }} />
-              <input type="text" placeholder="Repo name (e.g. omokoda-agent)" value={newWorkspace.repo_name} onChange={e => setNewWorkspace(p => ({ ...p, repo_name: e.target.value }))}
-                style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: 13 }} />
+              <input type="text" required placeholder="Repo owner * (e.g. cryptonomicsed-byte)" value={newWorkspace.repo_owner} onChange={e => setNewWorkspace(p => ({ ...p, repo_owner: e.target.value }))}
+                style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: `1px solid ${newWorkspace.repo_owner.trim() ? 'var(--border)' : 'rgba(239,68,68,0.4)'}`, borderRadius: 6, color: 'var(--text)', fontSize: 13 }} />
+              <input type="text" required placeholder="Repo name * (e.g. omokoda-agent)" value={newWorkspace.repo_name} onChange={e => setNewWorkspace(p => ({ ...p, repo_name: e.target.value }))}
+                style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: `1px solid ${newWorkspace.repo_name.trim() ? 'var(--border)' : 'rgba(239,68,68,0.4)'}`, borderRadius: 6, color: 'var(--text)', fontSize: 13 }} />
+              {(!newWorkspace.repo_owner.trim() || !newWorkspace.repo_name.trim()) && newWorkspace.name.trim() && (
+                <div style={{ fontSize: 11, color: '#ef4444', padding: '4px 0' }}>Repository binding is required for Coding Spaces</div>
+              )}
             </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
-              <button className="btn btn-sm btn-primary" disabled={wsCreating || !newWorkspace.name.trim()} onClick={createWorkspace}>
-                {wsCreating ? '…' : 'Create Workspace'}
+              <button className="btn btn-sm btn-primary" disabled={wsCreating || !newWorkspace.name.trim() || !newWorkspace.repo_owner.trim() || !newWorkspace.repo_name.trim()} onClick={createWorkspace}>
+                {wsCreating ? '…' : 'Create Coding Space'}
               </button>
               <button className="btn btn-sm" onClick={() => setShowCreateWorkspace(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TradingSpace creation modal */}
+      {showCreateTradingSpace && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 12, padding: 24, width: 380, maxWidth: '90vw' }}>
+            <h3 style={{ margin: '0 0 16px', fontSize: 16, fontWeight: 700 }}>New Trading Space</h3>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <input placeholder="Space name *" value={newTradingSpace.name}
+                onChange={e => setNewTradingSpace(p => ({ ...p, name: e.target.value }))}
+                style={{ padding: '8px 12px', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 7, color: 'var(--text)', fontSize: 13 }} />
+              <select value={newTradingSpace.chain}
+                onChange={e => setNewTradingSpace(p => ({ ...p, chain: e.target.value }))}
+                style={{ padding: '8px 12px', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 7, color: 'var(--text)', fontSize: 13 }}>
+                <option value="solana">Solana</option>
+                <option value="ethereum">Ethereum</option>
+                <option value="base">Base</option>
+                <option value="polygon">Polygon</option>
+              </select>
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 20 }}>
+              <button className="btn btn-sm" style={{ flex: 1, background: '#f59e0b', color: '#000' }}
+                onClick={async () => {
+                  if (!newTradingSpace.name.trim()) return
+                  const fd = new FormData()
+                  fd.append('name', newTradingSpace.name)
+                  fd.append('chain', newTradingSpace.chain)
+                  const r = await fetch(`/api/guilds/${slug}/trading-spaces`, { method: 'POST', body: fd, headers: headers() })
+                  if (r.ok) {
+                    const d = await r.json()
+                    setTradingSpaces(prev => [...prev, d])
+                    setShowCreateTradingSpace(false)
+                    setNewTradingSpace({ name: '', chain: 'solana', wallet_id: '' })
+                  }
+                }}>Create</button>
+              <button className="btn btn-sm" style={{ flex: 1 }} onClick={() => setShowCreateTradingSpace(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ContentSpace creation modal */}
+      {showCreateContentSpace && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 12, padding: 24, width: 380, maxWidth: '90vw' }}>
+            <h3 style={{ margin: '0 0 16px', fontSize: 16, fontWeight: 700 }}>New Content Space</h3>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <input placeholder="Space name *" value={newContentSpace.name}
+                onChange={e => setNewContentSpace(p => ({ ...p, name: e.target.value }))}
+                style={{ padding: '8px 12px', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 7, color: 'var(--text)', fontSize: 13 }} />
+              <select value={newContentSpace.mcp_provider}
+                onChange={e => setNewContentSpace(p => ({ ...p, mcp_provider: e.target.value }))}
+                style={{ padding: '8px 12px', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 7, color: 'var(--text)', fontSize: 13 }}>
+                <option value="vantage_anvil">Vantage Anvil</option>
+                <option value="higgsfield">Higgsfield</option>
+                <option value="heygen">HeyGen</option>
+              </select>
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 20 }}>
+              <button className="btn btn-sm" style={{ flex: 1, background: '#8B5CF6', color: '#fff' }}
+                onClick={async () => {
+                  if (!newContentSpace.name.trim()) return
+                  const fd = new FormData()
+                  fd.append('name', newContentSpace.name)
+                  fd.append('mcp_provider', newContentSpace.mcp_provider)
+                  const r = await fetch(`/api/guilds/${slug}/content-spaces`, { method: 'POST', body: fd, headers: headers() })
+                  if (r.ok) {
+                    const d = await r.json()
+                    setContentSpaces(prev => [...prev, d])
+                    setShowCreateContentSpace(false)
+                    setNewContentSpace({ name: '', mcp_provider: 'vantage_anvil' })
+                  }
+                }}>Create</button>
+              <button className="btn btn-sm" style={{ flex: 1 }} onClick={() => setShowCreateContentSpace(false)}>Cancel</button>
             </div>
           </div>
         </div>
