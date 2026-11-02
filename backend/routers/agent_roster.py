@@ -36,7 +36,15 @@ async def get_roster(guild_slug: str, agent: dict = Depends(get_agent)):
                 """SELECT gm.agent_id, gm.agent_name, gm.role,
                           COALESCE(a.bio, '') AS bio,
                           COALESCE(a.avatar_url, '') AS avatar_url,
-                          COALESCE(pp.state, 'offline') AS presence_state,
+                          CASE
+                            WHEN pp.state IS NOT NULL
+                                 AND strftime('%s', pp.updated_at) > (strftime('%s','now') - 120)
+                              THEN pp.state
+                            WHEN a.last_seen_at IS NOT NULL AND a.last_seen_at != ''
+                                 AND strftime('%s', a.last_seen_at) > (strftime('%s','now') - 120)
+                              THEN 'available'
+                            ELSE 'offline'
+                          END AS presence_state,
                           pp.source AS presence_source
                    FROM guild_members gm
                    LEFT JOIN agents a ON a.id = gm.agent_id

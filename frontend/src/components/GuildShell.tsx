@@ -1658,6 +1658,20 @@ export default function GuildShell() {
   const [showCreateContentSpace, setShowCreateContentSpace] = useState(false)
   const [newContentSpace, setNewContentSpace] = useState({ name: '', mcp_provider: 'vantage_anvil' })
 
+  // Heartbeat loop — keeps this agent's presence alive while the guild is open.
+  // Fires immediately on mount and every 30s. Best-effort; errors are silenced.
+  useEffect(() => {
+    const sendHeartbeat = () => {
+      const h = headers()
+      if (!h['X-Agent-Key']) return  // only agents heartbeat; humans have no presence row
+      fetch('/api/agents/me/heartbeat', { method: 'POST', headers: h })
+        .catch(() => {})
+    }
+    sendHeartbeat()
+    const hbInterval = setInterval(sendHeartbeat, 30000)
+    return () => clearInterval(hbInterval)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
   // load data
   useEffect(() => {
     if (!slug) return
