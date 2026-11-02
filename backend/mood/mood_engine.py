@@ -142,11 +142,6 @@ class Mood:
         it cannot fully predict itself, so neither can anyone else."""
         return {d: self.m[d] + self._rng.gauss(0.0, noise) for d in DIMS}
 
-    def commitment(self) -> str:
-        """Post-hoc binding. Records the state without constraining it."""
-        blob = f"{self.agent_id}|{self.epoch}|" + "|".join(f"{d}:{self.m[d]:.4f}" for d in DIMS)
-        return hashlib.sha256(blob.encode()).hexdigest()[:32]
-
     # -------------------------------------------------------------- behaviour
 
     def disposition(self) -> dict:
@@ -176,6 +171,19 @@ class Mood:
 
 # ------------------------------------------------------------------- demo
 
+def _schema_commitment(mood) -> str:
+    """RECEIPT_SCHEMA_V1 commitment for display.
+
+    The old Mood.commitment() returned 32 hex chars of a deterministic digest:
+    a value that LOOKS like a commitment and is not one. Anything that stored
+    it would fail verification against the real definition, silently. The only
+    correct implementation is mood.commitment.make(), which is 64 hex chars
+    over pack('<dd', valence, arousal) + an ephemeral nonce.
+    """
+    from .commitment import make as _make
+    return _make(mood.m["valence"], mood.m["arousal"])
+
+
 def run(agent_id: str, seed: bytes, stream, label=""):
     mo = Mood(agent_id=agent_id, seed=seed, epoch=2)
     print(f"\n=== {label or agent_id} ===")
@@ -185,7 +193,7 @@ def run(agent_id: str, seed: bytes, stream, label=""):
         d = mo.disposition()
         print(f"{i:>4} {ev:<10} {mo.m['valence']:>6.2f} {mo.m['arousal']:>5.2f} "
               f"{mo.m['focus']:>5.2f} {mo.m['trust']:>5.2f} {mo.m['tension']:>5.2f}  "
-              f"{d['mood_word']:<11} {d['accept_threshold']:>6.2f} {d['risk_appetite']:>5.2f}  {mo.commitment()[:10]}")
+              f"{d['mood_word']:<11} {d['accept_threshold']:>6.2f} {d['risk_appetite']:>5.2f}  {_schema_commitment(mo)[:10]}")
     return mo
 
 
