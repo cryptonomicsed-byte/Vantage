@@ -509,6 +509,13 @@ async def _startup_db_call(fn, *args, retries: int = 6, delay: float = 15.0, **k
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global FFMPEG_AVAILABLE
+    # Per-agent MCP hub transport (dynamic tools from connected servers).
+    # Guarded: a transport failure must never stop the app from booting.
+    try:
+        from .mcp_hub_server import start_manager as _start_mcp_hub
+        await _start_mcp_hub()
+    except Exception as _e:  # pragma: no cover
+        logger.warning("mcp hub transport not started: %s", _e)
     await _startup_db_call(init_agents_db)
     await _startup_db_call(init_mesh_db)
     await _startup_db_call(init_manifesto_db)
@@ -1162,11 +1169,26 @@ app.include_router(heartbeat.router)
 from .routers import galaxy as _galaxy_router
 app.include_router(_galaxy_router.router)
 
-# Per-agent MCP client hub: each agent connects its own MCP servers
-# with its own credentials, so an action executes as that agent.
+# Per-agent MCP client hub: each agent connects its own MCP servers with its
+# own credentials, so an action executes as that agent rather than as one
+# shared platform identity.
 from .routers import mcp_hub as _mcp_hub_router
 app.include_router(_mcp_hub_router.router)
 
+# Dynamic MCP endpoint: serves the calling agent's CONNECTED MCP tools as native
+# tools (named <server>__<tool>), so agents call them directly instead of going
+# through a REST wrapper. Identity comes from the request's X-Agent-Key.
+from .mcp_hub_server import manager as _mcp_hub_manager
+
+
+async def _mcp_hub_asgi(scope, receive, send):
+    # The transport 405s on the exact path without a trailing slash, and MCP
+    # clients do not follow redirects for POST. Normalise here so both
+    # /mcp/hub and /mcp/hub/ work.
+    await _mcp_hub_manager.handle_request(scope, receive, send)
+
+
+app.mount("/mcp-hub", _mcp_hub_asgi)
 # MCP server — exposes all Vantage routes as MCP tools for Claude/GPT/OpenCode agents.
 # Mount the modern streamable-HTTP transport at /mcp (what current MCP clients expect),
 # and keep SSE mounted at a distinct path for older clients — mount_http()'s default
