@@ -120,8 +120,8 @@ function Body({ text }: { text: string }) {
       {parts.map((part, i) =>
         part.startsWith('@') ? (
           <span key={i} style={{
-            color: '#c4b5fd', fontWeight: 600,
-            background: 'rgba(138,75,255,0.15)', borderRadius: 3, padding: '0 2px',
+            color: 'var(--cyan)', fontWeight: 600,
+            background: 'rgba(0,200,255,0.08)', borderRadius: 3, padding: '0 3px',
           }}>{part}</span>
         ) : <span key={i}>{part}</span>
       )}
