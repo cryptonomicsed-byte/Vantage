@@ -228,8 +228,13 @@ export default function MoneyFlowGraph() {
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const r = await fetch(`/api/moneyflow?hours=${hours}&tier_lookups=15`)
+      // /api/moneyflow requires X-Agent-Key. This call sent no headers at
+      // all, so the graph was a guaranteed 401 -> empty panel for every user.
+      const _key = localStorage.getItem('vantage_api_key') || ''
+      const r = await fetch(`/api/moneyflow?hours=${hours}&tier_lookups=15`,
+        _key ? { headers: { 'X-Agent-Key': _key } } : undefined)
       if (r.ok) setNetwork(await r.json())
+      else if (r.status === 401) console.warn('moneyflow: not authenticated - set vantage_api_key')
     } catch { /* offline — keep last-known graph */ }
     setLoading(false)
   }, [hours])

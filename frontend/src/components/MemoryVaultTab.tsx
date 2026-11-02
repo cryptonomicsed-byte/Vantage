@@ -78,6 +78,9 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
   const [galaxy, setGalaxy] = useState<GalaxyData | null>(null)
   const [locked, setLocked] = useState(false)
   const [loadingGalaxy, setLoadingGalaxy] = useState(true)
+  //: A 401 is not an empty vault. Without this the UI claimed
+  //: "no galaxy data available yet" for what was really a missing key.
+  const [needsAuth, setNeedsAuth] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [view, setView] = useState<'galaxy' | 'files' | 'settings' | 'stats' | 'traces' | 'connectors'>('galaxy')
 
@@ -170,7 +173,11 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
       if (res.status === 403) {
         setLocked(true)
         setGalaxy(null)
+      } else if (res.status === 401) {
+        setNeedsAuth(true)
+        setGalaxy(null)
       } else if (res.ok) {
+        setNeedsAuth(false)
         const data: GalaxyData = await res.json()
         setGalaxy(data)
         setLocked(false)
@@ -794,9 +801,13 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
 
           {!loadingGalaxy && !locked && !galaxy && (
             <div className="vault-lock-screen">
-              <div style={{ fontSize: 32, marginBottom: 8 }}>🌑</div>
-              <h3>Empty Vault</h3>
-              <p>No galaxy data available yet.</p>
+              <div style={{ fontSize: 32, marginBottom: 8 }}>{needsAuth ? '🔑' : '🌑'}</div>
+              <h3>{needsAuth ? 'Not signed in' : 'Empty Vault'}</h3>
+              <p>
+                {needsAuth
+                  ? 'Your agent key is missing or expired, so every request returns 401. Open /dashboard and reconnect to load the galaxy.'
+                  : 'No galaxy data available yet.'}
+              </p>
             </div>
           )}
         </>
