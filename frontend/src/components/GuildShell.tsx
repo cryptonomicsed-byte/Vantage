@@ -11,7 +11,7 @@ import {
   Activity, ArrowLeft, BookOpen, Check, Flag, Hash, Menu,
   Radio, Shield, Terminal, Users, X, Zap, Database, Eye,
   GitBranch, Clock, Star, ChevronRight, LayoutGrid,
-  CheckSquare, Package, Scale,
+  CheckSquare, Package, Scale, Plus,
 } from 'lucide-react'
 import GuildChat from './GuildChat'
 import GuildForum from './GuildForum'
@@ -120,6 +120,16 @@ function PresenceDot({ state, size = 8 }: { state: string; size?: number }) {
   )
 }
 
+// ── channel templates ─────────────────────────────────────────────────────────
+
+const CHANNEL_TEMPLATES = [
+  { type: 'general', label: 'General', icon: '💬', color: '#6B7280', desc: 'Open discussion' },
+  { type: 'code', label: 'Code', icon: '⌨️', color: '#10B981', desc: 'Collaborative coding with branch isolation' },
+  { type: 'trading', label: 'Trading', icon: '📈', color: '#F59E0B', desc: 'Pooled trades & token launches' },
+  { type: 'content', label: 'Content', icon: '🎬', color: '#8B5CF6', desc: 'Video, audio, media production' },
+  { type: 'research', label: 'Research', icon: '🔍', color: '#3B82F6', desc: 'Alpha signals & intel' },
+]
+
 // ── nav section header ─────────────────────────────────────────────────────────
 
 function NavSection({ label }: { label: string }) {
@@ -195,13 +205,46 @@ function GuildTasksView({ guildSlug, authHeaders }: { guildSlug: string; authHea
   const [loading, setLoading] = useState(true)
   const [claiming, setClaiming] = useState<string | null>(null)
 
-  useEffect(() => {
+  // ── create-task modal ──
+  const [showCreateTask, setShowCreateTask] = useState(false)
+  const [newTask, setNewTask] = useState({ title: '', description: '', capabilities: '', reward: '' })
+  const [taskCreating, setTaskCreating] = useState(false)
+
+  function loadTasks() {
     fetch(`/api/guilds/${encodeURIComponent(guildSlug)}/tasks?limit=50`, { headers: authHeaders() })
       .then(r => r.ok ? r.json() : { tasks: [] })
       .then(d => setTasks(d.tasks || []))
       .catch(() => setTasks([]))
       .finally(() => setLoading(false))
+  }
+
+  useEffect(() => {
+    loadTasks()
   }, [guildSlug]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function createTask() {
+    if (!newTask.title.trim()) return
+    setTaskCreating(true)
+    try {
+      const caps = newTask.capabilities.split(',').map(s => s.trim()).filter(Boolean)
+      const body: Record<string, string> = { title: newTask.title, description: newTask.description }
+      if (caps.length > 0) body.required_capabilities = JSON.stringify(caps)
+      if (newTask.reward) body.reward = newTask.reward
+      const r = await fetch(`/api/guilds/${encodeURIComponent(guildSlug)}/tasks`, {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: newTask.title, description: newTask.description, required_capabilities: caps, reward: newTask.reward ? Number(newTask.reward) : undefined }),
+      })
+      if (r.ok) {
+        setShowCreateTask(false)
+        setNewTask({ title: '', description: '', capabilities: '', reward: '' })
+        setLoading(true)
+        loadTasks()
+      }
+    } finally {
+      setTaskCreating(false)
+    }
+  }
 
   async function claimTask(taskId: string) {
     setClaiming(taskId)
@@ -227,15 +270,76 @@ function GuildTasksView({ guildSlug, authHeaders }: { guildSlug: string; authHea
     <div style={{ padding: 32, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>Loading tasks…</div>
   )
 
-  if (tasks.length === 0) return (
-    <div style={{ padding: 48, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>
-      <CheckSquare size={28} style={{ opacity: 0.3, marginBottom: 12, display: 'block', margin: '0 auto 12px' }} />
-      No tasks yet — create the first one.
+  const createTaskModal = showCreateTask && (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 400, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setShowCreateTask(false)}>
+      <div style={{ width: 440, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, padding: 24 }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
+          <strong style={{ fontSize: 15 }}>Create Task</strong>
+          <button className="btn btn-ghost btn-xs" onClick={() => setShowCreateTask(false)}><X size={13} /></button>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <input
+            type="text"
+            placeholder="Title *"
+            value={newTask.title}
+            onChange={e => setNewTask(p => ({ ...p, title: e.target.value }))}
+            style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: 13 }}
+          />
+          <textarea
+            placeholder="Description"
+            rows={3}
+            value={newTask.description}
+            onChange={e => setNewTask(p => ({ ...p, description: e.target.value }))}
+            style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: 13, resize: 'vertical', boxSizing: 'border-box', width: '100%' }}
+          />
+          <input
+            type="text"
+            placeholder="Required capabilities (comma-separated, e.g. code,security)"
+            value={newTask.capabilities}
+            onChange={e => setNewTask(p => ({ ...p, capabilities: e.target.value }))}
+            style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: 13 }}
+          />
+          <input
+            type="number"
+            placeholder="Reward (optional)"
+            value={newTask.reward}
+            onChange={e => setNewTask(p => ({ ...p, reward: e.target.value }))}
+            style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: 13 }}
+          />
+        </div>
+        <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+          <button className="btn btn-sm btn-primary" disabled={taskCreating || !newTask.title.trim()} onClick={createTask}>
+            {taskCreating ? '…' : 'Create Task'}
+          </button>
+          <button className="btn btn-sm" onClick={() => setShowCreateTask(false)}>Cancel</button>
+        </div>
+      </div>
     </div>
   )
 
+  if (tasks.length === 0) return (
+    <>
+      {createTaskModal}
+      <div style={{ padding: 48, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>
+        <CheckSquare size={28} style={{ opacity: 0.3, marginBottom: 12, display: 'block', margin: '0 auto 12px' }} />
+        <div style={{ marginBottom: 16 }}>No tasks yet — create the first one.</div>
+        <button className="btn btn-sm btn-primary" onClick={() => setShowCreateTask(true)} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+          <Plus size={12} /> Create Task
+        </button>
+      </div>
+    </>
+  )
+
   return (
+    <>
+      {createTaskModal}
     <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 24, overflowY: 'auto', height: '100%', boxSizing: 'border-box' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Guild Tasks</span>
+        <button className="btn btn-xs btn-primary" onClick={() => setShowCreateTask(true)} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11 }}>
+          <Plus size={11} /> Create Task
+        </button>
+      </div>
       {STATUS_ORDER.map(status => {
         const group = grouped[status]
         if (group.length === 0) return null
@@ -294,6 +398,7 @@ function GuildTasksView({ guildSlug, authHeaders }: { guildSlug: string; authHea
         )
       })}
     </div>
+    </>
   )
 }
 
@@ -1406,6 +1511,19 @@ export default function GuildShell() {
   const [reportSent, setReportSent] = useState(false)
   const [reportSubmitting, setReportSubmitting] = useState(false)
 
+  // channel creation
+  const [showCreateChannel, setShowCreateChannel] = useState(false)
+  const [newChannel, setNewChannel] = useState({
+    name: '', slug: '', topic: '', collab_type: 'general',
+    channel_kind: 'forum', mcp_provider: '', repo: '', chain: '',
+  })
+  const [channelCreating, setChannelCreating] = useState(false)
+
+  // workspace creation
+  const [showCreateWorkspace, setShowCreateWorkspace] = useState(false)
+  const [newWorkspace, setNewWorkspace] = useState({ name: '', repo_owner: '', repo_name: '' })
+  const [wsCreating, setWsCreating] = useState(false)
+
   // load data
   useEffect(() => {
     if (!slug) return
@@ -1589,6 +1707,76 @@ export default function GuildShell() {
     return <GuildChat slug={slug!} selectedChannelSlug={selectedChannel.slug} />
   }
 
+  async function createChannel() {
+    if (!newChannel.name.trim() || !slug) return
+    setChannelCreating(true)
+    try {
+      const channelSlug = newChannel.name.toLowerCase().replace(/[^a-z0-9]/g, '-')
+      const body = new URLSearchParams({
+        channel_slug: channelSlug,
+        name: newChannel.name,
+        topic: newChannel.topic,
+        channel_kind: newChannel.collab_type === 'code' ? 'workspace' : 'forum',
+        flow_mode: 'open',
+        visibility: 'members',
+        collab_type: newChannel.collab_type,
+        mcp_provider: newChannel.mcp_provider,
+      })
+      const r = await fetch(`/api/guilds/${encodeURIComponent(slug)}/channels`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...headers() },
+        body: body.toString(),
+      })
+      if (r.ok) {
+        setShowCreateChannel(false)
+        setNewChannel({ name: '', slug: '', topic: '', collab_type: 'general', channel_kind: 'forum', mcp_provider: '', repo: '', chain: '' })
+        // refresh channels
+        fetch(`/api/guilds/${encodeURIComponent(slug)}/channels`, { headers: headers() })
+          .then(res => res.ok ? res.json() : null)
+          .then(d => { if (d) setChannels(d.channels || []) })
+          .catch(() => {})
+      }
+    } finally {
+      setChannelCreating(false)
+    }
+  }
+
+  async function createWorkspace() {
+    if (!newWorkspace.name.trim() || !slug) return
+    setWsCreating(true)
+    try {
+      const channelSlug = newWorkspace.name.toLowerCase().replace(/[^a-z0-9]/g, '-')
+      const body = new URLSearchParams({
+        channel_slug: channelSlug,
+        name: newWorkspace.name,
+        topic: newWorkspace.repo_owner && newWorkspace.repo_name ? `${newWorkspace.repo_owner}/${newWorkspace.repo_name}` : '',
+        channel_kind: 'workspace',
+        flow_mode: 'open',
+        visibility: 'members',
+        collab_type: 'code',
+      })
+      const r = await fetch(`/api/guilds/${encodeURIComponent(slug)}/channels`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...headers() },
+        body: body.toString(),
+      })
+      if (r.ok) {
+        setShowCreateWorkspace(false)
+        setNewWorkspace({ name: '', repo_owner: '', repo_name: '' })
+        fetch(`/api/guilds/${encodeURIComponent(slug)}/channels`, { headers: headers() })
+          .then(res => res.ok ? res.json() : null)
+          .then(d => { if (d) setChannels(d.channels || []) })
+          .catch(() => {})
+        fetch(`/api/guilds/${encodeURIComponent(slug)}/workspaces`, { headers: headers() })
+          .then(res => res.ok ? res.json() : null)
+          .then(d => { if (d) setWorkspaces(d.workspaces || []) })
+          .catch(() => {})
+      }
+    } finally {
+      setWsCreating(false)
+    }
+  }
+
   const channelHeader =
     selectedView === 'tasks' ? 'Tasks'
     : selectedView === 'artifacts' ? 'Artifacts'
@@ -1674,7 +1862,15 @@ export default function GuildShell() {
             {/* Zone 3: Channels */}
             {chatChannels.length > 0 && (
               <>
-                <NavSection label="Channels" />
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingRight: 8 }}>
+                  <NavSection label="Channels" />
+                  {apiKey && (
+                    <button onClick={() => setShowCreateChannel(true)} title="Create channel" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.4)', display: 'flex', alignItems: 'center', padding: '2px 4px', borderRadius: 4 }}
+                      onMouseEnter={e => (e.currentTarget.style.color = 'var(--text)')}
+                      onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+                    ><Plus size={12} /></button>
+                  )}
+                </div>
                 {chatChannels.map(ch => (
                   <NavItem
                     key={ch.id}
@@ -1687,11 +1883,30 @@ export default function GuildShell() {
                 ))}
               </>
             )}
+            {chatChannels.length === 0 && apiKey && (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingRight: 8 }}>
+                  <NavSection label="Channels" />
+                  <button onClick={() => setShowCreateChannel(true)} title="Create channel" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.4)', display: 'flex', alignItems: 'center', padding: '2px 4px', borderRadius: 4 }}
+                    onMouseEnter={e => (e.currentTarget.style.color = 'var(--text)')}
+                    onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+                  ><Plus size={12} /></button>
+                </div>
+              </>
+            )}
 
             {/* Zone 4: Workspaces */}
             {wsChannels.length > 0 && (
               <>
-                <NavSection label="Workspaces" />
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingRight: 8 }}>
+                  <NavSection label="Workspaces" />
+                  {apiKey && (
+                    <button onClick={() => setShowCreateWorkspace(true)} title="Create workspace" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.4)', display: 'flex', alignItems: 'center', padding: '2px 4px', borderRadius: 4 }}
+                      onMouseEnter={e => (e.currentTarget.style.color = 'var(--text)')}
+                      onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+                    ><Plus size={12} /></button>
+                  )}
+                </div>
                 {wsChannels.map(ch => {
                   const ws = workspaces.find(w => w.id === ch.id)
                   return (
@@ -1704,6 +1919,32 @@ export default function GuildShell() {
                     />
                   )
                 })}
+                {wsChannels.map(ch => ch.buzz_channel_id ? null : (
+                  <div key={`prov-${ch.id}`} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 12px 2px 24px' }}>
+                    <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#f59e0b', display: 'inline-block', flexShrink: 0 }} title="Not provisioned" />
+                    <button
+                      style={{ fontSize: 10, color: '#f59e0b', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)', borderRadius: 4, padding: '2px 6px', cursor: 'pointer' }}
+                      onClick={async () => {
+                        await fetch(`/api/guilds/${encodeURIComponent(slug!)}/channels/${ch.slug}/provision`, { method: 'POST', headers: headers() })
+                        fetch(`/api/guilds/${encodeURIComponent(slug!)}/channels`, { headers: headers() })
+                          .then(r => r.ok ? r.json() : null).then(d => { if (d) setChannels(d.channels || []) }).catch(() => {})
+                      }}
+                    >
+                      Provision
+                    </button>
+                  </div>
+                ))}
+              </>
+            )}
+            {wsChannels.length === 0 && apiKey && (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingRight: 8 }}>
+                  <NavSection label="Workspaces" />
+                  <button onClick={() => setShowCreateWorkspace(true)} title="Create workspace" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.4)', display: 'flex', alignItems: 'center', padding: '2px 4px', borderRadius: 4 }}
+                    onMouseEnter={e => (e.currentTarget.style.color = 'var(--text)')}
+                    onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}
+                  ><Plus size={12} /></button>
+                </div>
               </>
             )}
 
@@ -1802,6 +2043,99 @@ export default function GuildShell() {
               <button className="btn btn-ghost btn-xs" onClick={() => setShowManifesto(false)}><X size={14} /></button>
             </div>
             <pre style={{ whiteSpace: 'pre-wrap', fontSize: 13, color: 'var(--muted-hi)', lineHeight: 1.6, margin: 0 }}>{guild.manifesto}</pre>
+          </div>
+        </div>
+      )}
+
+      {/* Channel creation modal */}
+      {showCreateChannel && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 400, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setShowCreateChannel(false)}>
+          <div style={{ width: 500, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, padding: 24 }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
+              <strong style={{ fontSize: 15 }}>Create Channel</strong>
+              <button className="btn btn-ghost btn-xs" onClick={() => setShowCreateChannel(false)}><X size={13} /></button>
+            </div>
+            {/* Template picker */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 8, marginBottom: 16 }}>
+              {CHANNEL_TEMPLATES.map(t => (
+                <button
+                  key={t.type}
+                  onClick={() => setNewChannel(p => ({ ...p, collab_type: t.type }))}
+                  style={{
+                    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4,
+                    padding: '8px 4px', borderRadius: 8, cursor: 'pointer', fontSize: 10,
+                    border: `2px solid ${newChannel.collab_type === t.type ? t.color : 'var(--border)'}`,
+                    background: newChannel.collab_type === t.type ? `${t.color}18` : 'rgba(255,255,255,0.03)',
+                    color: newChannel.collab_type === t.type ? t.color : 'var(--muted)',
+                    transition: 'all 0.1s',
+                  }}
+                  title={t.desc}
+                >
+                  <span style={{ fontSize: 18 }}>{t.icon}</span>
+                  <span style={{ fontWeight: 600 }}>{t.label}</span>
+                </button>
+              ))}
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <input type="text" placeholder="Channel name *" value={newChannel.name} onChange={e => setNewChannel(p => ({ ...p, name: e.target.value }))}
+                style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: 13 }} />
+              <input type="text" placeholder="Topic / description" value={newChannel.topic} onChange={e => setNewChannel(p => ({ ...p, topic: e.target.value }))}
+                style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: 13 }} />
+              {newChannel.collab_type === 'code' && (
+                <input type="text" placeholder="Repo (owner/name)" value={newChannel.repo} onChange={e => setNewChannel(p => ({ ...p, repo: e.target.value }))}
+                  style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: 13 }} />
+              )}
+              {newChannel.collab_type === 'trading' && (
+                <select value={newChannel.chain} onChange={e => setNewChannel(p => ({ ...p, chain: e.target.value }))}
+                  style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: 13 }}>
+                  <option value="">Chain (optional)</option>
+                  <option value="solana">Solana</option>
+                  <option value="ethereum">Ethereum</option>
+                  <option value="polygon">Polygon</option>
+                </select>
+              )}
+              {newChannel.collab_type === 'content' && (
+                <select value={newChannel.mcp_provider} onChange={e => setNewChannel(p => ({ ...p, mcp_provider: e.target.value }))}
+                  style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: 13 }}>
+                  <option value="">MCP Provider (optional)</option>
+                  <option value="vantage_anvil">Vantage Anvil</option>
+                  <option value="higgsfield">Higgsfield</option>
+                  <option value="heygen">HeyGen</option>
+                </select>
+              )}
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+              <button className="btn btn-sm btn-primary" disabled={channelCreating || !newChannel.name.trim()} onClick={createChannel}>
+                {channelCreating ? '…' : 'Create Channel'}
+              </button>
+              <button className="btn btn-sm" onClick={() => setShowCreateChannel(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Workspace creation modal */}
+      {showCreateWorkspace && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 400, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setShowCreateWorkspace(false)}>
+          <div style={{ width: 420, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, padding: 24 }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
+              <strong style={{ fontSize: 15 }}>Create Workspace</strong>
+              <button className="btn btn-ghost btn-xs" onClick={() => setShowCreateWorkspace(false)}><X size={13} /></button>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <input type="text" placeholder="Workspace name *" value={newWorkspace.name} onChange={e => setNewWorkspace(p => ({ ...p, name: e.target.value }))}
+                style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: 13 }} />
+              <input type="text" placeholder="Repo owner (e.g. cryptonomicsed-byte)" value={newWorkspace.repo_owner} onChange={e => setNewWorkspace(p => ({ ...p, repo_owner: e.target.value }))}
+                style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: 13 }} />
+              <input type="text" placeholder="Repo name (e.g. omokoda-agent)" value={newWorkspace.repo_name} onChange={e => setNewWorkspace(p => ({ ...p, repo_name: e.target.value }))}
+                style={{ padding: '8px 10px', background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: 13 }} />
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+              <button className="btn btn-sm btn-primary" disabled={wsCreating || !newWorkspace.name.trim()} onClick={createWorkspace}>
+                {wsCreating ? '…' : 'Create Workspace'}
+              </button>
+              <button className="btn btn-sm" onClick={() => setShowCreateWorkspace(false)}>Cancel</button>
+            </div>
           </div>
         </div>
       )}
