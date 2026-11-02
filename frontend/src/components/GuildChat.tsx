@@ -58,6 +58,12 @@ interface Command {
   summary: string
 }
 
+interface SlashCmd {
+  name: string
+  args: string
+  description: string
+}
+
 const MSG_TYPES = ['say', 'propose', 'claim', 'handoff', 'artifact'] as const
 
 function when(unix: number): string {
@@ -185,6 +191,7 @@ export default function GuildChat({ slug, selectedChannelSlug }: { slug: string;
   const [messages, setMessages] = useState<Message[]>([])
   const [principals, setPrincipals] = useState<Principal[]>([])
   const [commands, setCommands] = useState<Command[]>([])
+  const [slashCmds, setSlashCmds] = useState<SlashCmd[]>([])
   const [membership, setMembership] = useState<{ member: boolean; role: string | null; authenticated: boolean } | null>(null)
   const [draft, setDraft] = useState('')
   const [draftType, setDraftType] = useState<string>('say')
@@ -235,6 +242,22 @@ export default function GuildChat({ slug, selectedChannelSlug }: { slug: string;
   }, [slug, selectedChannelSlug, headers])
 
   useEffect(() => { loadShell() }, [loadShell])
+
+  // Load channel-specific slash commands when active channel changes
+  useEffect(() => {
+    if (!active) { setSlashCmds([]); return }
+    fetch(`/api/guilds/${slug}/channels/${active.slug}/commands`, { headers: headers() })
+      .then(r => r.ok ? r.json() : { commands: [] })
+      .then(d => {
+        const cmds: SlashCmd[] = (d.commands || []).map((c: SlashCmd) => ({
+          name: (c.name || '').replace(/^\//, ''),
+          args: c.args || '',
+          description: c.description || '',
+        }))
+        setSlashCmds(cmds)
+      })
+      .catch(() => setSlashCmds([]))
+  }, [active, slug, headers])
 
   useEffect(() => {
     if (!selectedChannelSlug || channels.length === 0) return
@@ -308,11 +331,24 @@ export default function GuildChat({ slug, selectedChannelSlug }: { slug: string;
         .map(p => ({ value: p.display_name, label: p.display_name, hint: p.kind, id: `p${p.id}` }))
     }
     const q = token.query.toLowerCase()
+    // Prefer channel-specific slash commands; fall back to global route palette
+    if (slashCmds.length > 0) {
+      return slashCmds
+        .filter(c => c.name.startsWith(q) || c.name.includes(q))
+        .slice(0, 8)
+        .map(c => ({
+          value: `/${c.name} `,
+          label: c.name,
+          hint: c.args,
+          description: c.description,
+          id: `sc-${c.name}`,
+        }))
+    }
     return commands
       .filter(c => c.command.slice(1).includes(q) || c.label.toLowerCase().includes(q))
       .slice(0, 6)
-      .map(c => ({ value: c.command, label: c.command, hint: c.category, id: c.command }))
-  }, [token, principals, commands])
+      .map(c => ({ value: c.command, label: c.command, hint: c.category, description: c.summary, id: c.command }))
+  }, [token, principals, commands, slashCmds])
 
   function accept(value: string) {
     if (!token) return
@@ -322,7 +358,7 @@ export default function GuildChat({ slug, selectedChannelSlug }: { slug: string;
     const replaced =
       token.kind === 'mention'
         ? before.replace(/@[A-Za-z0-9_.-]*$/, `@${value} `)
-        : `${value} `
+        : value.endsWith(' ') ? value : `${value} `
     setDraft(replaced + after)
     inputRef.current?.focus()
   }
@@ -617,18 +653,30 @@ export default function GuildChat({ slug, selectedChannelSlug }: { slug: string;
                           onMouseEnter={e => (e.currentTarget.style.background = 'rgba(138,75,255,0.12)')}
                           onMouseLeave={e => (e.currentTarget.style.background = 'none')}
                         >
-                          {token?.kind === 'command'
-                            ? <Slash size={12} style={{ color: 'var(--muted)' }} />
-                            : <div style={{
+                          {token?.kind === 'command' ? (
+                            <>
+                              <Slash size={12} style={{ color: 'var(--cyan, #22d3ee)', flexShrink: 0 }} />
+                              <span style={{ fontWeight: 700, color: 'var(--cyan, #22d3ee)', fontSize: 13, minWidth: 70 }}>{s.label}</span>
+                              {s.hint && <span style={{ color: 'var(--muted)', fontSize: 12, fontStyle: 'italic' }}>{s.hint}</span>}
+                              {(s as {description?: string}).description && (
+                                <span style={{ color: 'rgba(255,255,255,0.35)', fontSize: 11, marginLeft: 'auto', textAlign: 'right', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                  {(s as {description?: string}).description}
+                                </span>
+                              )}
+                            </>
+                          ) : (
+                            <>
+                              <div style={{
                                 width: 22, height: 22, borderRadius: '50%',
                                 background: s.hint === 'human' ? 'rgba(74,158,255,0.15)' : 'rgba(138,75,255,0.15)',
                                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                                 fontSize: 11, fontWeight: 700,
                                 color: s.hint === 'human' ? '#4a9eff' : '#8a4bff',
                               }}>{s.label[0].toUpperCase()}</div>
-                          }
-                          <span style={{ fontWeight: 600 }}>{s.label}</span>
-                          <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 'auto' }}>{s.hint}</span>
+                              <span style={{ fontWeight: 600 }}>{s.label}</span>
+                              <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 'auto' }}>{s.hint}</span>
+                            </>
+                          )}
                         </button>
                       ))}
                     </div>

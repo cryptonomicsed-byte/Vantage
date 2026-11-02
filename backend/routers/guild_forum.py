@@ -1382,7 +1382,16 @@ async def list_channel_commands(
     commands = []
     if row and row["slash_commands_json"]:
         try:
-            commands = _jcmds.loads(row["slash_commands_json"])
+            raw = _jcmds.loads(row["slash_commands_json"])
+            for cmd in raw:
+                if isinstance(cmd, str):
+                    commands.append({"name": cmd.lstrip("/"), "args": "", "description": ""})
+                elif isinstance(cmd, dict):
+                    commands.append({
+                        "name": cmd.get("name", "").lstrip("/"),
+                        "args": cmd.get("args", ""),
+                        "description": cmd.get("description", ""),
+                    })
         except Exception:
             pass
     return {
@@ -1398,33 +1407,40 @@ async def space_slash_commands(
     request: Request,
     principal: Optional[dict] = Depends(optional_principal),
 ):
-    """Return filtered slash command palette for a space.
+    """Return slash commands for a space, sourced from channel_templates.
 
     space_type: 'workspace' | 'trading' | 'content'
-    Keeps the existing instance-wide block list (no custody/wallet/order commands via slash).
+    The template is the single source of truth per space type.
     """
-    all_commands = guild_chat.build_command_palette(request.app)
-
-    # Blocked categories -- never in slash regardless of space type
-    BLOCKED_CATEGORIES = {"custody", "wallet", "identity", "order", "trading-execute", "alpha-share"}
-
-    SPACE_ALLOWED_CATEGORIES = {
-        "workspace": {"code", "workspace", "memory", "file", "repo", "task"},
-        "trading":   {"intel", "trading", "market", "signals", "research"},
-        "content":   {"publish", "content", "media", "audio", "video", "production"},
+    import json as _j
+    SPACE_TYPE_TO_COLLAB = {
+        "workspace": "code",
+        "trading":   "trading",
+        "content":   "content",
     }
-
-    allowed = SPACE_ALLOWED_CATEGORIES.get(space_type, set())
-
-    filtered = []
-    for cmd in all_commands:
-        cat = (cmd.get("category") or "").lower()
-        if cat in BLOCKED_CATEGORIES:
-            continue
-        if cat in allowed or not allowed:
-            filtered.append(cmd)
-
-    return {"commands": filtered, "space_type": space_type}
+    collab = SPACE_TYPE_TO_COLLAB.get(space_type, "general")
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT slash_commands_json FROM channel_templates WHERE collab_type=?", (collab,)
+        ) as cur:
+            row = await cur.fetchone()
+    commands = []
+    if row and row["slash_commands_json"]:
+        try:
+            raw = _j.loads(row["slash_commands_json"])
+            for cmd in raw:
+                if isinstance(cmd, str):
+                    commands.append({"name": cmd.lstrip("/"), "args": "", "description": ""})
+                elif isinstance(cmd, dict):
+                    commands.append({
+                        "name": cmd.get("name", "").lstrip("/"),
+                        "args": cmd.get("args", ""),
+                        "description": cmd.get("description", ""),
+                    })
+        except Exception:
+            pass
+    return {"commands": commands, "space_type": space_type}
 
 
 @router.patch("/{slug}/channels/{channel_slug}/mcp")
