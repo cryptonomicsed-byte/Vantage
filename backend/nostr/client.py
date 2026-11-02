@@ -42,6 +42,10 @@ def build_event(pk: PrivateKey, kind: int, content: str, tags: Optional[list] = 
     }
 
 
+#: How long a subscription may sit silent before we simply keep waiting.
+STREAM_IDLE_SECONDS = 30.0
+
+
 class NostrSession:
     """Generic NIP-01/NIP-42 WebSocket session to a Nostr relay."""
 
@@ -111,8 +115,24 @@ class NostrSession:
         return events
 
     async def stream_events(self, sub_id: str):
+        """Yield events until the relay genuinely closes the subscription.
+
+        `_recv_json` defaults to a 10s read timeout. Calling it bare in here
+        meant a QUIET channel raised TimeoutError every 10s, which the caller
+        caught and logged as "listener disconnected" -- an idle feed looked
+        exactly like a broken one and reconnected forever. An idle read is
+        normal for a subscription; only a closed socket or an explicit CLOSED
+        frame means the subscription ended.
+        """
+        import asyncio as _aio
         while True:
-            msg = await self._recv_json()
+            try:
+                raw = await _aio.wait_for(self.ws.recv(), timeout=STREAM_IDLE_SECONDS)
+            except _aio.TimeoutError:
+                continue                      # quiet channel, not a disconnect
+            except Exception as exc:          # socket closed / transport gone
+                raise RuntimeError(f"relay stream ended: {type(exc).__name__}") from exc
+            msg = json.loads(raw)
             if msg[0] == "EVENT" and msg[1] == sub_id:
                 yield msg[2]
             elif msg[0] == "CLOSED" and msg[1] == sub_id:

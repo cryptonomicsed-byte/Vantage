@@ -30,6 +30,10 @@ from .db import get_db
 logger = logging.getLogger(__name__)
 
 RECONNECT_BACKOFF_SECONDS = 2
+
+#: A channel the relay does not have will never accept a subscription,
+#: so back off slowly instead of hammering it every reconnect tick.
+UNPROVISIONED_BACKOFF_SECONDS = 60.0
 MAX_RECONNECT_BACKOFF_SECONDS = 60
 
 
@@ -366,15 +370,45 @@ async def run_inbound_listener() -> None:
             # handling). Membership registration is idempotent
             # ("already"/"exists" already treated as success below), so
             # retrying it every reconnect attempt is safe and self-heals.
+            channel = await get_main_feed_channel()
+            pk = await derive_instance_keypair()
+            pubkey = public_key_xonly_hex(pk)
+
+            # Preflight, in the order the relay actually enforces it:
+            #   1. the channel must EXIST on the relay at all
+            #   2. our identity must be a MEMBER of it
+            # Skipping either gets the SUB frame accepted and then closed by
+            # the relay, which is what produced a reconnect every ~2s. The old
+            # path called _docker_exec("add-member") to arrange (2) -- docker
+            # does not exist on this host and buzz-admin was never built, so
+            # membership never happened and the storm never stopped.
+            from .relay_admin import relay_has_channel, ensure_member
+
+            if not await relay_has_channel(channel):
+                logger.warning(
+                    "buzz_inbound: relay has no channel %s - not subscribing "
+                    "(retry in %ss). Repoint buzz_config.MAIN_FEED_CHANNEL at a "
+                    "provisioned channel, or provision this one on the relay.",
+                    channel, UNPROVISIONED_BACKOFF_SECONDS,
+                )
+                await asyncio.sleep(UNPROVISIONED_BACKOFF_SECONDS)
+                continue
+
             try:
-                await asyncio.wait_for(_ensure_instance_relay_membership(), timeout=10)
+                ok, detail = await ensure_member(channel, pubkey)
+                if ok:
+                    logger.info(
+                        "buzz_inbound: instance identity %s is a member of %s (%s)",
+                        pubkey[:16], channel[:8], detail,
+                    )
+                else:
+                    logger.warning("buzz_inbound: membership not established: %s", detail)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.warning("buzz_inbound: relay-membership check failed (non-fatal, retrying next backoff): %s", e)
-            channel = await get_main_feed_channel()
+                logger.warning("buzz_inbound: membership check failed (non-fatal): %s", e)
+
             since = await _get_last_ts()
-            pk = await derive_instance_keypair()
             sess = BuzzSession(RELAY_WS_URL, pk)
             await sess.connect()
             await sess.authenticate()
