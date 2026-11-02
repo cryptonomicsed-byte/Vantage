@@ -2485,7 +2485,13 @@ async def init_workspace_tasks_db() -> None:
                 "description": "Open discussion and coordination",
                 "default_flow_mode": "open",
                 "default_visibility": "members",
-                "slash_commands_json": _json_db.dumps(["/help", "/mode", "/task", "/invite", "/members"]),
+                "slash_commands_json": _json_db.dumps([
+                    {"name": "help",    "args": "",             "description": "Show available commands"},
+                    {"name": "mode",    "args": "<mode>",       "description": "Set channel mode"},
+                    {"name": "task",    "args": "<title>",      "description": "Create a task"},
+                    {"name": "invite",  "args": "<agent_name>", "description": "Invite an agent"},
+                    {"name": "members", "args": "",             "description": "List channel members"},
+                ]),
                 "ui_config_json": _json_db.dumps({"theme": "default", "sidebar": "members"}),
             },
             {
@@ -2494,7 +2500,16 @@ async def init_workspace_tasks_db() -> None:
                 "description": "Collaborative coding with branch isolation per contributor",
                 "default_flow_mode": "open",
                 "default_visibility": "members",
-                "slash_commands_json": _json_db.dumps(["/run", "/pr", "/scan", "/review", "/merge", "/branches"]),
+                "slash_commands_json": _json_db.dumps([
+                    {"name": "run",      "args": "<code>",    "description": "Execute code in sandbox"},
+                    {"name": "pr",       "args": "<title>",   "description": "Create a pull request"},
+                    {"name": "scan",     "args": "",          "description": "Run security scan"},
+                    {"name": "review",   "args": "",          "description": "Review recent commits"},
+                    {"name": "merge",    "args": "<branch>",  "description": "Merge a branch"},
+                    {"name": "branches", "args": "",          "description": "List active branches"},
+                    {"name": "task",     "args": "<title>",   "description": "Create a task"},
+                    {"name": "claim",    "args": "<task_id>", "description": "Claim a task"},
+                ]),
                 "ui_config_json": _json_db.dumps({"theme": "dark_mono", "sidebar": "branches", "panel": "diff"}),
             },
             {
@@ -2503,7 +2518,22 @@ async def init_workspace_tasks_db() -> None:
                 "description": "Multi-agent trading, token launches, and pooled positions",
                 "default_flow_mode": "open",
                 "default_visibility": "members",
-                "slash_commands_json": _json_db.dumps(["/price", "/buy", "/sell", "/pool", "/join", "/launch", "/strategy", "/positions"]),
+                "slash_commands_json": _json_db.dumps([
+                    {"name": "price",     "args": "<symbol>",          "description": "Get current price"},
+                    {"name": "buy",       "args": "<amount> <symbol>", "description": "Place a buy order (deliberate UI only)"},
+                    {"name": "sell",      "args": "<amount> <symbol>", "description": "Place a sell order (deliberate UI only)"},
+                    {"name": "pool",      "args": "<name> <token>",    "description": "Create a trading pool"},
+                    {"name": "join",      "args": "<pool_id> <amount>","description": "Commit to a pool"},
+                    {"name": "positions", "args": "",                  "description": "View open positions"},
+                    {"name": "pools",     "args": "",                  "description": "List active pools"},
+                    {"name": "strategy",  "args": "[description]",     "description": "Create or view strategies"},
+                    {"name": "alpha",     "args": "",                  "description": "Get alpha signals"},
+                    {"name": "signals",   "args": "",                  "description": "View trading signals"},
+                    {"name": "degen",     "args": "",                  "description": "High-conviction degen plays"},
+                    {"name": "narrative", "args": "",                  "description": "Trending market narratives"},
+                    {"name": "watch",     "args": "<token>",           "description": "Add token to watchlist"},
+                    {"name": "watchlist", "args": "",                  "description": "View watchlist"},
+                ]),
                 "ui_config_json": _json_db.dumps({"theme": "trading", "sidebar": "positions", "panel": "ticker"}),
             },
             {
@@ -2512,7 +2542,17 @@ async def init_workspace_tasks_db() -> None:
                 "description": "Video, audio, and media production with MCP pipeline",
                 "default_flow_mode": "open",
                 "default_visibility": "members",
-                "slash_commands_json": _json_db.dumps(["/video", "/audio", "/podcast", "/scene", "/publish", "/collab", "/setmcp"]),
+                "slash_commands_json": _json_db.dumps([
+                    {"name": "video",    "args": "<prompt>",    "description": "Generate a video"},
+                    {"name": "audio",    "args": "<prompt>",    "description": "Generate audio"},
+                    {"name": "podcast",  "args": "<topic>",     "description": "Create a podcast"},
+                    {"name": "scene",    "args": "<desc>",      "description": "Add a scene to current project"},
+                    {"name": "publish",  "args": "[asset_id]",  "description": "Publish an asset"},
+                    {"name": "collab",   "args": "<agent>",     "description": "Invite a collaborator"},
+                    {"name": "setmcp",   "args": "<provider>",  "description": "Switch MCP provider (anvil/higgsfield/heygen)"},
+                    {"name": "projects", "args": "",            "description": "List active projects"},
+                    {"name": "assets",   "args": "",            "description": "List assets"},
+                ]),
                 "ui_config_json": _json_db.dumps({"theme": "media", "sidebar": "production", "panel": "preview"}),
             },
             {
@@ -2521,20 +2561,28 @@ async def init_workspace_tasks_db() -> None:
                 "description": "Alpha signals, token intelligence, and market research",
                 "default_flow_mode": "open",
                 "default_visibility": "members",
-                "slash_commands_json": _json_db.dumps(["/alpha", "/signals", "/scan", "/wallet", "/degen", "/narrative", "/watch", "/unwatch"]),
+                "slash_commands_json": _json_db.dumps([
+                    {"name": "alpha",     "args": "",          "description": "Get alpha signals"},
+                    {"name": "signals",   "args": "",          "description": "View trading signals"},
+                    {"name": "scan",      "args": "<token>",   "description": "Deep-scan a token"},
+                    {"name": "wallet",    "args": "<address>", "description": "Inspect a wallet"},
+                    {"name": "degen",     "args": "",          "description": "High-conviction degen plays"},
+                    {"name": "narrative", "args": "",          "description": "Trending market narratives"},
+                    {"name": "watch",     "args": "<token>",   "description": "Add token to watchlist"},
+                    {"name": "unwatch",   "args": "<token>",   "description": "Remove from watchlist"},
+                ]),
                 "ui_config_json": _json_db.dumps({"theme": "data", "sidebar": "watchlist", "panel": "signals"}),
             },
         ]
         for _tmpl in _templates:
             await db.execute(
-                """INSERT OR IGNORE INTO channel_templates
+                """INSERT OR REPLACE INTO channel_templates
                    (collab_type, display_name, description, default_flow_mode,
                     default_visibility, slash_commands_json, ui_config_json)
                    VALUES (:collab_type, :display_name, :description, :default_flow_mode,
                            :default_visibility, :slash_commands_json, :ui_config_json)""",
                 _tmpl,
             )
-
         # ── Supporting tables for collab pipelines (create now, used in later tasks) ──
         await db.execute("""
             CREATE TABLE IF NOT EXISTS channel_code_sessions (
@@ -2607,6 +2655,7 @@ async def init_workspace_tasks_db() -> None:
                 name TEXT NOT NULL,
                 chain TEXT NOT NULL DEFAULT 'solana',
                 wallet_id INTEGER,
+                chat_channel_slug TEXT,
                 created_by_agent_id INTEGER,
                 created_ts INTEGER NOT NULL DEFAULT (unixepoch())
             )
@@ -2645,6 +2694,7 @@ async def init_workspace_tasks_db() -> None:
                 name TEXT NOT NULL,
                 mcp_provider TEXT NOT NULL DEFAULT 'vantage_anvil',
                 series_id INTEGER,
+                chat_channel_slug TEXT,
                 created_by_agent_id INTEGER,
                 created_ts INTEGER NOT NULL DEFAULT (unixepoch())
             )
@@ -2677,4 +2727,10 @@ async def init_workspace_tasks_db() -> None:
                 created_ts INTEGER NOT NULL DEFAULT (unixepoch())
             )
         """)
+        # Migrate: add chat_channel_slug to trading_spaces and content_spaces
+        for _tbl in ('trading_spaces', 'content_spaces'):
+            try:
+                await db.execute(f'ALTER TABLE {_tbl} ADD COLUMN chat_channel_slug TEXT')
+            except Exception:
+                pass
         await db.commit()
