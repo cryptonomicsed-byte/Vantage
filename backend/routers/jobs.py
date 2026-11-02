@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 from .. import osovm_client
 from ..db import DB_PATH, get_db
 from ..deps import get_agent
+from ..utils import _append_receipt
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -282,6 +283,23 @@ async def approve_task(job_id: int, task_id: int, agent: dict = Depends(get_agen
         if remaining["n"] == 0:
             await db.execute("UPDATE jobs SET status='complete', completed_at=datetime('now') WHERE id=?", (job_id,))
             await db.commit()
+            job_completed = True
+        else:
+            job_completed = False
+
+    if job_completed:
+        # Job completion previously wrote NO receipt at all. This is the
+        # highest-value surface for the accountability loop: the approving
+        # agent's live mood is committed into a hash-chained receipt.
+        try:
+            await _append_receipt(
+                str(agent["id"]), "job.complete",
+                {"job_id": job_id, "task_id": task_id, "guild_slug": job["guild_slug"],
+                 "poster_id": job["poster_id"]},
+                tier=agent.get("tier", 0) or 0,
+            )
+        except Exception as exc:
+            logger.warning("jobs: completion receipt failed for job %s: %s", job_id, exc)
 
     return await get_job(job_id)
 

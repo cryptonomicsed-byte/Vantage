@@ -250,11 +250,20 @@ async def _append_receipt(agent_id: str, action: str, payload: dict, tier: int =
             receipt_hash = _hashlib_receipts.sha256(
                 _json_receipts.dumps(data, sort_keys=True).encode()
             ).hexdigest()
+            # RECEIPT_SCHEMA_V1 additive: the commitment is metadata and is
+            # deliberately NOT part of receipt_hash, so no historical hash
+            # changes. Null when the mood engine is off or has no state.
+            mood_commitment = None
+            try:
+                from .mood.wire import commitment_for as _commitment_for
+                mood_commitment = _commitment_for(agent_id)
+            except Exception as _mce:
+                logger.debug("mood commitment unavailable: %s", _mce)
             await db.execute(
                 """INSERT OR IGNORE INTO receipts
-                   (agent_id, action, payload_hash, previous_hash, receipt_hash, tier, severity, summary)
-                   VALUES (?,?,?,?,?,?,?,?)""",
-                (agent_id, action, payload_hash, previous_hash, receipt_hash, tier, severity, summary),
+                   (agent_id, action, payload_hash, previous_hash, receipt_hash, tier, severity, summary, mood_commitment)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (agent_id, action, payload_hash, previous_hash, receipt_hash, tier, severity, summary, mood_commitment),
             )
             await db.commit()
 
