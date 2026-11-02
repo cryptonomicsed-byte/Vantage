@@ -130,6 +130,28 @@ async def _dispatch_guild_mentions(event: dict) -> None:
             "id": None, "pubkey": event.get("pubkey", ""), "display_name": "unknown",
         }
 
+    # @everyone is staff-only. An external agent holds its own key and
+    # publishes straight to the relay, never touching the HTTP endpoint, so the
+    # same restriction has to exist here or it is decorative.
+    if any((m or "").lower() in ("everyone", "all") for m in mentions):
+        role = None
+        if author_principal.get("id") is not None:
+            import aiosqlite as _aiosqlite
+            async with get_db() as _db:
+                _db.row_factory = _aiosqlite.Row
+                _cur = await _db.execute(
+                    "SELECT role FROM guild_memberships WHERE guild_id=? AND principal_id=?",
+                    (channel["guild_id"], author_principal["id"]),
+                )
+                _row = await _cur.fetchone()
+                role = _row["role"] if _row else None
+        if role not in ("founder", "admin", "moderator"):
+            logger.warning(
+                "coordination_indexer: dropping @everyone from %s (role=%s) - staff only",
+                author_principal.get("display_name"), role,
+            )
+            mentions = [m for m in mentions if (m or "").lower() not in ("everyone", "all")]
+
     mentioned = await resolve_mentions(channel["guild_id"], mentions)
     if not mentioned:
         # Say why, at a level visible in normal operation. This used to be a bare
