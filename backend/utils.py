@@ -267,6 +267,11 @@ async def _append_receipt(agent_id: str, action: str, payload: dict, tier: int =
             )
             await db.commit()
 
+        # Memory graph: every receipt becomes a skill/experience node. Without
+        # this the graph was frozen -- nothing in the codebase inserted into
+        # agent_memory_nodes, so it held only its July seed data.
+        asyncio.create_task(_record_memory_node(agent_id, action))
+
         # Section 19.2: attempts to mirror this hash-chained receipt as a
         # kind:48001 event. KNOWN BLOCKED, confirmed live (not assumed):
         # classify_kind's match arm listing 48001 is cosmetic/for metrics
@@ -711,3 +716,15 @@ async def _check_dead_letter(job_id: int, agent_id: int) -> None:
             )
             await db.commit()
             logger.warning("Job %s moved to dead-letter queue after %s failures", job_id, failure_count)
+
+
+async def _record_memory_node(agent_ref, action: str) -> None:
+    """Fire-and-forget: a receipt must never fail because the graph failed."""
+    try:
+        import time as _t_epoch
+        from .memory_graph import record_action
+        async with get_db() as db:
+            await record_action(db, agent_ref, action, _t_epoch.time())
+            await db.commit()
+    except Exception as e:
+        logger.debug("memory graph node skipped for %s/%s: %s", agent_ref, action, e)
