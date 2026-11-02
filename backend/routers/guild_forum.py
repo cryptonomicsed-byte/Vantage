@@ -569,9 +569,12 @@ async def post_channel_message(
 
     # Mentioned agents answer in the room, as themselves. Depth-guarded, so
     # agents talking to agents converges instead of looping forever.
+    # @everyone notifies the room; it must not ask every agent to answer, or a
+    # single broadcast becomes one model call per member.
+    dispatchable = [p for p in mentioned if not p.get("_everyone")]
     replies = await guild_chat.dispatch_to_mentioned(
         channel=channel, guild_slug=slug, content=content,
-        author_principal=principal, mentioned=mentioned,
+        author_principal=principal, mentioned=dispatchable,
         depth=0, root_event_id=root_event_id or event["id"],
     )
 

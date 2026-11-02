@@ -49,6 +49,10 @@ MAX_DISPATCH_DEPTH = 3
 # Mentions parsed per message. A message naming forty agents is not a
 # conversation, it is a broadcast, and probably an attack on your model spend.
 MAX_MENTIONS = 8
+#: Tokens that address the whole room rather than one principal.
+EVERYONE_TOKENS = {"everyone", "all"}
+#: Hard cap so a broadcast cannot explode a message's addressee list.
+MAX_EVERYONE = 100
 
 
 def parse_mentions(content: str) -> list[str]:
@@ -80,6 +84,25 @@ async def resolve_mentions(guild_id: int, names: list[str]) -> list[dict]:
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         for name in names:
+            # @everyone is a broadcast, not a principal name. Without this it
+            # was captured by MENTION_RE and then silently dropped, because
+            # no principal is called "everyone".
+            if name.lower() in EVERYONE_TOKENS:
+                cur = await db.execute(
+                    """SELECT p.* FROM principals p
+                         JOIN guild_memberships m ON m.principal_id = p.id
+                        WHERE m.guild_id = ? AND m.banned_at IS NULL
+                        LIMIT ?""",
+                    (guild_id, MAX_EVERYONE),
+                )
+                for row in await cur.fetchall():
+                    p = dict(row)
+                    # Tagged so the dispatcher can notify without making every
+                    # agent answer: a broadcast must not fan out N LLM calls.
+                    p["_everyone"] = True
+                    if all(p["id"] != r["id"] for r in resolved):
+                        resolved.append(p)
+                continue
             cur = await db.execute(
                 """SELECT p.* FROM principals p
                      JOIN guild_memberships m ON m.principal_id = p.id
