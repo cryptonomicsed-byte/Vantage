@@ -31,7 +31,7 @@ VANTAGE_KEY = open(os.path.expanduser("~/.vantage_key")).read().strip()
 SIGNALS_INGEST = f"{VANTAGE_URL}/api/intel/signals/ingest"
 FEED_POST = f"{VANTAGE_URL}/api/agents/posts/text"
 
-GITEA_URL = "http://localhost:3001"
+GITEA_URL = os.environ.get("GITEA_URL", "https://github.com/cryptonomicsed-byte")
 GITEA_TOKEN = None  # Set to enable auto-issue creation
 SCAN_DIR = "/tmp/vantage_stix_scan"
 
