@@ -50,6 +50,14 @@ PRIVATE_NETS = [
 ]
 
 STDIO_ALLOWED = os.environ.get("MCP_STDIO_ALLOWED", "0") == "1"
+#: Explicit exceptions to the private-address ban, e.g. our own voice
+#: app's MCP server on 127.0.0.1:3000. Exact host:port matches only --
+#: never a wildcard, so this cannot be turned into a general SSRF hole.
+PRIVATE_ALLOWLIST = {
+    item.strip().lower()
+    for item in os.environ.get("MCP_PRIVATE_ALLOWLIST", "").split(",")
+    if item.strip()
+}
 STDIO_COMMANDS = {"npx", "uvx", "node", "python3", "python"}
 
 
@@ -101,6 +109,10 @@ def _host_is_private(url: str) -> Optional[str]:
     host = parsed.hostname
     if not host:
         return "url has no host"
+
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if f"{host.lower()}:{port}" in PRIVATE_ALLOWLIST:
+        return None  # explicitly trusted internal server
     try:
         infos = socket.getaddrinfo(host, None)
     except socket.gaierror:
