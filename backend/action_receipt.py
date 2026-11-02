@@ -64,6 +64,11 @@ class ActionReceipt:
 
     signature:      str   # Ed25519 hex — populated by signing layer
 
+    # v1 additive (RECEIPT_SCHEMA_V1): sha256(pack(valence,arousal)+nonce).
+    # Null when the mood engine is inactive. Deliberately NOT part of
+    # canonical_hash(), so no historical receipt hash changes.
+    mood_commitment: Optional[str] = None
+
     def canonical_hash(self) -> str:
         """SHA-256 over stable fields (matches arp-types receipt.rs hash())."""
         data = json.dumps({
@@ -108,6 +113,7 @@ class ActionReceipt:
             "execution_id":          self.execution_id,
             "previous_hash":         self.previous_hash,
             "signature":             self.signature,
+            "mood_commitment":       self.mood_commitment,
         }
 
 
@@ -130,6 +136,7 @@ def new_receipt(
     previous_hash: Optional[str] = None,
     execution_id: Optional[str] = None,
     kind_ext: Optional[str] = None,
+    mood_commitment: Optional[str] = None,
 ) -> ActionReceipt:
     """Create a new unsigned ActionReceipt.  Caller fills `signature` after."""
     return ActionReceipt(
@@ -157,6 +164,7 @@ def new_receipt(
         execution_id  = execution_id,
         previous_hash = previous_hash,
         signature     = "",
+        mood_commitment = mood_commitment,
     )
 
 
