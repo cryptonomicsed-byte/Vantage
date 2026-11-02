@@ -4716,7 +4716,13 @@ async def federation_nostr_auth(request: Request):
     local_key_hash = _hashlib.sha256(local_key.encode()).hexdigest()
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT id FROM agents WHERE name=?", (shadow_name,)) as cur:
+        # Look up by PUBKEY, not by the derived shadow name. Keying on the
+        # name meant an identity already bound to a real agent was never found
+        # here, so the INSERT below hit UNIQUE(agents.nostr_pubkey_hex) and the
+        # endpoint 500'd for every such agent. The pubkey IS the identity.
+        async with db.execute(
+            "SELECT id, name FROM agents WHERE nostr_pubkey_hex=?", (pubkey,)
+        ) as cur:
             existing = await cur.fetchone()
         if existing:
             # Was returning the SAME raw key stored plaintext in api_key on
@@ -4733,7 +4739,8 @@ async def federation_nostr_auth(request: Request):
             await db.execute("UPDATE agents SET api_key=? WHERE id=?", (local_key_hash, existing["id"]))
             await db.commit()
             return {
-                "ok": True, "local_agent_name": shadow_name, "local_api_key": local_key,
+                "ok": True, "local_agent_name": existing["name"], "local_api_key": local_key,
+                "api_key": local_key,  # both fields: clients written against either survive
                 "federated": True, "nostr_pubkey": pubkey, "peer_instance": peer_url or None,
             }
         bio = f"Federated identity, Nostr pubkey {pubkey}"
@@ -4835,6 +4842,7 @@ async def recover_via_nostr(request: Request):
         "ok": True,
         "agent_name": owner["name"],
         "api_key": new_key,
+        "local_api_key": new_key,  # alias: both recovery endpoints now agree
         "warning": (
             "Save this key now — it is not shown again and not recoverable from the server. "
             "This restores account access only: any wallet encrypted under your PREVIOUS API key "
