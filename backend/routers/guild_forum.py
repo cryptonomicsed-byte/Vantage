@@ -261,6 +261,8 @@ async def create_channel(
     channel_kind: str = Form("forum"),
     flow_mode: str = Form("open"),
     visibility: str = Form("members"),
+    collab_type: str = Form("general"),
+    mcp_provider: str = Form(""),
     principal: dict = Depends(current_principal),
 ):
     """Create a channel or sub-guild.
@@ -297,13 +299,31 @@ async def create_channel(
         raise HTTPException(409, "A channel with that slug already exists in this guild")
 
     async with get_db() as db:
+        # Apply template defaults when collab_type is given and caller didn't override
+        _effective_flow = flow_mode
+        _effective_vis = visibility
+        async with get_db() as _tdb:
+            _tdb.row_factory = aiosqlite.Row
+            _tcur = await _tdb.execute(
+                "SELECT * FROM channel_templates WHERE collab_type=?", (collab_type,)
+            )
+            _trow = await _tcur.fetchone()
+        if _trow:
+            _trow = dict(_trow)
+            if flow_mode == "open":  # caller used the default → let template win
+                _effective_flow = _trow.get("default_flow_mode", flow_mode)
+            if visibility == "members":  # caller used the default → let template win
+                _effective_vis = _trow.get("default_visibility", visibility)
+
         cur = await db.execute(
             """INSERT INTO guild_channels
                  (guild_id, parent_channel_id, slug, name, topic, channel_kind,
-                  flow_mode, visibility, sandbox_bound, created_by_principal_id)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                  flow_mode, visibility, sandbox_bound, created_by_principal_id,
+                  collab_type, mcp_provider)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (guild["id"], parent_id, channel_slug, name, topic, channel_kind,
-             flow_mode, visibility, 1 if channel_kind == "workspace" else 0, principal["id"]),
+             _effective_flow, _effective_vis, 1 if channel_kind == "workspace" else 0,
+             principal["id"], collab_type, mcp_provider or None),
         )
         channel_id = cur.lastrowid
         await db.commit()
@@ -315,7 +335,9 @@ async def create_channel(
     })
     return {
         "guild": slug, "channel": channel_slug, "id": channel_id,
-        "channel_kind": channel_kind, "flow_mode": flow_mode, "visibility": visibility,
+        "channel_kind": channel_kind, "flow_mode": _effective_flow,
+        "visibility": _effective_vis, "collab_type": collab_type,
+        "mcp_provider": mcp_provider or None,
         "parent": parent or None,
         "relay_provisioned": bool(buzz_channel_id),
         "note": None if buzz_channel_id else
@@ -1239,3 +1261,60 @@ async def list_workspaces(slug: str, principal: Optional[dict] = Depends(optiona
         owner, name = row.get("repo_owner"), row.get("repo_name")
         row["repo"] = f"{owner}/{name}" if owner and name else None
     return {"guild": slug, "workspaces": visible, "count": len(visible)}
+
+
+# ── Collab channel endpoints ──────────────────────────────────────────────────
+
+@router.get("/channel-templates")
+async def list_channel_templates(db=Depends(get_db)):
+    """Return all seeded channel templates (no auth required)."""
+    db.row_factory = aiosqlite.Row
+    cur = await db.execute("SELECT * FROM channel_templates ORDER BY id")
+    rows = await cur.fetchall()
+    result = []
+    for r in rows:
+        row = dict(r)
+        import json as _j
+        for field in ("slash_commands_json", "ui_config_json"):
+            try:
+                row[field.replace("_json", "")] = _j.loads(row.pop(field))
+            except Exception:
+                row[field.replace("_json", "")] = []
+        result.append(row)
+    return result
+
+
+@router.patch("/{slug}/channels/{channel_slug}/mcp")
+async def set_channel_mcp(
+    slug: str,
+    channel_slug: str,
+    request: Request,
+    principal: dict = Depends(current_principal),
+):
+    """Update a channel's MCP provider config.
+
+    Requires channel creator or guild admin/founder/moderator.
+    """
+    guild = await _guild(slug)
+    channel = await _channel_or_404(guild, channel_slug)
+    membership = await _require_member(guild, principal)
+
+    # Check: channel creator OR guild staff
+    is_creator = channel.get("created_by_principal_id") == principal["id"]
+    is_staff = membership["role"] in _CHANNEL_ADMIN_ROLES
+    if not (is_creator or is_staff):
+        raise HTTPException(403, "Only the channel creator or guild staff can update MCP config")
+
+    body = await _parse_body(request)
+    import json as _j
+    provider = body.get("provider")
+    config = body.get("config", {})
+    async with get_db() as db:
+        await db.execute(
+            """UPDATE guild_channels
+               SET mcp_provider=?, mcp_config_json=?
+               WHERE slug=? AND guild_id=(SELECT id FROM guilds WHERE slug=?)""",
+            [provider, _j.dumps(config), channel_slug, slug],
+        )
+        await db.commit()
+    return {"ok": True, "provider": provider}

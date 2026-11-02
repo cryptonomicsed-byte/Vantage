@@ -2451,4 +2451,153 @@ async def init_workspace_tasks_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_action_receipts_kind"
             " ON action_receipts(kind)"
         )
+
+        # ── Collab channels: add collab_type + MCP columns to guild_channels ──
+        for _col, _ddl in [
+            ("collab_type",      "TEXT NOT NULL DEFAULT 'general'"),
+            ("mcp_provider",     "TEXT"),
+            ("mcp_config_json",  "TEXT"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE guild_channels ADD COLUMN {_col} {_ddl}")
+            except Exception:
+                pass  # column already exists
+
+        # channel_templates — one canonical row per collab_type, seeded below
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS channel_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collab_type TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                default_flow_mode TEXT NOT NULL DEFAULT 'open',
+                default_visibility TEXT NOT NULL DEFAULT 'members',
+                slash_commands_json TEXT NOT NULL,
+                ui_config_json TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        import json as _json_db
+        _templates = [
+            {
+                "collab_type": "general",
+                "display_name": "General",
+                "description": "Open discussion and coordination",
+                "default_flow_mode": "open",
+                "default_visibility": "members",
+                "slash_commands_json": _json_db.dumps(["/help", "/mode", "/task", "/invite", "/members"]),
+                "ui_config_json": _json_db.dumps({"theme": "default", "sidebar": "members"}),
+            },
+            {
+                "collab_type": "code",
+                "display_name": "Code",
+                "description": "Collaborative coding with branch isolation per contributor",
+                "default_flow_mode": "open",
+                "default_visibility": "members",
+                "slash_commands_json": _json_db.dumps(["/run", "/pr", "/scan", "/review", "/merge", "/branches"]),
+                "ui_config_json": _json_db.dumps({"theme": "dark_mono", "sidebar": "branches", "panel": "diff"}),
+            },
+            {
+                "collab_type": "trading",
+                "display_name": "Trading",
+                "description": "Multi-agent trading, token launches, and pooled positions",
+                "default_flow_mode": "open",
+                "default_visibility": "members",
+                "slash_commands_json": _json_db.dumps(["/price", "/buy", "/sell", "/pool", "/join", "/launch", "/strategy", "/positions"]),
+                "ui_config_json": _json_db.dumps({"theme": "trading", "sidebar": "positions", "panel": "ticker"}),
+            },
+            {
+                "collab_type": "content",
+                "display_name": "Content",
+                "description": "Video, audio, and media production with MCP pipeline",
+                "default_flow_mode": "open",
+                "default_visibility": "members",
+                "slash_commands_json": _json_db.dumps(["/video", "/audio", "/podcast", "/scene", "/publish", "/collab", "/setmcp"]),
+                "ui_config_json": _json_db.dumps({"theme": "media", "sidebar": "production", "panel": "preview"}),
+            },
+            {
+                "collab_type": "research",
+                "display_name": "Research",
+                "description": "Alpha signals, token intelligence, and market research",
+                "default_flow_mode": "open",
+                "default_visibility": "members",
+                "slash_commands_json": _json_db.dumps(["/alpha", "/signals", "/scan", "/wallet", "/degen", "/narrative", "/watch", "/unwatch"]),
+                "ui_config_json": _json_db.dumps({"theme": "data", "sidebar": "watchlist", "panel": "signals"}),
+            },
+        ]
+        for _tmpl in _templates:
+            await db.execute(
+                """INSERT OR IGNORE INTO channel_templates
+                   (collab_type, display_name, description, default_flow_mode,
+                    default_visibility, slash_commands_json, ui_config_json)
+                   VALUES (:collab_type, :display_name, :description, :default_flow_mode,
+                           :default_visibility, :slash_commands_json, :ui_config_json)""",
+                _tmpl,
+            )
+
+        # ── Supporting tables for collab pipelines (create now, used in later tasks) ──
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS channel_code_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER NOT NULL REFERENCES guild_channels(id),
+                contributor_id INTEGER NOT NULL,
+                contributor_type TEXT NOT NULL DEFAULT 'agent',
+                branch_name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                last_commit_sha TEXT,
+                repo_owner TEXT,
+                repo_name TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(channel_id, contributor_id)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS channel_trading_pools (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER NOT NULL REFERENCES guild_channels(id),
+                initiator_id INTEGER NOT NULL,
+                pool_type TEXT NOT NULL DEFAULT 'trade',
+                token TEXT,
+                symbol TEXT,
+                target_amount REAL NOT NULL DEFAULT 0,
+                committed_json TEXT NOT NULL DEFAULT '{}',
+                quorum_pct REAL NOT NULL DEFAULT 0.5,
+                status TEXT NOT NULL DEFAULT 'open',
+                tx_hash TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS channel_pool_commitments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pool_id INTEGER NOT NULL REFERENCES channel_trading_pools(id),
+                agent_id INTEGER NOT NULL,
+                amount REAL NOT NULL,
+                wallet_id INTEGER,
+                committed_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(pool_id, agent_id)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS channel_productions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER NOT NULL REFERENCES guild_channels(id),
+                production_id INTEGER REFERENCES production_projects(id),
+                mcp_provider TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS channel_watchlist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER NOT NULL REFERENCES guild_channels(id),
+                item_type TEXT NOT NULL DEFAULT 'token',
+                item_address TEXT NOT NULL,
+                item_symbol TEXT,
+                added_by INTEGER,
+                added_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(channel_id, item_address)
+            )
+        """)
         await db.commit()
