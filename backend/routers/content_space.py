@@ -56,7 +56,31 @@ async def create_content_space(
             (space_id, slug, name, mcp_provider, series_id, agent["id"], now),
         )
         await db.commit()
-    return {"id": space_id, "name": name, "mcp_provider": mcp_provider}
+
+    # Create backing chat channel for this content space
+    _chat_slug = f"cs-{space_id[:8]}"
+    try:
+        async with get_db() as _cdb:
+            _cdb.row_factory = aiosqlite.Row
+            async with _cdb.execute("SELECT id FROM guilds WHERE slug=?", (slug,)) as _cur:
+                _guild_row = await _cur.fetchone()
+            if _guild_row:
+                _guild_id = _guild_row["id"]
+                await _cdb.execute(
+                    """INSERT OR IGNORE INTO guild_channels
+                       (name, slug, guild_id, channel_kind, collab_type, topic)
+                       VALUES (?, ?, ?, 'forum', 'content', ?)""",
+                    (name, _chat_slug, _guild_id, f"Content space chat: {name}"),
+                )
+                await _cdb.execute(
+                    "UPDATE content_spaces SET chat_channel_slug=? WHERE id=?",
+                    (_chat_slug, space_id),
+                )
+                await _cdb.commit()
+    except Exception as _exc:
+        logger.warning("Failed to create backing channel for content space: %s", _exc)
+
+    return {"id": space_id, "name": name, "mcp_provider": mcp_provider, "chat_channel_slug": _chat_slug}
 
 
 @router.get("/{space_id}")

@@ -21,6 +21,7 @@ interface TradingSpace {
   wallet?: string
   description?: string
   status: string
+  chat_channel_slug?: string
 }
 
 interface RosterEntry {
@@ -585,7 +586,7 @@ export default function TradingSpaceShell({ slug, spaceId }: Props) {
       case 'overview':
         return <OverviewPanel space={space} slug={slug} roster={roster} authHeaders={authHeaders} />
       case 'chat':
-        return <GuildChat slug={slug} selectedChannelSlug={spaceId} />
+        return <GuildChat slug={slug} selectedChannelSlug={space.chat_channel_slug || spaceId} />
       case 'tasks':
         return <TradingSpaceTasks slug={slug} spaceId={spaceId} authHeaders={authHeadersObj} />
       case 'orders':
