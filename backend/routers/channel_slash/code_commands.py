@@ -272,6 +272,15 @@ async def _cmd_run(args: str, channel: dict, agent: dict, db) -> dict:
     )
     await db.commit()
 
+    try:
+        from backend.utils import _append_receipt
+        await _append_receipt(
+            str(agent_id), "code.execute",
+            {"verb": "run", "branch": branch, "prompt": args[:100], "file": file_path},
+        )
+    except Exception:
+        pass  # fail-open
+
     return _ok(
         f"Code pushed to `{branch}` -- `{file_path}` (sha `{push_result['sha']}`)\n\n"
         f"```\n{preview}\n```",
@@ -483,6 +492,14 @@ async def _cmd_merge(args: str, channel: dict, agent: dict, db) -> dict:
                     (channel_id, agent_id, branch),
                 )
                 await db.commit()
+                try:
+                    from backend.utils import _append_receipt
+                    await _append_receipt(
+                        str(agent_id), "code.execute",
+                        {"verb": "merge", "branch": branch, "pr": pr_num},
+                    )
+                except Exception:
+                    pass  # fail-open
                 return _ok(
                     f"Branch `{branch}` merged to main (PR #{pr_num}).",
                     pr=pr_num, branch=branch,

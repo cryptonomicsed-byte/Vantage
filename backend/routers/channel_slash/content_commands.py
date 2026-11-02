@@ -252,6 +252,14 @@ async def _cmd_video(args: str, channel: dict, agent: dict, db) -> dict:
     if url:
         reply_parts.append(f"Preview: {url}")
     reply_parts.append(f"Linked to production: _{title}_ (id={pid}). Scene will appear when ready.")
+    try:
+        from backend.utils import _append_receipt
+        await _append_receipt(
+            str(agent["id"]), "content.create",
+            {"verb": "video", "provider": provider, "prompt": args[:100], "job_id": job_id},
+        )
+    except Exception:
+        pass  # fail-open
     return _ok("\n".join(reply_parts), provider=provider, job_id=job_id, url=url, production_id=pid)
 
 
@@ -402,6 +410,14 @@ async def _cmd_publish(args: str, channel: dict, agent: dict, db) -> dict:
                     (channel_id, pid),
                 )
                 await db.commit()
+                try:
+                    from backend.utils import _append_receipt
+                    await _append_receipt(
+                        str(agent["id"]), "content.create",
+                        {"verb": "publish", "production_id": pid, "surface": surface, "url": pub_url},
+                    )
+                except Exception:
+                    pass  # fail-open
                 return _ok(
                     f"Production _{proj['title']}_ published to **{surface}**. URL: {pub_url}",
                     production_id=pid, surface=surface, url=pub_url,

@@ -51,11 +51,14 @@ async def _get_default_wallet(db, agent_id: int) -> Optional[dict]:
 
 
 async def _emit_receipt(agent_id: int, action: str, verb: str, evidence: dict) -> None:
-    """Best-effort receipt log — mirrors the pattern from trading.py."""
+    """Best-effort receipt log — wired to the real append-to-chain function."""
     try:
-        logger.info(
-            "channel_trade_receipt action=%s verb=%s agent=%s evidence=%s",
-            action, verb, agent_id, evidence,
+        from backend.utils import _append_receipt
+        payload = {"verb": verb, **evidence}
+        await _append_receipt(str(agent_id), action, payload)
+        logger.debug(
+            "channel_trade_receipt action=%s verb=%s agent=%s",
+            action, verb, agent_id,
         )
     except Exception as exc:
         logger.debug("channel receipt emit skipped: %s", exc)

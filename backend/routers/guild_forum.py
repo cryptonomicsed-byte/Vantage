@@ -571,11 +571,14 @@ async def post_channel_message(
     # "@alice @bob" only reaches alice is not possible. Resolution is scoped
     # to guild members, so a mention cannot page an agent into a room it is
     # not in.
-    # Slash command intercept: if content starts with '/', route to lounge handler
-    # when this channel is mapped to a guild lounge via nostr_channel_id.
+    # Slash command intercept: any message starting with '/' is a command.
+    # Priority: (1) lounge slash handler if this channel mirrors a lounge,
+    #           (2) collab-type-specific handler for non-general channels,
+    #           (3) helpful "unknown command" reply with available commands list.
     if content.startswith("/"):
-        async with get_db() as db:
-            lounge_row = await (await db.execute(
+        # (1) lounge priority — kept for backward compat
+        async with get_db() as _lounge_check_db:
+            lounge_row = await (await _lounge_check_db.execute(
                 "SELECT id FROM guild_lounges WHERE guild_slug=? AND nostr_channel_id=?",
                 (slug, str(channel.get("id", ""))),
             )).fetchone()
@@ -591,31 +594,73 @@ async def post_channel_message(
                 **{k: v for k, v in result.items() if k != "reply"},
             }
 
-        # Route to collab-type-specific handler when the channel has a non-general type.
-        # This runs after the lounge check so lounge slash commands keep priority.
+        # (2) collab-type handler for ANY channel (not just lounge-linked ones)
         _slash_parts = content.strip().split(None, 1)
         _slash_cmd   = _slash_parts[0] if _slash_parts else ""
         _slash_args  = _slash_parts[1] if len(_slash_parts) > 1 else ""
         _channel_collab_type = channel.get("collab_type") or "general"
+
         if _channel_collab_type != "general":
+            from .channel_slash import dispatch as _slash_dispatch
+            import aiosqlite as _aiosqlite
             async with get_db() as _slash_db:
-                import aiosqlite as _aiosqlite
                 _slash_db.row_factory = _aiosqlite.Row
                 _agent_dict = {
                     "id":   principal.get("agent_id") or principal.get("id"),
                     "name": principal.get("display_name", ""),
                 }
-                from .channel_slash import dispatch as _slash_dispatch
                 _slash_result = await _slash_dispatch(
                     _slash_cmd, _slash_args, dict(channel), _agent_dict, _slash_db
                 )
+
             if _slash_result is not None:
+                # Post the reply as a system message in the channel index
+                try:
+                    await coord.index_system_message(
+                        channel_id=channel["id"],
+                        content=_slash_result.get("reply", ""),
+                        author_label=f"system:{_slash_cmd}",
+                    )
+                except Exception:
+                    pass  # fail-open: reply is still returned
                 return {
                     "guild": slug, "channel": channel_slug,
                     "slash": True,
                     "reply": _slash_result.get("reply", ""),
                     "data":  _slash_result.get("data", {}),
                 }
+
+            # (3) dispatch returned None = unknown command — show available commands
+            async with get_db() as _tmpl_db:
+                _tmpl_db.row_factory = aiosqlite.Row
+                _tmpl_cur = await _tmpl_db.execute(
+                    "SELECT slash_commands_json FROM channel_templates WHERE collab_type=?",
+                    (_channel_collab_type,),
+                )
+                _tmpl_row = await _tmpl_cur.fetchone()
+            _avail_cmds: list = []
+            if _tmpl_row and _tmpl_row["slash_commands_json"]:
+                try:
+                    import json as _jcmd
+                    _avail_cmds = _jcmd.loads(_tmpl_row["slash_commands_json"])
+                except Exception:
+                    pass
+            if _avail_cmds:
+                _cmds_text = ", ".join(
+                    f"/{c['name']}" if isinstance(c, dict) else f"/{c}"
+                    for c in _avail_cmds
+                )
+                _err_msg = (
+                    f"Unknown command `{_slash_cmd}` for {_channel_collab_type} channels. "
+                    f"Available: {_cmds_text}. Type `/help` for details."
+                )
+            else:
+                _err_msg = (
+                    f"Unknown command `{_slash_cmd}` for {_channel_collab_type} channels. "
+                    "Type `/help` for available commands."
+                )
+            return {"guild": slug, "channel": channel_slug,
+                    "slash": True, "error": _err_msg, "reply": _err_msg}
 
     mentioned = await guild_chat.resolve_mentions(
         guild["id"], guild_chat.parse_mentions(content)
@@ -1311,6 +1356,41 @@ async def list_workspaces(slug: str, principal: Optional[dict] = Depends(optiona
         row["repo"] = f"{owner}/{name}" if owner and name else None
     return {"guild": slug, "workspaces": visible, "count": len(visible)}
 
+@router.get("/{slug}/channels/{channel_slug}/commands")
+async def list_channel_commands(
+    slug: str,
+    channel_slug: str,
+    principal: Optional[dict] = Depends(optional_principal),
+):
+    """Return the available slash commands for a channel.
+
+    Reads slash_commands_json from channel_templates for the channel's
+    collab_type. Frontend uses this for autocomplete.
+    """
+    import json as _jcmds
+    guild = await _guild(slug)
+    channel = await _channel_or_404(guild, channel_slug)
+    await _require_readable(channel, principal)
+    collab_type = channel.get("collab_type") or "general"
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT slash_commands_json FROM channel_templates WHERE collab_type=?",
+            (collab_type,),
+        )
+        row = await cur.fetchone()
+    commands = []
+    if row and row["slash_commands_json"]:
+        try:
+            commands = _jcmds.loads(row["slash_commands_json"])
+        except Exception:
+            pass
+    return {
+        "guild": slug, "channel": channel_slug,
+        "collab_type": collab_type, "commands": commands,
+    }
+
+
 @router.patch("/{slug}/channels/{channel_slug}/mcp")
 async def set_channel_mcp(
     slug: str,
@@ -1344,4 +1424,4 @@ async def set_channel_mcp(
             [provider, _j.dumps(config), channel_slug, slug],
         )
         await db.commit()
-    return {"ok": True, "provider": provider}
+    return {"ok": True, "provider": provider, "channel": channel_slug}

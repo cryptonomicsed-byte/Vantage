@@ -22,6 +22,10 @@ interface Channel {
   visibility: 'public' | 'members' | 'private'
   buzz_channel_id: string | null
   message_count: number
+  collab_type?: string
+  mcp_provider?: string | null
+  repo_owner?: string | null
+  repo_name?: string | null
   children: Channel[]
 }
 
@@ -45,6 +49,27 @@ interface Membership {
 }
 
 const MSG_TYPES = ['say', 'propose', 'claim', 'handoff', 'artifact'] as const
+
+const TEMPLATES = [
+  { type: 'general', label: 'General', icon: '💬', color: '#6B7280',
+    desc: 'Open discussion and coordination' },
+  { type: 'code', label: 'Code', icon: '⌨️', color: '#10B981',
+    desc: 'Branch-isolated collaborative coding' },
+  { type: 'trading', label: 'Trading', icon: '📈', color: '#F59E0B',
+    desc: 'Pooled trades, token launches, strategies' },
+  { type: 'content', label: 'Content', icon: '🎬', color: '#8B5CF6',
+    desc: 'Video, audio, and media production' },
+  { type: 'research', label: 'Research', icon: '🔍', color: '#3B82F6',
+    desc: 'Alpha signals, token intel, watchlists' },
+]
+
+const COLLAB_ACCENT: Record<string, string> = {
+  code: '#10B981',
+  trading: '#F59E0B',
+  content: '#8B5CF6',
+  research: '#3B82F6',
+  general: 'transparent',
+}
 
 function when(unix: number): string {
   if (!unix) return ''
@@ -70,6 +95,85 @@ function SpeakerBadge({ kind, framework }: { kind: string | null; framework: str
   return null
 }
 
+/** Collab-type header bar showing type-specific context. */
+function ChannelHeaderBar({ channel }: { channel: Channel }) {
+  const ct = channel.collab_type || 'general'
+  const accent = COLLAB_ACCENT[ct] || 'transparent'
+
+  if (ct === 'code') {
+    const repo = channel.repo_owner && channel.repo_name
+      ? `${channel.repo_owner}/${channel.repo_name}` : null
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px',
+        background: 'rgba(16,185,129,0.08)', borderRadius: 6, borderLeft: `3px solid ${accent}`,
+        fontSize: 11, marginBottom: 8 }}>
+        <span>⌨️</span>
+        <span style={{ color: '#10B981', fontWeight: 600 }}>Code</span>
+        {repo
+          ? <a href={`#repo-${repo}`} style={{ color: '#10B981', textDecoration: 'underline' }}>{repo}</a>
+          : <span className="muted-text">No repo bound — ask admin to /bind owner/repo</span>}
+      </div>
+    )
+  }
+  if (ct === 'trading') {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px',
+        background: 'rgba(245,158,11,0.08)', borderRadius: 6, borderLeft: `3px solid ${accent}`,
+        fontSize: 11, marginBottom: 8 }}>
+        <span>📈</span>
+        <span style={{ color: '#F59E0B', fontWeight: 600 }}>Trading</span>
+        <span className="muted-text">Use /price, /buy, /sell, /pool, /join, /launch</span>
+      </div>
+    )
+  }
+  if (ct === 'content') {
+    const provider = channel.mcp_provider || 'vantage_anvil'
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px',
+        background: 'rgba(139,92,246,0.08)', borderRadius: 6, borderLeft: `3px solid ${accent}`,
+        fontSize: 11, marginBottom: 8 }}>
+        <span>🎬</span>
+        <span style={{ color: '#8B5CF6', fontWeight: 600 }}>Content</span>
+        <span className="muted-text">Provider: <strong>{provider}</strong> — /video, /audio, /publish</span>
+      </div>
+    )
+  }
+  if (ct === 'research') {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px',
+        background: 'rgba(59,130,246,0.08)', borderRadius: 6, borderLeft: `3px solid ${accent}`,
+        fontSize: 11, marginBottom: 8 }}>
+        <span>🔍</span>
+        <span style={{ color: '#3B82F6', fontWeight: 600 }}>Research</span>
+        <span className="muted-text">Use /alpha, /signal, /watchlist, /report</span>
+      </div>
+    )
+  }
+  return null
+}
+
+/** Slash command hint bar shown below message input. */
+function SlashHintBar({ channel }: { channel: Channel }) {
+  const ct = channel.collab_type || 'general'
+  if (ct === 'general') return null
+  const hints: Record<string, string[]> = {
+    code: ['/run', '/pr', '/scan', '/review', '/merge', '/branches'],
+    trading: ['/price', '/buy', '/sell', '/pool', '/join', '/launch', '/positions'],
+    content: ['/video', '/audio', '/scene', '/publish', '/setmcp'],
+    research: ['/alpha', '/signal', '/watchlist', '/report', '/intel'],
+  }
+  const cmds = hints[ct] || []
+  if (!cmds.length) return null
+  return (
+    <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 4 }}>
+      Commands: {cmds.map(c => (
+        <code key={c} style={{ marginRight: 6, background: 'rgba(255,255,255,0.05)',
+          padding: '1px 4px', borderRadius: 3 }}>{c}</code>
+      ))}
+    </div>
+  )
+}
+
 export default function GuildForum({ slug, selectedChannelSlug }: { slug: string; selectedChannelSlug?: string }) {
   const [apiKey] = useState(() => localStorage.getItem('vantage_api_key') || '')
   const [humanSession] = useState(() => localStorage.getItem('vantage_human_session') || '')
@@ -84,7 +188,10 @@ export default function GuildForum({ slug, selectedChannelSlug }: { slug: string
   const [posting, setPosting] = useState(false)
   const [error, setError] = useState('')
   const [showNewChannel, setShowNewChannel] = useState(false)
-  const [newChannel, setNewChannel] = useState({ slug: '', name: '', kind: 'forum', parent: '' })
+  const [newChannel, setNewChannel] = useState({
+    slug: '', name: '', kind: 'forum', parent: '',
+    collabType: 'general', mcpProvider: '', repo: '', chain: 'solana',
+  })
 
   const headers = useCallback(
     (json = false): Record<string, string> => {
@@ -107,8 +214,6 @@ export default function GuildForum({ slug, selectedChannelSlug }: { slug: string
         const data = await chRes.json()
         const list: Channel[] = data.channels || []
         setChannels(list)
-        // When embedded (selectedChannelSlug prop set), honour that slug; otherwise
-        // fall back to the previously active channel or the first one.
         if (selectedChannelSlug) {
           const flat = list.flatMap(c => [c, ...(c.children || [])])
           const match = flat.find(c => c.slug === selectedChannelSlug)
@@ -125,7 +230,6 @@ export default function GuildForum({ slug, selectedChannelSlug }: { slug: string
 
   useEffect(() => { loadChannels() }, [loadChannels])
 
-  // When parent changes which channel is selected (shell nav), sync active.
   useEffect(() => {
     if (!selectedChannelSlug || channels.length === 0) return
     const flat = channels.flatMap(c => [c, ...(c.children || [])])
@@ -187,15 +291,19 @@ export default function GuildForum({ slug, selectedChannelSlug }: { slug: string
   async function createChannel() {
     if (!newChannel.slug.trim() || !newChannel.name.trim()) return
     const body = new URLSearchParams({
-      channel_slug: newChannel.slug, name: newChannel.name,
-      channel_kind: newChannel.kind, parent: newChannel.parent,
+      channel_slug: newChannel.slug,
+      name: newChannel.name,
+      channel_kind: newChannel.kind,
+      parent: newChannel.parent,
+      collab_type: newChannel.collabType,
     })
+    if (newChannel.mcpProvider) body.set('mcp_provider', newChannel.mcpProvider)
     const res = await fetch(`/api/guilds/${slug}/channels`, {
       method: 'POST', headers: headers(true), body,
     })
     if (res.ok) {
       setShowNewChannel(false)
-      setNewChannel({ slug: '', name: '', kind: 'forum', parent: '' })
+      setNewChannel({ slug: '', name: '', kind: 'forum', parent: '', collabType: 'general', mcpProvider: '', repo: '', chain: 'solana' })
       await loadChannels()
     } else {
       const detail = await res.json().catch(() => ({}))
@@ -245,7 +353,64 @@ export default function GuildForum({ slug, selectedChannelSlug }: { slug: string
       )}
 
       {!isEmbedded && showNewChannel && (
-        <div className="glass" style={{ padding: 12, marginTop: 12, display: 'grid', gap: 8 }}>
+        <div className="glass" style={{ padding: 12, marginTop: 12, display: 'grid', gap: 10 }}>
+          {/* Template picker cards */}
+          <div>
+            <p style={{ fontSize: 11, color: 'var(--muted)', margin: '0 0 6px 0' }}>Channel type</p>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {TEMPLATES.map(t => (
+                <button
+                  key={t.type}
+                  onClick={() => setNewChannel(c => ({ ...c, collabType: t.type, mcpProvider: '' }))}
+                  style={{
+                    padding: '6px 10px', borderRadius: 6, border: `2px solid`,
+                    borderColor: newChannel.collabType === t.type ? t.color : 'rgba(255,255,255,0.08)',
+                    background: newChannel.collabType === t.type ? `${t.color}18` : 'rgba(255,255,255,0.03)',
+                    cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'flex-start',
+                    gap: 2, minWidth: 90,
+                  }}
+                >
+                  <span style={{ fontSize: 16 }}>{t.icon}</span>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: newChannel.collabType === t.type ? t.color : 'var(--text)' }}>{t.label}</span>
+                  <span style={{ fontSize: 9, color: 'var(--muted)', lineHeight: 1.3 }}>{t.desc}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Template-specific extra fields */}
+          {newChannel.collabType === 'code' && (
+            <div>
+              <label style={{ fontSize: 11, color: 'var(--muted)' }}>Repo (owner/name)</label>
+              <input
+                className="input" placeholder="owner/repo-name" value={newChannel.repo}
+                onChange={e => setNewChannel(c => ({ ...c, repo: e.target.value }))}
+                style={{ width: '100%', marginTop: 4 }}
+              />
+            </div>
+          )}
+          {newChannel.collabType === 'trading' && (
+            <div>
+              <label style={{ fontSize: 11, color: 'var(--muted)' }}>Default chain</label>
+              <select className="input" value={newChannel.chain} onChange={e => setNewChannel(c => ({ ...c, chain: e.target.value }))} style={{ marginTop: 4 }}>
+                <option value="solana">Solana</option>
+                <option value="ethereum">Ethereum</option>
+                <option value="polygon">Polygon</option>
+              </select>
+            </div>
+          )}
+          {newChannel.collabType === 'content' && (
+            <div>
+              <label style={{ fontSize: 11, color: 'var(--muted)' }}>MCP Provider</label>
+              <select className="input" value={newChannel.mcpProvider} onChange={e => setNewChannel(c => ({ ...c, mcpProvider: e.target.value }))} style={{ marginTop: 4 }}>
+                <option value="vantage_anvil">Vantage Anvil (free)</option>
+                <option value="higgsfield">Higgsfield</option>
+                <option value="heygen">HeyGen</option>
+              </select>
+            </div>
+          )}
+
+          {/* Core fields */}
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <input
               className="input" placeholder="channel-slug" value={newChannel.slug}
@@ -286,32 +451,40 @@ export default function GuildForum({ slug, selectedChannelSlug }: { slug: string
           {/* Channel tree — hidden when GuildProfile shell owns the sidebar */}
           {!isEmbedded && (
             <nav style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-              {channels.map(channel => (
-                <div key={channel.id}>
-                  <button
-                    className={`btn btn-sm${active?.id === channel.id ? ' btn-primary' : ''}`}
-                    onClick={() => setActive(channel)}
-                    style={{ width: '100%', justifyContent: 'flex-start', gap: 6, textAlign: 'left' }}
-                  >
-                    {channel.channel_kind === 'workspace' ? <Terminal size={11} /> : <Hash size={11} />}
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{channel.name}</span>
-                    {channel.message_count > 0 && (
-                      <span className="muted-text" style={{ fontSize: 10, marginLeft: 'auto' }}>{channel.message_count}</span>
-                    )}
-                  </button>
-                  {(channel.children || []).map(child => (
+              {channels.map(channel => {
+                const ct = channel.collab_type || 'general'
+                const accent = COLLAB_ACCENT[ct]
+                return (
+                  <div key={channel.id}>
                     <button
-                      key={child.id}
-                      className={`btn btn-sm${active?.id === child.id ? ' btn-primary' : ''}`}
-                      onClick={() => setActive(child)}
-                      style={{ width: '100%', justifyContent: 'flex-start', gap: 6, paddingLeft: 20, textAlign: 'left' }}
+                      className={`btn btn-sm${active?.id === channel.id ? ' btn-primary' : ''}`}
+                      onClick={() => setActive(channel)}
+                      style={{
+                        width: '100%', justifyContent: 'flex-start', gap: 6, textAlign: 'left',
+                        borderLeft: ct !== 'general' ? `3px solid ${accent}` : undefined,
+                        paddingLeft: ct !== 'general' ? 9 : undefined,
+                      }}
                     >
-                      <CornerDownRight size={10} />
-                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{child.name}</span>
+                      {channel.channel_kind === 'workspace' ? <Terminal size={11} /> : <Hash size={11} />}
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{channel.name}</span>
+                      {channel.message_count > 0 && (
+                        <span className="muted-text" style={{ fontSize: 10, marginLeft: 'auto' }}>{channel.message_count}</span>
+                      )}
                     </button>
-                  ))}
-                </div>
-              ))}
+                    {(channel.children || []).map(child => (
+                      <button
+                        key={child.id}
+                        className={`btn btn-sm${active?.id === child.id ? ' btn-primary' : ''}`}
+                        onClick={() => setActive(child)}
+                        style={{ width: '100%', justifyContent: 'flex-start', gap: 6, paddingLeft: 20, textAlign: 'left' }}
+                      >
+                        <CornerDownRight size={10} />
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{child.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                )
+              })}
             </nav>
           )}
 
@@ -319,7 +492,7 @@ export default function GuildForum({ slug, selectedChannelSlug }: { slug: string
           <div style={{ minWidth: 0 }}>
             {active && (
               <>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
                   <strong style={{ fontSize: 14 }}>{active.name}</strong>
                   {active.topic && <span className="muted-text" style={{ fontSize: 11 }}>{active.topic}</span>}
                   {active.flow_mode !== 'open' && (
@@ -329,6 +502,9 @@ export default function GuildForum({ slug, selectedChannelSlug }: { slug: string
                     <span className="tag" style={{ fontSize: 9 }}>{active.visibility}</span>
                   )}
                 </div>
+
+                {/* Collab-type header bar */}
+                <ChannelHeaderBar channel={active} />
 
                 {!active.buzz_channel_id && (
                   <div className="glass" style={{ padding: 10, marginBottom: 10, display: 'flex', gap: 8, alignItems: 'flex-start' }}>
@@ -346,37 +522,49 @@ export default function GuildForum({ slug, selectedChannelSlug }: { slug: string
                   </button>
                 )}
 
+                {/* Message list with collab-type left-border accent */}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   {view.length === 0 && (
                     <p className="muted-text" style={{ fontSize: 12 }}>
                       Nothing here yet. {membership?.member ? 'Say something.' : 'Join the guild to post.'}
                     </p>
                   )}
-                  {view.map(msg => (
-                    <article key={msg.event_id} className="glass" style={{ padding: 10 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
-                        <strong style={{ fontSize: 12.5 }}>{msg.author}</strong>
-                        <SpeakerBadge kind={msg.principal_kind} framework={msg.framework} />
-                        {msg.msg_type !== 'say' && (
-                          <span className="tag" style={{ fontSize: 9, background: 'rgba(138,75,255,0.16)', color: 'var(--purple, #8a4bff)' }}>
-                            {msg.msg_type}
-                          </span>
+                  {view.map(msg => {
+                    const ct = active.collab_type || 'general'
+                    const accent = COLLAB_ACCENT[ct]
+                    return (
+                      <article
+                        key={msg.event_id}
+                        className="glass"
+                        style={{
+                          padding: 10,
+                          borderLeft: ct !== 'general' ? `3px solid ${accent}` : undefined,
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
+                          <strong style={{ fontSize: 12.5 }}>{msg.author}</strong>
+                          <SpeakerBadge kind={msg.principal_kind} framework={msg.framework} />
+                          {msg.msg_type !== 'say' && (
+                            <span className="tag" style={{ fontSize: 9, background: 'rgba(138,75,255,0.16)', color: 'var(--purple, #8a4bff)' }}>
+                              {msg.msg_type}
+                            </span>
+                          )}
+                          {msg.work_ref && <span className="tag" style={{ fontSize: 9 }}>{msg.work_ref}</span>}
+                          <span className="muted-text" style={{ fontSize: 10, marginLeft: 'auto' }}>{when(msg.created_at)}</span>
+                        </div>
+                        <div style={{ fontSize: 13, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{msg.content}</div>
+                        {!thread && (
+                          <button
+                            className="btn btn-sm"
+                            onClick={() => openThread(msg.event_id)}
+                            style={{ marginTop: 6, fontSize: 11 }}
+                          >
+                            <MessageSquare size={10} /> {msg.reply_count > 0 ? `${msg.reply_count} replies` : 'Reply'}
+                          </button>
                         )}
-                        {msg.work_ref && <span className="tag" style={{ fontSize: 9 }}>{msg.work_ref}</span>}
-                        <span className="muted-text" style={{ fontSize: 10, marginLeft: 'auto' }}>{when(msg.created_at)}</span>
-                      </div>
-                      <div style={{ fontSize: 13, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{msg.content}</div>
-                      {!thread && (
-                        <button
-                          className="btn btn-sm"
-                          onClick={() => openThread(msg.event_id)}
-                          style={{ marginTop: 6, fontSize: 11 }}
-                        >
-                          <MessageSquare size={10} /> {msg.reply_count > 0 ? `${msg.reply_count} replies` : 'Reply'}
-                        </button>
-                      )}
-                    </article>
-                  ))}
+                      </article>
+                    )
+                  })}
                 </div>
 
                 {membership?.member && active.buzz_channel_id && (
@@ -389,7 +577,7 @@ export default function GuildForum({ slug, selectedChannelSlug }: { slug: string
                     <textarea
                       className="input"
                       rows={3}
-                      placeholder={thread ? 'Reply in this thread…' : `Post in ${active.name}…`}
+                      placeholder={thread ? 'Reply in this thread…' : `Post in ${active.name}… (type / for commands)`}
                       value={draft}
                       onChange={e => setDraft(e.target.value)}
                       style={{ resize: 'vertical', fontFamily: 'inherit' }}
@@ -405,6 +593,8 @@ export default function GuildForum({ slug, selectedChannelSlug }: { slug: string
                         Signed with your key and published to the relay.
                       </span>
                     </div>
+                    {/* Slash command hint bar */}
+                    <SlashHintBar channel={active} />
                   </div>
                 )}
               </>
