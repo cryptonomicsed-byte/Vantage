@@ -27,7 +27,7 @@ from vantage_signals import post_signal as _post_signal
 
 VANTAGE_URL = "http://127.0.0.1:8001"
 VANTAGE_KEY = open(os.path.expanduser("~/.vantage_key")).read().strip()
-GITEA_URL = "http://localhost:3001"
+GITEA_URL = os.environ.get("GITEA_URL", "https://github.com/cryptonomicsed-byte")
 GITEA_API = f"{GITEA_URL}/api/v1"
 GITEA_TOKEN = os.environ.get("GITEA_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("STIX_WEBHOOK_SECRET", "vantage-stix-webhook-2026")

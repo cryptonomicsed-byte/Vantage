@@ -90,6 +90,18 @@ def _clamped_lease(minutes: int) -> int:
 
 # ── Endpoints ───────────────────────────────────────────────────────────
 
+async def _get_job_data(job_id: int) -> dict:
+    """Internal helper: fetch job + tasks without going through the FastAPI
+    dependency-injection path. Used by create_job so the response is built
+    from the same DB connection that did the insert — no extra semaphore wait."""
+    async with get_db() as db:
+        job = await _row(db, "SELECT * FROM jobs WHERE id = ?", (job_id,))
+        if not job:
+            raise HTTPException(404, "Job not found")
+        job["tasks"] = await _rows(db, "SELECT * FROM job_tasks WHERE job_id = ? ORDER BY id", (job_id,))
+    return job
+
+
 @router.post("")
 async def create_job(req: CreateJobRequest, agent: dict = Depends(get_agent)):
     """Post a spec that fans into N independently-claimable sub-tasks."""
@@ -105,7 +117,9 @@ async def create_job(req: CreateJobRequest, agent: dict = Depends(get_agent)):
                 (job_id, t.title, t.description, t.required_capability),
             )
         await db.commit()
-    return await get_job(job_id)
+    # Return data built in the same semaphore acquisition as the insert
+    # (no second semaphore wait on the response path).
+    return await _get_job_data(job_id)
 
 
 @router.get("")
@@ -301,7 +315,7 @@ async def approve_task(job_id: int, task_id: int, agent: dict = Depends(get_agen
         except Exception as exc:
             logger.warning("jobs: completion receipt failed for job %s: %s", job_id, exc)
 
-    return await get_job(job_id)
+    return await _get_job_data(job_id)
 
 
 @router.post("/{job_id}/tasks/{task_id}/reject")
