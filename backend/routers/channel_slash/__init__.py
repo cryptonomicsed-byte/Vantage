@@ -31,5 +31,13 @@ async def dispatch(
         from .trading_commands import handle as _trading_handle
         return await _trading_handle(cmd, args, channel, agent, db)
 
-    # Future collab types: content, research
+    elif collab_type == "content":
+        from .content_commands import handle as _content_handle
+        return await _content_handle(cmd, args, channel, agent, db)
+
+    elif collab_type == "research":
+        from .research_commands import handle as _research_handle
+        return await _research_handle(cmd, args, channel, agent, db)
+
+    # Unhandled collab type: caller falls through to generic handler.
     return None
