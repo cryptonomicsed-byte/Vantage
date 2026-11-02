@@ -84,7 +84,7 @@ export default function AgentDashboard() {
   const [agentName, setAgentName] = useState(() => localStorage.getItem('vantage_agent_name') || '')
 
   // Dashboard tab
-  const [activeTab, setActiveTab] = useState<'profile' | 'publish' | 'broadcasts' | 'negotiations' | 'handshakes' | 'debates'>('profile')
+  const [activeTab, setActiveTab] = useState<'profile' | 'publish' | 'broadcasts' | 'negotiations' | 'handshakes' | 'debates' | 'capabilities'>('profile')
 
   // Profile
   const [bio, setBio]             = useState('')
@@ -153,6 +153,14 @@ export default function AgentDashboard() {
   // Broadcasts list filter
   const [broadcastFilter, setBroadcastFilter] = useState<'all' | 'draft' | 'scheduled'>('all')
 
+  // Tier & capabilities
+  const [agentTier, setAgentTier] = React.useState<any>(null)
+  const [tierSeeding, setTierSeeding] = React.useState(false)
+  const [myCapabilities, setMyCapabilities] = React.useState<string[]>([])
+  const [allCapabilities, setAllCapabilities] = React.useState<string[]>([])
+  const [capabilitiesSaving, setCapabilitiesSaving] = React.useState(false)
+  const [capabilitiesSaved, setCapabilitiesSaved] = React.useState(false)
+
   // Seal / access control
   const [sealPolicy, setSealPolicy] = useState<'none' | 'followers-only' | 'private'>('none')
   const [sealing, setSealing] = useState(false)
@@ -201,6 +209,17 @@ export default function AgentDashboard() {
       setManifesto(prof.manifesto || '')
       setSuiAddress(prof.sui_address || '')
     }
+    // Load tier & capabilities
+    try {
+      const tierRes = await fetch('/api/agents/me/tier', { headers: headers() })
+      if (tierRes.ok) setAgentTier(await tierRes.json())
+      const [myCapR, allCapR] = await Promise.all([
+        fetch('/api/agents/me/capabilities', { headers: headers() }),
+        fetch('/api/agents/capabilities', { headers: headers() }),
+      ])
+      if (myCapR.ok) { const d = await myCapR.json(); setMyCapabilities(Array.isArray(d) ? d : (d.capabilities || [])) }
+      if (allCapR.ok) { const d = await allCapR.json(); setAllCapabilities(Array.isArray(d) ? d : (d.capabilities || [])) }
+    } catch {}
     // Load token milestones
     const milRes = await fetch('/api/agents/me/token-milestones', { headers: headers() })
     if (milRes.ok) {
@@ -664,6 +683,7 @@ export default function AgentDashboard() {
           ['negotiations', '🤝 Negotiate'],
           ['handshakes', '🔗 Handshakes'],
           ['debates', '⚔️ Debates'],
+          ['capabilities', '⚡ Tier & Caps'],
         ] as const).map(([t, label]) => (
           <button key={t} className={`neg-tab${activeTab === t ? ' active' : ''}`} onClick={() => setActiveTab(t)}>
             {label}
@@ -1168,10 +1188,87 @@ export default function AgentDashboard() {
       )}
 
       {/* Debate Challenges */}
-      {activeTab === 'debates' && (
+      {activeTab === 'capabilities' && (
         <div className="dash-panel">
-          <div className="dash-panel-title">⚔️ Debate Challenges</div>
-          <DebateChallengePanel apiKey={apiKey} agentName={agentName} />
+          {/* Tier badge */}
+          <div style={{ marginBottom: 20 }}>
+            <div className="dash-panel-title">⚡ Agent Tier</div>
+            {agentTier ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 8 }}>
+                <div style={{
+                  padding: '6px 16px', borderRadius: 8, fontWeight: 700, fontSize: 18,
+                  background: 'rgba(167,139,250,0.12)', border: '1px solid rgba(167,139,250,0.3)', color: '#a78bfa',
+                }}>
+                  Tier {agentTier.tier}
+                </div>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>{agentTier.tier_name || 'Agent'}</div>
+                  <div style={{ fontSize: 11, color: 'var(--muted)' }}>Current tier level</div>
+                </div>
+                <button
+                  className="btn btn-sm btn-primary"
+                  style={{ marginLeft: 'auto' }}
+                  disabled={tierSeeding}
+                  onClick={async () => {
+                    setTierSeeding(true)
+                    const r = await fetch('/api/agents/me/tier/seed', { method: 'POST', headers: headers() })
+                    if (r.ok) setAgentTier(await r.json())
+                    setTierSeeding(false)
+                  }}
+                >
+                  {tierSeeding ? 'Seeding...' : 'Seed Tier'}
+                </button>
+              </div>
+            ) : (
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>Tier data unavailable</div>
+            )}
+          </div>
+
+          {/* Capabilities grid */}
+          <div>
+            <div className="dash-panel-title">Capabilities</div>
+            <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 12 }}>Toggle capabilities then Save.</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+              {allCapabilities.map(cap => {
+                const active = myCapabilities.includes(cap)
+                return (
+                  <button
+                    key={cap}
+                    onClick={() => setMyCapabilities(prev =>
+                      active ? prev.filter(c => c !== cap) : [...prev, cap]
+                    )}
+                    style={{
+                      padding: '4px 12px', borderRadius: 20, fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                      border: active ? '1px solid rgba(34,197,94,0.5)' : '1px solid rgba(255,255,255,0.1)',
+                      background: active ? 'rgba(34,197,94,0.12)' : 'rgba(255,255,255,0.03)',
+                      color: active ? '#22c55e' : 'var(--muted-hi)',
+                    }}
+                  >
+                    {active ? "✓ " : ""}{cap}
+                  </button>
+                )
+              })}
+              {allCapabilities.length === 0 && (
+                <div style={{ fontSize: 12, color: 'var(--muted)' }}>No capabilities defined yet.</div>
+              )}
+            </div>
+            <button
+              className="btn btn-primary btn-sm"
+              disabled={capabilitiesSaving}
+              onClick={async () => {
+                setCapabilitiesSaving(true)
+                const r = await fetch('/api/agents/me/capabilities', {
+                  method: 'POST',
+                  headers: { ...headers(), 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ capabilities: myCapabilities }),
+                })
+                setCapabilitiesSaving(false)
+                if (r.ok) { setCapabilitiesSaved(true); setTimeout(() => setCapabilitiesSaved(false), 2500) }
+              }}
+            >
+              {capabilitiesSaved ? "✓ Saved" : capabilitiesSaving ? "Saving..." : "Save Capabilities"}
+            </button>
+          </div>
         </div>
       )}
     </div>

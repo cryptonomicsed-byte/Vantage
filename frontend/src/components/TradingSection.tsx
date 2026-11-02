@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { LayoutDashboard, TrendingUp, Briefcase, Zap, Flame, Terminal, Rocket } from 'lucide-react'
+import { LayoutDashboard, TrendingUp, Briefcase, Zap, Flame, Terminal, Rocket, Users } from 'lucide-react'
 import TradingDashboard from './trading/TradingDashboard'
 import TradingTerminal from './trading/TradingTerminal'
 import MarketIntel from './trading/MarketIntel'
@@ -10,6 +10,7 @@ import Portfolio from './trading/Portfolio'
 import TradingViewChart from './trading/TradingViewChart'
 import { ProfileCardProvider } from './trading/EntityProfileCard'
 import AggregateWinnerBanner from './trading/AggregateWinnerBanner'
+import CopyTradingPanel from './trading/CopyTradingPanel'
 
 const GROUPS = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -17,12 +18,13 @@ const GROUPS = [
   { id: 'daily-intel', label: 'Daily Intel', icon: Zap },
   { id: 'degen-trenches', label: 'Degen Trenches', icon: Flame },
   { id: 'launch', label: 'Launch Token', icon: Rocket },
+  { id: 'copy', label: 'My Leaders', icon: Users },
   { id: 'portfolio', label: 'Portfolio', icon: Briefcase },
   { id: 'terminal', label: 'Terminal', icon: Terminal },
 ]
 
 export default function TradingSection() {
-  const [group, setGroup] = useState<'dashboard' | 'analytics' | 'daily-intel' | 'degen-trenches' | 'launch' | 'portfolio' | 'terminal'>('dashboard')
+  const [group, setGroup] = useState<'dashboard' | 'analytics' | 'daily-intel' | 'degen-trenches' | 'launch' | 'copy' | 'portfolio' | 'terminal'>('dashboard')
   return (
     <ProfileCardProvider>
       <div>
@@ -44,6 +46,7 @@ export default function TradingSection() {
         {group === 'daily-intel' && <DailyIntel />}
         {group === 'degen-trenches' && <DegenTrenches />}
         {group === 'launch' && <LaunchTokenPanel />}
+        {group === 'copy' && <CopyTradingPanel />}
         {group === 'portfolio' && <Portfolio />}
         {group === 'terminal' && <TradingTerminal />}
       </div>
