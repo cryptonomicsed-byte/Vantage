@@ -1158,6 +1158,12 @@ from .routers import osovm_router, heartbeat
 app.include_router(osovm_router.router)
 app.include_router(heartbeat.router)
 
+# The memory-galaxy router existed but was never mounted, so
+# /api/agents/me/memory-galaxy 404'd even though the nodes were in the
+# database. Federation's galaxy router was mounted; this one was not.
+from .routers import galaxy as _galaxy_router
+app.include_router(_galaxy_router.router)
+
 # MCP server — exposes all Vantage routes as MCP tools for Claude/GPT/OpenCode agents.
 # Mount the modern streamable-HTTP transport at /mcp (what current MCP clients expect),
 # and keep SSE mounted at a distinct path for older clients — mount_http()'s default
