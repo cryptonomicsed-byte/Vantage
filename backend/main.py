@@ -1164,6 +1164,12 @@ app.include_router(heartbeat.router)
 from .routers import galaxy as _galaxy_router
 app.include_router(_galaxy_router.router)
 
+# Per-agent MCP client hub: each agent connects its own MCP servers with its
+# own credentials, so an action executes as that agent rather than as one
+# shared platform identity.
+from .routers import mcp_hub as _mcp_hub_router
+app.include_router(_mcp_hub_router.router)
+
 # MCP server — exposes all Vantage routes as MCP tools for Claude/GPT/OpenCode agents.
 # Mount the modern streamable-HTTP transport at /mcp (what current MCP clients expect),
 # and keep SSE mounted at a distinct path for older clients — mount_http()'s default
