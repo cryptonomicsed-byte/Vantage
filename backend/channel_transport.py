@@ -307,3 +307,12 @@ register(RelayTransport())
 register(MeshnetTransport())
 register(FreenetTransport())
 register(GoRelayTransport())
+
+
+def default_transport() -> Transport:
+    """Return the active default transport instance.
+
+    Convenience wrapper around default_name() + get() so callers don't
+    have to spell out both steps. The relay is always the fallback.
+    """
+    return get(default_name())

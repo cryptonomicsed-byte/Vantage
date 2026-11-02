@@ -542,13 +542,13 @@ async def post_channel_message(
         addressees.append(addressed_to)
 
     try:
-        event = await coord.publish_message(
+        event = await channel_transport.default_transport().publish(
             channel=channel, guild_slug=slug, principal=principal, content=content,
             msg_type=msg_type, root_event_id=root_event_id,
             reply_to_event_id=reply_to or None,
             addressed_to=addressees or None, work_ref=work_ref or None,
         )
-    except coord.RelayUnavailable as exc:
+    except (coord.RelayUnavailable, channel_transport.TransportUnavailable) as exc:
         # The relay is the log. Indexing a message the log never accepted
         # would create a message that exists on exactly one node, can never
         # be reconciled, and reads identically to a real one. Refusing is the
@@ -556,7 +556,7 @@ async def post_channel_message(
         # nothing unsigned ever enters the index.
         raise HTTPException(
             503,
-            f"Relay unavailable — {exc}. Nothing was published and nothing "
+            f"Transport unavailable — {exc}. Nothing was published and nothing "
             "was indexed; retry once the relay is reachable.",
         ) from exc
     except ValueError as exc:

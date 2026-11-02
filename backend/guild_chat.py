@@ -32,6 +32,7 @@ from typing import Optional
 import aiosqlite
 
 from . import coordination as coord
+from . import channel_transport
 from .db import get_db
 
 logger = logging.getLogger(__name__)
@@ -185,7 +186,7 @@ async def dispatch_to_mentioned(
             # No local fallback: a reply the relay refused must not be
             # indexed as if it had been said. The outer handler logs the
             # failure and the turn is simply not recorded.
-            event = await coord.publish_message(
+            event = await channel_transport.default_transport().publish(
                 channel=channel, guild_slug=guild_slug, principal=principal,
                 content=reply_text, msg_type="say",
                 root_event_id=root_event_id,
