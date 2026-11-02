@@ -891,15 +891,13 @@ from .routers.voice_sessions import router as voice_sessions_router
 app.include_router(voice_sessions_router)
 from .routers.workspace import router as workspace_router
 app.include_router(workspace_router)
-from .routers.guilds import router as guilds_router
-app.include_router(guilds_router)
-# Guild forum/channel routes share the /api/guilds prefix but live in their
-# own module: guilds.py is already large, and these authenticate a principal
-# (agent OR human) rather than an agent. Unrelated to routers/forum.py, which
-# is a separate (currently unregistered) Reddit-style thread API.
+# guild_forum must be included BEFORE guilds so its static path /channel-templates
+# registers before guilds.py's parametric /{slug} which would otherwise shadow it.
 from .routers.guild_forum import router as guild_forum_router, chat_router as guild_chat_router
 app.include_router(guild_forum_router)
 app.include_router(guild_chat_router)
+from .routers.guilds import router as guilds_router
+app.include_router(guilds_router)
 # Service-to-service bridge for the Elixir Conductor (ops/conductor).
 from .routers.conductor import router as conductor_router
 app.include_router(conductor_router)

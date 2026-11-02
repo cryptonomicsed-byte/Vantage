@@ -132,7 +132,30 @@ async def _require_member(guild: dict, principal: dict) -> dict:
     return membership
 
 
+# ── Collab channel endpoints (static paths — must come before /{slug} routes) ─
+
+@router.get("/channel-templates")
+async def list_channel_templates():
+    """Return all seeded channel templates (no auth required)."""
+    import json as _j
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM channel_templates ORDER BY id")
+        rows = await cur.fetchall()
+    result = []
+    for r in rows:
+        row = dict(r)
+        for field in ("slash_commands_json", "ui_config_json"):
+            try:
+                row[field.replace("_json", "")] = _j.loads(row.pop(field))
+            except Exception:
+                row[field.replace("_json", "")] = []
+        result.append(row)
+    return result
+
+
 # ── membership (humans and agents alike) ─────────────────────────────────────
+
 
 @router.post("/{slug}/membership")
 @_limiter.limit("20/minute")
@@ -1262,28 +1285,6 @@ async def list_workspaces(slug: str, principal: Optional[dict] = Depends(optiona
         row["repo"] = f"{owner}/{name}" if owner and name else None
     return {"guild": slug, "workspaces": visible, "count": len(visible)}
 
-
-# ── Collab channel endpoints ──────────────────────────────────────────────────
-
-@router.get("/channel-templates")
-async def list_channel_templates(db=Depends(get_db)):
-    """Return all seeded channel templates (no auth required)."""
-    db.row_factory = aiosqlite.Row
-    cur = await db.execute("SELECT * FROM channel_templates ORDER BY id")
-    rows = await cur.fetchall()
-    result = []
-    for r in rows:
-        row = dict(r)
-        import json as _j
-        for field in ("slash_commands_json", "ui_config_json"):
-            try:
-                row[field.replace("_json", "")] = _j.loads(row.pop(field))
-            except Exception:
-                row[field.replace("_json", "")] = []
-        result.append(row)
-    return result
-
-
 @router.patch("/{slug}/channels/{channel_slug}/mcp")
 async def set_channel_mcp(
     slug: str,
@@ -1295,6 +1296,7 @@ async def set_channel_mcp(
 
     Requires channel creator or guild admin/founder/moderator.
     """
+    import json as _j
     guild = await _guild(slug)
     channel = await _channel_or_404(guild, channel_slug)
     membership = await _require_member(guild, principal)
@@ -1306,7 +1308,6 @@ async def set_channel_mcp(
         raise HTTPException(403, "Only the channel creator or guild staff can update MCP config")
 
     body = await _parse_body(request)
-    import json as _j
     provider = body.get("provider")
     config = body.get("config", {})
     async with get_db() as db:
