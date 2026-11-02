@@ -27,5 +27,9 @@ async def dispatch(
         from .code_commands import handle as _code_handle
         return await _code_handle(cmd, args, channel, agent, db)
 
-    # Future collab types: trading, content, research
+    elif collab_type == "trading":
+        from .trading_commands import handle as _trading_handle
+        return await _trading_handle(cmd, args, channel, agent, db)
+
+    # Future collab types: content, research
     return None
