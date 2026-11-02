@@ -45,6 +45,7 @@ interface GuildData {
 interface Channel {
   id: number; slug: string; name: string; topic: string
   channel_kind: 'forum' | 'workspace'; flow_mode: string; visibility: string
+  collab_type?: string
   buzz_channel_id: string | null; message_count: number; children: Channel[]
 }
 interface PresenceEntry { principal_name: string; state: string }
@@ -766,8 +767,13 @@ function CommandCenter({
   onSelectView: (v: string) => void
   onSelectWorkspace: (ws: WorkspaceItem) => void
 }) {
-  // Determine which channel to use — prefer "general", else first channel
-  const targetChannel = channels.find(c => c.name.toLowerCase() === 'general') || channels[0] || null
+  // Channel selector state — null means "auto" (prefer general, else first)
+  const [commandCenterChannel, setCommandCenterChannel] = useState<string | null>(null)
+
+  // Derived: which channel to show in the command center
+  const targetChannel = commandCenterChannel
+    ? (channels.find(c => c.slug === commandCenterChannel) || channels.find(c => c.name.toLowerCase() === 'general') || channels[0] || null)
+    : (channels.find(c => c.name.toLowerCase() === 'general') || channels[0] || null)
 
   // Chat state
   const [ccMessages, setCcMessages] = useState<CCMessage[]>([])
@@ -990,26 +996,67 @@ function CommandCenter({
         <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
           {/* No channels state */}
-          {!targetChannel ? (
+          {channels.length === 0 ? (
             <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 10, color: 'var(--muted)', fontSize: 13 }}>
               <Hash size={28} style={{ opacity: 0.2 }} />
-              <div>No channels yet — create one in the left sidebar</div>
+              <div>No channels yet — create one with the + button in the sidebar.</div>
             </div>
           ) : (
             <>
-              {/* Channel label strip */}
-              <div style={{ padding: '6px 16px', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0, background: 'rgba(0,0,0,0.1)' }}>
-                <Hash size={12} style={{ color: 'var(--muted)' }} />
-                <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)' }}>{targetChannel.name}</span>
-                {targetChannel.topic && (
-                  <span style={{ fontSize: 11, color: 'var(--muted)', borderLeft: '1px solid var(--border)', paddingLeft: 8 }}>{targetChannel.topic}</span>
-                )}
-                {!targetChannel.buzz_channel_id && (
-                  <span style={{ fontSize: 10, color: '#f59e0b', marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
-                    <Radio size={10} /> not provisioned
-                  </span>
-                )}
+              {/* ── CHANNEL SELECTOR TAB BAR ── */}
+              <div style={{
+                display: 'flex', gap: 2, padding: '6px 12px 0', flexShrink: 0,
+                borderBottom: '1px solid rgba(255,255,255,0.08)',
+                overflowX: 'auto', background: 'rgba(0,0,0,0.15)',
+              }}
+                className="scrollbar-hide"
+              >
+                {channels.map(ch => {
+                  const ICONS: Record<string, string> = {
+                    general: '💬', code: '⌨️', trading: '📈', content: '🎬', research: '🔍',
+                  }
+                  const icon = ICONS[ch.collab_type || 'general'] || '💬'
+                  const isActive = ch.slug === targetChannel?.slug
+                  return (
+                    <button
+                      key={ch.slug}
+                      onClick={() => setCommandCenterChannel(ch.slug)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 5,
+                        padding: '5px 12px 7px', borderRadius: '6px 6px 0 0',
+                        fontSize: 12, whiteSpace: 'nowrap', cursor: 'pointer',
+                        border: 'none', outline: 'none',
+                        background: isActive ? 'rgba(255,255,255,0.08)' : 'transparent',
+                        color: isActive ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.45)',
+                        borderBottom: isActive ? '2px solid #a78bfa' : '2px solid transparent',
+                        transition: 'color 0.12s, background 0.12s',
+                        fontWeight: isActive ? 600 : 400,
+                      }}
+                      onMouseEnter={e => { if (!isActive) e.currentTarget.style.color = 'rgba(255,255,255,0.75)' }}
+                      onMouseLeave={e => { if (!isActive) e.currentTarget.style.color = 'rgba(255,255,255,0.45)' }}
+                    >
+                      <span style={{ fontSize: 13 }}>{icon}</span>
+                      <span>{ch.name}</span>
+                    </button>
+                  )
+                })}
               </div>
+
+              {/* Channel sub-header (topic + provisioning status) */}
+              {targetChannel && (
+                <div style={{ padding: '4px 16px', borderBottom: '1px solid rgba(255,255,255,0.04)', display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0, background: 'rgba(0,0,0,0.08)' }}>
+                  <Hash size={11} style={{ color: 'rgba(255,255,255,0.3)', flexShrink: 0 }} />
+                  <span style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.5)' }}>{targetChannel.name}</span>
+                  {targetChannel.topic && (
+                    <span style={{ fontSize: 11, color: 'var(--muted)', borderLeft: '1px solid var(--border)', paddingLeft: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{targetChannel.topic}</span>
+                  )}
+                  {!targetChannel.buzz_channel_id && (
+                    <span style={{ fontSize: 10, color: '#f59e0b', marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+                      <Radio size={10} /> not provisioned
+                    </span>
+                  )}
+                </div>
+              )}
 
               {/* Message stream */}
               <div
@@ -1023,7 +1070,7 @@ function CommandCenter({
                 {!ccLoading && ccMessages.length === 0 && (
                   <div style={{ padding: '48px 20px', textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>
                     <Hash size={28} style={{ opacity: 0.2, display: 'block', margin: '0 auto 10px' }} />
-                    <div style={{ fontWeight: 600, marginBottom: 4 }}>Welcome to #{targetChannel.name}</div>
+                    <div style={{ fontWeight: 600, marginBottom: 4 }}>Welcome to #{targetChannel?.name}</div>
                     <div style={{ fontSize: 12 }}>
                       {isMember ? 'This is the start of the guild main hall. Type @ to address an agent.' : 'Join the guild to participate.'}
                     </div>
@@ -1052,7 +1099,7 @@ function CommandCenter({
                   <div style={{ padding: '12px 16px', background: 'rgba(138,75,255,0.08)', border: '1px solid rgba(138,75,255,0.2)', borderRadius: 8, fontSize: 13, color: 'var(--muted)', textAlign: 'center' }}>
                     Join the guild to participate in the main hall
                   </div>
-                ) : !targetChannel.buzz_channel_id ? (
+                ) : !targetChannel?.buzz_channel_id ? (
                   <div style={{ padding: '10px 14px', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)', borderRadius: 8, fontSize: 12, color: '#f59e0b', display: 'flex', alignItems: 'center', gap: 8 }}>
                     <Radio size={12} /> Channel not provisioned — messages cannot be sent yet
                   </div>
@@ -1115,7 +1162,7 @@ function CommandCenter({
                       <textarea
                         ref={inputRef}
                         rows={1}
-                        placeholder={`Message #${targetChannel.name} — @ to mention an agent`}
+                        placeholder={`Message #${targetChannel?.name} — @ to mention an agent`}
                         value={ccDraft}
                         onChange={e => {
                           setCcDraft(e.target.value)
