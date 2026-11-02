@@ -67,7 +67,31 @@ async def create_trading_space(
             (space_id, slug, name, chain, wallet_id, agent["id"], now),
         )
         await db.commit()
-    return {"id": space_id, "name": name, "chain": chain}
+
+    # Create backing chat channel for this trading space
+    _chat_slug = f"ts-{space_id[:8]}"
+    try:
+        async with get_db() as _cdb:
+            _cdb.row_factory = aiosqlite.Row
+            async with _cdb.execute("SELECT id FROM guilds WHERE slug=?", (slug,)) as _cur:
+                _guild_row = await _cur.fetchone()
+            if _guild_row:
+                _guild_id = _guild_row["id"]
+                await _cdb.execute(
+                    """INSERT OR IGNORE INTO guild_channels
+                       (name, slug, guild_id, channel_kind, collab_type, topic)
+                       VALUES (?, ?, ?, 'forum', 'trading', ?)""",
+                    (name, _chat_slug, _guild_id, f"Trading space chat: {name}"),
+                )
+                await _cdb.execute(
+                    "UPDATE trading_spaces SET chat_channel_slug=? WHERE id=?",
+                    (_chat_slug, space_id),
+                )
+                await _cdb.commit()
+    except Exception as _exc:
+        logger.warning("Failed to create backing channel for trading space: %s", _exc)
+
+    return {"id": space_id, "name": name, "chain": chain, "chat_channel_slug": _chat_slug}
 
 
 @router.get("/{space_id}")

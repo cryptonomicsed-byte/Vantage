@@ -2607,6 +2607,7 @@ async def init_workspace_tasks_db() -> None:
                 name TEXT NOT NULL,
                 chain TEXT NOT NULL DEFAULT 'solana',
                 wallet_id INTEGER,
+                chat_channel_slug TEXT,
                 created_by_agent_id INTEGER,
                 created_ts INTEGER NOT NULL DEFAULT (unixepoch())
             )
@@ -2645,6 +2646,7 @@ async def init_workspace_tasks_db() -> None:
                 name TEXT NOT NULL,
                 mcp_provider TEXT NOT NULL DEFAULT 'vantage_anvil',
                 series_id INTEGER,
+                chat_channel_slug TEXT,
                 created_by_agent_id INTEGER,
                 created_ts INTEGER NOT NULL DEFAULT (unixepoch())
             )
@@ -2677,4 +2679,10 @@ async def init_workspace_tasks_db() -> None:
                 created_ts INTEGER NOT NULL DEFAULT (unixepoch())
             )
         """)
+        # Migrate: add chat_channel_slug to trading_spaces and content_spaces
+        for _tbl in ('trading_spaces', 'content_spaces'):
+            try:
+                await db.execute(f'ALTER TABLE {_tbl} ADD COLUMN chat_channel_slug TEXT')
+            except Exception:
+                pass
         await db.commit()
