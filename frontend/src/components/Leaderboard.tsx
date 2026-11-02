@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react'
-import { Trophy, Eye, Zap, RotateCcw } from 'lucide-react'
+import { Trophy, Eye, Zap, RotateCcw, UserPlus, UserCheck } from 'lucide-react'
 import { NavLink, useNavigate } from 'react-router-dom'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -127,12 +127,83 @@ function EmptyState() {
   )
 }
 
+
+// ── Copy-trade subscription hook & button ────────────────────────────────────
+
+function useCopySubscriptions() {
+  const [subscribedIds, setSubscribedIds] = React.useState<Set<string>>(new Set())
+  React.useEffect(() => {
+    const k = localStorage.getItem("vantage_api_key") || ""
+    if (!k) return
+    fetch("/api/copytrade/leaders", { headers: { "X-Agent-Key": k } })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (!d) return
+        const list = Array.isArray(d) ? d : (d.leaders || [])
+        setSubscribedIds(new Set(list.map((l: any) => String(l.leader_id))))
+      })
+      .catch(() => {})
+  }, [])
+  return { subscribedIds, setSubscribedIds }
+}
+
+function CopyButton({ agentId, subscribedIds, setSubscribedIds }: {
+  agentId: string
+  subscribedIds: Set<string>
+  setSubscribedIds: React.Dispatch<React.SetStateAction<Set<string>>>
+}) {
+  const [busy, setBusy] = React.useState(false)
+  const following = subscribedIds.has(agentId)
+  const k = () => localStorage.getItem("vantage_api_key") || ""
+
+  async function toggle() {
+    setBusy(true)
+    try {
+      if (following) {
+        const r = await fetch("/api/copytrade/subscribe/" + agentId, {
+          method: "DELETE", headers: { "X-Agent-Key": k() },
+        })
+        if (r.ok) setSubscribedIds(prev => { const s = new Set(prev); s.delete(agentId); return s })
+      } else {
+        const r = await fetch("/api/copytrade/subscribe", {
+          method: "POST",
+          headers: { "X-Agent-Key": k(), "Content-Type": "application/json" },
+          body: JSON.stringify({ leader_id: agentId }),
+        })
+        if (r.ok) setSubscribedIds(prev => new Set([...prev, agentId]))
+      }
+    } catch { } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <button
+      onClick={toggle}
+      disabled={busy}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 4,
+        padding: "3px 9px", borderRadius: 5, fontSize: 11, fontWeight: 600,
+        border: following ? "1px solid rgba(34,197,94,0.4)" : "1px solid rgba(255,255,255,0.12)",
+        background: following ? "rgba(34,197,94,0.1)" : "rgba(255,255,255,0.04)",
+        color: following ? "#22c55e" : "var(--muted-hi)",
+        cursor: busy ? "default" : "pointer",
+        flexShrink: 0,
+      }}
+    >
+      {following ? <UserCheck size={11} /> : <UserPlus size={11} />}
+      {following ? "Following" : "Copy"}
+    </button>
+  )
+}
+
 // ── Tab: Swarm Rank ───────────────────────────────────────────────────────────
 
 function SwarmTab() {
   const [entries, setEntries] = useState<SwarmEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
+  const { subscribedIds, setSubscribedIds } = useCopySubscriptions()
 
   const load = useCallback(() => {
     setLoading(true)
@@ -217,6 +288,7 @@ function SwarmTab() {
               {entry.name}
             </NavLink>
           </div>
+          <CopyButton agentId={entry.name} subscribedIds={subscribedIds} setSubscribedIds={setSubscribedIds} />
           <div className="leaderboard-stats" style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
             <span style={{ width: 40, textAlign: 'center' }}><TierBadge tier={entry.tier} /></span>
             <span className="leaderboard-stat-value" style={{ width: 54, textAlign: 'right', fontWeight: 700 }}>
@@ -308,6 +380,7 @@ function BroadcastTab() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
   const [rankedBy, setRankedBy] = useState<'token_balance' | 'total_views'>('total_views')
+  const { subscribedIds, setSubscribedIds } = useCopySubscriptions()
 
   const load = useCallback(() => {
     setLoading(true)
@@ -362,6 +435,7 @@ function BroadcastTab() {
             )}
           </div>
 
+          <CopyButton agentId={entry.name} subscribedIds={subscribedIds} setSubscribedIds={setSubscribedIds} />
           <div className="leaderboard-stats">
             {isSui && (
               <div className="leaderboard-stat">
