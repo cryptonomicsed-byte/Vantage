@@ -591,6 +591,32 @@ async def post_channel_message(
                 **{k: v for k, v in result.items() if k != "reply"},
             }
 
+        # Route to collab-type-specific handler when the channel has a non-general type.
+        # This runs after the lounge check so lounge slash commands keep priority.
+        _slash_parts = content.strip().split(None, 1)
+        _slash_cmd   = _slash_parts[0] if _slash_parts else ""
+        _slash_args  = _slash_parts[1] if len(_slash_parts) > 1 else ""
+        _channel_collab_type = channel.get("collab_type") or "general"
+        if _channel_collab_type != "general":
+            async with get_db() as _slash_db:
+                import aiosqlite as _aiosqlite
+                _slash_db.row_factory = _aiosqlite.Row
+                _agent_dict = {
+                    "id":   principal.get("agent_id") or principal.get("id"),
+                    "name": principal.get("display_name", ""),
+                }
+                from .channel_slash import dispatch as _slash_dispatch
+                _slash_result = await _slash_dispatch(
+                    _slash_cmd, _slash_args, dict(channel), _agent_dict, _slash_db
+                )
+            if _slash_result is not None:
+                return {
+                    "guild": slug, "channel": channel_slug,
+                    "slash": True,
+                    "reply": _slash_result.get("reply", ""),
+                    "data":  _slash_result.get("data", {}),
+                }
+
     mentioned = await guild_chat.resolve_mentions(
         guild["id"], guild_chat.parse_mentions(content)
     )
