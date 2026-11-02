@@ -18,6 +18,10 @@ _WISDOM_CONFIDENCE_THRESHOLD = float(
     os.environ.get("WISDOM_CONFIDENCE_THRESHOLD", "0.5")
 )
 
+# Observe hermetic scores in the routing log; reorder only when explicitly primed.
+HERMETIC_OBSERVE = os.environ.get("HERMETIC_OBSERVE", "1") == "1"
+WISDOM_PRIMARY = os.environ.get("WISDOM_PRIMARY", "0") == "1"
+
 # Availability priority (lower index = higher priority)
 _AVAILABILITY_ORDER = ["available", "thinking", "working", "blocked", "offline"]
 
@@ -75,24 +79,88 @@ async def route_task(
     if candidates:
         try:
             agent_ids = [str(a.get("agent_id") or a.get("id", "")) for a in candidates]
-            context = f"task {task_id} requiring {required_capabilities}"
-            wisdom = await _mode_route(context, agent_ids, agent_ids)
+            # Context must carry task MEANING, not just an id. Built from the
+            # id alone the engine scored ~0.45 on every call -- permanently
+            # below the 0.5 threshold, so its vote could never win.
+            _tt, _td = "", ""
+            try:
+                import sqlite3 as _sq
+                _dbp = os.environ.get("VANTAGE_DATA_DIR", "/opt/ares/Vantage/data") + "/vantage.db"
+                _c = _sq.connect(f"file:{_dbp}?mode=ro", uri=True)
+                _row = _c.execute("SELECT title, description FROM jobs WHERE id=?", (task_id,)).fetchone()
+                _c.close()
+                if _row:
+                    _tt, _td = (_row[0] or ""), (_row[1] or "")
+            except Exception:
+                pass
+            # Task TEXT only. Concatenating the capability list here let the
+            # engine keyword-match on the caps themselves (a "Regression job"
+            # routed as mode=trade because "trade" appeared in the cap list).
+            # Caps travel in the agent_capabilities parameter, where they belong.
+            context = f"{_tt} {_td}".strip() or f"task {task_id}"
+            # CONTRACT REPAIR: capabilities and modes are different axes. The old
+            # call passed agent ids as BOTH, so the engine keyword-matched
+            # identifiers. Send what each parameter actually means.
+            caps = sorted({str(c) for c in (required_capabilities or [])})
+            modes = caps or ["code", "trade", "video", "mixed"]
+            wisdom = await _mode_route(context, caps, modes)
             confidence = float(wisdom.get("confidence", 0.0))
             recommended = wisdom.get("recommended_mode") or wisdom.get("mode")
             logger.info(
-                "task_router: wisdom decision for task %s → agent=%s confidence=%.2f reasoning=%s",
+                "task_router: wisdom decision for task %s -> mode=%s confidence=%.2f reasoning=%s",
                 task_id, recommended, confidence, wisdom.get("reasoning", ""),
             )
+
+            # OBSERVE-ONLY hermetic scoring. Computes and logs; reorders nothing
+            # unless WISDOM_PRIMARY=1. Failure here must never break routing.
+            if HERMETIC_OBSERVE:
+                try:
+                    from .mood.hermetic_scorer import score_agent
+                    _dbp = os.environ.get("VANTAGE_DATA_DIR", "/opt/ares/Vantage/data") + "/vantage.db"
+                    scores = []
+                    for a in candidates[:8]:
+                        _aid = a.get("agent_id") or a.get("id")
+                        try:
+                            r = score_agent(
+                                _dbp, _aid,
+                                intent=required_capabilities,
+                                capability=(a.get("capabilities") or caps),
+                                action_type=(recommended or None),
+                                mood=None,
+                                koodu_day=None,
+                            )
+                            scores.append((str(_aid), r["alignment"], r["coverage"]))
+                        except Exception:
+                            continue
+                    logger.info("task_router[hermetic-observe] task=%s %s",
+                                task_id, scores)
+                    if WISDOM_PRIMARY and recommended:
+                        # mode selects the eligible set; hermetic alignment orders it.
+                        sel = [s for s in scores if s[1] is not None]
+                        if sel:
+                            best = max(sel, key=lambda s: (s[1] * s[2],))
+                            ranked.sort(key=lambda a: (str(a.get("agent_id") or a.get("id")) != best[0],
+                                                       -next((s[1] for s in sel if s[0] == str(a.get("agent_id") or a.get("id"))), 0.0)))
+                            logger.info("task_router[hermetic-primary] task=%s chose=%s score=%.3f cov=%.2f",
+                                        task_id, best[0], best[1], best[2])
+                except Exception as _he:
+                    logger.debug("task_router: hermetic observe failed: %s", _he)
+
             if recommended and confidence >= _WISDOM_CONFIDENCE_THRESHOLD:
-                # Re-order ranked so the wisdom-recommended agent is first
-                primary = [a for a in ranked
-                           if str(a.get("agent_id") or a.get("id", "")) == recommended]
-                rest = [a for a in ranked
-                        if str(a.get("agent_id") or a.get("id", "")) != recommended]
-                ranked = primary + rest
-                logger.info(
-                    "task_router: wisdom primary routing accepted (confidence=%.2f)", confidence
-                )
+                # `recommended` is a MODE, not an agent id. Compare it against
+                # candidate capabilities instead of identity (the old comparison
+                # could never match and `ranked` came back unchanged).
+                def _has_mode(a):
+                    caps_a = {str(c).lower() for c in (a.get("capabilities") or [])}
+                    return recommended.lower() in caps_a
+                primary = [a for a in ranked if _has_mode(a)]
+                rest = [a for a in ranked if not _has_mode(a)]
+                if primary:
+                    ranked = primary + rest
+                    logger.info(
+                        "task_router: wisdom primary routing accepted (confidence=%.2f, mode=%s, matched=%d)",
+                        confidence, recommended, len(primary)
+                    )
         except Exception as _we:
             logger.debug("task_router: wisdom engine unavailable, using local ranking: %s", _we)
 

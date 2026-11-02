@@ -53,9 +53,16 @@ async def mode_route(context: str, agent_capabilities: list, available_modes: li
             r = await client.post(f"{WISDOM_URL}/mode-route",
                 json={"context": context, "agent_capabilities": agent_capabilities,
                       "available_modes": available_modes or ["code","trade","video","mixed"]})
-            return r.json()
+            out = r.json()
+            # CONTRACT REPAIR: the engine emits `score`; every caller reads
+            # `confidence`, which defaulted to 0.0 -> Clojure's vote was silently
+            # discarded on every routing call. Map it, and keep the raw value.
+            if "confidence" not in out:
+                out["confidence"] = float(out.get("score", 0.0) or 0.0)
+            out.setdefault("ok", r.status_code == 200)
+            return out
     except Exception:
-        return {"ok": False, "recommended_mode": "mixed"}
+        return {"ok": False, "recommended_mode": "mixed", "confidence": 0.0}
 
 async def filter_capabilities(requirements: list, candidates: list) -> list:
     try:
