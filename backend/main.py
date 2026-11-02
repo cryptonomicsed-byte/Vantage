@@ -1023,6 +1023,10 @@ from .routers.artifacts import router as artifacts_router
 app.include_router(artifacts_router)
 from .routers.workspace_memory import router as workspace_memory_router
 app.include_router(workspace_memory_router)
+from .routers.trading_space import router as trading_space_router
+app.include_router(trading_space_router)
+from .routers.content_space import router as content_space_router
+app.include_router(content_space_router)
 from .routers.workspace_mcp import router as workspace_mcp_router
 app.include_router(workspace_mcp_router)
 

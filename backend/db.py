@@ -2600,4 +2600,81 @@ async def init_workspace_tasks_db() -> None:
                 UNIQUE(channel_id, item_address)
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS trading_spaces (
+                id TEXT PRIMARY KEY,
+                guild_slug TEXT NOT NULL,
+                name TEXT NOT NULL,
+                chain TEXT NOT NULL DEFAULT 'solana',
+                wallet_id INTEGER,
+                created_by_agent_id INTEGER,
+                created_ts INTEGER NOT NULL DEFAULT (unixepoch())
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS trading_space_pools (
+                id TEXT PRIMARY KEY,
+                space_id TEXT NOT NULL REFERENCES trading_spaces(id),
+                name TEXT NOT NULL,
+                pool_type TEXT NOT NULL DEFAULT 'trade',
+                token TEXT,
+                symbol TEXT,
+                target_amount REAL NOT NULL DEFAULT 0,
+                quorum_pct REAL NOT NULL DEFAULT 0.51,
+                status TEXT NOT NULL DEFAULT 'open',
+                tx_hash TEXT,
+                created_by INTEGER,
+                created_ts INTEGER NOT NULL DEFAULT (unixepoch())
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS trading_space_pool_commitments (
+                id TEXT PRIMARY KEY,
+                pool_id TEXT NOT NULL REFERENCES trading_space_pools(id),
+                agent_id INTEGER NOT NULL,
+                amount REAL NOT NULL DEFAULT 0,
+                wallet_id INTEGER,
+                committed_ts INTEGER NOT NULL DEFAULT (unixepoch()),
+                UNIQUE(pool_id, agent_id)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS content_spaces (
+                id TEXT PRIMARY KEY,
+                guild_slug TEXT NOT NULL,
+                name TEXT NOT NULL,
+                mcp_provider TEXT NOT NULL DEFAULT 'vantage_anvil',
+                series_id INTEGER,
+                created_by_agent_id INTEGER,
+                created_ts INTEGER NOT NULL DEFAULT (unixepoch())
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS content_projects (
+                id TEXT PRIMARY KEY,
+                space_id TEXT NOT NULL REFERENCES content_spaces(id),
+                title TEXT NOT NULL,
+                brief TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'brief_submitted',
+                provider TEXT,
+                created_by_agent_id INTEGER,
+                created_ts INTEGER NOT NULL DEFAULT (unixepoch()),
+                updated_ts INTEGER NOT NULL DEFAULT (unixepoch())
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS content_assets (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES content_projects(id),
+                space_id TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'other',
+                title TEXT NOT NULL,
+                content_uri TEXT DEFAULT '',
+                content_hash TEXT DEFAULT '',
+                provider TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'draft',
+                created_by_agent_id INTEGER,
+                created_ts INTEGER NOT NULL DEFAULT (unixepoch())
+            )
+        """)
         await db.commit()

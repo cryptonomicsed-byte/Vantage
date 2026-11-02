@@ -1391,6 +1391,42 @@ async def list_channel_commands(
     }
 
 
+@router.get("/spaces/{space_type}/{space_id}/commands")
+async def space_slash_commands(
+    space_type: str,
+    space_id: str,
+    request: Request,
+    principal: Optional[dict] = Depends(optional_principal),
+):
+    """Return filtered slash command palette for a space.
+
+    space_type: 'workspace' | 'trading' | 'content'
+    Keeps the existing instance-wide block list (no custody/wallet/order commands via slash).
+    """
+    all_commands = guild_chat.build_command_palette(request.app)
+
+    # Blocked categories -- never in slash regardless of space type
+    BLOCKED_CATEGORIES = {"custody", "wallet", "identity", "order", "trading-execute", "alpha-share"}
+
+    SPACE_ALLOWED_CATEGORIES = {
+        "workspace": {"code", "workspace", "memory", "file", "repo", "task"},
+        "trading":   {"intel", "trading", "market", "signals", "research"},
+        "content":   {"publish", "content", "media", "audio", "video", "production"},
+    }
+
+    allowed = SPACE_ALLOWED_CATEGORIES.get(space_type, set())
+
+    filtered = []
+    for cmd in all_commands:
+        cat = (cmd.get("category") or "").lower()
+        if cat in BLOCKED_CATEGORIES:
+            continue
+        if cat in allowed or not allowed:
+            filtered.append(cmd)
+
+    return {"commands": filtered, "space_type": space_type}
+
+
 @router.patch("/{slug}/channels/{channel_slug}/mcp")
 async def set_channel_mcp(
     slug: str,
