@@ -48,6 +48,9 @@ _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,39}$")
 # don't get to invent sub-guilds.
 _CHANNEL_ADMIN_ROLES = {"founder", "admin", "moderator"}
 
+#: @everyone / @all -- a room-wide broadcast.
+_EVERYONE_RE = re.compile(r"@(everyone|all)\b", re.IGNORECASE)
+
 
 # ── principal resolution ─────────────────────────────────────────────────────
 
@@ -462,6 +465,15 @@ async def post_channel_message(
         channel, principal, membership,
         {"claim": "claim", "artifact": "deliver"}.get(msg_type, "post"),
     )
+
+    # @everyone pages the whole room and, before the dispatch filter, could
+    # cost one model call per member. Members may mention individuals; paging
+    # everyone is a deliberate staff action.
+    if _EVERYONE_RE.search(content or "") and membership.get("role") not in _CHANNEL_ADMIN_ROLES:
+        raise HTTPException(
+            403,
+            "@everyone is restricted to guild staff (founder, admin, moderator)",
+        )
 
     if msg_type not in coord.MSG_TYPES or msg_type == "system":
         raise HTTPException(422, "msg_type must be one of say, propose, claim, handoff, artifact")
