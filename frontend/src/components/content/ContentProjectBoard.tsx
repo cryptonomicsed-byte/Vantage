@@ -107,18 +107,18 @@ export default function ContentProjectBoard({ slug, spaceId, authHeaders }: Prop
     <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: 16, height: '100%', boxSizing: 'border-box', overflowY: 'auto' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>Content Projects</div>
-        <button className=btn btn-sm onClick={() => setShowCreate(!showCreate)} style={{ fontSize: 11 }}>{showCreate ? 'Cancel' : '+ New Project'}</button>
+        <button className="btn btn-sm" onClick={() => setShowCreate(!showCreate)} style={{ fontSize: 11 }}>{showCreate ? 'Cancel' : '+ New Project'}</button>
       </div>
 
       {showCreate && (
         <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: 10, padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>New Project</div>
-          <input value={newTitle} onChange={e => setNewTitle(e.target.value)} placeholder=Project title style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text)', fontSize: 12, outline: 'none' }} />
-          <textarea value={newBrief} onChange={e => setNewBrief(e.target.value)} placeholder=Brief / description rows={3} style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text)', fontSize: 12, outline: 'none', resize: 'vertical' as const }} />
+          <input value={newTitle} onChange={e => setNewTitle(e.target.value)} placeholder="Project title" style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text)', fontSize: 12, outline: 'none' }} />
+          <textarea value={newBrief} onChange={e => setNewBrief(e.target.value)} placeholder="Brief / description" rows={3} style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text)', fontSize: 12, outline: 'none', resize: 'vertical' as const }} />
           <select value={newProvider} onChange={e => setNewProvider(e.target.value)} style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text)', fontSize: 12, outline: 'none' }}>
             {PROVIDERS.map(p => <option key={p} value={p}>{p}</option>)}
           </select>
-          <button className=btn btn-sm onClick={createProject} disabled={creating || !newTitle.trim()} style={{ alignSelf: 'flex-start', fontSize: 11 }}>{creating ? 'Creating…' : 'Create Project'}</button>
+          <button className="btn btn-sm" onClick={createProject} disabled={creating || !newTitle.trim()} style={{ alignSelf: 'flex-start', fontSize: 11 }}>{creating ? 'Creating…' : 'Create Project'}</button>
         </div>
       )}
 
@@ -141,7 +141,7 @@ export default function ContentProjectBoard({ slug, spaceId, authHeaders }: Prop
                     {proj.provider && <span style={{ fontSize: 10, color: 'var(--muted)' }}>{proj.provider}</span>}
                   </div>
                   {hasNext && (
-                    <button className=btn btn-sm onClick={() => advanceProject(proj.id, proj.status)} disabled={advancing === proj.id} style={{ fontSize: 10, width: '100%' }}>
+                    <button className="btn btn-sm" onClick={() => advanceProject(proj.id, proj.status)} disabled={advancing === proj.id} style={{ fontSize: 10, width: '100%' }}>
                       {advancing === proj.id ? '…' : 'Move to ' + stageLabel(nextStage(proj.status) as string)}
                     </button>
                   )}

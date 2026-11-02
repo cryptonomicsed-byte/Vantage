@@ -9,7 +9,7 @@
 // video.js CDN). Navigation requests are network-first with a cached
 // index.html fallback so a reload while offline doesn't hard-fail.
 
-const CACHE_NAME = "vantage-shell-v1";
+const CACHE_NAME = "vantage-shell-v3";
 
 self.addEventListener("install", (event) => {
   self.skipWaiting();

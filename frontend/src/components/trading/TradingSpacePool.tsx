@@ -87,25 +87,25 @@ export default function TradingSpacePool({ slug, spaceId, authHeaders }: Props) 
     <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: 16, height: '100%', boxSizing: 'border-box', overflowY: 'auto' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>Liquidity Pools</div>
-        <button className=btn btn-sm onClick={() => setShowCreate(!showCreate)} style={{ fontSize: 11 }}>{showCreate ? 'Cancel' : '+ New Pool'}</button>
+        <button className="btn btn-sm" onClick={() => setShowCreate(!showCreate)} style={{ fontSize: 11 }}>{showCreate ? 'Cancel' : '+ New Pool'}</button>
       </div>
 
       {showCreate && (
         <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: 10, padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>New Pool</div>
-          <input value={newName} onChange={e => setNewName(e.target.value)} placeholder=Pool name style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text)', fontSize: 12, outline: 'none' }} />
+          <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="Pool name" style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text)', fontSize: 12, outline: 'none' }} />
           <div style={{ display: 'flex', gap: 10 }}>
-            <input value={newToken} onChange={e => setNewToken(e.target.value)} placeholder=Token address style={{ flex: 2, background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text)', fontSize: 12, outline: 'none' }} />
-            <input value={newSymbol} onChange={e => setNewSymbol(e.target.value)} placeholder=Symbol style={{ flex: 1, background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text)', fontSize: 12, outline: 'none' }} />
+            <input value={newToken} onChange={e => setNewToken(e.target.value)} placeholder="Token address" style={{ flex: 2, background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text)', fontSize: 12, outline: 'none' }} />
+            <input value={newSymbol} onChange={e => setNewSymbol(e.target.value)} placeholder="Symbol" style={{ flex: 1, background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text)', fontSize: 12, outline: 'none' }} />
           </div>
           <div style={{ display: 'flex', gap: 10 }}>
-            <input value={newTarget} onChange={e => setNewTarget(e.target.value)} placeholder=Target amount type=number style={{ flex: 1, background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text)', fontSize: 12, outline: 'none' }} />
+            <input value={newTarget} onChange={e => setNewTarget(e.target.value)} placeholder="Target amount" type="number" style={{ flex: 1, background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text)', fontSize: 12, outline: 'none' }} />
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span style={{ fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap' as const }}>Quorum %:</span>
-              <input type=number min={1} max={100} value={newQuorum} onChange={e => setNewQuorum(Number(e.target.value))} style={{ width: 70, background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 8px', color: 'var(--text)', fontSize: 12, outline: 'none' }} />
+              <input type="number" min={1} max={100} value={newQuorum} onChange={e => setNewQuorum(Number(e.target.value))} style={{ width: 70, background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 8px', color: 'var(--text)', fontSize: 12, outline: 'none' }} />
             </div>
           </div>
-          <button className=btn btn-sm onClick={createPool} disabled={creating || !newName.trim() || !newToken.trim()} style={{ alignSelf: 'flex-start', fontSize: 11 }}>{creating ? 'Creating…' : 'Create Pool'}</button>
+          <button className="btn btn-sm" onClick={createPool} disabled={creating || !newName.trim() || !newToken.trim()} style={{ alignSelf: 'flex-start', fontSize: 11 }}>{creating ? 'Creating…' : 'Create Pool'}</button>
         </div>
       )}
 
@@ -134,7 +134,7 @@ export default function TradingSpacePool({ slug, spaceId, authHeaders }: Props) 
 
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 10 }}>
                 {[
-                  { label: 'Target', value: pool.target_amount ? pool.target_amount.toLocaleString() : '—' },
+                  { label: 'Target', value: pool.target_amount ? pool.target_amount.toLocaleString() : '\u2014' },
                   { label: 'Committed', value: pool.total_committed ? pool.total_committed.toLocaleString() : '0' },
                   { label: 'Participants', value: String(pool.committed_count || 0) },
                 ].map(s => (
@@ -160,12 +160,12 @@ export default function TradingSpacePool({ slug, spaceId, authHeaders }: Props) 
               {pool.status !== 'closed' && pool.status !== 'executing' && (
                 commitPoolId === pool.id ? (
                   <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                    <input value={commitAmount} onChange={e => setCommitAmount(e.target.value)} placeholder=Amount type=number style={{ flex: 1, background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text)', fontSize: 12, outline: 'none' }} />
-                    <button className=btn btn-sm onClick={() => commitToPool(pool.id)} disabled={committing || !commitAmount} style={{ fontSize: 11 }}>{committing ? '…' : 'Commit'}</button>
-                    <button className=btn btn-sm onClick={() => setCommitPoolId(null)} style={{ fontSize: 11 }}>Cancel</button>
+                    <input value={commitAmount} onChange={e => setCommitAmount(e.target.value)} placeholder="Amount" type="number" style={{ flex: 1, background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text)', fontSize: 12, outline: 'none' }} />
+                    <button className="btn btn-sm" onClick={() => commitToPool(pool.id)} disabled={committing || !commitAmount} style={{ fontSize: 11 }}>{committing ? '…' : 'Commit'}</button>
+                    <button className="btn btn-sm" onClick={() => setCommitPoolId(null)} style={{ fontSize: 11 }}>Cancel</button>
                   </div>
                 ) : (
-                  <button className=btn btn-sm onClick={() => setCommitPoolId(pool.id)} style={{ fontSize: 11, background: 'rgba(0,200,180,0.08)', border: '1px solid rgba(0,200,180,0.25)', color: 'var(--cyan)' }}>
+                  <button className="btn btn-sm" onClick={() => setCommitPoolId(pool.id)} style={{ fontSize: 11, background: 'rgba(0,200,180,0.08)', border: '1px solid rgba(0,200,180,0.25)', color: 'var(--cyan)' }}>
                     + Commit Capital
                   </button>
                 )

@@ -142,7 +142,7 @@ export default function ContentSpaceTasks({ slug, spaceId, authHeaders }: Props)
         <div style={{ display: 'flex', gap: 8, fontSize: 10, color: 'rgba(255,255,255,0.3)', flexWrap: 'wrap' as const, marginBottom: children ? 6 : 0 }}>
           <span>{ageLabel(task.created_at)}</span>
           {task.project_id && <span style={{ color: 'var(--cyan)' }}>{getProjectName(task.project_id)}</span>}
-          {task.claimed_by_name && <span style={{ color: '#a78bfa' }}>→ {task.claimed_by_name}</span>}
+          {task.claimed_by_name && <span style={{ color: '#a78bfa' }}>to {task.claimed_by_name}</span>}
         </div>
         {children && <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const }}>{children}</div>}
       </div>
@@ -155,23 +155,23 @@ export default function ContentSpaceTasks({ slug, spaceId, authHeaders }: Props)
     <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: 16, height: '100%', boxSizing: 'border-box', overflowY: 'auto' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>Content Tasks</div>
-        <button className=btn btn-sm onClick={() => setShowCreate(!showCreate)} style={{ fontSize: 11 }}>{showCreate ? 'Cancel' : '+ New Task'}</button>
+        <button className="btn btn-sm" onClick={() => setShowCreate(!showCreate)} style={{ fontSize: 11 }}>{showCreate ? 'Cancel' : '+ New Task'}</button>
       </div>
 
       {showCreate && (
         <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: 10, padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>New Task</div>
-          <input value={newTitle} onChange={e => setNewTitle(e.target.value)} placeholder=Task title style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text)', fontSize: 12, outline: 'none' }} />
-          <textarea value={newDesc} onChange={e => setNewDesc(e.target.value)} placeholder=Description rows={2} style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text)', fontSize: 12, outline: 'none', resize: 'vertical' as const }} />
+          <input value={newTitle} onChange={e => setNewTitle(e.target.value)} placeholder="Task title" style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text)', fontSize: 12, outline: 'none' }} />
+          <textarea value={newDesc} onChange={e => setNewDesc(e.target.value)} placeholder="Description" rows={2} style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text)', fontSize: 12, outline: 'none', resize: 'vertical' as const }} />
           <div style={{ display: 'flex', gap: 10 }}>
-            <input value={newKind} onChange={e => setNewKind(e.target.value)} placeholder=Kind tag style={{ flex: 1, background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text)', fontSize: 12, outline: 'none' }} />
+            <input value={newKind} onChange={e => setNewKind(e.target.value)} placeholder="Kind tag" style={{ flex: 1, background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text)', fontSize: 12, outline: 'none' }} />
             <select value={newProjectId} onChange={e => setNewProjectId(e.target.value)} style={{ flex: 1, background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 10px', color: 'var(--text)', fontSize: 12, outline: 'none' }}>
-              <option value=>No project</option>
+              <option value="">No project</option>
               {projects.map(p => <option key={p.id} value={p.id}>{p.title}</option>)}
             </select>
-            <input type=number min={1} max={100} value={newPriority} onChange={e => setNewPriority(Number(e.target.value))} style={{ width: 70, background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 8px', color: 'var(--text)', fontSize: 12, outline: 'none' }} />
+            <input type="number" min={1} max={100} value={newPriority} onChange={e => setNewPriority(Number(e.target.value))} style={{ width: 70, background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '7px 8px', color: 'var(--text)', fontSize: 12, outline: 'none' }} />
           </div>
-          <button className=btn btn-sm onClick={createTask} disabled={creating || !newTitle.trim()} style={{ alignSelf: 'flex-start', fontSize: 11 }}>{creating ? 'Creating…' : 'Create Task'}</button>
+          <button className="btn btn-sm" onClick={createTask} disabled={creating || !newTitle.trim()} style={{ alignSelf: 'flex-start', fontSize: 11 }}>{creating ? 'Creating…' : 'Create Task'}</button>
         </div>
       )}
 
@@ -184,28 +184,28 @@ export default function ContentSpaceTasks({ slug, spaceId, authHeaders }: Props)
             </div>
             {(tasksByStatus[col.id] || []).map(t => (
               <TaskCard key={t.id} task={t}>
-                {idx === 0 && <button className=btn btn-sm onClick={() => claimTask(t.id)} disabled={actioning === t.id} style={{ fontSize: 10 }}>{actioning === t.id ? '…' : 'Claim'}</button>}
+                {idx === 0 && <button className="btn btn-sm" onClick={() => claimTask(t.id)} disabled={actioning === t.id} style={{ fontSize: 10 }}>{actioning === t.id ? '…' : 'Claim'}</button>}
                 {idx === 1 && (submitTaskId === t.id ? (
                   <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    <textarea value={submitContent} onChange={e => setSubmitContent(e.target.value)} placeholder=Submission notes… rows={2} style={{ width: '100%', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '6px 8px', color: 'var(--text)', fontSize: 11, outline: 'none', resize: 'vertical' as const, boxSizing: 'border-box' }} />
+                    <textarea value={submitContent} onChange={e => setSubmitContent(e.target.value)} placeholder="Submission notes…" rows={2} style={{ width: '100%', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '6px 8px', color: 'var(--text)', fontSize: 11, outline: 'none', resize: 'vertical' as const, boxSizing: 'border-box' }} />
                     <div style={{ display: 'flex', gap: 6 }}>
-                      <button className=btn btn-sm onClick={() => submitTask(t.id)} disabled={submitting} style={{ fontSize: 10 }}>{submitting ? '…' : 'Submit'}</button>
-                      <button className=btn btn-sm onClick={() => setSubmitTaskId(null)} style={{ fontSize: 10 }}>Cancel</button>
+                      <button className="btn btn-sm" onClick={() => submitTask(t.id)} disabled={submitting} style={{ fontSize: 10 }}>{submitting ? '…' : 'Submit'}</button>
+                      <button className="btn btn-sm" onClick={() => setSubmitTaskId(null)} style={{ fontSize: 10 }}>Cancel</button>
                     </div>
                   </div>
-                ) : <button className=btn btn-sm onClick={() => setSubmitTaskId(t.id)} style={{ fontSize: 10 }}>Submit</button>)}
+                ) : <button className="btn btn-sm" onClick={() => setSubmitTaskId(t.id)} style={{ fontSize: 10 }}>Submit</button>)}
                 {idx === 2 && (
                   <>
-                    <button className=btn btn-sm onClick={() => acceptTask(t.id)} disabled={actioning === t.id} style={{ fontSize: 10, color: '#3cc878' }}>{actioning === t.id ? '…' : 'Accept'}</button>
+                    <button className="btn btn-sm" onClick={() => acceptTask(t.id)} disabled={actioning === t.id} style={{ fontSize: 10, color: '#3cc878' }}>{actioning === t.id ? '…' : 'Accept'}</button>
                     {rejectTaskId === t.id ? (
                       <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
-                        <input value={rejectNote} onChange={e => setRejectNote(e.target.value)} placeholder=Rejection note… style={{ width: '100%', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '5px 8px', color: 'var(--text)', fontSize: 11, outline: 'none', boxSizing: 'border-box' }} />
+                        <input value={rejectNote} onChange={e => setRejectNote(e.target.value)} placeholder="Rejection note…" style={{ width: '100%', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 6, padding: '5px 8px', color: 'var(--text)', fontSize: 11, outline: 'none', boxSizing: 'border-box' }} />
                         <div style={{ display: 'flex', gap: 6 }}>
-                          <button className=btn btn-sm onClick={() => rejectTask(t.id)} disabled={actioning === t.id} style={{ fontSize: 10, color: '#ef4444' }}>Confirm</button>
-                          <button className=btn btn-sm onClick={() => setRejectTaskId(null)} style={{ fontSize: 10 }}>Cancel</button>
+                          <button className="btn btn-sm" onClick={() => rejectTask(t.id)} disabled={actioning === t.id} style={{ fontSize: 10, color: '#ef4444' }}>Confirm</button>
+                          <button className="btn btn-sm" onClick={() => setRejectTaskId(null)} style={{ fontSize: 10 }}>Cancel</button>
                         </div>
                       </div>
-                    ) : <button className=btn btn-sm onClick={() => setRejectTaskId(t.id)} style={{ fontSize: 10, color: '#ef4444' }}>Reject</button>}
+                    ) : <button className="btn btn-sm" onClick={() => setRejectTaskId(t.id)} style={{ fontSize: 10, color: '#ef4444' }}>Reject</button>}
                   </>
                 )}
               </TaskCard>
