@@ -274,28 +274,64 @@ class GoRelayTransport:
 
     async def publish(self, *, principal: dict, channel: dict, guild_slug: str,
                       content: str, msg_type: str = "say", **kwargs) -> dict:
+        """Sign -> publish -> index -> return the event. Same invariant as the
+        relay transport; Go is a delivery hop only.
+
+        Previously this shipped the raw principal/channel dicts to Go and
+        returned whatever Go replied. Go has no signing key and no database,
+        so nothing was ever signed and nothing was ever indexed -- a message
+        that "succeeded" left no row, and callers that read event["id"] died
+        with KeyError. Keys stay in Python; Go moves bytes.
+        """
         import httpx
         import json as _json
-        event_payload = _json.dumps({
-            "principal": principal,
-            "channel": channel,
-            "guild_slug": guild_slug,
-            "content": content,
-            "msg_type": msg_type,
-        })
+        from . import coordination as coord
+        from .nostr.client import build_event
+
+        if msg_type not in coord.MSG_TYPES or msg_type in ("system", "blocked"):
+            raise ValueError(f"invalid message type: {msg_type}")
+        content = (content or "").strip()
+        if not content:
+            raise ValueError("message content is empty")
+        if not channel.get("buzz_channel_id"):
+            raise coord.RelayUnavailable("channel is not provisioned on the relay yet")
+
+        pk = await coord.signing_key_for_principal(principal)
+        if pk is None:
+            raise ValueError(
+                "this principal holds its own key - publish directly to the relay instead"
+            )
+
+        tags = coord.build_message_tags(
+            buzz_channel_id=channel["buzz_channel_id"], guild_slug=guild_slug,
+            channel_slug=channel["slug"], msg_type=msg_type,
+            root_event_id=kwargs.get("root_event_id"),
+            reply_to_event_id=kwargs.get("reply_to_event_id"),
+            addressed_to=kwargs.get("addressed_to"),
+            work_ref=kwargs.get("work_ref"),
+            extra_tags=kwargs.get("extra_tags"),
+        )
+        event = build_event(pk, coord.KIND_MESSAGE, content[:coord.MAX_CONTENT_CHARS], tags)
+
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 r = await client.post(
                     f"{self.GO_URL}/publish",
-                    json={"event_json": event_payload, "relay_url": ""},
+                    json={"event_json": _json.dumps(event), "relay_url": ""},
                 )
                 if r.status_code == 200:
-                    return r.json()
+                    # Index only after the log accepted it -- the same ordering
+                    # publish_message enforces. Never index optimistically.
+                    await coord.index_event(event, channel=channel)
+                    return event
+                logger.warning(
+                    "[GoRelayTransport] Go returned %s; falling back to RelayTransport",
+                    r.status_code,
+                )
         except (httpx.ConnectError, httpx.TimeoutException) as e:
             logger.warning(
                 "[GoRelayTransport] Go service unreachable (%s), falling back to RelayTransport", e
             )
-        # Fallback to Python relay transport
         fallback = RelayTransport()
         return await fallback.publish(
             principal=principal, channel=channel, guild_slug=guild_slug,
