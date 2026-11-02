@@ -38,6 +38,9 @@ router = APIRouter(prefix="/api/code", tags=["code"])
 
 GITEA_URL = settings.GITEA_URL or os.environ.get("GITEA_URL", "http://localhost:3001")
 GITEA_API = f"{GITEA_URL}/api/v1"
+
+# Gitea is gone from this stack; every repo call now goes to GitHub.
+from .. import repo_host  # noqa: E402
 # No hardcoded fallback — must come from VANTAGE_GITEA_TOKEN or GITEA_TOKEN env vars.
 # A previous version of this file shipped a live-looking default token here;
 # treat that value as compromised and rotate it on the Gitea instance.
@@ -162,7 +165,7 @@ async def code_overview(agent: dict = Depends(get_agent)):
     repos = []
     async with httpx.AsyncClient(timeout=10) as cl:
         try:
-            r = await cl.get(f"{GITEA_API}/repos/search?limit=30", headers=_headers)
+            r = await repo_host.get(f"repos/search?limit=30", headers=_headers)
             repo_data = r.json().get("data", []) if r.status_code == 200 else []
         except:
             repo_data = []
@@ -199,7 +202,7 @@ async def code_overview(agent: dict = Depends(get_agent)):
 
             # Branches
             try:
-                br = await cl.get(f"{GITEA_API}/repos/{full_name}/branches", headers=_headers)
+                br = await repo_host.get(f"repos/{full_name}/branches", headers=_headers)
                 if br.status_code == 200:
                     info["branches"] = [b.get("name") for b in br.json()[:8]]
             except: pass
@@ -207,7 +210,7 @@ async def code_overview(agent: dict = Depends(get_agent)):
             # Commits
             try:
                 branch = info["default_branch"]
-                cm = await cl.get(f"{GITEA_API}/repos/{full_name}/commits?limit=3&sha={branch}", headers=_headers)
+                cm = await repo_host.get(f"repos/{full_name}/commits?limit=3&sha={branch}", headers=_headers)
                 if cm.status_code == 200:
                     for c in cm.json()[:3]:
                         commit_data = c.get("commit", {})
@@ -221,7 +224,7 @@ async def code_overview(agent: dict = Depends(get_agent)):
 
             # Strix (security scan) webhooks
             try:
-                hooks = await cl.get(f"{GITEA_API}/repos/{full_name}/hooks", headers=_headers)
+                hooks = await repo_host.get(f"repos/{full_name}/hooks", headers=_headers)
                 if hooks.status_code == 200:
                     for h in hooks.json():
                         config = h.get("config", {})
@@ -257,7 +260,7 @@ async def repo_detail(owner: str, name: str, agent: dict = Depends(get_agent)):
     full_name = f"{owner}/{name}"
     async with httpx.AsyncClient(timeout=10) as cl:
         try:
-            r = await cl.get(f"{GITEA_API}/repos/{full_name}", headers=_headers)
+            r = await repo_host.get(f"repos/{full_name}", headers=_headers)
             if r.status_code == 200:
                 return r.json()
         except: pass
@@ -291,7 +294,7 @@ async def repo_detail_full(owner: str, name: str, agent: dict = Depends(get_agen
     async with httpx.AsyncClient(timeout=15) as cl:
         # Gitea repo info
         try:
-            r = await cl.get(f"{GITEA_API}/repos/{full_name}", headers=_headers)
+            r = await repo_host.get(f"repos/{full_name}", headers=_headers)
             if r.status_code == 200:
                 info = r.json()
                 result.update({
@@ -312,14 +315,14 @@ async def repo_detail_full(owner: str, name: str, agent: dict = Depends(get_agen
 
         # Branches
         try:
-            br = await cl.get(f"{GITEA_API}/repos/{full_name}/branches", headers=_headers)
+            br = await repo_host.get(f"repos/{full_name}/branches", headers=_headers)
             if br.status_code == 200:
                 result["branches"] = [b.get("name") for b in br.json()[:10]]
         except: pass
 
         # Collaborators (teams with access)
         try:
-            col = await cl.get(f"{GITEA_API}/repos/{full_name}/collaborators", headers=_headers)
+            col = await repo_host.get(f"repos/{full_name}/collaborators", headers=_headers)
             if col.status_code == 200:
                 result["collaborators"] = [c.get("login", c.get("username", "?")) for c in col.json()[:20]]
         except: pass
@@ -327,7 +330,7 @@ async def repo_detail_full(owner: str, name: str, agent: dict = Depends(get_agen
         # Commits
         try:
             branch = result["default_branch"]
-            cm = await cl.get(f"{GITEA_API}/repos/{full_name}/commits?limit=5&sha={branch}", headers=_headers)
+            cm = await repo_host.get(f"repos/{full_name}/commits?limit=5&sha={branch}", headers=_headers)
             if cm.status_code == 200:
                 for c in cm.json()[:5]:
                     commit_data = c.get("commit", {})
@@ -341,7 +344,7 @@ async def repo_detail_full(owner: str, name: str, agent: dict = Depends(get_agen
 
         # PRs
         try:
-            pr = await cl.get(f"{GITEA_API}/repos/{full_name}/pulls?state=open&limit=5", headers=_headers)
+            pr = await repo_host.get(f"repos/{full_name}/pulls?state=open&limit=5", headers=_headers)
             if pr.status_code == 200:
                 for p in pr.json()[:5]:
                     result["open_prs"].append({
@@ -354,7 +357,7 @@ async def repo_detail_full(owner: str, name: str, agent: dict = Depends(get_agen
 
         # Strix (security scan) webhooks
         try:
-            hooks = await cl.get(f"{GITEA_API}/repos/{full_name}/hooks", headers=_headers)
+            hooks = await repo_host.get(f"repos/{full_name}/hooks", headers=_headers)
             if hooks.status_code == 200:
                 for h in hooks.json():
                     config = h.get("config", {})
@@ -382,7 +385,7 @@ async def create_repo(req: CreateRepoRequest, agent: dict = Depends(get_agent)):
     }
     async with httpx.AsyncClient(timeout=10) as cl:
         try:
-            r = await cl.post(f"{GITEA_API}/user/repos", json=payload, headers=_headers)
+            r = await repo_host.post(f"user/repos", json=payload, headers=_headers)
             if r.status_code in (200, 201):
                 data = r.json()
                 _log_activity("repo_created", f"ares-bot/{req.name}", req.description or "", agent=agent["name"])
@@ -394,7 +397,7 @@ async def create_repo(req: CreateRepoRequest, agent: dict = Depends(get_agent)):
                     "config": {"url": "http://localhost:9876/", "content_type": "json", "secret": "vantage-stix-webhook-2026"},
                     "events": ["push"], "active": True,
                 }
-                await cl.post(f"{GITEA_API}/repos/ares-bot/{req.name}/hooks", json=webhook_payload, headers=_headers)
+                await repo_host.post(f"repos/ares-bot/{req.name}/hooks", json=webhook_payload, headers=_headers)
 
                 import asyncio as _asyncio
                 from ..buzz_git import announce_repo
@@ -967,7 +970,7 @@ async def create_pr(owner: str, name: str, req: CreatePRRequest, agent: dict = D
     payload = {"title": req.title, "body": req.body, "head": req.head, "base": req.base}
     async with httpx.AsyncClient(timeout=10) as cl:
         try:
-            r = await cl.post(f"{GITEA_API}/repos/{full_name}/pulls", json=payload, headers=_headers)
+            r = await repo_host.post(f"repos/{full_name}/pulls", json=payload, headers=_headers)
             if r.status_code in (200, 201):
                 data = r.json()
                 note = req.title if not (req.force and latest_scan) else f"{req.title} [scan gate forced]"
@@ -1027,7 +1030,7 @@ async def search_code(req: SearchRequest, agent: dict = Depends(get_agent)):
         # Get all repo names
         async with httpx.AsyncClient(timeout=10) as cl:
             try:
-                r = await cl.get(f"{GITEA_API}/repos/search?limit=20", headers=_headers)
+                r = await repo_host.get(f"repos/search?limit=20", headers=_headers)
                 if r.status_code == 200:
                     repos_to_search = [repo["full_name"] for repo in r.json().get("data", [])]
             except: pass
