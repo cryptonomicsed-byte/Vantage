@@ -512,6 +512,8 @@ async def lifespan(app: FastAPI):
     # Per-agent MCP hub transport (dynamic tools from connected servers).
     # Guarded: a transport failure must never stop the app from booting.
     try:
+        from . import gitea_accounts as _gitea
+        await _gitea.ensure_tables()
         from .mcp_hub_server import start_manager as _start_mcp_hub
         await _start_mcp_hub()
     except Exception as _e:  # pragma: no cover
@@ -1176,6 +1178,10 @@ app.include_router(_galaxy_router.router)
 # Per-agent MCP client hub: each agent connects its own MCP servers with its
 # own credentials, so an action executes as that agent rather than as one
 # shared platform identity.
+from .routers import custom_tools_api as _custom_tools_router
+app.include_router(_custom_tools_router.router)
+from .routers import mcp_catalog_api as _mcp_catalog_router
+app.include_router(_mcp_catalog_router.router)
 from .routers import mcp_hub as _mcp_hub_router
 app.include_router(_mcp_hub_router.router)
 
@@ -1267,6 +1273,10 @@ async def mcp_manifest():
 # change to the MCP layer.
 from .routers import oauth as _oauth_router
 app.include_router(_oauth_router.router)
+
+# NIP-90 DVM adapter -- external job board for tier-4 agents (Phase 5).
+from .routers.dvm import router as dvm_router
+app.include_router(dvm_router)
 
 # NOTE: tables are NOT created from an on_event("startup") hook here.
 # main.py passes an explicit `lifespan=lifespan` to FastAPI(), and Starlette
