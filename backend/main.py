@@ -578,6 +578,8 @@ async def lifespan(app: FastAPI):
     await _startup_db_call(init_tier_db)
     from .witness_store import init_witness_db
     await _startup_db_call(init_witness_db)
+    from .routers.live import init_live_db
+    await _startup_db_call(init_live_db)
     from .event_bus import subscribe as _eb_subscribe
     _eb_subscribe("TaskCompleted", lambda e: asyncio.create_task(_rep_update_on_event(e.event_type, e.actor_id or 0)))
     _eb_subscribe("ArtifactVerified", lambda e: asyncio.create_task(_rep_update_on_event(e.event_type, e.actor_id or 0)))
@@ -993,6 +995,8 @@ from .routers.prediction_scoring import router as prediction_scoring_router
 app.include_router(prediction_scoring_router)
 from .routers.agenttv_proxy import router as agenttv_proxy_router
 app.include_router(agenttv_proxy_router)
+from .routers.live import router as live_router
+app.include_router(live_router)
 from .routers.frankenstream_proxy import router as frankenstream_proxy_router, audio_router as frankenstream_audio_router
 app.include_router(frankenstream_proxy_router)
 app.include_router(frankenstream_audio_router)
