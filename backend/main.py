@@ -663,6 +663,34 @@ async def lifespan(app: FastAPI):
     coordination_indexer_task = asyncio.create_task(run_coordination_indexer())
     mention_poller_task = asyncio.create_task(run_mention_dispatch_poller())
 
+    # Publish kind 11317 cordn coordinator tools-announcement on startup.
+    # Non-fatal: relay unavailability or missing identity must never block boot.
+    async def _publish_cordn_coordinator_announcement():
+        try:
+            import json as _json
+            from .buzz_identity import derive_instance_keypair, public_key_xonly_hex
+            from .nostr.client import BuzzSession
+            from .buzz_registration import RELAY_WS_URL
+            _pk = await derive_instance_keypair()
+            _pubkey = public_key_xonly_hex(_pk)
+            _tools = [
+                "kp_publish", "kp_remove", "kp_list", "kp_take",
+                "welcome_store", "welcome_take",
+                "join_request_store", "join_request_take_many",
+                "msg_post", "msg_fetch_many", "msg_sub_many",
+            ]
+            _content = _json.dumps({"tools": _tools, "endpoint": "nostr"})
+            _tags = [["relay", RELAY_WS_URL]]
+            _sess = BuzzSession(RELAY_WS_URL, _pk)
+            await _sess.connect()
+            await _sess.authenticate()
+            await _sess.publish(11317, _content, tags=_tags)
+            await _sess.close()
+            logger.info("Published cordn coordinator announcement (kind 11317)")
+        except Exception as _ann_exc:
+            logger.warning("kind 11317 coordinator announcement failed (non-fatal): %s", _ann_exc)
+    asyncio.create_task(_publish_cordn_coordinator_announcement())
+
     # Guild-scoped leaderboard rollup. Deliberately slow: a leaderboard needs
     # stable numbers more than fresh ones.
     from .coordination_scoring import scoring_loop
@@ -1025,6 +1053,10 @@ from .routers.artifacts import router as artifacts_router
 app.include_router(artifacts_router)
 from .routers.workspace_memory import router as workspace_memory_router
 app.include_router(workspace_memory_router)
+from .routers.trading_space import router as trading_space_router
+app.include_router(trading_space_router)
+from .routers.content_space import router as content_space_router
+app.include_router(content_space_router)
 from .routers.trading_space import router as trading_space_router
 app.include_router(trading_space_router)
 from .routers.content_space import router as content_space_router
