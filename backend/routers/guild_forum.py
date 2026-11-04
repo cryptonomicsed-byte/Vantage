@@ -1382,13 +1382,65 @@ async def list_channel_commands(
     commands = []
     if row and row["slash_commands_json"]:
         try:
-            commands = _jcmds.loads(row["slash_commands_json"])
+            raw = _jcmds.loads(row["slash_commands_json"])
+            for cmd in raw:
+                if isinstance(cmd, str):
+                    commands.append({"name": cmd.lstrip("/"), "args": "", "description": ""})
+                elif isinstance(cmd, dict):
+                    commands.append({
+                        "name": cmd.get("name", "").lstrip("/"),
+                        "args": cmd.get("args", ""),
+                        "description": cmd.get("description", ""),
+                    })
         except Exception:
             pass
     return {
         "guild": slug, "channel": channel_slug,
         "collab_type": collab_type, "commands": commands,
     }
+
+
+@router.get("/spaces/{space_type}/{space_id}/commands")
+async def space_slash_commands(
+    space_type: str,
+    space_id: str,
+    request: Request,
+    principal: Optional[dict] = Depends(optional_principal),
+):
+    """Return slash commands for a space, sourced from channel_templates.
+
+    space_type: 'workspace' | 'trading' | 'content'
+    The template is the single source of truth per space type.
+    """
+    import json as _j
+    SPACE_TYPE_TO_COLLAB = {
+        "workspace": "code",
+        "trading":   "trading",
+        "content":   "content",
+    }
+    collab = SPACE_TYPE_TO_COLLAB.get(space_type, "general")
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT slash_commands_json FROM channel_templates WHERE collab_type=?", (collab,)
+        ) as cur:
+            row = await cur.fetchone()
+    commands = []
+    if row and row["slash_commands_json"]:
+        try:
+            raw = _j.loads(row["slash_commands_json"])
+            for cmd in raw:
+                if isinstance(cmd, str):
+                    commands.append({"name": cmd.lstrip("/"), "args": "", "description": ""})
+                elif isinstance(cmd, dict):
+                    commands.append({
+                        "name": cmd.get("name", "").lstrip("/"),
+                        "args": cmd.get("args", ""),
+                        "description": cmd.get("description", ""),
+                    })
+        except Exception:
+            pass
+    return {"commands": commands, "space_type": space_type}
 
 
 @router.patch("/{slug}/channels/{channel_slug}/mcp")

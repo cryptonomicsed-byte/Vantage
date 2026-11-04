@@ -438,6 +438,8 @@ async def _check_mode_skill(db, guild_slug: str, lounge_id: str, mode: str, agen
     """Check if a guild skill is registered for this mode. Returns skill dict or None."""
     try:
         import json as _json
+        import aiosqlite as _aiosqlite
+        db.row_factory = _aiosqlite.Row
         row = await (await db.execute(
             "SELECT * FROM guild_skills WHERE guild_slug=? AND mode=? AND enabled=1 LIMIT 1",
             (guild_slug, mode)

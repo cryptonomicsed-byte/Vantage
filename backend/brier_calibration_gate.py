@@ -48,3 +48,9 @@ async def should_gate() -> tuple:
     """Returns (gated: bool, brier_score: float). If gated, do not emit signals."""
     score = await compute_rolling_brier()
     return score > BRIER_THRESHOLD, score
+
+
+async def gate_status() -> dict:
+    """Returns {gated: bool, brier_score: float} dict. Alias for should_gate() for daemon compatibility."""
+    gated, score = await should_gate()
+    return {"gated": gated, "brier_score": score}

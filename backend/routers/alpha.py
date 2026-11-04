@@ -975,78 +975,96 @@ async def money_flow(
 
 # --- Smart Money endpoints ---
 @router.get("/alpha/smart-money", operation_id="get_smart_money_scores")
-async def get_smart_money(db=Depends(get_db)):
-    async with db as conn:
-        rows = await (await conn.execute(
-            "SELECT * FROM smart_money_scores ORDER BY score DESC LIMIT 50"
+async def get_smart_money():
+    async with get_db() as db:
+        rows = await (await db.execute(
+            "SELECT cluster_id, score, computed_ts FROM smart_money_scores ORDER BY score DESC LIMIT 100"
         )).fetchall()
-        return [dict(r) for r in rows]
+    return {"scores": [{"cluster_id": r[0], "score": r[1], "computed_ts": r[2]} for r in rows]}
 
 @router.post("/alpha/smart-money/refresh", operation_id="refresh_smart_money_scores")
 async def refresh_smart_money():
-    from backend.smart_money import compute_smart_money_score, upsert_score
-    from backend.db import get_db as _get_db
+    from backend.smart_money import refresh_smart_money_scores
     import asyncio
+
     async def run_refresh():
-        async with _get_db() as conn:
-            try:
-                rows = await (await conn.execute(
-                    "SELECT DISTINCT wallet FROM alpha_early_buyers LIMIT 500"
-                )).fetchall()
-                wallets = [r["wallet"] for r in rows]
-            except Exception:
-                wallets = []
-        for wallet in wallets:
-            score_data = await compute_smart_money_score(wallet, [])
-            await upsert_score(wallet, score_data)
+        async with get_db() as db:
+            await refresh_smart_money_scores(db)
+
     asyncio.create_task(run_refresh())
-    return {"status": "scheduled"}
+    return {"status": "refresh queued"}
 
 
-# --- P1-6: Alpha service health endpoint ---
+# --- P1-5 / P1-6: Alpha service health endpoint ---
 @router.get("/alpha/status", operation_id="alpha_status")
 async def alpha_status(_caller: dict = Depends(get_agent)):
-    """Service health and row counts for each alpha subsystem."""
-    async with get_db() as db:
-        db.row_factory = aiosqlite.Row
-        status: dict = {"ok": True, "subsystems": {}}
+    """Health + last_run_ts per subsystem + signal counts."""
 
-        subsystems = {
-            "clusters":     "alpha_clusters",
-            "smart_money":  "smart_money_scores",
-        }
-        for name, table in subsystems.items():
+    def _last_run(conn, table: str, ts_col: str = "updated_at") -> Optional[int]:
+        """Return MAX(ts_col) as unix int, or None on failure."""
+        try:
+            row = conn.execute(
+                f"SELECT MAX({ts_col}) FROM {table}"
+            ).fetchone()
+            val = row[0] if row else None
+            if val is None:
+                return None
+            # Support both float/int unix and ISO datetime strings
             try:
-                row = await (await db.execute(
-                    f"SELECT COUNT(*) AS cnt FROM {table}"
-                )).fetchone()
-                status["subsystems"][name] = {
-                    "available": True,
-                    "count": row["cnt"] if row else 0,
-                }
-            except Exception:
-                status["subsystems"][name] = {"available": False, "count": 0}
+                return int(float(val))
+            except (TypeError, ValueError):
+                import datetime as _dt
+                try:
+                    return int(_dt.datetime.fromisoformat(str(val)).timestamp())
+                except Exception:
+                    return None
+        except Exception:
+            return None
 
-        # early_buyers: table created by smart_money_daemon, may not exist yet
+    def _count_rows(conn, table: str) -> int:
         try:
-            row = await (await db.execute(
-                "SELECT COUNT(*) AS cnt FROM alpha_early_buyers"
-            )).fetchone()
-            status["subsystems"]["early_buyers"] = {
-                "available": True,
-                "count": row["cnt"] if row else 0,
+            return conn.execute(
+                f"SELECT COUNT(*) FROM {table}"
+            ).fetchone()[0]
+        except Exception:
+            return -1
+
+    from backend.db import get_sync_db as _get_sync_db
+    conn = _get_sync_db()
+    try:
+        subsystems_cfg = {
+            "wallet_clusters": {"table": "wallet_clusters", "ts_col": "updated_at"},
+            "smart_money_scores": {"table": "smart_money_scores", "ts_col": "computed_ts"},
+            "sniper_targets": {"table": "sniper_targets", "ts_col": "queued_ts"},
+            "alpha_signals": {"table": "alpha_signals_log", "ts_col": "ts"},
+        }
+        sub_out: dict = {}
+        for key, cfg in subsystems_cfg.items():
+            sub_out[key] = {
+                "last_run_ts": _last_run(conn, cfg["table"], cfg["ts_col"]),
+                "count": _count_rows(conn, cfg["table"]),
             }
-        except Exception:
-            status["subsystems"]["early_buyers"] = {"available": False, "count": 0}
 
-        # signals in the last hour
+        # keep legacy "clusters" key so existing callers are not broken
+        sub_out["clusters"] = {
+            "last_run_ts": _last_run(conn, "alpha_clusters", "detected_at"),
+            "count": _count_rows(conn, "alpha_clusters"),
+        }
+
+        signals_last_hour = 0
         try:
-            row = await (await db.execute(
-                "SELECT COUNT(*) AS c FROM trading_signals WHERE ts > ?",
+            signals_last_hour = conn.execute(
+                "SELECT COUNT(*) FROM trading_signals WHERE ts > ?",
                 (int(time.time()) - 3600,),
-            )).fetchone()
-            status["signals_last_hour"] = row["c"] if row else 0
+            ).fetchone()[0]
         except Exception:
-            status["signals_last_hour"] = 0
+            pass
+    finally:
+        conn.close()
 
-        return status
+    return {
+        "status": "ok",
+        "ts": int(time.time()),
+        "subsystems": sub_out,
+        "signals_last_hour": signals_last_hour,
+    }

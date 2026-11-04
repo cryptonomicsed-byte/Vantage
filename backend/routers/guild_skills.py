@@ -1,4 +1,5 @@
 import uuid, time, json
+import aiosqlite
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -34,6 +35,7 @@ async def register_skill(slug: str, body: SkillCreate, agent=Depends(get_agent))
 @router.get("/api/guilds/{slug}/skills")
 async def list_skills(slug: str, mode: Optional[str] = None):
     async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         if mode:
             rows = await (await db.execute(
                 "SELECT * FROM guild_skills WHERE guild_slug=? AND mode=? AND enabled=1",
@@ -48,6 +50,7 @@ async def list_skills(slug: str, mode: Optional[str] = None):
 @router.post("/api/guilds/{slug}/skills/{skill_id}/invoke")
 async def invoke_skill(slug: str, skill_id: str, body: SkillInvoke, agent=Depends(get_agent)):
     async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         row = await (await db.execute(
             "SELECT * FROM guild_skills WHERE id=? AND guild_slug=? AND enabled=1",
             (skill_id, slug)
