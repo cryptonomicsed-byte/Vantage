@@ -681,6 +681,10 @@ async def lifespan(app: FastAPI):
     from .event_bus import start_dispatch_loop
     event_bus_task = asyncio.create_task(start_dispatch_loop())
 
+    # Watches lnd-b for settled zap invoices and publishes the kind-9735 receipt.
+    from .routers.lnurl_local import _receipt_watcher
+    lnurl_watcher_task = asyncio.create_task(_receipt_watcher())
+
     # Live streaming: sweep stale (never-ended) streams older than 24h so a
     # crashed broadcaster doesn't leave a dead "Live now" card forever, and
     # probe HLS liveness so a stream that dies leaves the feed fast.
@@ -1146,6 +1150,17 @@ app.include_router(guild_workspace_router)
 
 from .routers.lounge import router as lounge_router
 app.include_router(lounge_router)
+
+# Local LNURL-pay / NIP-57 zap server (lnd-b). Registered BEFORE the
+# app.mount("/", StaticFiles) frontend mount below, which matches every path.
+from .routers.lnurl_local import router as lnurl_router
+app.include_router(lnurl_router)
+
+# Agent note publishing (kind 1 / NIP-18 repost) — the endpoint ProtocolHub
+# has always POSTed; it was never registered, so the publish button 404'd.
+from .routers.agent_notes import router as agent_notes_router
+app.include_router(agent_notes_router)
+
 from .routers.guild_skills import router as guild_skills_router
 app.include_router(guild_skills_router)
 
