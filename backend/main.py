@@ -1255,6 +1255,8 @@ app.include_router(_galaxy_router.router)
 # shared platform identity.
 from .routers import custom_tools_api as _custom_tools_router
 app.include_router(_custom_tools_router.router)
+from .routers import galaxy_ext as _galaxy_ext_router
+app.include_router(_galaxy_ext_router.router)
 from .routers import mcp_catalog_api as _mcp_catalog_router
 app.include_router(_mcp_catalog_router.router)
 from .routers import mcp_hub as _mcp_hub_router

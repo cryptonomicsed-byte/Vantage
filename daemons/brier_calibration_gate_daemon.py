@@ -20,6 +20,14 @@ async def main():
     while True:
         try:
             if gate is not None:
+                from backend.db import get_db
+                async with get_db() as _db:
+                    _c = await (await _db.execute(
+                        "SELECT COUNT(*) FROM brier_predictions WHERE scored=0")).fetchone()
+                if not _c or not _c[0]:
+                    logger.warning("Brier tick: no predictions recorded yet - gate is vacuous, skipping")
+                    await asyncio.sleep(TICK)
+                    continue
                 score = await gate.compute_rolling_brier()
                 status = await gate.gate_status()
                 logger.info("Brier tick -- score=%s gate=%s", score, status)

@@ -264,6 +264,38 @@ async def _execute(target: dict, args: dict, agent_row: dict) -> str:
     return "unknown tool"
 
 
+async def _anchor(agent_row: dict, tool_name: str, output: str) -> None:
+    """Write an action receipt for a consequential tool call.
+
+    Receipts are the accountability primitive: the agent may be unpredictable,
+    it must not be unaccountable. Before this, justice_layer was only reached
+    from the (gate-off) trading path, so action_receipts stayed at zero rows.
+    """
+    try:
+        try:
+            from .. import justice_layer as jl
+        except ImportError:
+            from backend import justice_layer as jl
+    except Exception as exc:
+        log.warning("receipts unavailable: %s: %s", type(exc).__name__, exc)
+        return
+    try:
+        ok = not str(output).lower().startswith(("tool error", "error:", "request failed",
+                                                 "integration error", "composio error"))
+        await jl.anchor_receipt(
+            principal_id=f"agent:{agent_row['id']}",
+            action_kind=tool_name,
+            capability="mcp_tool",
+            evidence={"tool": tool_name, "ok": ok, "chars": len(str(output))},
+            kind="mcp_tool_call",
+            action_target=tool_name[:200],
+            action_outcome="success" if ok else "error",
+        )
+    except Exception as exc:
+        log.warning("receipt write failed for %s: %s: %s",
+                    tool_name, type(exc).__name__, exc)
+
+
 async def run_tool_loop(agent_row: dict, text: str) -> Optional[str]:
     """Return the assistant's final text, or None if no tools apply/failed."""
     if not GATEWAY_KEY:
@@ -334,6 +366,7 @@ async def run_tool_loop(agent_row: dict, text: str) -> Optional[str]:
             if target:
                 try:
                     out = await _execute(target, args, agent_row)
+                    await _anchor(agent_row, fname, out)
                 except Exception as exc:
                     # one broken tool must not abort the whole turn
                     log.warning("tool %s failed: %s: %s", fname, type(exc).__name__, exc)

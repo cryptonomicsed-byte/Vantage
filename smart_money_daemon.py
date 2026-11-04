@@ -20,7 +20,20 @@ async def main():
         try:
             async with get_db() as db:
                 count = await refresh_smart_money_scores(db)
-            logger.info(f"smart_money refresh complete: {count} clusters scored")
+            if not count:
+                # Zero clusters means the upstream rebuild produced nothing.
+                # Logging INFO made a dead pipeline look healthy, so escalate
+                # and eventually fail the unit where systemd can see it.
+                globals()["_zero_streak"] = globals().get("_zero_streak", 0) + 1
+                logger.error(
+                    "smart money scored 0 clusters (%d consecutive) - "
+                    "wallet_clusters is empty; check ares-auto-refresh cluster rebuild",
+                    globals()["_zero_streak"])
+                if globals()["_zero_streak"] >= 3:
+                    raise SystemExit(1)
+            else:
+                globals()["_zero_streak"] = 0
+                logger.info(f"smart_money refresh complete: {count} clusters scored")
         except Exception as e:
             logger.error(f"smart_money refresh error: {e}")
         await asyncio.sleep(INTERVAL)

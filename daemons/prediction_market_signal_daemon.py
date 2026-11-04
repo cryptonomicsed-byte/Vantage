@@ -18,13 +18,17 @@ async def process_unprocessed_signals():
         return
 
     async with get_db() as db:
-        rows = await (await db.execute(
+        # Rows come back as tuples (no row_factory), so dict(row) raised
+        # "dictionary update sequence element #0 has length 36" on every tick.
+        cur = await db.execute(
             "SELECT * FROM prediction_signals WHERE processed=0 ORDER BY ingested_ts DESC LIMIT 20"
-        )).fetchall()
+        )
+        rows = await cur.fetchall()
+        _cols = [d[0] for d in (cur.description or [])]
 
     processed = 0
     for row in rows:
-        signal = dict(row)
+        signal = dict(zip(_cols, row))
         decision = await jev_decide(signal)
         if decision["verdict"] in ("yes", "no") and decision["confidence"] >= JEV_CONFIDENCE_THRESHOLD:
             try:

@@ -14,6 +14,15 @@ INTERVAL_MINT_BACKTRACK  = int(os.environ.get("REFRESH_MINT_BACKTRACK_SECS",  st
 INTERVAL_CLUSTER_REBUILD = int(os.environ.get("REFRESH_CLUSTER_REBUILD_SECS", str(12 * 3600)))
 TICK = int(os.environ.get("REFRESH_TICK_SECS", "60"))
 
+def _auth_headers():
+    """The alpha routes are guarded by get_agent, not by the tool key.
+    Sending X-Vantage-Tool-Key returned 401 on every rebuild, which is
+    why wallet_clusters never filled."""
+    key = (os.environ.get("VANTAGE_AGENT_KEY")
+           or os.environ.get("VANTAGE_TOOL_KEY", ""))
+    return {"X-Agent-Key": key} if key else {}
+
+
 LAST_RUN = {"kol_link": 0, "mint_backtrack": 0, "cluster_rebuild": 0}
 
 
@@ -23,20 +32,45 @@ async def refresh_kol_links():
         import httpx
         async with httpx.AsyncClient(timeout=30) as client:
             r = await client.post("http://localhost:8001/api/alpha/social-link/refresh",
-                                  headers={"X-Vantage-Tool-Key": os.environ.get("VANTAGE_TOOL_KEY", "")})
+                                  headers=_auth_headers())
             print(f"[auto_refresh] KOL link: {r.status_code}", flush=True)
     except Exception as e:
         print(f"[auto_refresh] KOL link error (fail-open): {e}", flush=True)
 
 
 async def refresh_mint_backtrack():
+    """Backtrack early buyers for recent tokens.
+
+    The route requires a `mint`; calling it bare returned 422 forever. Source
+    candidates from wallet_trades and skip cleanly when there are none.
+    """
     print("[auto_refresh] Mint backtrack refresh starting", flush=True)
     try:
         import httpx
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post("http://localhost:8001/api/alpha/backtrack",
-                                  headers={"X-Vantage-Tool-Key": os.environ.get("VANTAGE_TOOL_KEY", "")})
-            print(f"[auto_refresh] Mint backtrack: {r.status_code}", flush=True)
+        from backend.db import get_db
+
+        async with get_db() as db:
+            cur = await db.execute(
+                "SELECT token_mint FROM wallet_trades "
+                "WHERE token_mint IS NOT NULL AND token_mint != '' "
+                "GROUP BY token_mint ORDER BY MAX(timestamp) DESC LIMIT 3")
+            mints = [r[0] for r in await cur.fetchall()]
+
+        if not mints:
+            print("[auto_refresh] Mint backtrack: no mints queued, skipping", flush=True)
+            return
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            for mint in mints:
+                r = await client.post(
+                    "http://localhost:8001/api/alpha/backtrack",
+                    json={"mint": mint},
+                    headers=_auth_headers())
+                if r.status_code >= 400:
+                    print(f"[auto_refresh] ERROR Mint backtrack {mint[:8]} HTTP {r.status_code}",
+                          flush=True)
+                else:
+                    print(f"[auto_refresh] Mint backtrack {mint[:8]}: {r.status_code}", flush=True)
     except Exception as e:
         print(f"[auto_refresh] Backtrack error (fail-open): {e}", flush=True)
 
@@ -47,8 +81,11 @@ async def rebuild_wallet_clusters():
         import httpx
         async with httpx.AsyncClient(timeout=120) as client:
             r = await client.post("http://localhost:8001/api/alpha/clusters/rebuild",
-                                  headers={"X-Vantage-Tool-Key": os.environ.get("VANTAGE_TOOL_KEY", "")})
-            print(f"[auto_refresh] Cluster rebuild: {r.status_code}", flush=True)
+                                  headers=_auth_headers())
+            if r.status_code >= 400:
+                print(f"[auto_refresh] ERROR Cluster rebuild HTTP {r.status_code}", flush=True)
+            else:
+                print(f"[auto_refresh] Cluster rebuild: {r.status_code}", flush=True)
     except Exception as e:
         print(f"[auto_refresh] Cluster rebuild error (fail-open): {e}", flush=True)
 
