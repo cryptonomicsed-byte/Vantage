@@ -56,7 +56,18 @@ class KindSpec:
 # them, and a disagreement with the NIP is a Vantage bug.
 
 _NIP_KINDS = [
+    KindSpec(5, "deletion", Origin.NIP, "Author's request to delete their own events.", "NIP-09"),
+    KindSpec(7, "reaction", Origin.NIP, "Reaction (emoji or +) to another event.", "NIP-25"),
     KindSpec(9, "message", Origin.NIP, "Chat message. The guild/workspace log.", "NIP-29"),
+    KindSpec(21, "video", Origin.NIP, "First-class video event (recorded stream, VOD).", "NIP-71"),
+    KindSpec(22, "short_video", Origin.NIP, "Short-form first-class video event.", "NIP-71"),
+    KindSpec(1311, "live_chat_message", Origin.NIP, "Chat message scoped to a live activity (a-tag).", "NIP-53"),
+    KindSpec(1984, "report", Origin.NIP, "Report a user or event for abuse.", "NIP-56"),
+    KindSpec(9734, "zap_request", Origin.NIP, "Zap request forwarded to the recipient's LNURL server.", "NIP-57"),
+    KindSpec(9735, "zap_receipt", Origin.NIP, "Lightning receipt proving a zap was paid.", "NIP-57"),
+    KindSpec(10312, "live_presence", Origin.NIP, "Replaceable presence heartbeat in an audio room.", "NIP-53"),
+    KindSpec(30311, "live_stream", Origin.NIP, "Addressable live streaming event (title/status/streaming).", "NIP-53"),
+    KindSpec(30312, "meeting_space", Origin.NIP, "Addressable audio room (spaces/huddles).", "NIP-53"),
     KindSpec(9007, "create_channel", Origin.NIP, "Create a relay-based group.", "NIP-29"),
     KindSpec(9021, "join_request", Origin.NIP, "Self-join an open group.", "NIP-29"),
     KindSpec(9040, "moderation_ban", Origin.NIP, "Remove a member from a group.", "NIP-29"),

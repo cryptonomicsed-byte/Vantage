@@ -681,6 +681,30 @@ async def lifespan(app: FastAPI):
     from .event_bus import start_dispatch_loop
     event_bus_task = asyncio.create_task(start_dispatch_loop())
 
+    # Live streaming: sweep stale (never-ended) streams older than 24h so a
+    # crashed broadcaster doesn't leave a dead "Live now" card forever, and
+    # probe HLS liveness so a stream that dies leaves the feed fast.
+    from .routers.live import sweep_stale_live_streams, probe_live_streams
+
+    async def _live_sweep_loop():
+        # Two cadences in one loop: liveness every 45s, expiry sweep every 15 min.
+        ticks = 0
+        while True:
+            try:
+                if ticks % 20 == 0:
+                    swept = await sweep_stale_live_streams()
+                    if swept:
+                        logger.info("live sweep: ended %d stale stream(s)", swept)
+                probed = await probe_live_streams()
+                if probed.get("offline") or probed.get("promoted"):
+                    logger.info("live probe: %s", probed)
+            except Exception as _sweep_exc:
+                logger.warning("live sweep failed: %s", _sweep_exc)
+            ticks += 1
+            await asyncio.sleep(45)  # liveness probe; expiry runs every 20th tick
+
+    live_sweep_task = asyncio.create_task(_live_sweep_loop())
+
     # Task reputation: create table + subscribe to completion events
     try:
         from .reputation import init_task_reputation_db, update_on_event

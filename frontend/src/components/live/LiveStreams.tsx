@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { Radio, X, Play, Users, Eye, Video, Send, Link2 } from 'lucide-react'
+import { Radio, X, Play, Users, Eye, Video, Send, Link2, Clock, Share2, Flag, Zap } from 'lucide-react'
 import Hls from 'hls.js'
 
 /* ── Live streaming (NIP-53 / Amethyst / Twitter style) ───────────────────
@@ -22,6 +22,20 @@ export interface LiveStream {
   viewer_count: number
   started_at: string
   ended_at: string | null
+  // NIP-53 / NIP-19 / NIP-25 / NIP-57
+  address?: string
+  naddr?: string
+  hashtags?: string[]
+  participants?: string[]
+  scheduled_at?: number | null
+  recording_url?: string
+  status_rank?: number
+  reactions?: Record<string, number>
+  my_reactions?: string[]
+  zap_count?: number
+  zap_msat?: number
+  can_zap?: boolean
+  chat_count?: number
 }
 
 interface ChatMessage {
@@ -44,6 +58,16 @@ const CSS = `
 .ls-ava-inner{width:100%;height:100%;border-radius:50%;overflow:hidden;background:#0a0b16;border:2px solid #05040d;display:flex;align-items:center;justify-content:center}
 .ls-ava-inner img{width:100%;height:100%;object-fit:cover;display:block}
 .ls-avalive{position:absolute;bottom:-5px;left:50%;transform:translateX(-50%);background:#ef4444;color:#fff;font-size:8.5px;font-weight:800;letter-spacing:.06em;padding:1px 6px;border-radius:99px;border:2px solid #05040d}
+.ls-avalive.soon{background:#8b5cf6}
+.ls-ava.planned{background:conic-gradient(from 210deg,#8b5cf6,#6366f1,#8b5cf6);animation-duration:14s}
+.ls-reactbar{display:flex;gap:6px;align-items:center;padding:8px 12px;border-top:1px solid rgba(255,255,255,.06)}
+.ls-react{display:inline-flex;align-items:center;gap:4px;padding:5px 10px;border-radius:99px;font-size:13px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.09);cursor:pointer;color:#fff;transition:all .12s}
+.ls-react:hover{background:rgba(255,255,255,.1)}
+.ls-react.mine{border-color:rgba(139,92,246,.6);background:rgba(139,92,246,.18)}
+.ls-react span.n{font-size:11px;color:rgba(255,255,255,.6)}
+.ls-tools{display:flex;gap:6px;margin-left:auto}
+.ls-iconbtn{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:8px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.09);color:rgba(255,255,255,.75);cursor:pointer}
+.ls-iconbtn:hover{background:rgba(255,255,255,.12);color:#fff}
 .ls-avaname{font-size:11px;font-weight:600;color:rgba(255,255,255,.85);max-width:78px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ls-avaview{font-size:10px;color:rgba(255,255,255,.45);display:flex;align-items:center;gap:3px;margin-top:-3px}
 .ls-livehead{display:flex;align-items:center;gap:8px;padding:16px 20px 0}
@@ -261,20 +285,31 @@ export function LiveNowRow({ streams, onJoin }: { streams: LiveStream[]; onJoin:
       {/* Amethyst homeLive / Twitter-live row: one avatar bubble per live host,
           ringed in red, tap to join. Followed hosts sort first server-side. */}
       <div className="ls-liverow">
-        {streams.map(s => (
-          <div key={s.id} className="ls-slot" onClick={() => onJoin(s)} title={`${s.title} — ${s.agent_name || 'Agent'}`}>
-            <div className="ls-ava">
-              <div className="ls-ava-inner">
-                {s.avatar_url
-                  ? <img src={s.avatar_url} alt={s.agent_name || 'Agent'} loading="lazy" />
-                  : <Radio size={22} opacity={0.55} />}
+        {streams.map(s => {
+          const planned = s.status === 'planned'
+          const startIn = s.scheduled_at ? Math.max(0, s.scheduled_at - Math.floor(Date.now() / 1000)) : 0
+          const reactionCount = Object.values(s.reactions || {}).reduce((a, b) => a + b, 0)
+          return (
+            <div key={s.id} className="ls-slot" onClick={() => onJoin(s)}
+                 title={`${s.title} — ${s.agent_name || 'Agent'}${planned ? ` · starts in ${Math.round(startIn / 60)}m` : ''}`}>
+              <div className={`ls-ava ${planned ? 'planned' : ''}`}>
+                <div className="ls-ava-inner">
+                  {s.avatar_url
+                    ? <img src={s.avatar_url} alt={s.agent_name || 'Agent'} loading="lazy" />
+                    : <Radio size={22} opacity={0.55} />}
+                </div>
+                <span className={`ls-avalive ${planned ? 'soon' : ''}`}>{planned ? 'SOON' : 'LIVE'}</span>
               </div>
-              <span className="ls-avalive">LIVE</span>
+              <div className="ls-avaname">{s.agent_name || s.title || 'Agent'}</div>
+              <div className="ls-avaview">
+                {planned
+                  ? <><Clock size={10} /> {startIn > 3600 ? `${Math.round(startIn / 3600)}h` : `${Math.max(1, Math.round(startIn / 60))}m`}</>
+                  : <><Eye size={10} /> {s.viewer_count || 0}</>}
+                {!!reactionCount && <span style={{ marginLeft: 4 }}>· {reactionCount}🔥</span>}
+              </div>
             </div>
-            <div className="ls-avaname">{s.agent_name || s.title || 'Agent'}</div>
-            <div className="ls-avaview"><Eye size={10} /> {s.viewer_count || 0}</div>
-          </div>
-        ))}
+          )
+        })}
       </div>
     </div>
   )
@@ -287,12 +322,22 @@ export function GoLiveModal({ onClose, onStarted }: { onClose: () => void; onSta
   const [streamUrl, setStreamUrl] = useState('')
   const [summary, setSummary] = useState('')
   const [imageUrl, setImageUrl] = useState('')
+  const [hashtags, setHashtags] = useState('')
+  const [scheduleAt, setScheduleAt] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [camError, setCamError] = useState('')
 
   const camVideoRef = useRef<HTMLVideoElement | null>(null)
   const camStreamRef = useRef<MediaStream | null>(null)
+
+  // NIP-53: hashtags go out as `t` tags; a future start time publishes the
+  // stream as `planned` instead of `live`.
+  function commonFields() {
+    const tags = hashtags.split(/[,\s]+/).map(t => t.trim().replace(/^#/, '')).filter(Boolean)
+    const scheduled_at = scheduleAt ? Math.floor(new Date(scheduleAt).getTime() / 1000) : 0
+    return { summary: summary.trim(), image_url: imageUrl.trim(), hashtags: tags, scheduled_at }
+  }
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -331,7 +376,7 @@ export function GoLiveModal({ onClose, onStarted }: { onClose: () => void; onSta
         const res = await fetch('/api/live/start', {
           method: 'POST',
           headers: { 'X-Agent-Key': apiKey(), 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title: title.trim(), camera: true, summary: summary.trim(), image_url: imageUrl.trim() }),
+          body: JSON.stringify({ title: title.trim(), camera: true, ...commonFields() }),
         })
         const data = await res.json()
         if (!res.ok) { setError(data.detail || 'Failed to go live'); return }
@@ -354,7 +399,7 @@ export function GoLiveModal({ onClose, onStarted }: { onClose: () => void; onSta
         const res = await fetch('/api/live/start', {
           method: 'POST',
           headers: { 'X-Agent-Key': apiKey(), 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title: title.trim(), stream_url: streamUrl.trim(), summary: summary.trim(), image_url: imageUrl.trim() }),
+          body: JSON.stringify({ title: title.trim(), stream_url: streamUrl.trim(), ...commonFields() }),
         })
         const data = await res.json()
         if (!res.ok) { setError(data.detail || 'Failed to go live'); return }
@@ -406,6 +451,16 @@ export function GoLiveModal({ onClose, onStarted }: { onClose: () => void; onSta
             <input className="ls-input" value={imageUrl} onChange={e => setImageUrl(e.target.value)} placeholder="https://…/cover.jpg" />
           </div>
           <div className="ls-field">
+            <label className="ls-label">Hashtags (optional)</label>
+            <input className="ls-input" value={hashtags} onChange={e => setHashtags(e.target.value)} placeholder="nostr, music, dev" />
+            <div className="ls-hint">Published as NIP-53 t tags so clients can discover the stream.</div>
+          </div>
+          <div className="ls-field">
+            <label className="ls-label">Schedule (optional)</label>
+            <input className="ls-input" type="datetime-local" value={scheduleAt} onChange={e => setScheduleAt(e.target.value)} />
+            <div className="ls-hint">Leave empty to go live now. A future time publishes it as planned (SOON bubble).</div>
+          </div>
+          <div className="ls-field">
             <label className="ls-label">Summary (optional)</label>
             <input className="ls-input" value={summary} onChange={e => setSummary(e.target.value)} placeholder="One-line description" maxLength={2000} />
           </div>
@@ -447,7 +502,69 @@ export function LiveViewer({ stream, onClose, isMine, onEnd }: {
   const messages = useLiveChat(stream.id)
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
+  const [reactions, setReactions] = useState<Record<string, number>>(stream.reactions || {})
+  const [mine, setMine] = useState<string[]>(stream.my_reactions || [])
+  const [notice, setNotice] = useState('')
   const chatRef = useRef<HTMLDivElement | null>(null)
+  const isEnded = stream.status === 'ended' || stream.status === 'offline'
+  // NIP-71: a finished stream replays from its recording instead of the dead HLS.
+  const playbackUrl = !isEnded && stream.stream_url ? stream.stream_url : (stream.recording_url || '')
+
+  async function react(emoji: string) {
+    const k = apiKey(); if (!k) return
+    try {
+      const r = await fetch(`/api/live/${stream.id}/react`, {
+        method: 'POST', headers: { 'X-Agent-Key': k, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ emoji }),
+      })
+      if (r.ok) {
+        const d = await r.json()
+        setReactions(d.reactions || {})
+        setMine(prev => (d.active ? [...prev, emoji] : prev.filter(e => e !== emoji)))
+      }
+    } catch { /* noop */ }
+  }
+
+  async function share() {
+    const link = stream.naddr
+      ? `nostr:${stream.naddr}`
+      : `${window.location.origin}/?live=${stream.id}`
+    try {
+      await navigator.clipboard.writeText(link)
+      setNotice(`Copied ${stream.naddr ? 'naddr' : 'link'}`)
+    } catch { setNotice(link) }
+    setTimeout(() => setNotice(''), 2500)
+  }
+
+  async function report() {
+    const k = apiKey(); if (!k) return
+    const reason = window.prompt('Report this stream — type (spam, illegal, nudity, malware, profanity, impersonation, other):', 'spam')
+    if (!reason) return
+    try {
+      const r = await fetch(`/api/live/${stream.id}/report`, {
+        method: 'POST', headers: { 'X-Agent-Key': k, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ report_type: reason.toLowerCase().trim(), reason: '' }),
+      })
+      setNotice(r.ok ? 'Report sent to moderators' : 'Report failed')
+    } catch { setNotice('Report failed') }
+    setTimeout(() => setNotice(''), 2500)
+  }
+
+  async function zap() {
+    const k = apiKey(); if (!k) return
+    const amt = window.prompt('Zap amount in sats:', '21')
+    if (!amt) return
+    try {
+      const r = await fetch(`/api/live/${stream.id}/zap?amount_sats=${encodeURIComponent(amt)}`, {
+        headers: { 'X-Agent-Key': k },
+      })
+      const d = await r.json().catch(() => ({}))
+      if (!r.ok) { setNotice(d.detail || 'Zap unavailable'); setTimeout(() => setNotice(''), 3000); return }
+      await navigator.clipboard.writeText(d.invoice).catch(() => {})
+      setNotice(`Invoice copied (${amt} sats) — pay from any lightning wallet`)
+    } catch { setNotice('Zap failed') }
+    setTimeout(() => setNotice(''), 4000)
+  }
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -491,12 +608,39 @@ export function LiveViewer({ stream, onClose, isMine, onEnd }: {
     <div className="ls-modal" onClick={onClose}>
       <div className="ls-panel" style={{ maxWidth: 920 }} onClick={e => e.stopPropagation()}>
         <div className="ls-player-wrap">
-          {stream.stream_url
-            ? <HlsVideo src={stream.stream_url} />
-            : <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,.4)' }}>No stream URL attached.</div>}
-          <span className="ls-livebadge" style={{ top: 12, left: 12 }}><span className="dot" /> Live</span>
+          {playbackUrl
+            ? (playbackUrl.endsWith('.mp4') || playbackUrl.endsWith('.m4s') || playbackUrl.endsWith('.mkv')
+                ? <video src={playbackUrl} controls autoPlay playsInline />
+                : <HlsVideo src={playbackUrl} />)
+            : <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,.4)' }}>
+                {stream.status === 'planned' ? 'Scheduled — not started yet.' : 'No stream URL attached.'}
+              </div>}
+          <span className="ls-livebadge" style={{ top: 12, left: 12, background: isEnded ? 'rgba(139,92,246,.94)' : undefined }}>
+            {!isEnded && <span className="dot" />} {isEnded ? 'Replay' : stream.status === 'planned' ? 'Scheduled' : 'Live'}
+          </span>
           <button onClick={onClose} style={{ position: 'absolute', top: 12, right: 12, zIndex: 3, background: 'rgba(0,0,0,.6)', border: 'none', borderRadius: 8, padding: 8, cursor: 'pointer', color: '#fff' }}><X size={18} /></button>
         </div>
+        {/* NIP-25 reactions + NIP-19 share + NIP-56 report + NIP-57 zap */}
+        <div className="ls-reactbar">
+          {['🔥', '👏', '💜'].map(e => (
+            <button key={e} className={`ls-react ${mine.includes(e) ? 'mine' : ''}`} onClick={() => react(e)}>
+              {e} <span className="n">{reactions[e] || 0}</span>
+            </button>
+          ))}
+          {!!(stream.zap_count || 0) && (
+            <span className="ls-react" style={{ cursor: 'default' }}>
+              ⚡ <span className="n">{(stream.zap_msat || 0) / 1000} sats · {stream.zap_count}</span>
+            </span>
+          )}
+          <div className="ls-tools">
+            {stream.can_zap && <button className="ls-iconbtn" title="Zap (NIP-57)" onClick={zap}><Zap size={15} /></button>}
+            <button className="ls-iconbtn" title="Copy share link (NIP-19 naddr)" onClick={share}><Share2 size={15} /></button>
+            <button className="ls-iconbtn" title="Report (NIP-56)" onClick={report}><Flag size={15} /></button>
+          </div>
+        </div>
+        {notice && (
+          <div style={{ padding: '8px 18px', fontSize: 12, color: 'rgba(255,255,255,.75)', background: 'rgba(139,92,246,.12)' }}>{notice}</div>
+        )}
         <div style={{ padding: '12px 18px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 14, flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 16, fontWeight: 700, color: '#fff', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{stream.title}</div>
@@ -508,7 +652,18 @@ export function LiveViewer({ stream, onClose, isMine, onEnd }: {
           </div>
           {isMine && (
             <button className="ls-golive" style={{ background: 'rgba(255,255,255,.08)', flexShrink: 0 }} onClick={() => onEnd(stream)}>
-              End stream
+              {stream.status === 'planned' ? 'Cancel' : 'End stream'}
+            </button>
+          )}
+          {isMine && stream.status === 'planned' && (
+            <button className="ls-golive" style={{ flexShrink: 0 }}
+              onClick={async () => {
+                const k = apiKey(); if (!k) return
+                const r = await fetch(`/api/live/${stream.id}/go-live`, { method: 'POST', headers: { 'X-Agent-Key': k } })
+                setNotice(r.ok ? 'Stream is live' : 'Could not go live')
+                setTimeout(() => setNotice(''), 2500)
+              }}>
+              <Radio size={14} /> Start now
             </button>
           )}
         </div>
