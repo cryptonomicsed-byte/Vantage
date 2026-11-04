@@ -1219,6 +1219,10 @@ async def ingest_signal(payload: dict, tool: dict = Depends(get_system_tool)):
         if f not in payload:
             return {"error": f"Missing required field: {f}"}
 
+    # P4-1: reject test signals before they enter the production feed
+    if payload.get("source", "").lower() in ("test", "test-signal", "test_signal"):
+        return {"status": "dropped", "reason": "test signals not ingested to production feed"}
+
     # Same 0-1 contract the docstring states, now enforced. An unnormalised
     # value (several daemons here use 0-5/0-7 scales) does not just mis-rank
     # the pool -- these signals are what downstream consumers trade on, so a
