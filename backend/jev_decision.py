@@ -2,8 +2,8 @@
 import os, json
 from typing import Optional
 
-OPENROUTER_BASE = "https://openrouter.ai/api/v1"
-JEV_MODEL = os.environ.get("JEV_MODEL", "anthropic/claude-haiku-4-5")
+OPENROUTER_BASE = os.environ.get("OPENROUTER_BASE", os.environ.get("OPENROUTER_BASE_URL", "http://127.0.0.1:8300/v1"))
+JEV_MODEL = os.environ.get("JEV_MODEL", os.environ.get("OPENROUTER_MODEL", "free-reasoner"))
 CONFIDENCE_THRESHOLD = float(os.environ.get("JEV_CONFIDENCE_THRESHOLD", "0.65"))
 
 async def jev_decide(signal: dict) -> dict:
@@ -29,7 +29,7 @@ verdict=yes means bet YES, no means bet NO, skip means insufficient signal."""
             r = await client.post(
                 f"{OPENROUTER_BASE}/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={"model": JEV_MODEL, "messages": [{"role": "user", "content": prompt}], "temperature": 0.1}
+                json={"model": JEV_MODEL, "messages": [{"role": "user", "content": prompt}], "temperature": 0.1, "max_tokens": int(os.environ.get("OPENROUTER_MAX_TOKENS", "1024"))}
             )
             if r.status_code != 200:
                 return {"verdict": "skip", "confidence": 0.0, "reasoning": f"api error {r.status_code}"}
