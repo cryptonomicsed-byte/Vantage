@@ -2391,6 +2391,19 @@ async def init_workspace_tasks_db() -> None:
             except Exception:
                 pass  # column already exists
 
+        # P1-6 wave 1-C: add quality-tag columns to wallet_clusters if not present
+        for _col, _ddl in [
+            ("bundle_detected", "INTEGER DEFAULT 0"),
+            ("fresh_wallet",    "INTEGER DEFAULT 0"),
+            ("concentration_pct", "REAL DEFAULT 0.0"),
+        ]:
+            try:
+                await db.execute(
+                    f"ALTER TABLE wallet_clusters ADD COLUMN {_col} {_ddl}"
+                )
+            except Exception:
+                pass  # column already exists
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS guild_skills (
                 id TEXT PRIMARY KEY,
