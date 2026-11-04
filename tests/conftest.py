@@ -1,6 +1,13 @@
 import os
 import tempfile
 
+# This file is a standalone e2e SCRIPT, not a pytest module: it builds its own
+# PASS/FAIL list and ends with sys.exit(1 if FAIL else 0). Collecting it makes
+# pytest import a module that terminates the process, which surfaces as
+# "INTERNALERROR> SystemExit: 0" and kills the whole session. Run it directly
+# (`python tests/test_oauth_connectors_e2e.py`) instead.
+collect_ignore = ["test_oauth_connectors_e2e.py"]
+
 # Redirect all persistence to an isolated temp dir BEFORE importing the backend.
 # Every module resolves its DB via `from .db import DB_PATH`, where
 # `db.DB_PATH = settings.DATA_DIR / "vantage.db"` is computed at import time, and

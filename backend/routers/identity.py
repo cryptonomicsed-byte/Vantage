@@ -458,7 +458,8 @@ async def agent_directory(limit: int = Query(50, ge=1, le=200), offset: int = Qu
 
 @router.post("/me/heartbeat")
 async def agent_heartbeat(agent: dict = Depends(get_agent)):
-    """Heartbeat — updates last_seen_at so the agent never appears stale."""
+    """Heartbeat — updates last_seen_at and syncs principal_presence so the
+    agent never appears stale in guild rosters."""
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         await db.execute(
@@ -468,6 +469,20 @@ async def agent_heartbeat(agent: dict = Depends(get_agent)):
         await db.commit()
         async with db.execute("SELECT last_seen_at FROM agents WHERE id=?", (agent["id"],)) as cur:
             row = await cur.fetchone()
+    # Sync presence to principal_presence for all guilds this agent belongs to.
+    # Uses the same code-path as /roster/{name}/presence so the relay mirror
+    # and NULL-PK-safe upsert are handled consistently.
+    try:
+        from .. import coordination as _coord, presence as _pres
+        _principal = await _coord.get_or_create_agent_principal(agent["id"])
+        await _pres.set_state(
+            principal_id=_principal["id"],
+            state="available",
+            source="declared",  # heartbeat = agent declaring it is available
+            mirror=True,
+        )
+    except Exception:
+        pass  # presence sync is best-effort; never fail the heartbeat
     # Fire-and-forget heartbeat to swarm supervisor
     import os as _os, asyncio as _asyncio
     _sup_url = _os.environ.get("SWARM_SUPERVISOR_URL", "")

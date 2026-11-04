@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import aiosqlite
+import sqlite3
 
 from .config import settings
 
@@ -72,6 +73,22 @@ async def connect_bounded():
             _DB_CONN_LIMIT.release()
 
     conn.close = _close_release
+    return conn
+
+
+
+def get_sync_db():
+    """Return a plain sqlite3 connection on DB_PATH.
+
+    Exists so sync/daemon call-sites (e.g. routers/alpha_hunter.py,
+    daemons/vantage_db_shim.py) can import from a single canonical
+    location.  Uses WAL mode + busy_timeout to match the async get_db()
+    contract.
+    """
+    conn = sqlite3.connect(str(DB_PATH), timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=20000")
+    conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 
@@ -2345,6 +2362,10 @@ async def init_workspace_tasks_db() -> None:
                 UNIQUE(wallet, mint)
             )
         """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_prediction_signals_source
+            ON prediction_signals(source, ingested_ts DESC)
+        """)
         await db.commit()
 
 
@@ -2387,6 +2408,19 @@ async def init_workspace_tasks_db() -> None:
             except Exception:
                 pass  # column already exists
 
+        # P1-6 wave 1-C: add quality-tag columns to wallet_clusters if not present
+        for _col, _ddl in [
+            ("bundle_detected", "INTEGER DEFAULT 0"),
+            ("fresh_wallet",    "INTEGER DEFAULT 0"),
+            ("concentration_pct", "REAL DEFAULT 0.0"),
+        ]:
+            try:
+                await db.execute(
+                    f"ALTER TABLE wallet_clusters ADD COLUMN {_col} {_ddl}"
+                )
+            except Exception:
+                pass  # column already exists
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS guild_skills (
                 id TEXT PRIMARY KEY,
@@ -2422,6 +2456,15 @@ async def init_workspace_tasks_db() -> None:
                 predicted_ts INTEGER NOT NULL,
                 outcome TEXT,
                 scored INTEGER DEFAULT 0
+            )
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS prediction_resolutions (
+                market_id TEXT PRIMARY KEY,
+                predicted_probability REAL NOT NULL,
+                actual_outcome REAL NOT NULL,
+                resolved_ts INTEGER NOT NULL
             )
         """)
 
@@ -2485,7 +2528,13 @@ async def init_workspace_tasks_db() -> None:
                 "description": "Open discussion and coordination",
                 "default_flow_mode": "open",
                 "default_visibility": "members",
-                "slash_commands_json": _json_db.dumps(["/help", "/mode", "/task", "/invite", "/members"]),
+                "slash_commands_json": _json_db.dumps([
+                    {"name": "help",    "args": "",             "description": "Show available commands"},
+                    {"name": "mode",    "args": "<mode>",       "description": "Set channel mode"},
+                    {"name": "task",    "args": "<title>",      "description": "Create a task"},
+                    {"name": "invite",  "args": "<agent_name>", "description": "Invite an agent"},
+                    {"name": "members", "args": "",             "description": "List channel members"},
+                ]),
                 "ui_config_json": _json_db.dumps({"theme": "default", "sidebar": "members"}),
             },
             {
@@ -2494,7 +2543,16 @@ async def init_workspace_tasks_db() -> None:
                 "description": "Collaborative coding with branch isolation per contributor",
                 "default_flow_mode": "open",
                 "default_visibility": "members",
-                "slash_commands_json": _json_db.dumps(["/run", "/pr", "/scan", "/review", "/merge", "/branches"]),
+                "slash_commands_json": _json_db.dumps([
+                    {"name": "run",      "args": "<code>",    "description": "Execute code in sandbox"},
+                    {"name": "pr",       "args": "<title>",   "description": "Create a pull request"},
+                    {"name": "scan",     "args": "",          "description": "Run security scan"},
+                    {"name": "review",   "args": "",          "description": "Review recent commits"},
+                    {"name": "merge",    "args": "<branch>",  "description": "Merge a branch"},
+                    {"name": "branches", "args": "",          "description": "List active branches"},
+                    {"name": "task",     "args": "<title>",   "description": "Create a task"},
+                    {"name": "claim",    "args": "<task_id>", "description": "Claim a task"},
+                ]),
                 "ui_config_json": _json_db.dumps({"theme": "dark_mono", "sidebar": "branches", "panel": "diff"}),
             },
             {
@@ -2503,7 +2561,22 @@ async def init_workspace_tasks_db() -> None:
                 "description": "Multi-agent trading, token launches, and pooled positions",
                 "default_flow_mode": "open",
                 "default_visibility": "members",
-                "slash_commands_json": _json_db.dumps(["/price", "/buy", "/sell", "/pool", "/join", "/launch", "/strategy", "/positions"]),
+                "slash_commands_json": _json_db.dumps([
+                    {"name": "price",     "args": "<symbol>",          "description": "Get current price"},
+                    {"name": "buy",       "args": "<amount> <symbol>", "description": "Place a buy order (deliberate UI only)"},
+                    {"name": "sell",      "args": "<amount> <symbol>", "description": "Place a sell order (deliberate UI only)"},
+                    {"name": "pool",      "args": "<name> <token>",    "description": "Create a trading pool"},
+                    {"name": "join",      "args": "<pool_id> <amount>","description": "Commit to a pool"},
+                    {"name": "positions", "args": "",                  "description": "View open positions"},
+                    {"name": "pools",     "args": "",                  "description": "List active pools"},
+                    {"name": "strategy",  "args": "[description]",     "description": "Create or view strategies"},
+                    {"name": "alpha",     "args": "",                  "description": "Get alpha signals"},
+                    {"name": "signals",   "args": "",                  "description": "View trading signals"},
+                    {"name": "degen",     "args": "",                  "description": "High-conviction degen plays"},
+                    {"name": "narrative", "args": "",                  "description": "Trending market narratives"},
+                    {"name": "watch",     "args": "<token>",           "description": "Add token to watchlist"},
+                    {"name": "watchlist", "args": "",                  "description": "View watchlist"},
+                ]),
                 "ui_config_json": _json_db.dumps({"theme": "trading", "sidebar": "positions", "panel": "ticker"}),
             },
             {
@@ -2512,7 +2585,17 @@ async def init_workspace_tasks_db() -> None:
                 "description": "Video, audio, and media production with MCP pipeline",
                 "default_flow_mode": "open",
                 "default_visibility": "members",
-                "slash_commands_json": _json_db.dumps(["/video", "/audio", "/podcast", "/scene", "/publish", "/collab", "/setmcp"]),
+                "slash_commands_json": _json_db.dumps([
+                    {"name": "video",    "args": "<prompt>",    "description": "Generate a video"},
+                    {"name": "audio",    "args": "<prompt>",    "description": "Generate audio"},
+                    {"name": "podcast",  "args": "<topic>",     "description": "Create a podcast"},
+                    {"name": "scene",    "args": "<desc>",      "description": "Add a scene to current project"},
+                    {"name": "publish",  "args": "[asset_id]",  "description": "Publish an asset"},
+                    {"name": "collab",   "args": "<agent>",     "description": "Invite a collaborator"},
+                    {"name": "setmcp",   "args": "<provider>",  "description": "Switch MCP provider (anvil/higgsfield/heygen)"},
+                    {"name": "projects", "args": "",            "description": "List active projects"},
+                    {"name": "assets",   "args": "",            "description": "List assets"},
+                ]),
                 "ui_config_json": _json_db.dumps({"theme": "media", "sidebar": "production", "panel": "preview"}),
             },
             {
@@ -2521,20 +2604,28 @@ async def init_workspace_tasks_db() -> None:
                 "description": "Alpha signals, token intelligence, and market research",
                 "default_flow_mode": "open",
                 "default_visibility": "members",
-                "slash_commands_json": _json_db.dumps(["/alpha", "/signals", "/scan", "/wallet", "/degen", "/narrative", "/watch", "/unwatch"]),
+                "slash_commands_json": _json_db.dumps([
+                    {"name": "alpha",     "args": "",          "description": "Get alpha signals"},
+                    {"name": "signals",   "args": "",          "description": "View trading signals"},
+                    {"name": "scan",      "args": "<token>",   "description": "Deep-scan a token"},
+                    {"name": "wallet",    "args": "<address>", "description": "Inspect a wallet"},
+                    {"name": "degen",     "args": "",          "description": "High-conviction degen plays"},
+                    {"name": "narrative", "args": "",          "description": "Trending market narratives"},
+                    {"name": "watch",     "args": "<token>",   "description": "Add token to watchlist"},
+                    {"name": "unwatch",   "args": "<token>",   "description": "Remove from watchlist"},
+                ]),
                 "ui_config_json": _json_db.dumps({"theme": "data", "sidebar": "watchlist", "panel": "signals"}),
             },
         ]
         for _tmpl in _templates:
             await db.execute(
-                """INSERT OR IGNORE INTO channel_templates
+                """INSERT OR REPLACE INTO channel_templates
                    (collab_type, display_name, description, default_flow_mode,
                     default_visibility, slash_commands_json, ui_config_json)
                    VALUES (:collab_type, :display_name, :description, :default_flow_mode,
                            :default_visibility, :slash_commands_json, :ui_config_json)""",
                 _tmpl,
             )
-
         # ── Supporting tables for collab pipelines (create now, used in later tasks) ──
         await db.execute("""
             CREATE TABLE IF NOT EXISTS channel_code_sessions (
@@ -2600,4 +2691,89 @@ async def init_workspace_tasks_db() -> None:
                 UNIQUE(channel_id, item_address)
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS trading_spaces (
+                id TEXT PRIMARY KEY,
+                guild_slug TEXT NOT NULL,
+                name TEXT NOT NULL,
+                chain TEXT NOT NULL DEFAULT 'solana',
+                wallet_id INTEGER,
+                chat_channel_slug TEXT,
+                created_by_agent_id INTEGER,
+                created_ts INTEGER NOT NULL DEFAULT (unixepoch())
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS trading_space_pools (
+                id TEXT PRIMARY KEY,
+                space_id TEXT NOT NULL REFERENCES trading_spaces(id),
+                name TEXT NOT NULL,
+                pool_type TEXT NOT NULL DEFAULT 'trade',
+                token TEXT,
+                symbol TEXT,
+                target_amount REAL NOT NULL DEFAULT 0,
+                quorum_pct REAL NOT NULL DEFAULT 0.51,
+                status TEXT NOT NULL DEFAULT 'open',
+                tx_hash TEXT,
+                created_by INTEGER,
+                created_ts INTEGER NOT NULL DEFAULT (unixepoch())
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS trading_space_pool_commitments (
+                id TEXT PRIMARY KEY,
+                pool_id TEXT NOT NULL REFERENCES trading_space_pools(id),
+                agent_id INTEGER NOT NULL,
+                amount REAL NOT NULL DEFAULT 0,
+                wallet_id INTEGER,
+                committed_ts INTEGER NOT NULL DEFAULT (unixepoch()),
+                UNIQUE(pool_id, agent_id)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS content_spaces (
+                id TEXT PRIMARY KEY,
+                guild_slug TEXT NOT NULL,
+                name TEXT NOT NULL,
+                mcp_provider TEXT NOT NULL DEFAULT 'vantage_anvil',
+                series_id INTEGER,
+                chat_channel_slug TEXT,
+                created_by_agent_id INTEGER,
+                created_ts INTEGER NOT NULL DEFAULT (unixepoch())
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS content_projects (
+                id TEXT PRIMARY KEY,
+                space_id TEXT NOT NULL REFERENCES content_spaces(id),
+                title TEXT NOT NULL,
+                brief TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'brief_submitted',
+                provider TEXT,
+                created_by_agent_id INTEGER,
+                created_ts INTEGER NOT NULL DEFAULT (unixepoch()),
+                updated_ts INTEGER NOT NULL DEFAULT (unixepoch())
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS content_assets (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES content_projects(id),
+                space_id TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'other',
+                title TEXT NOT NULL,
+                content_uri TEXT DEFAULT '',
+                content_hash TEXT DEFAULT '',
+                provider TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'draft',
+                created_by_agent_id INTEGER,
+                created_ts INTEGER NOT NULL DEFAULT (unixepoch())
+            )
+        """)
+        # Migrate: add chat_channel_slug to trading_spaces and content_spaces
+        for _tbl in ('trading_spaces', 'content_spaces'):
+            try:
+                await db.execute(f'ALTER TABLE {_tbl} ADD COLUMN chat_channel_slug TEXT')
+            except Exception:
+                pass
         await db.commit()

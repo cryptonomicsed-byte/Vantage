@@ -599,15 +599,22 @@ def _fire_cluster(token, distinct_wallets, entries):
     conviction = round(conviction, 1)
     action = "MIRROR" if conviction >= 70 else "WATCH"
 
+    # TODO(wave1-C): populate from alpha_hunter entry_time/wallet_age when available
+    bundle_detected = False   # True if >60% bought within 30s window
+    fresh_wallet    = False   # True if any wallet age < 7 days
+    concentration_pct = 0.0  # % of token supply held by this cluster
+
     def _write():
         conn = db_conn()
         try:
             conn.execute("""
                 INSERT INTO alpha_clusters (chain, token_address, token_symbol, wallets_json, wallet_count,
-                    total_inflow_usd, market_cap, liquidity_usd, rug_ratio, conviction, action)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    total_inflow_usd, market_cap, liquidity_usd, rug_ratio, conviction, action,
+                    bundle_detected, fresh_wallet, concentration_pct)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (CHAIN, token, symbol, json.dumps(distinct_wallets), len(distinct_wallets),
-                  total_inflow, mc, liq, rug_ratio, conviction, action))
+                  total_inflow, mc, liq, rug_ratio, conviction, action,
+                  int(bundle_detected), int(fresh_wallet), concentration_pct))
             conn.commit()
         finally:
             conn.close()

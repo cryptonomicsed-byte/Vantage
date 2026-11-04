@@ -512,6 +512,8 @@ async def lifespan(app: FastAPI):
     # Per-agent MCP hub transport (dynamic tools from connected servers).
     # Guarded: a transport failure must never stop the app from booting.
     try:
+        from . import gitea_accounts as _gitea
+        await _gitea.ensure_tables()
         from .mcp_hub_server import start_manager as _start_mcp_hub
         await _start_mcp_hub()
     except Exception as _e:  # pragma: no cover
@@ -662,6 +664,34 @@ async def lifespan(app: FastAPI):
     from .coordination_indexer import run_coordination_indexer, run_mention_dispatch_poller
     coordination_indexer_task = asyncio.create_task(run_coordination_indexer())
     mention_poller_task = asyncio.create_task(run_mention_dispatch_poller())
+
+    # Publish kind 11317 cordn coordinator tools-announcement on startup.
+    # Non-fatal: relay unavailability or missing identity must never block boot.
+    async def _publish_cordn_coordinator_announcement():
+        try:
+            import json as _json
+            from .buzz_identity import derive_instance_keypair, public_key_xonly_hex
+            from .nostr.client import BuzzSession
+            from .buzz_registration import RELAY_WS_URL
+            _pk = await derive_instance_keypair()
+            _pubkey = public_key_xonly_hex(_pk)
+            _tools = [
+                "kp_publish", "kp_remove", "kp_list", "kp_take",
+                "welcome_store", "welcome_take",
+                "join_request_store", "join_request_take_many",
+                "msg_post", "msg_fetch_many", "msg_sub_many",
+            ]
+            _content = _json.dumps({"tools": _tools, "endpoint": "nostr"})
+            _tags = [["relay", RELAY_WS_URL]]
+            _sess = BuzzSession(RELAY_WS_URL, _pk)
+            await _sess.connect()
+            await _sess.authenticate()
+            await _sess.publish(11317, _content, tags=_tags)
+            await _sess.close()
+            logger.info("Published cordn coordinator announcement (kind 11317)")
+        except Exception as _ann_exc:
+            logger.warning("kind 11317 coordinator announcement failed (non-fatal): %s", _ann_exc)
+    asyncio.create_task(_publish_cordn_coordinator_announcement())
 
     # Guild-scoped leaderboard rollup. Deliberately slow: a leaderboard needs
     # stable numbers more than fresh ones.
@@ -1055,6 +1085,14 @@ from .routers.artifacts import router as artifacts_router
 app.include_router(artifacts_router)
 from .routers.workspace_memory import router as workspace_memory_router
 app.include_router(workspace_memory_router)
+from .routers.trading_space import router as trading_space_router
+app.include_router(trading_space_router)
+from .routers.content_space import router as content_space_router
+app.include_router(content_space_router)
+from .routers.trading_space import router as trading_space_router
+app.include_router(trading_space_router)
+from .routers.content_space import router as content_space_router
+app.include_router(content_space_router)
 from .routers.workspace_mcp import router as workspace_mcp_router
 app.include_router(workspace_mcp_router)
 
@@ -1215,6 +1253,12 @@ app.include_router(_galaxy_router.router)
 # Per-agent MCP client hub: each agent connects its own MCP servers with its
 # own credentials, so an action executes as that agent rather than as one
 # shared platform identity.
+from .routers import custom_tools_api as _custom_tools_router
+app.include_router(_custom_tools_router.router)
+from .routers import galaxy_ext as _galaxy_ext_router
+app.include_router(_galaxy_ext_router.router)
+from .routers import mcp_catalog_api as _mcp_catalog_router
+app.include_router(_mcp_catalog_router.router)
 from .routers import mcp_hub as _mcp_hub_router
 app.include_router(_mcp_hub_router.router)
 
@@ -1306,6 +1350,10 @@ async def mcp_manifest():
 # change to the MCP layer.
 from .routers import oauth as _oauth_router
 app.include_router(_oauth_router.router)
+
+# NIP-90 DVM adapter -- external job board for tier-4 agents (Phase 5).
+from .routers.dvm import router as dvm_router
+app.include_router(dvm_router)
 
 # NOTE: tables are NOT created from an on_event("startup") hook here.
 # main.py passes an explicit `lifespan=lifespan` to FastAPI(), and Starlette

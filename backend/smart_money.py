@@ -1,33 +1,116 @@
-import uuid, time, json
-from backend.memory_engine import aggregate_score as _julia_score
-from backend.db import get_db
+import logging
+import json
+from datetime import datetime, timezone
 
-async def compute_smart_money_score(wallet: str, trades: list) -> dict:
-    if not trades:
-        return {"wallet": wallet, "score": 0.0, "win_rate": 0.0, "avg_roi": 0.0, "trade_count": 0}
-    wins = [t for t in trades if t.get("roi", 0) > 0]
-    win_rate = len(wins) / len(trades)
-    avg_roi = sum(t.get("roi", 0) for t in trades) / len(trades)
-    volume_score = min(len(trades) / 50, 1.0)
-    roi_score = min(avg_roi / 100, 1.0)
-    score = await _julia_score(
-        signals={"win_rate": win_rate, "roi": roi_score, "volume": volume_score},
-        weights={"win_rate": 0.5, "roi": 0.3, "volume": 0.2}
-    )
-    return {"wallet": wallet, "score": round(score, 4), "win_rate": round(win_rate, 4),
-            "avg_roi": round(avg_roi, 4), "trade_count": len(trades)}
+logger = logging.getLogger(__name__)
 
-async def upsert_score(wallet: str, score_data: dict, cluster_id: str = "", tags: list = None):
-    async with get_db() as db:
-        await db.execute(
-            """INSERT INTO smart_money_scores (id, wallet, score, win_rate, avg_roi, trade_count, cluster_id, tags, computed_ts)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(wallet) DO UPDATE SET
-                 score=excluded.score, win_rate=excluded.win_rate, avg_roi=excluded.avg_roi,
-                 trade_count=excluded.trade_count, cluster_id=excluded.cluster_id,
-                 tags=excluded.tags, computed_ts=excluded.computed_ts""",
-            (str(uuid.uuid4()), wallet, score_data["score"], score_data["win_rate"],
-             score_data["avg_roi"], score_data["trade_count"], cluster_id,
-             json.dumps(tags or []), int(time.time()))
-        )
+
+def compute_smart_money_score(wallet_cluster: dict) -> float:
+    """
+    Score a wallet cluster for smart money characteristics.
+    Returns 0.0-1.0. Higher = more likely smart money.
+    """
+    score = 0.0
+    wallets = wallet_cluster.get("wallets", [])
+    if not wallets:
+        return 0.0
+
+    n = len(wallets)
+
+    # Factor 1: cluster concentration (fewer wallets = more coordinated)
+    if n <= 3:
+        score += 0.3
+    elif n <= 10:
+        score += 0.15
+
+    # Factor 2: early entry (bought before 10% of cumulative volume)
+    early_count = sum(1 for w in wallets if w.get("entry_percentile", 100) < 10)
+    if early_count > 0:
+        score += min(0.3, early_count / max(n, 1) * 0.3)
+
+    # Factor 3: profitable exits
+    profitable = sum(1 for w in wallets if w.get("realized_pnl", 0) > 0)
+    score += min(0.2, profitable / max(n, 1) * 0.2)
+
+    # Factor 4: repeat coordination (cluster seen across multiple tokens)
+    seen_tokens = wallet_cluster.get("tokens_seen", 1)
+    if seen_tokens >= 3:
+        score += 0.2
+
+    return round(min(score, 1.0), 4)
+
+
+async def refresh_smart_money_scores(db) -> int:
+    """
+    Recompute scores for all wallet clusters.
+    Groups wallet_clusters rows by cluster_id, scores each cluster,
+    and upserts into smart_money_scores.
+    Returns count of clusters updated.
+    """
+    import uuid
+
+    updated = 0
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+
+    try:
+        rows = await (await db.execute(
+            "SELECT cluster_id, wallet_address, cluster_tags, cluster_score "
+            "FROM wallet_clusters ORDER BY cluster_id"
+        )).fetchall()
+    except Exception as exc:
+        logger.warning(f"smart_money: could not read wallet_clusters: {exc}")
+        return 0
+
+    # Group into cluster_id -> list of wallet dicts
+    clusters: dict = {}
+    for row in rows:
+        cid = row[0]
+        if cid not in clusters:
+            clusters[cid] = {"wallets": [], "tokens_seen": 1, "raw_score": row[3]}
+        try:
+            tags = json.loads(row[2]) if row[2] else []
+        except Exception:
+            tags = []
+        clusters[cid]["wallets"].append({
+            "address": row[1],
+            "tags": tags,
+        })
+
+    # Count distinct tokens per cluster from wallet_trades
+    try:
+        token_counts = await (await db.execute(
+            "SELECT wc.cluster_id, COUNT(DISTINCT wt.token_mint) AS cnt "
+            "FROM wallet_clusters wc "
+            "JOIN wallet_trades wt ON wt.wallet = wc.wallet_address "
+            "GROUP BY wc.cluster_id"
+        )).fetchall()
+        for cid, cnt in token_counts:
+            if cid in clusters:
+                clusters[cid]["tokens_seen"] = cnt
+    except Exception:
+        pass  # wallet_trades may be empty; default tokens_seen=1 is fine
+
+    for cid, cluster_data in clusters.items():
+        try:
+            score = compute_smart_money_score(cluster_data)
+            await db.execute(
+                "UPDATE smart_money_scores SET score=?, computed_ts=? WHERE cluster_id=?",
+                (score, now_ts, cid)
+            )
+            # INSERT if no row existed (UPDATE touches 0 rows)
+            await db.execute(
+                "INSERT OR IGNORE INTO smart_money_scores "
+                "(id, wallet, score, win_rate, avg_roi, trade_count, cluster_id, tags, computed_ts) "
+                "VALUES (?, ?, ?, 0.0, 0.0, ?, ?, '[]', ?)",
+                (str(uuid.uuid4()), cid, score, len(cluster_data["wallets"]), cid, now_ts)
+            )
+            updated += 1
+        except Exception as exc:
+            logger.warning(f"smart_money: score failed for cluster {cid}: {exc}")
+
+    try:
         await db.commit()
+    except Exception as exc:
+        logger.warning(f"smart_money: commit failed: {exc}")
+
+    return updated

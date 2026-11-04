@@ -75,10 +75,10 @@ const PRESENCE_COLOR: Record<string, string> = {
 }
 
 const TABS = [
+  { id: 'code', label: 'Code', icon: <Terminal size={13} /> },
   { id: 'overview', label: 'Overview', icon: <Star size={13} /> },
   { id: 'chat', label: 'Chat', icon: <MessageSquare size={13} /> },
   { id: 'tasks', label: 'Tasks', icon: <Activity size={13} /> },
-  { id: 'code', label: 'Code', icon: <Terminal size={13} /> },
   { id: 'memory', label: 'Memory', icon: <Database size={13} /> },
   { id: 'agents', label: 'Agents', icon: <Users size={13} /> },
   { id: 'artifacts', label: 'Artifacts', icon: <Package size={13} /> },
@@ -674,7 +674,7 @@ export default function WorkspaceShell({
 }) {
   const [apiKey] = useState(() => localStorage.getItem('vantage_api_key') || '')
   const [humanSession] = useState(() => localStorage.getItem('vantage_human_session') || '')
-  const [activeTab, setActiveTab] = useState('overview')
+  const [activeTab, setActiveTab] = useState('code')
   const [roster, setRoster] = useState<RosterEntry[]>([])
   const [taskSummary, setTaskSummary] = useState<TaskSummary>({ total: 0, active: 0, review: 0 })
 
