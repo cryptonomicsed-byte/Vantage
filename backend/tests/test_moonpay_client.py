@@ -39,7 +39,7 @@ def test_is_configured_reflects_real_env_state(monkeypatch):
 
 
 def test_build_onramp_url_sandbox_key_uses_sandbox_domain(monkeypatch):
-    monkeypatch.setenv("MOONPAY_API_KEY", "pk_test_abc123")
+    monkeypatch.setenv("MOONPAY_API_KEY", "pk_test_not_a_real_key")
     monkeypatch.setenv("MOONPAY_SECRET_KEY", "sk_test_secret456")
     result = mp.build_onramp_url("SoLWaLLetAddress1111111111111111111111111", currency="SOL")
     assert result["environment"] == "sandbox"
@@ -51,7 +51,7 @@ def test_build_onramp_url_sandbox_key_uses_sandbox_domain(monkeypatch):
 
 def test_build_onramp_url_live_key_uses_live_domain(monkeypatch):
     monkeypatch.setenv("MOONPAY_API_KEY", "pk_live_realkey")
-    monkeypatch.setenv("MOONPAY_SECRET_KEY", "sk_live_realsecret")
+    monkeypatch.setenv("MOONPAY_SECRET_KEY", "sk_test_not_a_real_key")
     result = mp.build_onramp_url("SoLWaLLetAddress1111111111111111111111111", currency="SOL")
     assert result["environment"] == "live"
     assert result["url"].startswith("https://buy.moonpay.com?")

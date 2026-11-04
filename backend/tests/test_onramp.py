@@ -36,7 +36,7 @@ async def test_onramp_503_when_moonpay_not_configured(client, fresh_agent):
 @pytest.mark.asyncio
 async def test_onramp_returns_real_signed_url_when_configured(client, fresh_agent, monkeypatch):
     monkeypatch.setenv("MOONPAY_API_KEY", "pk_test_realkey")
-    monkeypatch.setenv("MOONPAY_SECRET_KEY", "sk_test_realsecret")
+    monkeypatch.setenv("MOONPAY_SECRET_KEY", "sk_test_not_a_real_key")
     h = _h(await fresh_agent())
     real_address = "So11111111111111111111111111111111111111112"
     rw = await client.post("/api/trading/wallets", headers=h,
@@ -58,13 +58,13 @@ async def test_onramp_returns_real_signed_url_when_configured(client, fresh_agen
     query_and_sig = d["url"].split("?", 1)[1]
     query_part, sig_part = query_and_sig.rsplit("&signature=", 1)
     from urllib.parse import unquote
-    assert unquote(sig_part) == mp._sign_query("?" + query_part, "sk_test_realsecret")
+    assert unquote(sig_part) == mp._sign_query("?" + query_part, "sk_test_not_a_real_key")
 
 
 @pytest.mark.asyncio
 async def test_onramp_rejects_non_solana_wallet(client, fresh_agent, monkeypatch):
     monkeypatch.setenv("MOONPAY_API_KEY", "pk_test_realkey")
-    monkeypatch.setenv("MOONPAY_SECRET_KEY", "sk_test_realsecret")
+    monkeypatch.setenv("MOONPAY_SECRET_KEY", "sk_test_not_a_real_key")
     h = _h(await fresh_agent())
     rw = await client.post("/api/trading/wallets", headers=h,
                             json={"label": "btc-1", "chain": "bitcoin", "address": "bc1qtest"})
@@ -86,7 +86,7 @@ async def test_onramp_404_for_another_agents_wallet(client, fresh_agent, monkeyp
     """Ownership-scoped like every other wallet endpoint -- agent A cannot
     generate an on-ramp URL for agent B's wallet."""
     monkeypatch.setenv("MOONPAY_API_KEY", "pk_test_realkey")
-    monkeypatch.setenv("MOONPAY_SECRET_KEY", "sk_test_realsecret")
+    monkeypatch.setenv("MOONPAY_SECRET_KEY", "sk_test_not_a_real_key")
     a = await fresh_agent()
     b = await fresh_agent()
     rw = await client.post("/api/trading/wallets", headers=_h(a),
@@ -100,7 +100,7 @@ async def test_onramp_404_for_another_agents_wallet(client, fresh_agent, monkeyp
 @pytest.mark.asyncio
 async def test_onramp_custom_currency_and_fiat_amount(client, fresh_agent, monkeypatch):
     monkeypatch.setenv("MOONPAY_API_KEY", "pk_test_realkey")
-    monkeypatch.setenv("MOONPAY_SECRET_KEY", "sk_test_realsecret")
+    monkeypatch.setenv("MOONPAY_SECRET_KEY", "sk_test_not_a_real_key")
     h = _h(await fresh_agent())
     rw = await client.post("/api/trading/wallets", headers=h,
                             json={"label": "sol-1", "chain": "solana", "address": "So" + "1" * 42})
@@ -120,7 +120,7 @@ async def test_onramp_custom_currency_and_fiat_amount(client, fresh_agent, monke
 @pytest.mark.asyncio
 async def test_onramp_requires_agent_key(client, fresh_agent, monkeypatch):
     monkeypatch.setenv("MOONPAY_API_KEY", "pk_test_realkey")
-    monkeypatch.setenv("MOONPAY_SECRET_KEY", "sk_test_realsecret")
+    monkeypatch.setenv("MOONPAY_SECRET_KEY", "sk_test_not_a_real_key")
     h = _h(await fresh_agent())
     rw = await client.post("/api/trading/wallets", headers=h,
                             json={"label": "sol-1", "chain": "solana", "address": "So" + "1" * 42})
