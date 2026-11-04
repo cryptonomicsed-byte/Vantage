@@ -7,8 +7,12 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      '3d-force-graph': path.resolve(__dirname, 'src/stubs/3d-force-graph.js'),
-      'three': path.resolve(__dirname, 'src/stubs/three.js'),
+      // NOTE: '3d-force-graph' and 'three' used to be aliased to empty stubs
+      // here. The packages are installed, so the alias did not save a build
+      // dependency -- it only made every galaxy view render nothing: the app
+      // got stub classes (THREE.CanvasTexture undefined -> "is not a
+      // constructor") instead of the real library. Keep them resolving to the
+      // real packages.
       'video.js/dist/video-js.css': path.resolve(__dirname, 'src/stubs/video-js.css'),
       'video.js': path.resolve(__dirname, 'src/stubs/videojs'),
       '@videojs/http-streaming': path.resolve(__dirname, 'src/stubs/videojs-http-streaming.js'),

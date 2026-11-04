@@ -115,6 +115,7 @@ export default function NeuralVault() {
   const [galaxy, setGalaxy] = useState<GalaxyData | null>(null)
   const [error, setError] = useState('')
   const [counts, setCounts] = useState({ stars: 0, links: 0 })
+  const [publicView, setPublicView] = useState(false)
   const [families, setFamilies] = useState<string[]>([])
   const [hidden, setHidden] = useState<Set<string>>(new Set())
   const [note, setNote] = useState<{ title: string; md: string } | null>(null)
@@ -140,7 +141,18 @@ export default function NeuralVault() {
     if (!agentName) return
     fetch(`/api/agents/${encodeURIComponent(agentName)}/vault/galaxy`, { headers })
       .then(r => { if (!r.ok) throw new Error(r.status === 403 ? 'This vault is private.' : `vault ${r.status}`); return r.json() })
-      .then((d: GalaxyData) => { setGalaxy(d); setError('') })
+      .then((d: GalaxyData) => {
+        if (d?.stars?.length) { setGalaxy(d); setPublicView(false); setError(''); return }
+        // A guest is auto-provisioned as viewer-*, whose vault is empty. Rather
+        // than show a blank galaxy, fall back to the public hive vault.
+        return fetch('/api/vault/public-galaxy', { headers })
+          .then(r => (r.ok ? r.json() : null))
+          .then((pd: any) => {
+            if (pd?.stars?.length) { setGalaxy(pd); setPublicView(true); setError('') }
+            else { setGalaxy(d); setPublicView(false); setError('') }
+          })
+          .catch(() => { setGalaxy(d); setPublicView(false); setError('') })
+      })
       .catch(e => setError(e.message))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentName])
@@ -161,9 +173,15 @@ export default function NeuralVault() {
     if (!galaxy || !mountRef.current) return
     let disposed = false
     ;(async () => {
-      const [{ default: ForceGraph3D }, THREE] = await Promise.all([
+      const [{ default: ForceGraph3D }, threeMod] = await Promise.all([
         import('3d-force-graph'), import('three'),
       ])
+      // Vite's three interop puts the named exports under .default in the
+      // pre-bundled build, so THREE.CanvasTexture was undefined and threw
+      // \"is not a constructor\" -- which killed the whole graph silently.
+      const THREE: any = (threeMod as any).CanvasTexture
+        ? (threeMod as any)
+        : ((threeMod as any).default ?? threeMod)
       if (disposed || !mountRef.current) return
 
       const { nodes, links } = buildGraph(galaxy)
@@ -306,6 +324,11 @@ export default function NeuralVault() {
         </div>
         <div style={{ fontFamily: 'monospace', fontSize: 11, color: 'rgba(255,255,255,.55)', marginTop: 2 }}>
           {counts.stars} stars · {counts.links} links
+          {publicView && (
+            <span style={{ marginLeft: 10, fontSize: 10, color: '#ffaa00', fontFamily: 'monospace' }}>
+              public hive — connect an agent key to see your own
+            </span>
+          )}
         </div>
         <div style={{ fontFamily: 'monospace', fontSize: 10, color: 'rgba(255,255,255,.32)', marginTop: 2 }}>
           drag to orbit · scroll to zoom · click a star to read the memory · brighter = more recent
