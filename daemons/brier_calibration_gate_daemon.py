@@ -26,7 +26,7 @@ async def main():
                         "SELECT COUNT(*) FROM brier_predictions WHERE scored=0")).fetchone()
                 if not _c or not _c[0]:
                     logger.warning("Brier tick: no predictions recorded yet - gate is vacuous, skipping")
-                    await asyncio.sleep(TICK)
+                    await asyncio.sleep(POLL_INTERVAL)
                     continue
                 score = await gate.compute_rolling_brier()
                 status = await gate.gate_status()
