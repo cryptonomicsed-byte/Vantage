@@ -17,7 +17,7 @@ from typing import Optional
 
 import aiosqlite
 import httpx
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from pydantic import BaseModel
 
 from backend.db import DB_PATH
@@ -976,31 +976,22 @@ async def money_flow(
 # --- Smart Money endpoints ---
 @router.get("/alpha/smart-money", operation_id="get_smart_money_scores")
 async def get_smart_money(db=Depends(get_db)):
-    async with db as conn:
-        rows = await (await conn.execute(
-            "SELECT * FROM smart_money_scores ORDER BY score DESC LIMIT 50"
-        )).fetchall()
-        return [dict(r) for r in rows]
+    rows = await (await db.execute(
+        "SELECT cluster_id, score, computed_ts FROM smart_money_scores ORDER BY score DESC LIMIT 100"
+    )).fetchall()
+    return {"scores": [{"cluster_id": r[0], "score": r[1], "computed_ts": r[2]} for r in rows]}
 
 @router.post("/alpha/smart-money/refresh", operation_id="refresh_smart_money_scores")
-async def refresh_smart_money():
-    from backend.smart_money import compute_smart_money_score, upsert_score
+async def refresh_smart_money(background_tasks: BackgroundTasks):
+    from backend.smart_money import refresh_smart_money_scores
     from backend.db import get_db as _get_db
-    import asyncio
+
     async def run_refresh():
-        async with _get_db() as conn:
-            try:
-                rows = await (await conn.execute(
-                    "SELECT DISTINCT wallet FROM alpha_early_buyers LIMIT 500"
-                )).fetchall()
-                wallets = [r["wallet"] for r in rows]
-            except Exception:
-                wallets = []
-        for wallet in wallets:
-            score_data = await compute_smart_money_score(wallet, [])
-            await upsert_score(wallet, score_data)
-    asyncio.create_task(run_refresh())
-    return {"status": "scheduled"}
+        async with _get_db() as db:
+            await refresh_smart_money_scores(db)
+
+    background_tasks.add_task(run_refresh)
+    return {"status": "refresh queued"}
 
 
 # --- P1-5 / P1-6: Alpha service health endpoint ---

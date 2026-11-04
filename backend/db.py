@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import aiosqlite
+import sqlite3
 
 from .config import settings
 
@@ -72,6 +73,22 @@ async def connect_bounded():
             _DB_CONN_LIMIT.release()
 
     conn.close = _close_release
+    return conn
+
+
+
+def get_sync_db():
+    """Return a plain sqlite3 connection on DB_PATH.
+
+    Exists so sync/daemon call-sites (e.g. routers/alpha_hunter.py,
+    daemons/vantage_db_shim.py) can import from a single canonical
+    location.  Uses WAL mode + busy_timeout to match the async get_db()
+    contract.
+    """
+    conn = sqlite3.connect(str(DB_PATH), timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=20000")
+    conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 
