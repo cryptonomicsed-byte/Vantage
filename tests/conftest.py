@@ -10,6 +10,11 @@ import tempfile
 _TEST_ROOT = tempfile.mkdtemp(prefix="vantage-test-")
 os.environ.setdefault("VANTAGE_DATA_DIR", os.path.join(_TEST_ROOT, "data"))
 os.environ.setdefault("VANTAGE_MEDIA_DIR", os.path.join(_TEST_ROOT, "media"))
+# The data dir must EXIST before anything opens the sqlite file: sqlite creates the
+# file but never the parent directory, so a missing dir surfaces as the misleading
+# "sqlite3.OperationalError: unable to open database file" at collection time.
+os.makedirs(os.environ["VANTAGE_DATA_DIR"], exist_ok=True)
+os.makedirs(os.environ["VANTAGE_MEDIA_DIR"], exist_ok=True)
 # Enable the Admin API so unauthenticated admin requests are rejected with 403
 # (the intended behaviour the tests assert) rather than the 503 the app returns
 # when no admin key is configured at all. Must be >=32 chars (settings validator).
