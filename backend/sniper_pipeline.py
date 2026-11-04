@@ -1,37 +1,75 @@
-import uuid, time, json
-from backend.db import get_db
+"""
+Sniper pipeline: handoff from early_buyers detection to sniper targeting.
+Takes early buyer wallet clusters and scores them for sniper targeting.
+"""
+import logging
+from typing import List, Dict, Any
 
-async def get_sniper_targets(limit: int = 50) -> list[dict]:
-    """Pull wallets from early_buyers that qualify as sniper targets."""
-    async with get_db() as db:
+logger = logging.getLogger(__name__)
+
+
+def build_sniper_targets(early_buyers, db):
+    targets = []
+    for buyer in early_buyers:
         try:
-            rows = await (await db.execute(
-                """SELECT wallet, mint, buy_ts, profit_multiplier
-                   FROM alpha_early_buyers
-                   WHERE buy_ts > ? AND profit_multiplier > 2.0
-                   ORDER BY profit_multiplier DESC LIMIT ?""",
-                (int(time.time()) - 86400 * 7, limit)
-            )).fetchall()
-            return [dict(r) for r in rows]
-        except Exception:
-            return []
+            wallet = buyer.get("wallet", "")
+            mint = buyer.get("mint", "")
+            if not wallet or not mint:
+                continue
 
-async def enqueue_sniper_target(wallet: str, mint: str, context: dict = None):
-    """Mark a wallet as a sniper target for copy-trade consideration."""
-    async with get_db() as db:
-        try:
-            await db.execute(
-                """INSERT OR IGNORE INTO sniper_targets (id, wallet, mint, context_json, queued_ts, status)
-                   VALUES (?, ?, ?, ?, ?, 'pending')""",
-                (str(uuid.uuid4()), wallet, mint, json.dumps(context or {}), int(time.time()))
-            )
-            await db.commit()
-        except Exception:
-            pass  # table may not exist yet
+            score = 0.0
+            reasons = []
 
-async def handoff_early_buyers_to_sniper():
-    """Main handoff: pull early buyers, enqueue qualified ones."""
-    targets = await get_sniper_targets()
+            entry_pct = buyer.get("entry_percentile", 100)
+            if entry_pct < 5:
+                score += 0.4
+                reasons.append("top-5pct-entry")
+            elif entry_pct < 15:
+                score += 0.2
+                reasons.append("early-entry")
+
+            try:
+                prev_count = db.execute(
+                    "SELECT COUNT(*) FROM sniper_targets WHERE wallet=? AND mint != ?",
+                    (wallet, mint)
+                ).fetchone()[0]
+                if prev_count >= 2:
+                    score += 0.3
+                    reasons.append(f"repeat-sniper({prev_count})")
+            except Exception:
+                pass
+
+            hold_minutes = buyer.get("hold_minutes", 9999)
+            if hold_minutes < 60:
+                score += 0.2
+                reasons.append("fast-exit")
+
+            targets.append({
+                "wallet": wallet,
+                "mint": mint,
+                "sniper_score": round(min(score, 1.0), 4),
+                "reason": ",".join(reasons),
+            })
+        except Exception as e:
+            logger.warning(f"sniper_pipeline error on buyer {buyer}: {e}")
+
+    targets.sort(key=lambda x: x["sniper_score"], reverse=True)
+    return targets
+
+
+def upsert_sniper_targets(targets, db):
+    import time
+    now_ts = int(time.time())
+    count = 0
     for t in targets:
-        await enqueue_sniper_target(t["wallet"], t["mint"], {"profit_multiplier": t.get("profit_multiplier", 0)})
-    return len(targets)
+        try:
+            db.execute(
+                "INSERT INTO sniper_targets (wallet, mint, sniper_score, reason, updated_ts) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(wallet, mint) DO UPDATE SET sniper_score=excluded.sniper_score, reason=excluded.reason, updated_ts=excluded.updated_ts",
+                (t["wallet"], t["mint"], t["sniper_score"], t["reason"], now_ts)
+            )
+            count += 1
+        except Exception as e:
+            logger.warning(f"upsert_sniper_target failed: {e}")
+    db.commit()
+    return count

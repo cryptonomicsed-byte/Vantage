@@ -2345,6 +2345,10 @@ async def init_workspace_tasks_db() -> None:
                 UNIQUE(wallet, mint)
             )
         """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_prediction_signals_source
+            ON prediction_signals(source, ingested_ts DESC)
+        """)
         await db.commit()
 
 
@@ -2422,6 +2426,15 @@ async def init_workspace_tasks_db() -> None:
                 predicted_ts INTEGER NOT NULL,
                 outcome TEXT,
                 scored INTEGER DEFAULT 0
+            )
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS prediction_resolutions (
+                market_id TEXT PRIMARY KEY,
+                predicted_probability REAL NOT NULL,
+                actual_outcome REAL NOT NULL,
+                resolved_ts INTEGER NOT NULL
             )
         """)
 
