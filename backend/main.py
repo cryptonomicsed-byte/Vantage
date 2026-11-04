@@ -984,9 +984,12 @@ from .routers.analytics import router as analytics_router
 app.include_router(analytics_router)
 from .routers.identity import router as identity_router
 app.include_router(identity_router)
-from .routers.memory_vault import router as memory_vault_router, external_router as vault_external_router
+from .routers.memory_vault import (router as memory_vault_router,
+    external_router as vault_external_router,
+    public_router as vault_public_router)
 app.include_router(memory_vault_router)
 app.include_router(vault_external_router)
+app.include_router(vault_public_router)
 from .routers.federation import router as federation_galaxy_router
 app.include_router(federation_galaxy_router)
 from .routers.trading import router as trading_router

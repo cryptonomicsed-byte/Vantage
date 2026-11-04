@@ -836,3 +836,45 @@ async def ingest_iranti_memory(request: Request, connector: dict = Depends(get_v
         "slug": slug,
         "vault_path": vault_path,
     }
+
+
+public_router = APIRouter(prefix="/api/vault", tags=["memory_vault"])
+
+
+@public_router.get("/public-galaxy")
+async def public_galaxy():
+    """Most populated vault, for visitors who do not have one yet.
+
+    A guest is auto-provisioned as `viewer-*`, whose vault is empty, so /vault
+    rendered a blank canvas (0 stars, nothing clickable). This returns a real
+    populated galaxy plus `public_fallback` so the UI can say whose it is.
+    """
+    async with get_db() as db:
+        row = await (await db.execute(
+            "SELECT agent_id, COUNT(*) c FROM agent_memory_nodes "
+            "GROUP BY agent_id ORDER BY c DESC LIMIT 1")).fetchone()
+    if not row:
+        raise HTTPException(404, "no public galaxy yet")
+    agent_id = row[0]
+    async with get_db() as db:
+        r2 = await (await db.execute(
+            "SELECT name FROM agents WHERE id=?", (agent_id,))).fetchone()
+    name = r2[0] if r2 else f"agent-{agent_id}"
+    data = MemoryVault(agent_id, name).get_galaxy_data()
+
+    # 15k stars serialised to ~8 MB, which took ~10s to paint on a phone. Trim
+    # to a representative slice (and keep only edges whose endpoints survive)
+    # so a visitor's first view is fast.
+    limit = 5000
+    stars = data.get("stars") or []
+    if len(stars) > limit:
+        data["stars"] = stars[:limit]
+        # ids are not always hashable (some stars carry a list), so compare as
+        # strings -- {s["id"] for ...} raised TypeError: unhashable type: list.
+        keep = {str(s.get("id")) for s in data["stars"]}
+        data["edges"] = [e for e in (data.get("edges") or [])
+                         if str(e.get("source")) in keep and str(e.get("target")) in keep]
+        data["truncated_from"] = len(stars)
+    data["public_fallback"] = True
+    data["subject_agent"] = name
+    return data

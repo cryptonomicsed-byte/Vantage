@@ -227,9 +227,15 @@ export default function SwarmMap() {
     if (!network || !mountRef.current) return
     let disposed = false
     ;(async () => {
-      const [{ default: ForceGraph3D }, THREE] = await Promise.all([
+      const [{ default: ForceGraph3D }, threeMod] = await Promise.all([
         import('3d-force-graph'), import('three'),
       ])
+      // Vite's three interop puts the named exports under .default in the
+      // pre-bundled build, so THREE.CanvasTexture was undefined and threw
+      // \"is not a constructor\" -- which killed the whole graph silently.
+      const THREE: any = (threeMod as any).CanvasTexture
+        ? (threeMod as any)
+        : ((threeMod as any).default ?? threeMod)
       if (disposed || !mountRef.current) return
 
       const { nodes, links } = buildGraph(network, taskLinks)
