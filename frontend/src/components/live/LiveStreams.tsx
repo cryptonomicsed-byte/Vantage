@@ -162,6 +162,10 @@ export async function startCameraPublish(whipUrl: string, stream: MediaStream): 
   const iceServers = await getIceServers()
   const pc = new RTCPeerConnection({ iceServers })
   stream.getTracks().forEach(t => pc.addTrack(t, stream))
+  // The media server can only remux H264 (and VP9/AV1, which it does not offer)
+  // into HLS. Browsers default to VP8, which ingests fine but produces NO HLS
+  // playlist -> "live" that no viewer can watch. Force H264 before negotiating.
+  preferH264(pc)
   const offer = await pc.createOffer()
   await pc.setLocalDescription(offer)
   await waitForIceComplete(pc)
@@ -175,8 +179,39 @@ export async function startCameraPublish(whipUrl: string, stream: MediaStream): 
   if (!res.ok) throw new Error(`WHIP failed (${res.status})`)
   const answerSdp = await res.text()
   await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp })
+  const negotiated = negotiatedVideoCodec(pc)
+  if (negotiated && !/H264/i.test(negotiated)) {
+    try { pc.close() } catch { /* noop */ }
+    throw new Error(
+      `The media server picked ${negotiated}, which it cannot convert to HLS — ` +
+      `viewers would see nothing. Retry (this build asks for H264) or announce ` +
+      `an existing stream URL instead.`,
+    )
+  }
   activePeer = pc
   activeStream = stream
+}
+
+/* Ask the browser to negotiate H264 (the only codec mediamtx can remux into HLS). */
+function preferH264(pc: RTCPeerConnection): void {
+  const caps = typeof RTCRtpSender !== 'undefined' && RTCRtpSender.getCapabilities
+    ? RTCRtpSender.getCapabilities('video')
+    : null
+  const codecs = caps?.codecs || []
+  if (!codecs.length) return
+  const h264 = codecs.filter(c => /H264/i.test(c.mimeType))
+  if (!h264.length) return
+  const ordered = [...h264, ...codecs.filter(c => !/H264/i.test(c.mimeType))]
+  for (const t of pc.getTransceivers()) {
+    try { t.setCodecPreferences?.(ordered) } catch { /* browser without support */ }
+  }
+}
+
+function negotiatedVideoCodec(pc: RTCPeerConnection): string {
+  try {
+    const params = pc.getReceivers()[0]?.getParameters?.()
+    return params?.codecs?.[0]?.mimeType || ''
+  } catch { return '' }
 }
 
 export function stopCameraPublish(): void {
