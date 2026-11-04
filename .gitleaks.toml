@@ -19,4 +19,5 @@ regexes = [
   '''So11111111111111111111111111111111111111112''',  # Wrapped SOL mint (public)
   '''EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v''',  # USDC SPL mint (public)
   '''Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB''',  # USDT SPL mint (public)
+  '''dGhlIHNhbXBsZSBub25jZQ==''',  # RFC 6455 §1.3 example Sec-WebSocket-Key (public)
 ]

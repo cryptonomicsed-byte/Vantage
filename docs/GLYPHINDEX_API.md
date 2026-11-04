@@ -48,7 +48,7 @@ X-Agent-Key: <agent_session_token>
 ```bash
 curl -X POST https://vantage.local/api/glyphs/seal \
   -H "Content-Type: application/json" \
-  -H "X-Agent-Key: abc123xyz" \
+  -H "X-Agent-Key: $VANTAGE_AGENT_KEY" \
   -d '{
     "plaintext": "Critical discovery: 49-block cycle confirmed",
     "owner": "0xagent_alice",
@@ -97,7 +97,7 @@ curl -X POST https://vantage.local/api/glyphs/seal \
 ```bash
 curl -X POST https://vantage.local/api/glyphs/open \
   -H "Content-Type: application/json" \
-  -H "X-Agent-Key: abc123xyz" \
+  -H "X-Agent-Key: $VANTAGE_AGENT_KEY" \
   -d '{
     "canonical_id": "a1b2c3d4...f0a",
     "ciphertext": "7a8b9c0d...",

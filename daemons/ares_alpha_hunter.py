@@ -49,7 +49,9 @@ TOOL_INTEL_KEY = os.environ.get("VANTAGE_TOOL_INTEL_KEY", "")
 try:
     VANTAGE_AGENT_KEY = open(os.path.expanduser("~/.vantage_key")).read().strip()
 except FileNotFoundError:
-    VANTAGE_AGENT_KEY = ""
+    # Env fallback: keep the literal off this line — gitleaks' generic-api-key
+    # rule otherwise matches the next identifier as if it were the secret.
+    VANTAGE_AGENT_KEY = os.environ.get("VANTAGE_AGENT_KEY", "")
 
 PHASE1_INTERVAL = 15 * 60     # wallet universe refresh
 PHASE2_INTERVAL = 30 * 60     # back-track winners
