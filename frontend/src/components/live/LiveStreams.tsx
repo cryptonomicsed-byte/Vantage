@@ -35,8 +35,17 @@ interface ChatMessage {
 
 const STYLE_ID = 'live-streams-styles'
 const CSS = `
-.ls-liverow{display:flex;gap:12px;overflow-x:auto;padding:14px 20px;scroll-snap-type:x mandatory;scrollbar-width:none}
+.ls-liverow{display:flex;gap:14px;overflow-x:auto;padding:12px 20px 16px;scroll-snap-type:x mandatory;scrollbar-width:none}
 .ls-liverow::-webkit-scrollbar{display:none}
+.ls-slot{flex-shrink:0;width:78px;display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer;scroll-snap-align:start;transition:transform .15s}
+.ls-slot:hover{transform:translateY(-2px)}
+.ls-ava{position:relative;width:66px;height:66px;border-radius:50%;padding:3px;background:conic-gradient(from 210deg,#ef4444,#f97316,#ec4899,#ef4444);animation:lsSpin 7s linear infinite}
+@keyframes lsSpin{to{transform:rotate(360deg)}}
+.ls-ava-inner{width:100%;height:100%;border-radius:50%;overflow:hidden;background:#0a0b16;border:2px solid #05040d;display:flex;align-items:center;justify-content:center}
+.ls-ava-inner img{width:100%;height:100%;object-fit:cover;display:block}
+.ls-avalive{position:absolute;bottom:-5px;left:50%;transform:translateX(-50%);background:#ef4444;color:#fff;font-size:8.5px;font-weight:800;letter-spacing:.06em;padding:1px 6px;border-radius:99px;border:2px solid #05040d}
+.ls-avaname{font-size:11px;font-weight:600;color:rgba(255,255,255,.85);max-width:78px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ls-avaview{font-size:10px;color:rgba(255,255,255,.45);display:flex;align-items:center;gap:3px;margin-top:-3px}
 .ls-livehead{display:flex;align-items:center;gap:8px;padding:16px 20px 0}
 .ls-bubble{flex-shrink:0;width:220px;cursor:pointer;border-radius:14px;overflow:hidden;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.02);transition:transform .2s,border-color .2s;scroll-snap-align:start;position:relative}
 .ls-bubble:hover{transform:translateY(-3px);border-color:rgba(255,255,255,.18)}
@@ -91,6 +100,31 @@ function timeAgo(d: string): string {
 
 function apiKey(): string { return localStorage.getItem('vantage_api_key') || '' }
 
+/* ── ICE servers (STUN + ephemeral TURN creds from the backend) ────────────
+   Amethyst plays back relayed streams, so its clients never negotiate ICE.
+   Vantage publishes from the browser (WHIP), so a symmetric NAT needs TURN or
+   the camera silently never reaches mediamtx. Creds are HMAC'd server-side and
+   expire (default 1h); we cache them until ~5 min before expiry. */
+let iceCache: { servers: RTCIceServer[]; expiresAt: number } | null = null
+
+export async function getIceServers(): Promise<RTCIceServer[]> {
+  const now = Date.now()
+  if (iceCache && iceCache.expiresAt > now) return iceCache.servers
+  try {
+    const res = await fetch('/api/live/ice', { headers: apiKey() ? { 'X-Agent-Key': apiKey(), Authorization: `Bearer ${apiKey()}` } : {} })
+    if (res.ok) {
+      const d = await res.json()
+      const servers: RTCIceServer[] = Array.isArray(d.iceServers) ? d.iceServers : []
+      const ttlMs = Math.max(60, (d.ttl || 3600) - 300) * 1000
+      if (servers.length) {
+        iceCache = { servers, expiresAt: now + ttlMs }
+        return servers
+      }
+    }
+  } catch { /* fall through to STUN */ }
+  return [{ urls: 'stun:stun.l.google.com:19302' }]
+}
+
 /* ── HLS player ─────────────────────────────────────────────────────────── */
 function HlsVideo({ src }: { src: string }) {
   const ref = useRef<HTMLVideoElement | null>(null)
@@ -125,7 +159,8 @@ function waitForIceComplete(pc: RTCPeerConnection): Promise<void> {
 }
 
 export async function startCameraPublish(whipUrl: string, stream: MediaStream): Promise<void> {
-  const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] })
+  const iceServers = await getIceServers()
+  const pc = new RTCPeerConnection({ iceServers })
   stream.getTracks().forEach(t => pc.addTrack(t, stream))
   const offer = await pc.createOffer()
   await pc.setLocalDescription(offer)
@@ -157,7 +192,8 @@ export function useLiveStreams(pollMs = 15000) {
   useEffect(() => {
     let alive = true
     function load() {
-      fetch('/api/live/active')
+      const k = apiKey()
+      fetch('/api/live/active', { headers: k ? { 'X-Agent-Key': k, Authorization: `Bearer ${k}` } : {} })
         .then(r => r.json())
         .then(d => { if (alive) setStreams(Array.isArray(d.streams) ? d.streams : []) })
         .catch(() => {})
@@ -187,19 +223,21 @@ export function LiveNowRow({ streams, onJoin }: { streams: LiveStream[]; onJoin:
         </span>
         <span style={{ fontSize: 12, color: 'rgba(255,255,255,.4)' }}>{streams.length} streaming</span>
       </div>
+      {/* Amethyst homeLive / Twitter-live row: one avatar bubble per live host,
+          ringed in red, tap to join. Followed hosts sort first server-side. */}
       <div className="ls-liverow">
         {streams.map(s => (
-          <div key={s.id} className="ls-bubble" onClick={() => onJoin(s)}>
-            <div className="ls-bubble-cover">
-              {s.image_url ? <img src={s.image_url} alt={s.title} loading="lazy" />
-                : <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Radio size={26} opacity={0.6} /></div>}
-              <span className="ls-livebadge"><span className="dot" /> Live</span>
-              <span className="ls-viewers"><Users size={11} /> {s.viewer_count || 0}</span>
+          <div key={s.id} className="ls-slot" onClick={() => onJoin(s)} title={`${s.title} — ${s.agent_name || 'Agent'}`}>
+            <div className="ls-ava">
+              <div className="ls-ava-inner">
+                {s.avatar_url
+                  ? <img src={s.avatar_url} alt={s.agent_name || 'Agent'} loading="lazy" />
+                  : <Radio size={22} opacity={0.55} />}
+              </div>
+              <span className="ls-avalive">LIVE</span>
             </div>
-            <div className="ls-bubble-body">
-              <div className="ls-bubble-title">{s.title}</div>
-              <div className="ls-bubble-agent">{s.agent_name || 'Agent'} · {timeAgo(s.started_at)}</div>
-            </div>
+            <div className="ls-avaname">{s.agent_name || s.title || 'Agent'}</div>
+            <div className="ls-avaview"><Eye size={10} /> {s.viewer_count || 0}</div>
           </div>
         ))}
       </div>
@@ -385,6 +423,20 @@ export function LiveViewer({ stream, onClose, isMine, onEnd }: {
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight
   }, [messages.length])
+
+  // Viewer presence heartbeat — powers the "N watching" count on the live row.
+  useEffect(() => {
+    if (isMine) return
+    let alive = true
+    const ping = () => {
+      const k = apiKey()
+      if (!k) return
+      fetch(`/api/live/${stream.id}/view`, { method: 'POST', headers: { 'X-Agent-Key': k } }).catch(() => {})
+    }
+    if (alive) ping()
+    const t = setInterval(ping, 25000)
+    return () => { alive = false; clearInterval(t) }
+  }, [stream.id, isMine])
 
   async function send() {
     const content = draft.trim()
