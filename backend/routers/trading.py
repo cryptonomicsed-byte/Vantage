@@ -727,6 +727,42 @@ async def _enforce_price_sanity(symbol: str, price: Optional[float]) -> None:
         )
 
 
+# ── Ifá gate on material notional ───────────────────────────
+# The BIPỌ̀N39 odu cast (pure-Python port: backend/odu_cast.py) is applied at the
+# last point where the real notional is known. Contradictory signs veto the
+# order; mixed or strict signs escalate to review instead of executing, because
+# this path has no human in the loop. The nonce is bucketed into 5-minute
+# windows so a rejected order cannot simply be retried until it rolls a
+# friendlier sign.
+_ODU_WINDOW_SECONDS = 300
+
+
+async def _enforce_odu_gate(agent_id, symbol: str, notional_usd: float) -> None:
+    try:
+        from backend import odu_cast
+    except Exception:  # fail-open: divination must never take the API down
+        return
+    if notional_usd < odu_cast.STAKE_SOFT_CAP:
+        return
+    window = int(time.time()) // _ODU_WINDOW_SECONDS
+    try:
+        casting = odu_cast.cast(str(agent_id), nonce=f"{symbol}:{window}")
+        verdict = odu_cast.gate(casting, stake_usd=notional_usd)
+    except Exception as exc:
+        logger.warning("odu gate skipped for %s: %s", symbol, exc)
+        return
+    if verdict.decision in ("veto", "escalate"):
+        raise RiskLimitExceeded(
+            f"odu gate {verdict.decision} for {symbol} (${notional_usd:,.2f}): "
+            f"{verdict.reason}; {verdict.primary['sacred_name']} / "
+            f"{verdict.corroborating['sacred_name']} cast_id={verdict.cast_id}"
+        )
+    logger.info(
+        "odu gate allow %s notional=$%.2f cast_id=%s",
+        symbol, notional_usd, verdict.cast_id,
+    )
+
+
 async def _enforce_risk_limits(
     db, agent_id: int, symbol: str, quantity: float, price: Optional[float],
     strategy_id: Optional[int], chain: str,
@@ -774,6 +810,7 @@ async def _enforce_risk_limits(
             raise RiskLimitExceeded(
                 f"order notional ${notional:.2f} exceeds max_position_size_usd ${max_position_usd:.2f}"
             )
+        await _enforce_odu_gate(agent_id, symbol, notional)
 
     if max_concurrent > 0:
         if strategy_id is not None:

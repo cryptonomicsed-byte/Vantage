@@ -87,4 +87,7 @@ include = ["backend*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests", "backend/tests"]
+markers = [
+    "live: requires a live external service (skipped unless ECO_LIVE=1)",
+]
 filterwarnings = ["ignore::DeprecationWarning:starlette"]
