@@ -118,6 +118,13 @@ async def ingest_markets(markets: list):
                      json.dumps(m), int(time.time())),
                 )
             written += 1
+            if written % 40 == 0:
+                # Same reason as the Polymarket collector: a long single
+                # transaction starves the API's own writes. 100 rows is small
+                # enough to be harmless, but the pattern is what caused the
+                # outage, so it is not left in place for the next venue.
+                await db.commit()
+                await asyncio.sleep(0)
         await db.commit()
     return written
 

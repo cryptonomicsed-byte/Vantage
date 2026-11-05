@@ -25,8 +25,42 @@ const GROUPS = [
   { id: 'terminal', label: 'Terminal', icon: Terminal },
 ]
 
+type Group = 'dashboard' | 'analytics' | 'prediction' | 'daily-intel' | 'degen-trenches' | 'launch' | 'copy' | 'portfolio' | 'terminal'
+
+/** `?tab=<group>&market=<source>:<market_id>` — shareable links into the section. */
+function parseMarketParam(): { source: string; market_id: string } | null {
+  try {
+    const qs = new URLSearchParams(window.location.search)
+    const raw = qs.get('market')
+    if (!raw) return null
+    const idx = raw.indexOf(':')
+    if (idx > 0) return { source: raw.slice(0, idx), market_id: raw.slice(idx + 1) }
+    // A bare id is ambiguous across venues, so the caller has to say which.
+    const source = qs.get('source')
+    return source ? { source, market_id: raw } : null
+  } catch { return null }
+}
+
+function initialGroup(): Group {
+  try {
+    const tab = new URLSearchParams(window.location.search).get('tab')
+    return (GROUPS.some(g => g.id === tab) ? tab : 'dashboard') as Group
+  } catch { return 'dashboard' }
+}
+
 export default function TradingSection() {
-  const [group, setGroup] = useState<'dashboard' | 'analytics' | 'prediction' | 'daily-intel' | 'degen-trenches' | 'launch' | 'copy' | 'portfolio' | 'terminal'>('dashboard')
+  const [group, setGroup] = useState<Group>(initialGroup)
+  const [deepLinkMarket] = useState(parseMarketParam)
+
+  const select = (id: Group) => {
+    setGroup(id)
+    try {
+      const url = new URL(window.location.href)
+      url.searchParams.set('tab', id)
+      window.history.replaceState({}, '', url.toString())
+    } catch { /* non-browser env */ }
+  }
+
   return (
     <ProfileCardProvider>
       <div>
@@ -37,15 +71,20 @@ export default function TradingSection() {
           </div>
           <div className="top-nav-tabs" style={{ flex: 'initial' }}>
             {GROUPS.map(g => (
-              <button key={g.id} type="button" className={`top-nav-tab ${group === g.id ? 'active' : ''}`} onClick={() => setGroup(g.id as any)}>
+              <button key={g.id} type="button" className={`top-nav-tab ${group === g.id ? 'active' : ''}`} onClick={() => select(g.id as Group)}>
                 <g.icon size={15} /> {g.label}
               </button>
             ))}
           </div>
         </div>
-        {group === 'dashboard' && <TradingDashboard onOpenPortfolio={() => setGroup('portfolio')} />}
+        {group === 'dashboard' && <TradingDashboard onOpenPortfolio={() => select('portfolio')} />}
         {group === 'analytics' && <MarketIntel />}
-        {group === 'prediction' && <PredictionMarkets />}
+        {group === 'prediction' && (
+          <PredictionMarkets
+            initialMarket={deepLinkMarket}
+            initialTab={deepLinkMarket ? 'markets' : undefined}
+          />
+        )}
         {group === 'daily-intel' && <DailyIntel />}
         {group === 'degen-trenches' && <DegenTrenches />}
         {group === 'launch' && <LaunchTokenPanel />}

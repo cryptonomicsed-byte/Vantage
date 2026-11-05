@@ -89,6 +89,8 @@ export interface MarketDetailData {
   decision: Decision | null
   context: ContextSignal[]
   venue_url: string | null
+  raw?: Record<string, unknown>
+  raw_bytes?: number
 }
 
 // ── data ─────────────────────────────────────────────────────────────────────

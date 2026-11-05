@@ -13,12 +13,12 @@ import {
  * matched the question, and neither is in the feed payload. Composite key
  * because market ids are not unique across venues.
  */
-export default function Markets() {
+export default function Markets({ initialMarket }: { initialMarket?: { source: string; market_id: string } | null } = {}) {
   const [source, setSource] = useState<string>('')
   const [openOnly, setOpenOnly] = useState(true)
   const [decidedOnly, setDecidedOnly] = useState(false)
   const [q, setQ] = useState('')
-  const [selected, setSelected] = useState<{ source: string; market_id: string } | null>(null)
+  const [selected, setSelected] = useState<{ source: string; market_id: string } | null>(initialMarket || null)
 
   const path = useMemo(() => {
     const p = new URLSearchParams()
@@ -37,6 +37,22 @@ export default function Markets() {
     ? `/api/trading/prediction/markets/${encodeURIComponent(selected.source)}/${encodeURIComponent(selected.market_id)}`
     : null
   const detail = useJSON<MarketDetailData>(detailPath || '/api/trading/prediction/overview', 60000)
+
+  // Outcome labels come from the venue payload: "Up / Down", two team names, or
+  // Yes / No. Rendering "yes" over a football team would be a claim about the
+  // data that the data does not make.
+  const sideLabels = (() => {
+    const raw = (detail.data?.raw || {}) as Record<string, unknown>
+    let outcomes: unknown = raw.outcomes
+    if (typeof outcomes === 'string') {
+      try { outcomes = JSON.parse(outcomes) } catch { return null }
+    }
+    if (!Array.isArray(outcomes) || outcomes.length !== 2) return null
+    const a = String(outcomes[0]).trim()
+    const b = String(outcomes[1]).trim()
+    if (/^(yes|no)$/i.test(a) && /^(yes|no)$/i.test(b)) return null
+    return [a, b] as [string, string]
+  })()
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -123,8 +139,8 @@ export default function Markets() {
                 </div>
 
                 <div style={{ display: 'flex', gap: 14, marginBottom: 10 }}>
-                  <span>yes <b style={{ color: '#22c55e' }}>{pct(detail.data.market.implied_yes ?? detail.data.market.yes_price)}</b></span>
-                  <span>no <b style={{ color: '#ef4444' }}>{pct(detail.data.market.implied_no ?? detail.data.market.no_price)}</b></span>
+                  <span>{sideLabels?.[0] ?? 'yes'} <b style={{ color: '#22c55e' }}>{pct(detail.data.market.implied_yes ?? detail.data.market.yes_price)}</b></span>
+                  <span>{sideLabels?.[1] ?? 'no'} <b style={{ color: '#ef4444' }}>{pct(detail.data.market.implied_no ?? detail.data.market.no_price)}</b></span>
                 </div>
 
                 <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--muted)', marginBottom: 4 }}>decision</div>
@@ -161,6 +177,26 @@ export default function Markets() {
                     {detail.data.decision.reasoning}
                   </div>
                 )}
+
+                {/* The venue's own payload, collapsed. It is the only way to
+                    audit a normalized field (a price, a close date) back to what
+                    the venue actually said, and it is huge — so it opens on
+                    demand rather than bloating the panel. */}
+                {detail.data.raw && (
+                  <details style={{ marginTop: 10 }}>
+                    <summary style={{ cursor: 'pointer', fontSize: 10, color: 'var(--muted)' }}>
+                      raw venue payload ({Math.max(1, Math.round((detail.data.raw_bytes || 0) / 1024))} KB)
+                    </summary>
+                    <pre style={{
+                      maxHeight: 220, overflow: 'auto', fontSize: 9, lineHeight: 1.4,
+                      background: 'rgba(0,0,0,0.25)', padding: 8, borderRadius: 6,
+                      border: '1px solid rgba(255,255,255,0.06)', marginTop: 6,
+                    }}>
+                      {JSON.stringify(detail.data.raw, null, 2)}
+                    </pre>
+                  </details>
+                )}
+
                 <div style={{ marginTop: 8, fontSize: 9, color: 'var(--muted)' }}>
                   ingested {ago(detail.data.market.ingested_ts)}
                 </div>

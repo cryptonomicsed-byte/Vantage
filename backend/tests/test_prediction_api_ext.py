@@ -149,6 +149,29 @@ async def test_market_detail_404s_on_unknown_market(client, fresh_agent):
     assert r.status_code == 404
 
 
+async def test_market_detail_returns_the_raw_venue_payload(client, fresh_agent):
+    """The drawer exists so a normalized field can be audited against the venue."""
+    h = await _headers(fresh_agent)
+    end = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 86400))
+    payload = '{"conditionId": "0xabc", "closed": false, "outcomes": "[\\"Yes\\", \\"No\\"]"}'
+    async with get_db() as db:
+        await db.execute(
+            """INSERT OR REPLACE INTO prediction_signals
+               (id, source, market_id, question, yes_price, no_price, volume_24h,
+                end_date, category, raw_json, ingested_ts, processed)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,0)""",
+            (PREFIX + "raw", "polymarket", "0xRAW", "Will the raw payload survive?",
+             0.5, 0.5, 10.0, end, "", payload, int(time.time())),
+        )
+        await db.commit()
+
+    d = (await client.get("/api/trading/prediction/markets/polymarket/0xRAW", headers=h)).json()
+    assert d["raw"]["conditionId"] == "0xabc"
+    assert d["raw"]["closed"] is False
+    assert d["raw_bytes"] == len(payload)
+    assert "raw_json" not in d["market"], "the raw blob belongs in `raw`, not duplicated on the row"
+
+
 async def test_market_detail_attaches_matched_context(client, fresh_agent):
     h = await _headers(fresh_agent)
     await _signal(PREFIX + "m3", market_id="KX-CPI-3", question="Will CPI inflation exceed 3%?")
