@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { LayoutDashboard, TrendingUp, Briefcase, Zap, Flame, Terminal, Rocket, Users } from 'lucide-react'
+import { LayoutDashboard, TrendingUp, Briefcase, Zap, Flame, Terminal, Rocket, Users, Target } from 'lucide-react'
 import TradingDashboard from './trading/TradingDashboard'
 import TradingTerminal from './trading/TradingTerminal'
 import MarketIntel from './trading/MarketIntel'
@@ -11,10 +11,12 @@ import TradingViewChart from './trading/TradingViewChart'
 import { ProfileCardProvider } from './trading/EntityProfileCard'
 import AggregateWinnerBanner from './trading/AggregateWinnerBanner'
 import CopyTradingPanel from './trading/CopyTradingPanel'
+import PredictionMarkets from './trading/PredictionMarkets'
 
 const GROUPS = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'analytics', label: 'Analytics', icon: TrendingUp },
+  { id: 'prediction', label: 'Prediction', icon: Target },
   { id: 'daily-intel', label: 'Daily Intel', icon: Zap },
   { id: 'degen-trenches', label: 'Degen Trenches', icon: Flame },
   { id: 'launch', label: 'Launch Token', icon: Rocket },
@@ -24,7 +26,7 @@ const GROUPS = [
 ]
 
 export default function TradingSection() {
-  const [group, setGroup] = useState<'dashboard' | 'analytics' | 'daily-intel' | 'degen-trenches' | 'launch' | 'copy' | 'portfolio' | 'terminal'>('dashboard')
+  const [group, setGroup] = useState<'dashboard' | 'analytics' | 'prediction' | 'daily-intel' | 'degen-trenches' | 'launch' | 'copy' | 'portfolio' | 'terminal'>('dashboard')
   return (
     <ProfileCardProvider>
       <div>
@@ -43,6 +45,7 @@ export default function TradingSection() {
         </div>
         {group === 'dashboard' && <TradingDashboard onOpenPortfolio={() => setGroup('portfolio')} />}
         {group === 'analytics' && <MarketIntel />}
+        {group === 'prediction' && <PredictionMarkets />}
         {group === 'daily-intel' && <DailyIntel />}
         {group === 'degen-trenches' && <DegenTrenches />}
         {group === 'launch' && <LaunchTokenPanel />}
