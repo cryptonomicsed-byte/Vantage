@@ -52,9 +52,14 @@ def app():
 
 @pytest_asyncio.fixture(scope="session")
 async def client(app):
-    # ASGITransport doesn't run app lifespan — init DB manually
-    from backend.db import init_agents_db
-    await init_agents_db()
+    # ASGITransport doesn't run app lifespan — init DB manually.
+    # Use the SAME sequence lifespan() uses: initialising only agents.db left
+    # every later table (channel_templates, mesh, receipts, tasks, live, degen
+    # indexes) absent under test, which surfaced as "no such table" in tests
+    # that had nothing to do with schema.
+    from backend.startup_db import init_all_databases
+    failures = await init_all_databases()
+    assert not failures, f"DB init failed under test: {failures}"
 
     # Start batch writers that the lifespan normally starts
     from backend.utils import view_events_writer, activity_log_writer
