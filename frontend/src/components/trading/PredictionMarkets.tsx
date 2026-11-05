@@ -63,6 +63,17 @@ interface SourceRow {
   open_markets: number
   decisions: number; abstentions: number; resolved: number; pending: number; resolvable: boolean
 }
+interface ContextSignal {
+  source: string; market_id: string; signal_type: string
+  observed_ts: number; confidence: number; direction: string
+  payload: Record<string, unknown>
+}
+interface ContextFeed {
+  count: number
+  signals: ContextSignal[]
+  by_source: { source: string; signal_type: string; n: number; last_seen: number }[]
+  cadence_seconds: Record<string, number>
+}
 
 function useJSON<T>(path: string, intervalMs = 60000) {
   const [data, setData] = useState<T | null>(null)
@@ -133,6 +144,18 @@ const until = (iso: string | null | undefined) => {
 const VERDICT_COLOR: Record<string, string> = {
   yes: '#22c55e', no: '#ef4444', skip: '#6b7280',
   resolved: '#22c55e', void: '#f59e0b', unresolved: '#6b7280',
+}
+
+// Context-signal direction: what the evidence argues for, not what the venue
+// price says. "catalyst" means "something is due" with no direction.
+const DIRECTION_COLOR: Record<string, string> = {
+  bullish: '#22c55e', bearish: '#ef4444', neutral: '#6b7280', catalyst: '#f59e0b',
+}
+
+function contextSummary(c: ContextSignal): string {
+  const p = (c.payload || {}) as Record<string, unknown>
+  const value = p.label ?? p.question ?? p.city ?? p.title ?? c.market_id
+  return String(value)
 }
 
 // Kalshi multi-leg collections arrive as one comma-joined title ("yes $79,800
@@ -362,13 +385,14 @@ export default function PredictionMarkets() {
   const decisions = useJSON<{ decisions: Decision[] }>('/api/trading/prediction/decisions?limit=40', 60000)
   const calibration = useJSON<Calibration>('/api/trading/prediction/calibration', 60000)
   const sources = useJSON<{ sources: SourceRow[] }>('/api/trading/prediction/sources', 60000)
+  const context = useJSON<ContextFeed>('/api/trading/prediction/context?limit=14', 60000)
 
   const o = overview.data
   const cal = o?.calibration
   const rows = markets.data?.markets || []
   const selectedMarket = useMemo(() => rows.find(r => r.id === selected) || null, [rows, selected])
 
-  const refreshAll = () => { overview.refresh(); markets.refresh(); decisions.refresh(); calibration.refresh(); sources.refresh() }
+  const refreshAll = () => { overview.refresh(); markets.refresh(); decisions.refresh(); calibration.refresh(); sources.refresh(); context.refresh() }
   const anyError = overview.error || markets.error || calibration.error
 
   return (
@@ -558,6 +582,41 @@ export default function PredictionMarkets() {
 
           <Panel title="Calibration gate" icon={<Gauge size={13} />}>
             <GateCard cal={calibration.data} />
+          </Panel>
+
+          <Panel title="Context feeds" icon={<Activity size={13} />} right={
+            <span className="td-badge">{context.data?.count ?? 0}</span>
+          }>
+            {(context.data?.signals || []).length === 0 && (
+              <div className="td-empty">
+                No outside evidence stored yet. The context daemon polls FRED (6h), Open-Meteo (30m)
+                and Manifold (15m); a source that is down simply leaves the others running.
+              </div>
+            )}
+            {(context.data?.signals || []).map(c => {
+              const color = DIRECTION_COLOR[c.direction] || '#6b7280'
+              return (
+                <div key={`${c.source}:${c.market_id}`} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                  <Chip label={c.source} color="#00f5ff" />
+                  <span style={{ flex: 1, minWidth: 0, fontSize: 11, color: '#ffffffe6', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {contextSummary(c)}
+                  </span>
+                  <Chip label={c.direction} color={color} />
+                  <span style={{ fontFamily: 'monospace', fontSize: 10, color: '#ffffff99', width: 34, textAlign: 'right' }}>
+                    {Math.round(c.confidence * 100)}%
+                  </span>
+                  <span style={{ fontSize: 9, color: 'var(--muted)', width: 44, textAlign: 'right' }}>
+                    {ago(c.observed_ts)}
+                  </span>
+                </div>
+              )
+            })}
+            {(context.data?.signals || []).length > 0 && (
+              <div style={{ marginTop: 8, fontSize: 9, color: 'var(--muted)', lineHeight: 1.5 }}>
+                Evidence only — these feeds never settle a market. The venue price stays the source of record
+                and the Brier gate only ever scores venue settlements.
+              </div>
+            )}
           </Panel>
 
           <Panel title="Venues" icon={<Layers size={13} />}>

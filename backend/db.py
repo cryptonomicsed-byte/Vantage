@@ -2499,6 +2499,27 @@ async def init_workspace_tasks_db() -> None:
             )
         """)
 
+        # Non-venue evidence for prediction-market decisions: macro prints,
+        # forecasts, community probabilities. One row per (source, market_id):
+        # these describe "what is true now", so history here would grow with no
+        # reader.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS context_signals (
+                source       TEXT NOT NULL,
+                market_id    TEXT NOT NULL,
+                signal_type  TEXT NOT NULL,
+                observed_ts  INTEGER NOT NULL,
+                confidence   REAL NOT NULL,
+                direction    TEXT NOT NULL,
+                payload_json TEXT DEFAULT '{}',
+                PRIMARY KEY (source, market_id)
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_context_signals_ts "
+            "ON context_signals(observed_ts DESC)"
+        )
+
         # ── Justice layer: ARP on-chain receipt anchoring ──────────────────
         await db.execute("""
             CREATE TABLE IF NOT EXISTS action_receipts (
