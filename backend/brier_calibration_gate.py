@@ -39,10 +39,10 @@ SCORED_OUTCOMES = ("yes", "no")
 TERMINAL_OUTCOMES = ("yes", "no", "void")
 
 # Venues backend.prediction_markets can read a settlement from. A source not
-# listed here (kalshi today) is never selected for resolution: no reader
-# exists for it, and a missing reader must not be mistaken for a market that
-# has not settled -- that mistake parks the whole queue head forever.
-RESOLVABLE_VENUES = ("polymarket", "limitless")
+# listed here is never selected for resolution: no reader exists for it, and a
+# missing reader must not be mistaken for a market that has not settled -- that
+# mistake parks the whole queue head forever.
+RESOLVABLE_VENUES = ("polymarket", "limitless", "kalshi")
 
 
 async def record_prediction(
@@ -293,9 +293,14 @@ async def resolve_pending_outcomes(limit: int = 25) -> dict:
     counters = {"checked": 0, "resolved": 0, "void": 0, "pending": 0, "errors": 0}
 
     async with get_db() as db:
+        # The venue list is interpolated as placeholders rather than written
+        # into the SQL: RESOLVABLE_VENUES is the single source of truth, and a
+        # hard-coded copy in the query is how a newly supported venue silently
+        # stops being resolved.
+        _ph = ",".join("?" for _ in RESOLVABLE_VENUES)
         rows = await (
             await db.execute(
-                """SELECT p.signal_id, p.confidence, p.abstained,
+                f"""SELECT p.signal_id, p.confidence, p.abstained,
                           COALESCE(p.market_id, s.market_id) AS market_id,
                           LOWER(COALESCE(s.source, '')) AS source
                    FROM brier_predictions p
@@ -303,10 +308,10 @@ async def resolve_pending_outcomes(limit: int = 25) -> dict:
                    WHERE p.scored = 0
                      AND p.outcome IS NULL
                      AND COALESCE(p.market_id, s.market_id) IS NOT NULL
-                     AND LOWER(COALESCE(s.source, '')) IN ('polymarket', 'limitless')
+                     AND LOWER(COALESCE(s.source, '')) IN ({_ph})
                    ORDER BY p.predicted_ts ASC
                    LIMIT ?""",
-                (int(limit),),
+                (*RESOLVABLE_VENUES, int(limit)),
             )
         ).fetchall()
 
