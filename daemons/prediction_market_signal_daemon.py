@@ -30,6 +30,24 @@ async def process_unprocessed_signals():
     for row in rows:
         signal = dict(zip(_cols, row))
         decision = await jev_decide(signal)
+
+        # Record EVERY decision, including skip. Recording only yes/no above
+        # threshold is why brier_predictions stayed empty while this daemon
+        # reported success every five minutes: the decision path returns
+        # "skip" by default, so the filter admitted nothing and the gate was
+        # left permanently open. A skip is stored with abstained=1 and is
+        # excluded from the score by the gate itself, not by this filter.
+        await record_prediction(
+            signal["id"],
+            decision["verdict"],
+            decision["confidence"],
+            direction=decision.get("direction"),
+            conviction=decision.get("conviction"),
+            should_trade=decision.get("should_trade"),
+            market_id=signal.get("market_id"),
+            reasoning=decision.get("reasoning"),
+        )
+
         if decision["verdict"] in ("yes", "no") and decision["confidence"] >= JEV_CONFIDENCE_THRESHOLD:
             try:
                 import httpx
@@ -49,7 +67,7 @@ async def process_unprocessed_signals():
                     )
             except Exception as e:
                 print(f"[jev_daemon] Signal bus error: {e}", flush=True)
-            await record_prediction(signal["id"], decision["verdict"], decision["confidence"])
+
         async with get_db() as db:
             await db.execute("UPDATE prediction_signals SET processed=1 WHERE id=?", (signal["id"],))
             await db.commit()

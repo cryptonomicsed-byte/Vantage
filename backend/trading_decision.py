@@ -84,7 +84,18 @@ async def jev_decide(signal: dict) -> dict:
         f"model={result.get('model_used', '?')}"
     )
 
-    return {"verdict": verdict, "confidence": confidence, "reasoning": reasoning}
+    # direction/conviction/should_trade are surfaced for the recorder, not the
+    # caller's control flow: the Brier gate stores why a decision came out
+    # "skip" (pass direction vs. below-threshold conviction) so abstentions are
+    # auditable instead of indistinguishable from a model failure.
+    return {
+        "verdict": verdict,
+        "confidence": confidence,
+        "reasoning": reasoning,
+        "direction": direction_val,
+        "conviction": conviction_val,
+        "should_trade": bool(should_trade_val),
+    }
 
 
 async def _legacy_decide(signal: dict) -> dict:
