@@ -214,13 +214,39 @@ async def prediction_markets(
 async def prediction_decisions(
     limit: int = Query(50, ge=1, le=200),
     verdict: Optional[str] = Query(None, description="yes | no | skip"),
+    source: Optional[str] = Query(None, description="kalshi | polymarket"),
+    abstained: Optional[bool] = Query(None, description="true = skips only"),
+    min_confidence: Optional[float] = Query(None, ge=0.0, le=1.0),
+    from_ts: Optional[int] = Query(None, description="epoch seconds, inclusive"),
+    to_ts: Optional[int] = Query(None, description="epoch seconds, inclusive"),
     agent: dict = Depends(get_agent),
 ):
-    """Decision feed, abstentions included -- that is the point of recording them."""
+    """Decision feed, abstentions included -- that is the point of recording them.
+
+    A skip is a decision, and 99.9% of this system's decisions are skips, so a
+    feed that cannot filter down to them is a feed that cannot answer the only
+    question worth asking. `abstained=true` is the audit view; `=false` is the
+    (currently near-empty) view of calls actually made.
+    """
     where, args = [], []
     if verdict:
         where.append("p.verdict = ?")
         args.append(verdict.strip().lower())
+    if source:
+        where.append("LOWER(s.source) = ?")
+        args.append(source.strip().lower())
+    if abstained is not None:
+        where.append("COALESCE(p.abstained, 0) = ?")
+        args.append(1 if abstained else 0)
+    if min_confidence is not None:
+        where.append("p.confidence >= ?")
+        args.append(float(min_confidence))
+    if from_ts is not None:
+        where.append("p.predicted_ts >= ?")
+        args.append(int(from_ts))
+    if to_ts is not None:
+        where.append("p.predicted_ts <= ?")
+        args.append(int(to_ts))
     clause = ("WHERE " + " AND ".join(where)) if where else ""
 
     async with get_db() as db:
@@ -375,3 +401,281 @@ async def prediction_sources(agent: dict = Depends(get_agent)):
 
     return {"sources": base, "resolvable_venues": list(gate.RESOLVABLE_VENUES),
             "generated_at": int(time.time())}
+
+
+# ── history ────────────────────────────────────────────────────────────────
+
+_WINDOWS = {"7d": 7, "30d": 30, "90d": 90}
+
+
+@router.get("/calibration/history")
+async def prediction_calibration_history(
+    window: str = Query("30d", description="7d | 30d | 90d"),
+    agent: dict = Depends(get_agent),
+):
+    """Daily series behind the gate, abstention-first.
+
+    Abstentions dominate this system's behaviour (2,037 of 2,040 decisions), so
+    the honest history is recorded/abstained/scored per day plus a Brier that is
+    `null` on any day with no scored directional call. Returning 0.0 there would
+    draw a perfect line through days that measured nothing -- the exact bug the
+    gate itself was fixed for.
+
+    `vacuous` is true when the whole window has zero scored calls, so the UI can
+    say "no scored calls yet" instead of rendering a flat, healthy-looking zero.
+    """
+    from fastapi import HTTPException
+
+    if window not in _WINDOWS:
+        raise HTTPException(422, f"window must be one of {sorted(_WINDOWS)}")
+
+    days = _WINDOWS[window]
+    now = int(time.time())
+    # Bucket on UTC day boundaries ending with today. A rolling `now - days*86400`
+    # window starts mid-day, so the last bucket ended before today existed and a
+    # decision made minutes ago fell off the end of the chart.
+    today = (now // 86400) * 86400
+    since = today - (days - 1) * 86400
+
+    async with get_db() as db:
+        cur = await db.execute(
+            """
+            SELECT p.verdict, p.confidence, p.outcome,
+                   COALESCE(p.abstained, 0) AS abstained, p.predicted_ts
+              FROM brier_predictions p
+             WHERE p.predicted_ts >= ?
+             ORDER BY p.predicted_ts ASC
+            """,
+            (since,),
+        )
+        rows = _dicts(cur, await cur.fetchall())
+
+    buckets: dict[str, dict] = {}
+    for offset in range(days):
+        day = time.strftime("%Y-%m-%d", time.gmtime(since + offset * 86400))
+        buckets[day] = {"date": day, "recorded": 0, "abstained": 0,
+                        "scored": 0, "brier": None, "_sq": 0.0}
+
+    for row in rows:
+        day = time.strftime("%Y-%m-%d", time.gmtime(row["predicted_ts"]))
+        b = buckets.get(day)
+        if b is None:
+            continue
+        b["recorded"] += 1
+        if row["abstained"]:
+            b["abstained"] += 1
+            continue
+        if row["outcome"] in ("yes", "no") and row["verdict"] in ("yes", "no"):
+            b["scored"] += 1
+            # Same convention as compute_rolling_brier: a "no" verdict predicts
+            # (1 - confidence) for the YES outcome.
+            pred = row["confidence"] if row["verdict"] == "yes" else 1.0 - row["confidence"]
+            actual = 1.0 if row["outcome"] == "yes" else 0.0
+            b["_sq"] += (pred - actual) ** 2
+
+    series = []
+    total_scored = total_recorded = total_abstained = 0
+    sq_all = 0.0
+    for day in sorted(buckets):
+        b = buckets[day]
+        scored = b.pop("scored")
+        sq = b.pop("_sq", 0.0)
+        b["scored"] = scored
+        if scored:
+            b["brier"] = round(sq / scored, 6)
+            sq_all += sq
+        total_scored += scored
+        total_recorded += b["recorded"]
+        total_abstained += b["abstained"]
+        series.append(b)
+
+    return {
+        "window": window,
+        "days": days,
+        "series": series,
+        "totals": {
+            "recorded": total_recorded,
+            "abstained": total_abstained,
+            "scored": total_scored,
+            "abstention_rate": round(total_abstained / total_recorded, 4) if total_recorded else None,
+            "brier": round(sq_all / total_scored, 6) if total_scored else None,
+        },
+        "vacuous": total_scored == 0,
+        "generated_at": now,
+    }
+
+
+# ── one market ─────────────────────────────────────────────────────────────
+
+@router.get("/markets/{source}/{market_id}")
+async def prediction_market_detail(
+    source: str,
+    market_id: str,
+    agent: dict = Depends(get_agent),
+):
+    """One market: the latest signal, the decision this system made, and the
+    outside evidence that matched it.
+
+    Composite key on purpose. `market_id` alone is not unique across venues --
+    947 Polymarket condition ids and 6,200 Kalshi tickers share one column -- so
+    a bare `/markets/{id}` would resolve the wrong market the first time two
+    venues ever disagreed about a string.
+    """
+    from fastapi import HTTPException
+
+    src = source.strip().lower()
+    async with get_db() as db:
+        cur = await db.execute(
+            """
+            SELECT id, source, market_id, question, yes_price, no_price,
+                   volume_24h, end_date, category, ingested_ts, processed
+              FROM prediction_signals
+             WHERE LOWER(source) = ? AND market_id = ?
+             ORDER BY ingested_ts DESC
+             LIMIT 1
+            """,
+            (src, market_id),
+        )
+        rows = _dicts(cur, await cur.fetchall())
+        if not rows:
+            raise HTTPException(404, f"no {src} market {market_id!r}")
+        market = rows[0]
+
+        cur = await db.execute(
+            """
+            SELECT p.verdict, p.confidence, p.abstained, p.direction, p.conviction,
+                   p.should_trade, p.reasoning, p.outcome, p.scored,
+                   p.predicted_ts, p.resolved_ts
+              FROM brier_predictions p
+             WHERE p.signal_id = ?
+             ORDER BY p.predicted_ts DESC
+             LIMIT 1
+            """,
+            (market["id"],),
+        )
+        decision_rows = _dicts(cur, await cur.fetchall())
+
+    context: list[dict] = []
+    try:
+        from ..signal_sources import store as context_store
+        context = await context_store.matching(market["question"] or "", limit=3)
+    except Exception:
+        context = []
+
+    venue_url = None
+    if src == "kalshi":
+        venue_url = f"https://kalshi.com/markets/{market_id.lower()}"
+    elif src == "polymarket":
+        venue_url = f"https://polymarket.com/market/{market_id}"
+
+    return {
+        "market": market,
+        "decision": decision_rows[0] if decision_rows else None,
+        "context": context,
+        "venue_url": venue_url,
+        "generated_at": int(time.time()),
+    }
+
+
+# ── health ─────────────────────────────────────────────────────────────────
+
+@router.get("/health")
+async def prediction_health(agent: dict = Depends(get_agent)):
+    """Collector liveness, per source, with the failure named rather than implied.
+
+    `status` is derived, not decorative:
+      ok        — ingested within 2x its poll interval and has open markets
+      stale     — ingesting, but nothing open (the archived-feed failure)
+      silent    — no ingest within 2x its poll interval
+    """
+    now = int(time.time())
+    now_iso = _iso(now)
+    # Matches each collector's POLL_INTERVAL; 2x is the tolerance before a feed
+    # is called late (one missed poll is normal, two is a signal).
+    expected = {"kalshi": 900, "polymarket": 900}
+
+    async with get_db() as db:
+        cur = await db.execute(
+            """
+            SELECT LOWER(COALESCE(NULLIF(s.source, ''), 'unknown')) AS source,
+                   COUNT(*) AS signals,
+                   SUM(CASE WHEN s.processed = 0 THEN 1 ELSE 0 END) AS unprocessed,
+                   SUM(CASE WHEN COALESCE(s.end_date, '') > ? THEN 1 ELSE 0 END) AS open_markets,
+                   SUM(CASE WHEN COALESCE(s.end_date, '') <= ? OR s.end_date IS NULL
+                            THEN 1 ELSE 0 END) AS archived_markets,
+                   MAX(s.ingested_ts) AS last_ingest
+              FROM prediction_signals s
+             GROUP BY source
+             ORDER BY signals DESC
+            """,
+            (now_iso, now_iso),
+        )
+        base = _dicts(cur, await cur.fetchall())
+
+    sources = []
+    for row in base:
+        last = row.get("last_ingest") or 0
+        age = (now - last) if last else None
+        interval = expected.get(row["source"])
+        if interval is None:
+            status = "untracked"
+        elif age is None or age > interval * 2:
+            status = "silent"
+        elif (row.get("open_markets") or 0) == 0:
+            status = "stale"
+        else:
+            status = "ok"
+        row["age_seconds"] = age
+        row["expected_interval_seconds"] = interval
+        row["open_ratio"] = (
+            round((row.get("open_markets") or 0) / row["signals"], 4) if row["signals"] else None
+        )
+        row["status"] = status
+        sources.append(row)
+
+    return {"sources": sources, "generated_at": now}
+
+
+# ── forecast (Mycelium) ────────────────────────────────────────────────────
+
+@router.get("/forecast")
+async def prediction_forecast(
+    limit: int = Query(50, ge=1, le=200),
+    agent: dict = Depends(get_agent),
+):
+    """Forecasts recorded in the Mycelium substrate, not invented here.
+
+    Mycelium's `predictions` table is the real store: question, probability,
+    resolution_date, resolution_criterion, status, outcome, plus its own
+    grading loop. TimesFM is not wired and is not the same thing -- it forecasts
+    trace buckets, not markets -- and `vantage_predictor` is a trading engine, so
+    neither belongs in a read-only forecast tab.
+
+    Fail-soft: an unreachable gateway returns available=false with a reason; it
+    never blocks the tab, and it never fabricates a forecast.
+    """
+    import os
+
+    import httpx
+
+    base = os.environ.get("MYCELIUM_URL", "http://127.0.0.1:8811")
+    try:
+        async with httpx.AsyncClient(timeout=2.5) as client:
+            r = await client.get(f"{base}/api/predictions", params={"limit": limit})
+        if r.status_code != 200:
+            return {"available": False, "predictions": [], "count": 0,
+                    "reason": f"gateway returned HTTP {r.status_code}", "generated_at": int(time.time())}
+        payload = r.json()
+    except Exception as exc:
+        return {"available": False, "predictions": [], "count": 0,
+                "reason": f"gateway unreachable: {type(exc).__name__}", "generated_at": int(time.time())}
+
+    rows = payload if isinstance(payload, list) else (payload.get("predictions") or [])
+    return {
+        "available": True,
+        "count": len(rows),
+        "predictions": rows,
+        "gateway": base,
+        "note": "Mycelium records these; Vantage does not generate them and does not settle them.",
+        "generated_at": int(time.time()),
+    }
