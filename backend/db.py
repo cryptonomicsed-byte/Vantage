@@ -2455,9 +2455,40 @@ async def init_workspace_tasks_db() -> None:
                 confidence REAL NOT NULL,
                 predicted_ts INTEGER NOT NULL,
                 outcome TEXT,
-                scored INTEGER DEFAULT 0
+                scored INTEGER DEFAULT 0,
+                -- Abstentions are recorded, not filtered out: a "skip" is a
+                -- deliberate non-prediction, excluded from the Brier score but
+                -- still resolved so a skipping strategy can be audited.
+                abstained INTEGER DEFAULT 0,
+                direction TEXT,
+                conviction TEXT,
+                should_trade REAL,
+                market_id TEXT,
+                reasoning TEXT,
+                resolved_ts INTEGER
             )
         """)
+
+        # Existing deployments already have the narrow table. CREATE TABLE IF NOT
+        # EXISTS is a no-op there, which left the new columns missing and turned
+        # every record_prediction() into "no such column". ALTER per missing
+        # column keeps fresh and migrated schemas identical.
+        _BRIER_MIGRATIONS = {
+            "abstained": "INTEGER DEFAULT 0",
+            "direction": "TEXT",
+            "conviction": "TEXT",
+            "should_trade": "REAL",
+            "market_id": "TEXT",
+            "reasoning": "TEXT",
+            "resolved_ts": "INTEGER",
+        }
+        _brier_cur = await db.execute("PRAGMA table_info(brier_predictions)")
+        _brier_have = {_r[1] for _r in await _brier_cur.fetchall()}
+        for _col, _decl in _BRIER_MIGRATIONS.items():
+            if _col not in _brier_have:
+                await db.execute(
+                    f"ALTER TABLE brier_predictions ADD COLUMN {_col} {_decl}"
+                )
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS prediction_resolutions (
