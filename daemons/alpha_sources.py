@@ -25,7 +25,7 @@ VANTAGE_URL = os.environ.get("VANTAGE_URL", "http://127.0.0.1:8001")
 VANTAGE_KEY = open(os.path.expanduser("~/.vantage_key")).read().strip()
 JUPITER_KEY = os.environ.get("JUPITER_KEY", "")
 SIGNALS_INGEST = f"{VANTAGE_URL}/api/intel/signals/ingest"
-FEED_POST = f"{VANTAGE_URL}/api/trading/signals/ingest"
+FEED_POST = f"{VANTAGE_URL}/api/agents/publish"  # was /api/trading/signals/ingest (wrong endpoint + wrong auth)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -254,7 +254,7 @@ def gdelt_scan():
 # ═══════════════════════════════════════════════════════════════════════════
 
 JUPITER_TOKENS = [
-    ("SOL", "So11111111111111111111111111111111111111112"),
+    ("SOL", "So11111111111111111111111111111111111111112"),  # secret-scan:allow
     ("USDC", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
     ("JUP", "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"),
     ("BONK", "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"),
@@ -363,7 +363,7 @@ def birdeye_scan():
 
 # Map Jupiter mints to symbols for Birdeye
 JUPITER_TOKENS_DICT = {
-    "So11111111111111111111111111111111111111112": "SOL",
+    "So11111111111111111111111111111111111111112": "SOL",  # secret-scan:allow
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "USDC",
     "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN": "JUP",
     "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263": "BONK",
