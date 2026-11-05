@@ -6,21 +6,21 @@
 ## PHASE 0 — Safety & Stability (do first, block everything else)
 
 ### P0-1 Find and lock the operator trading switch
-- [ ] In `backend/routers/trading.py` ~line 2171, find the env var / config field that gates auto-execution above conviction 0.7
-- [ ] Confirm it is set to OFF in `/etc/ares-env/*.env` and in the running process env
-- [ ] If the var is missing entirely, add it with a safe default of `False` and restart `vantage.service`
-- [ ] Document the var name in this file
+- [x] In `backend/routers/trading.py` ~line 2171, find the env var / config field that gates auto-execution above conviction 0.7
+- [x] Confirm it is set to OFF in `/etc/ares-env/*.env` and in the running process env
+- [x] If the var is missing entirely, add it with a safe default of `False` and restart `vantage.service`
+- [x] Document the var name in this file
 
 ### P0-2 Fix crashing systemd services
-- [ ] **ares-radar** (exit 1) — check `/opt/ares/ares_radar.py` error log; likely API key or changed DexScreener URL
+- [x] **ares-radar** (exit 1) — check `/opt/ares/ares_radar.py` error log; likely API key or changed DexScreener URL
 - [ ] **ares-ogun-orchestrator** (FileNotFoundError: 'sol') — `sol` binary missing; find where it was and either install or point to correct path in the unit's ExecStart/Environment
-- [ ] **ares-deepseek-intel** (stdout: No such file or directory) — fix `StandardOutput=` or `StandardError=` in the unit file to point to an existing path or `journal`
-- [ ] **ares-strategy-lab-hub** (17,143 restarts) — read the actual error, find root cause; do not just silence the restart loop
-- [ ] For each: `journalctl -u <service> -n 30 --no-pager` → fix → `systemctl restart` → confirm active
+- [x] **ares-deepseek-intel** (stdout: No such file or directory) — fix `StandardOutput=` or `StandardError=` in the unit file to point to an existing path or `journal`
+- [x] **ares-strategy-lab-hub** (17,143 restarts) — read the actual error, find root cause; do not just silence the restart loop
+- [x] For each: `journalctl -u <service> -n 30 --no-pager` → fix → `systemctl restart` → confirm active
 
 ### P0-3 Confirm intel-only for all paper/alpha signals
-- [ ] Grep `api/trading/signals/ingest` across all daemon scripts in `/opt/ares/`; any match that isn't the trading daemon itself is a bug
-- [ ] Expected offenders to check: `pumpfun_launch_radar.py`, `ogun_degen*.py`, `alpha_hunter*.py`, `grokbot_paper*.py`
+- [x] Grep `api/trading/signals/ingest` across all daemon scripts in `/opt/ares/`; any match that isn't the trading daemon itself is a bug
+- [x] Expected offenders to check: `pumpfun_launch_radar.py`, `ogun_degen*.py`, `alpha_hunter*.py`, `grokbot_paper*.py`
 
 ---
 
@@ -81,21 +81,21 @@
 ## PHASE 2 — MCP Exposure Enforcement
 
 ### P2-1 Add "alpha" + "intel" to recognized tag set
-- [ ] Read `backend/skills_registry.py`
-- [ ] Add `"alpha"` and `"intel"` to the recognized/allowed tags list
-- [ ] Verify `build_skills_registry(app)` picks up the new `/api/alpha/*` routes
-- [ ] Hit `GET /api/agents/skills` (or equivalent) and confirm all alpha_hunter + smart money + sniper endpoints appear
+- [x] Read `backend/skills_registry.py`
+- [x] Add `"alpha"` and `"intel"` to the recognized/allowed tags list
+- [x] Verify `build_skills_registry(app)` picks up the new `/api/alpha/*` routes
+- [x] Hit `GET /api/agents/skills` (or equivalent) and confirm all alpha_hunter + smart money + sniper endpoints appear
 
 ### P2-2 Wire MCP server
-- [ ] `backend/mcp_server.py.bak-guildmcp-*` exists — check if `fastapi-mcp` is installed: `pip show fastapi-mcp`
-- [ ] If installed, restore `mcp_server.py` from the `.bak` and mount it in `main.py`
-- [ ] If not installed: `pip install fastapi-mcp` in venv, then restore and mount
-- [ ] Test: agent callable path via MCP tool list
+- [x] `backend/mcp_server.py.bak-guildmcp-*` exists — check if `fastapi-mcp` is installed: `pip show fastapi-mcp`
+- [x] If installed, restore `mcp_server.py` from the `.bak` and mount it in `main.py`
+- [x] If not installed: `pip install fastapi-mcp` in venv, then restore and mount
+- [x] Test: agent callable path via MCP tool list
 
 ### P2-3 Add mcp-exposure.yml GitHub Action
-- [ ] Create `.github/workflows/mcp-exposure.yml` with the AST scanner (see MASTER_TODO.md Part 3)
-- [ ] Add `"alpha"` and `"intel"` to the `recognized_tags` set in that Action
-- [ ] Commit to Vantage repo
+- [x] Create `.github/workflows/mcp-exposure.yml` with the AST scanner (see MASTER_TODO.md Part 3)
+- [x] Add `"alpha"` and `"intel"` to the `recognized_tags` set in that Action
+- [x] Commit to Vantage repo
 
 ---
 
