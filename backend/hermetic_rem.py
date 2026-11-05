@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import math
 from typing import Optional
 
 
@@ -110,7 +111,7 @@ def score_memory(candidate: dict) -> RemResult:
         PrincipleScore("gender", gender),
     ]
 
-    overall = sum(p.score for p in principles) / len(principles)
+    overall = math.prod(p.score for p in principles) ** (1.0 / len(principles))
 
     # Routing
     if overall >= 0.70:
