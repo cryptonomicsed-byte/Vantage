@@ -213,8 +213,8 @@ async def test_resolver_leaves_unparsed_settlement_pending(monkeypatch):
 
 
 async def test_resolver_ignores_venues_without_a_reader():
-    await _signal("k1", "kalshi", "KX-1")
-    await gate.record_prediction("k1", "yes", 0.8, market_id="KX-1")
+    await _signal("k1", "manifold", "MAN-1")
+    await gate.record_prediction("k1", "yes", 0.8, market_id="MAN-1")
     counters = await gate.resolve_pending_outcomes()
     assert counters["checked"] == 0
     row = await _row("k1")
