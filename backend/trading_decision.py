@@ -94,6 +94,32 @@ async def jev_decide(signal: dict) -> dict:
     # caller's control flow: the Brier gate stores why a decision came out
     # "skip" (pass direction vs. below-threshold conviction) so abstentions are
     # auditable instead of indistinguishable from a model failure.
+    #
+    # Emitted to the substrate as a `decision` trace (J1). Without it the
+    # prediction pipeline is invisible to every miner -- 19,580 traces on the
+    # server, none of them a prediction decision -- so "why does this engine
+    # abstain on 99.9% of markets" could only be answered by reading the DB by
+    # hand. Fail-soft: the bridge never raises, and this block never re-raises.
+    try:
+        from .mycelium_bridge import emit_prediction_decision
+
+        emit_prediction_decision(
+            source=signal.get("source", "unknown"),
+            market_id=signal.get("market_id", ""),
+            verdict=verdict,
+            confidence=confidence,
+            direction=direction_val,
+            conviction=conviction_val,
+            should_trade=bool(should_trade_val),
+            abstained=verdict == "skip",
+            context_sources=[
+                c.get("source") for c in (signal.get("context") or []) if c.get("source")
+            ],
+            reasoning=reasoning,
+        )
+    except Exception:
+        pass
+
     return {
         "verdict": verdict,
         "confidence": confidence,
