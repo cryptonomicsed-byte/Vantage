@@ -362,3 +362,112 @@ async def load_cluster_map() -> dict[str, dict]:
             return result
         except aiosqlite.Error:
             return {}
+
+
+# P1-6: Quality tag computation ───────────────────────────────────────────────
+
+BUNDLE_WINDOW_SEC = 60   # wallets funded within 60s by same funder = bundle
+FRESH_WALLET_DAYS = 7    # first tx within 7 days = fresh wallet
+
+
+async def compute_quality_tags(wallets: list[dict], cluster_id: str) -> dict:
+    """Compute three quality indicators for a cluster's wallet set.
+
+    Returns:
+        bundle_detected   : bool   — any two cluster wallets were funded by the
+                                     same address within a 60-second window.
+        fresh_wallet      : bool   — at least one wallet had its first on-chain
+                                     tx less than 7 days ago.
+        concentration_pct : float  — the top-1 holder's share of total token
+                                     balance across the cluster (0.0–100.0).
+                                     Returns 0.0 when no balance data exists.
+    """
+    addresses = [w.get("wallet_address") or w.get("address") for w in wallets if w]
+    addresses = [a for a in addresses if a]
+
+    bundle_detected = False
+    fresh_wallet = False
+    concentration_pct = 0.0
+
+    if not addresses:
+        return {
+            "bundle_detected": bundle_detected,
+            "fresh_wallet": fresh_wallet,
+            "concentration_pct": concentration_pct,
+        }
+
+    placeholders = ",".join("?" * len(addresses))
+    import time as _time
+
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+
+        # ── bundle_detected: same funder funded >= 2 cluster wallets
+        #    within BUNDLE_WINDOW_SEC of each other ──────────────────────────
+        try:
+            edge_rows = await (await db.execute(
+                f"""SELECT address_a AS funder, address_b AS funded,
+                           CAST(COALESCE(ts, 0) AS INTEGER) AS ts
+                    FROM wallet_edges
+                    WHERE role='funded' AND address_b IN ({placeholders})
+                    ORDER BY address_a, ts""",
+                addresses,
+            )).fetchall()
+            # Group by funder, look for any pair within BUNDLE_WINDOW_SEC
+            from collections import defaultdict as _dd
+            funder_events: dict = _dd(list)
+            for r in edge_rows:
+                funder_events[r["funder"]].append(int(r["ts"] or 0))
+            for _funder, timestamps in funder_events.items():
+                if len(timestamps) < 2:
+                    continue
+                timestamps.sort()
+                for i in range(len(timestamps) - 1):
+                    if timestamps[i + 1] - timestamps[i] <= BUNDLE_WINDOW_SEC:
+                        bundle_detected = True
+                        break
+                if bundle_detected:
+                    break
+        except aiosqlite.Error:
+            pass
+
+        # ── fresh_wallet: any wallet with first_tx_ts within FRESH_WALLET_DAYS ─
+        cutoff_ts = int(_time.time()) - FRESH_WALLET_DAYS * 86400
+        try:
+            fresh_rows = await (await db.execute(
+                f"""SELECT 1 FROM tracked_wallets
+                    WHERE address IN ({placeholders})
+                      AND first_tx_ts IS NOT NULL
+                      AND CAST(first_tx_ts AS INTEGER) >= ?
+                    LIMIT 1""",
+                addresses + [cutoff_ts],
+            )).fetchone()
+            if fresh_rows:
+                fresh_wallet = True
+        except aiosqlite.Error:
+            pass
+
+        # ── concentration_pct: top-1 holder share of cluster token balance ──
+        try:
+            bal_rows = await (await db.execute(
+                f"""SELECT address, balance_usd
+                    FROM tracked_wallets
+                    WHERE address IN ({placeholders})
+                      AND balance_usd IS NOT NULL AND balance_usd > 0""",
+                addresses,
+            )).fetchall()
+            if bal_rows:
+                balances = sorted(
+                    [float(r["balance_usd"]) for r in bal_rows], reverse=True
+                )
+                total = sum(balances)
+                if total > 0:
+                    concentration_pct = round(balances[0] / total * 100, 2)
+        except aiosqlite.Error:
+            pass
+
+    return {
+        "bundle_detected": bundle_detected,
+        "fresh_wallet": fresh_wallet,
+        "concentration_pct": concentration_pct,
+    }
