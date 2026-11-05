@@ -17,6 +17,7 @@ column names.
 """
 from __future__ import annotations
 
+import json
 import time
 from typing import Optional
 
@@ -528,7 +529,7 @@ async def prediction_market_detail(
         cur = await db.execute(
             """
             SELECT id, source, market_id, question, yes_price, no_price,
-                   volume_24h, end_date, category, ingested_ts, processed
+                   volume_24h, end_date, category, ingested_ts, processed, raw_json
               FROM prediction_signals
              WHERE LOWER(source) = ? AND market_id = ?
              ORDER BY ingested_ts DESC
@@ -568,11 +569,22 @@ async def prediction_market_detail(
     elif src == "polymarket":
         venue_url = f"https://polymarket.com/market/{market_id}"
 
+    # The venue's own payload, for the drawer. Parsed here rather than shipped as
+    # a JSON string so the client can render it as a tree; the raw text length is
+    # reported too, because a 40KB blob is worth warning about before expanding.
+    raw_text = market.pop("raw_json", None) or "{}"
+    try:
+        raw = json.loads(raw_text)
+    except (TypeError, ValueError):
+        raw = {"unparsed": raw_text[:2000]}
+
     return {
         "market": market,
         "decision": decision_rows[0] if decision_rows else None,
         "context": context,
         "venue_url": venue_url,
+        "raw": raw,
+        "raw_bytes": len(raw_text),
         "generated_at": int(time.time()),
     }
 

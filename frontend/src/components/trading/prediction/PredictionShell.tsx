@@ -25,23 +25,31 @@ import Forecast from './Forecast'
  * backend/tests/test_no_prediction_orders.py).
  */
 const TABS = [
-  { id: 'overview', label: 'Overview', icon: Target, render: () => <Overview /> },
-  { id: 'markets', label: 'Markets', icon: Layers, render: () => <Markets /> },
-  { id: 'decisions', label: 'Decisions', icon: ListOrdered, render: () => <Decisions /> },
-  { id: 'calibration', label: 'Calibration', icon: Gauge, render: () => <Calibration /> },
-  { id: 'context', label: 'Context', icon: Activity, render: () => <ContextTab /> },
-  { id: 'venues', label: 'Venues', icon: Layers, render: () => <Venues /> },
-  { id: 'scores', label: 'Scores', icon: Trophy, render: () => <Scores /> },
-  { id: 'health', label: 'Health', icon: HeartPulse, render: () => <Health /> },
-  { id: 'forecast', label: 'Forecast', icon: Sparkles, render: () => <Forecast /> },
+  { id: 'overview', label: 'Overview', icon: Target, Component: Overview },
+  { id: 'markets', label: 'Markets', icon: Layers, Component: Markets },
+  { id: 'decisions', label: 'Decisions', icon: ListOrdered, Component: Decisions },
+  { id: 'calibration', label: 'Calibration', icon: Gauge, Component: Calibration },
+  { id: 'context', label: 'Context', icon: Activity, Component: ContextTab },
+  { id: 'venues', label: 'Venues', icon: Layers, Component: Venues },
+  { id: 'scores', label: 'Scores', icon: Trophy, Component: Scores },
+  { id: 'health', label: 'Health', icon: HeartPulse, Component: Health },
+  { id: 'forecast', label: 'Forecast', icon: Sparkles, Component: Forecast },
 ] as const
 
 type TabId = typeof TABS[number]['id']
 
-export default function PredictionShell() {
-  const [tab, setTab] = useState<TabId>('overview')
+export interface PredictionShellProps {
+  /** Deep link: ?tab=markets&market=kalshi:KX-CPI-26 preselects the detail. */
+  initialMarket?: { source: string; market_id: string } | null
+  initialTab?: string
+}
+
+export default function PredictionShell({ initialMarket = null, initialTab }: PredictionShellProps = {}) {
+  const startTab = (TABS.some(t => t.id === initialTab) ? initialTab : 'overview') as TabId
+  const [tab, setTab] = useState<TabId>(startTab)
   const [nonce, setNonce] = useState(0)
   const active = TABS.find(t => t.id === tab) || TABS[0]
+  const Active = active.Component as React.ComponentType<{ initialMarket?: { source: string; market_id: string } | null }>
 
   return (
     <div>
@@ -73,14 +81,20 @@ export default function PredictionShell() {
         </button>
       </div>
 
-      <div style={{ fontSize: 10, color: 'var(--muted)', marginBottom: 12, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 10, color: 'var(--muted)', marginBottom: 6, lineHeight: 1.5 }}>
         Read-only telemetry: venue prices and settlements, this system's decisions (abstentions
         included), and the outside evidence behind them. No control on this surface can place an order.
+      </div>
+      <div style={{ fontSize: 10, color: 'var(--muted)', marginBottom: 12, lineHeight: 1.5 }}>
+        Three different gates live in this app and they do not grade the same thing: the hermetic /
+        odu / REM gates govern <b>orders and memory</b>, while the Brier gate on the Calibration tab
+        grades <b>settled venue outcomes</b>. A prediction can be well calibrated and still never be
+        traded — nothing here feeds the trading engine.
       </div>
 
       {/* Remounting on tab change keeps each panel's poll cadence scoped to the
           tab that is actually visible; the nonce forces a full refetch. */}
-      <div key={`${tab}-${nonce}`}>{active.render()}</div>
+      <div key={`${tab}-${nonce}`}><Active initialMarket={initialMarket} /></div>
     </div>
   )
 }
