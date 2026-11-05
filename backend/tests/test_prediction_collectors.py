@@ -90,6 +90,23 @@ def test_parse_tolerates_list_payloads():
     assert parsed["yes_price"] == pytest.approx(0.7)
 
 
+def test_parse_reads_up_down_markets_as_two_sides():
+    """600 open Polymarket markets are 'Up or Down'. Without a positional
+    fallback every one of them showed '—', which reads as a dead feed."""
+    m = _market(outcomes='["Up", "Down"]', outcomePrices='["0.63", "0.37"]')
+    parsed = parse_market(m)
+    assert parsed is not None
+    assert parsed["yes_price"] == pytest.approx(0.63)
+    assert parsed["no_price"] == pytest.approx(0.37)
+
+
+def test_parse_leaves_non_binary_markets_price_less():
+    m = _market(outcomes='["A", "B", "C"]', outcomePrices='["0.4", "0.35", "0.25"]')
+    parsed = parse_market(m)
+    assert parsed is not None
+    assert parsed["yes_price"] is None and parsed["no_price"] is None
+
+
 # ── kalshi price scaling ────────────────────────────────────────────────────
 
 def test_kalshi_cents_become_probabilities():

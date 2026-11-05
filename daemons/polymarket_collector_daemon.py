@@ -108,6 +108,19 @@ def parse_market(market: dict) -> Optional[dict]:
         elif name in ("no", "false"):
             no_price = value
 
+    # Polymarket's binary markets are not always Yes/No: "Up or Down", "Real
+    # Madrid vs PSG", "Ospreys vs Seminoles". The venue lists the two sides in
+    # outcome order, so the first outcome is the side the quoted price is for.
+    # Without this every one of those markets rendered as "—" — 600 open markets
+    # with no visible price, which reads as a broken feed rather than a different
+    # question shape. The UI labels them from `outcomes`, so nothing is called
+    # "yes" that is really a football team.
+    if yes_price is None and no_price is None and len(prices) == 2 and len(outcomes) == 2:
+        try:
+            yes_price, no_price = float(prices[0]), float(prices[1])
+        except (TypeError, ValueError):
+            pass
+
     return {
         "market_id": str(condition_id),
         "question": question,
@@ -170,9 +183,16 @@ async def fetch_open_markets() -> list[dict]:
 
 
 async def ingest_markets(markets: list[dict]) -> int:
-    """Upsert one row per market. `processed` is left alone on purpose."""
+    """Upsert one row per market. `processed` is left alone on purpose.
+
+    Commits every BATCH rows rather than once at the end. A 600-market poll in a
+    single transaction held the SQLite write lock for long enough that the API's
+    startup migrations timed out and the service came back "active" but never
+    bound a port -- a collector starving the app it feeds.
+    """
     from backend.db import get_db
 
+    BATCH = 40
     written = 0
     async with get_db() as db:
         for m in markets:
@@ -205,6 +225,9 @@ async def ingest_markets(markets: list[dict]) -> int:
                     ),
                 )
             written += 1
+            if written % BATCH == 0:
+                await db.commit()
+                await asyncio.sleep(0)  # let the API's writers in between batches
         await db.commit()
     return written
 
