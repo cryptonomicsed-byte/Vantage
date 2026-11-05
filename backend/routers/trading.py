@@ -17,6 +17,13 @@ from ..db import get_db
 from ..action_receipt import from_trade_order
 from ..justice_layer import anchor_receipt as _anchor_receipt
 
+# P0-1: endpoint-level gate for high-conviction auto-execution.
+# Daemon-level gates (daemon_settings DB) prevent daemons from calling this
+# endpoint, but any caller with a valid tool key could still trigger an order.
+# This gate defaults False so the endpoint never auto-creates orders unless
+# an operator explicitly opts in.
+SIGNAL_AUTO_EXECUTE_ENABLED = os.environ.get("SIGNAL_AUTO_EXECUTE_ENABLED", "0").strip() == "1"
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/trading", tags=["trading"])
 
@@ -2207,7 +2214,7 @@ async def ingest_signal(request: Request, tool: dict = Depends(get_system_tool))
 
     Body: {symbol, direction, conviction, source, agent_id, quantity?, chain?}
       - agent_id: which agent should receive this signal
-      - conviction: 0–1 confidence (>0.7 auto-executes if wallet exists)
+      - conviction: 0–1 confidence (>0.7 auto-executes when SIGNAL_AUTO_EXECUTE_ENABLED=1)
       - source: origin (e.g. "freqtrade", "worldmonitor")
 
     Only X-Vantage-Tool (trading) + X-Vantage-Tool-Key can call this.
@@ -2237,9 +2244,9 @@ async def ingest_signal(request: Request, tool: dict = Depends(get_system_tool))
         return {"ok": False, "skipped": True, "reason": "test signals are not ingested to production feed"}
 
     direction_upper = direction.upper()
-    if conviction > 0.7 and direction_upper in ("BUY", "LONG", "BULLISH"):
+    if SIGNAL_AUTO_EXECUTE_ENABLED and conviction > 0.7 and direction_upper in ("BUY", "LONG", "BULLISH"):
         side = "BUY"
-    elif conviction > 0.7 and direction_upper in ("SELL", "SHORT", "BEARISH"):
+    elif SIGNAL_AUTO_EXECUTE_ENABLED and conviction > 0.7 and direction_upper in ("SELL", "SHORT", "BEARISH"):
         side = "SELL"
     else:
         side = None
