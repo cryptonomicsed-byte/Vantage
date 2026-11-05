@@ -484,28 +484,6 @@ async def _federation_gossip_loop():
             logger.debug("Federation Buzz discovery skipped this cycle: %s", exc)
 
 
-async def _startup_db_call(fn, *args, retries: int = 6, delay: float = 15.0, **kwargs):
-    """Retry a DB-initialising coroutine when SQLite is temporarily locked at startup.
-
-    swarm_orchestrator and other daemons hold long write transactions against
-    vantage.db; a 30-second busy_timeout is not always enough.  This wrapper
-    retries up to `retries` times with `delay`-second pauses so Vantage can
-    start even while a bulk-write is in progress.
-    """
-    for attempt in range(retries):
-        try:
-            return await fn(*args, **kwargs)
-        except Exception as exc:
-            if "database is locked" in str(exc).lower() and attempt < retries - 1:
-                logger.warning(
-                    "Startup DB call %s locked (attempt %d/%d), retrying in %.0fs…",
-                    fn.__name__, attempt + 1, retries, delay,
-                )
-                await asyncio.sleep(delay)
-            else:
-                raise
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global FFMPEG_AVAILABLE
@@ -518,68 +496,13 @@ async def lifespan(app: FastAPI):
         await _start_mcp_hub()
     except Exception as _e:  # pragma: no cover
         logger.warning("mcp hub transport not started: %s", _e)
-    await _startup_db_call(init_agents_db)
-    await _startup_db_call(init_mesh_db)
-    await _startup_db_call(init_manifesto_db)
-    from .routers.copilot import init_copilot_db
-    await _startup_db_call(init_copilot_db)
-    from .routers.pine import init_pine_db
-    await _startup_db_call(init_pine_db)
-    from .routers.genesis import _init_genesis_db
-    await _startup_db_call(_init_genesis_db)
-    from .routers.collectives import init_collectives_db
-    await _startup_db_call(init_collectives_db)
-    from .coordination import init_coordination_db
-    await _startup_db_call(init_coordination_db)
-    from .work_refs import init_work_ref_db
-    await _startup_db_call(init_work_ref_db)
-    from .workspace_roles import (
-        deduplicate_builtin_templates, init_workspace_roles_db, seed_builtin_templates,
-    )
-    await _startup_db_call(init_workspace_roles_db)
-    await _startup_db_call(deduplicate_builtin_templates)
-    await _startup_db_call(seed_builtin_templates)
-    from .presence import init_presence_db
-    await _startup_db_call(init_presence_db)
-    from .receipts import init_receipts_db
-    await _startup_db_call(init_receipts_db)
-    # Aliased: backend/mesh_store.py already exports init_mesh_db for the
-    # Block Mesh coordination tables and main.py imports it at module level.
-    # A bare `from ... import init_mesh_db` here rebinds the name for the
-    # whole function, so the module-level one becomes an UnboundLocalError at
-    # its own call site further up -- which takes the service down at boot.
-    from .mesh_gateway import init_mesh_db as init_meshnet_db
-    await _startup_db_call(init_meshnet_db)
-    from .coordination_join import init_join_db
-    await _startup_db_call(init_join_db)
-    from .routers.conductor import init_conductor_db
-    await _startup_db_call(init_conductor_db)
-    from .coordination_scoring import init_scoring_db
-    await _startup_db_call(init_scoring_db)
-    from .sovereignty import init_sovereignty_db
-    await _startup_db_call(init_sovereignty_db)
-    from .intel_exchange import init_intel_exchange_db
-    await _startup_db_call(init_intel_exchange_db)
-    from .routers.wallets import init_wallet_tables
-    await _startup_db_call(init_wallet_tables)
-    from .routers.degen import ensure_degen_indexes
-    await _startup_db_call(ensure_degen_indexes)
-    from .db import init_workspace_tasks_db
-    await _startup_db_call(init_workspace_tasks_db)
-    from .tasks_db import init_tasks_db
-    await _startup_db_call(init_tasks_db)
-    from .routers.blockmesh_board import init_blockmesh_board_db
-    await _startup_db_call(init_blockmesh_board_db)
-    from .device_registry import init_device_registry_db
-    await _startup_db_call(init_device_registry_db)
-    from .reputation import init_task_reputation_db, update_on_event as _rep_update_on_event
-    await _startup_db_call(init_task_reputation_db)
-    from .tier_engine import init_tier_db
-    await _startup_db_call(init_tier_db)
-    from .witness_store import init_witness_db
-    await _startup_db_call(init_witness_db)
-    from .routers.live import init_live_db
-    await _startup_db_call(init_live_db)
+    from .startup_db import init_all_databases
+    _db_init_failures = await init_all_databases()
+    if _db_init_failures:
+        logger.warning("DB init failures at startup: %s", _db_init_failures)
+    # subscriptions below need this import, which used to live inside the
+    # inline init block
+    from .reputation import update_on_event as _rep_update_on_event
     from .event_bus import subscribe as _eb_subscribe
     _eb_subscribe("TaskCompleted", lambda e: asyncio.create_task(_rep_update_on_event(e.event_type, e.actor_id or 0)))
     _eb_subscribe("ArtifactVerified", lambda e: asyncio.create_task(_rep_update_on_event(e.event_type, e.actor_id or 0)))
