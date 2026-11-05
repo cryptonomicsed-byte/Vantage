@@ -1,0 +1,17 @@
+[Unit]
+Description=Ares Prediction Context Signals (FRED / Open-Meteo / Manifold)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=-/etc/ares-env/ares-context-signals.env
+WorkingDirectory=/opt/ares/Vantage
+ExecStart=/opt/ares/venv/bin/python /opt/ares/Vantage/daemons/prediction_context_daemon.py
+Restart=on-failure
+RestartSec=120
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

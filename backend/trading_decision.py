@@ -27,6 +27,12 @@ async def jev_decide(signal: dict) -> dict:
         "loom_conviction": signal.get("loom_conviction"),
         "loom_direction": signal.get("loom_direction"),
         "strategy_lab_score": signal.get("strategy_lab_score"),
+        # Non-venue evidence (macro print / forecast / community probability).
+        # Passed as context, never folded into the venue price: the venue is
+        # what settles, these are what argue about it.
+        "context": (signal.get("context") or [])[:3],
+        "context_direction": signal.get("context_direction"),
+        "context_confidence": signal.get("context_confidence"),
     }
 
     questions = {

@@ -299,6 +299,32 @@ async def prediction_calibration(agent: dict = Depends(get_agent)):
     }
 
 
+@router.get("/context")
+async def prediction_context(
+    limit: int = Query(40, ge=1, le=200),
+    source: Optional[str] = Query(None, description="fred | open-meteo | manifold"),
+    signal_type: Optional[str] = Query(None, description="macro | weather | community"),
+    agent: dict = Depends(get_agent),
+):
+    """Non-venue evidence: macro prints, forecasts, community probabilities.
+
+    These never settle a market — the venue does. They are what the decision
+    layer reads before it speaks, and they are shown here so a decision's
+    evidence is inspectable rather than implied.
+    """
+    from ..signal_sources import CADENCE, store
+
+    rows = await store.latest(limit=limit, source=source, signal_type=signal_type)
+    counts = await store.counts_by_source()
+    return {
+        "count": len(rows),
+        "signals": rows,
+        "by_source": counts,
+        "cadence_seconds": CADENCE,
+        "generated_at": int(time.time()),
+    }
+
+
 @router.get("/sources")
 async def prediction_sources(agent: dict = Depends(get_agent)):
     """Per-venue health: ingest rate, decision coverage, resolution coverage.
