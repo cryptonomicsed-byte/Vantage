@@ -225,23 +225,32 @@ def _emit_trace(candidate: dict, rem: RemResult, payload: dict) -> bool:
         mc.emit(
             agent="vantage-eco",
             session=session,
-            kind="rem-memory",
+            kind="decision",
             action=rem.fate.value,
-            outcome=(
-                f"domain={domain} score={rem.overall_score:.3f} "
-                f"agreement={payload['agreement']} contested={payload['contested']} "
-                f"{rem.reasoning}"
-            ),
+            outcome="info",
+            payload={
+                "domain": domain,
+                "score": round(rem.overall_score, 4),
+                "agreement": payload["agreement"],
+                "contested": payload["contested"],
+                "reasoning": rem.reasoning,
+            },
         )
         if rem.fate in (MemoryFate.PROMOTE, MemoryFate.FOLD_TO_HIVE):
             mc.add_finding(
-                agent="vantage-eco",
-                session=session,
-                finding=(
-                    f"[{rem.fate.value}] {domain}: score={rem.overall_score:.3f} "
-                    f"→ {rem.reasoning}"
-                ),
-                severity="info",
+                miner="vantage-eco",
+                confidence=round(rem.overall_score, 3),
+                title=f"[{rem.fate.value}] {domain}",
+                evidence=f"score={rem.overall_score:.3f} session={session}",
+                suggestion=rem.reasoning,
+                payload={
+                    "agent": "vantage-eco",
+                    "session": session,
+                    "fate": rem.fate.value,
+                    "domain": domain,
+                    "agreement": payload["agreement"],
+                    "contested": payload["contested"],
+                },
             )
         return True
     except Exception as exc:

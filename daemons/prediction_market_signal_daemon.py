@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Prediction market signal daemon: fetch signals -> Jev decision -> Brier gate -> emit to signal bus."""
+"""Prediction market signal daemon: fetch signals -> Jev decision -> Brier record.
+
+Deliberately ends at the record. A prediction decision is a claim about a future
+event, not an order, and there is no code path from this daemon to the trading
+engine (tests/test_no_prediction_orders.py enforces it).
+"""
 import asyncio, time, sys, os
 sys.path.insert(0, "/opt/ares/Vantage")
-os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:////opt/ares/Vantage/vantage.db")
+os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:////opt/ares/Vantage/data/vantage.db")
 
 POLL_INTERVAL = 300
-JEV_CONFIDENCE_THRESHOLD = float(os.environ.get("JEV_CONFIDENCE_THRESHOLD", "0.65"))
 
 async def process_unprocessed_signals():
     from backend.db import get_db
@@ -48,25 +52,18 @@ async def process_unprocessed_signals():
             reasoning=decision.get("reasoning"),
         )
 
-        if decision["verdict"] in ("yes", "no") and decision["confidence"] >= JEV_CONFIDENCE_THRESHOLD:
-            try:
-                import httpx
-                tool_key = os.environ.get("VANTAGE_TOOL_KEY", "")
-                async with httpx.AsyncClient(timeout=15) as client:
-                    await client.post(
-                        "http://localhost:8001/api/trading/signals/ingest",
-                        headers={"X-Vantage-Tool-Key": tool_key, "Content-Type": "application/json"},
-                        json={
-                            "source": "jev-prediction",
-                            "signal_type": "prediction_market",
-                            "market_id": signal["market_id"],
-                            "verdict": decision["verdict"],
-                            "confidence": decision["confidence"],
-                            "reasoning": decision.get("reasoning", ""),
-                        }
-                    )
-            except Exception as e:
-                print(f"[jev_daemon] Signal bus error: {e}", flush=True)
+        # There used to be a POST to /api/trading/signals/ingest here: the
+        # order-creating endpoint. It never worked (it sends no
+        # X-Vantage-Tool header, and the env carries no tool key, so every call
+        # 401'd into a bare except), which is exactly why it was dangerous --
+        # dead code aimed at a live order path. That endpoint turns
+        # direction in (BUY, LONG, BULLISH) + conviction > 0.7 into a real
+        # order, and BULLISH is the direction word the context signals emit, so
+        # one "forward contexts to the decision bus" change would have armed it.
+        #
+        # A prediction decision is a claim, not an order. There is no code path
+        # from here to the trading engine; tests/test_no_prediction_orders.py
+        # enforces that by grepping this daemon directory.
 
         async with get_db() as db:
             await db.execute("UPDATE prediction_signals SET processed=1 WHERE id=?", (signal["id"],))
