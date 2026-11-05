@@ -536,3 +536,71 @@ def emit_witness_finalized_trace(
         receipt_id=receipt_id,
         principal_id=submitter_agent_id,
     )
+
+
+# ── prediction decisions ───────────────────────────────────────────────────
+# The prediction pipeline was invisible to the substrate: 19,580 traces on the
+# server, not one of them a prediction decision. Without this, the only question
+# that matters -- why does the engine abstain on 99.9% of markets -- can only be
+# answered by reading the database by hand, and no miner can ever see the shape
+# of it.
+
+def emit_prediction_decision(
+    *,
+    source: str,
+    market_id: str,
+    verdict: str,
+    confidence: float,
+    direction: Optional[str] = None,
+    conviction: Optional[str] = None,
+    should_trade: Optional[bool] = None,
+    abstained: Optional[bool] = None,
+    context_sources: Optional[list[str]] = None,
+    reasoning: Optional[str] = None,
+) -> bool:
+    """Emit one `decision` trace per prediction decision. Never raises.
+
+    `kind="decision"` specifically -- not "observation". The miners key on it,
+    and a decision filed as an observation is a decision nobody can count.
+
+    The payload carries the abstention flag explicitly so the trace log can
+    answer "how often does this engine decline, and on what" without a join back
+    into brier_predictions.
+    """
+    try:
+        from uuid import uuid4
+
+        body = {
+            "agent": pseudonymize_agent("prediction-engine"),
+            "session": _prediction_session(),
+            "kind": "decision",
+            "action": str(verdict or "skip"),
+            "target": f"{source}:{market_id}",
+            "outcome": "success" if verdict in ("yes", "no") else "info",
+            "payload": scrub_payload({
+                "verdict": verdict,
+                "confidence": round(float(confidence or 0.0), 4),
+                "direction": direction,
+                "conviction": conviction,
+                "should_trade": should_trade,
+                "abstained": bool(abstained if abstained is not None else verdict == "skip"),
+                "context_sources": context_sources or [],
+                "reasoning": (reasoning or "")[:400],
+            }),
+        }
+        return _post_trace(body)
+    except Exception as exc:  # never break a decision over telemetry
+        logger.debug("mycelium_bridge: prediction decision trace failed: %s", exc)
+        return False
+
+
+_prediction_session_id: Optional[str] = None
+
+
+def _prediction_session() -> str:
+    """One session id per process, so a daemon run is one trace session."""
+    global _prediction_session_id
+    if _prediction_session_id is None:
+        from uuid import uuid4
+        _prediction_session_id = f"prediction-{uuid4().hex[:12]}"
+    return _prediction_session_id
