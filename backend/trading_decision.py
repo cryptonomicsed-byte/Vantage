@@ -3,7 +3,10 @@ Trading decision branch. Thin adapter over system_one.decide().
 Keeps jev_decide() signature for backward compatibility.
 """
 import os
-from system_one import decide, NOUL, CHOICE, SCORE
+try:
+    from .system_one import decide, NOUL, CHOICE, SCORE
+except ImportError:  # backend/ itself on sys.path
+    from system_one import decide, NOUL, CHOICE, SCORE
 
 CONFIDENCE_THRESHOLD = float(os.environ.get("JEV_CONFIDENCE_THRESHOLD", "0.65"))
 

@@ -14,8 +14,12 @@ CONFIDENCE_THRESHOLD = float(os.environ.get("JEV_CONFIDENCE_THRESHOLD", "0.65"))
 
 async def jev_decide(signal: dict) -> dict:
     """Pure function: signal dict -> {verdict, confidence, reasoning}. No side effects."""
-    from signal_fusion import enrich_from_loom, enrich_from_strategy_lab
-    from trading_decision import jev_decide as _trade_decide
+    try:
+        from .signal_fusion import enrich_from_loom, enrich_from_strategy_lab
+        from .trading_decision import jev_decide as _trade_decide
+    except ImportError:  # backend/ itself on sys.path
+        from signal_fusion import enrich_from_loom, enrich_from_strategy_lab
+        from trading_decision import jev_decide as _trade_decide
 
     signal = await enrich_from_loom(signal)
     signal = await enrich_from_strategy_lab(signal)
