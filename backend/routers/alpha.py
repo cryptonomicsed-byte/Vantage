@@ -468,7 +468,7 @@ async def money_flow(
         try:
             async with get_db() as _smdb:
                 _smrows = await (await _smdb.execute(
-                    SELECT cluster_id, score FROM smart_money_scores
+                    "SELECT cluster_id, score FROM smart_money_scores"
                 )).fetchall()
             _smart_money_map = {r[0]: r[1] for r in _smrows}
         except Exception as _e:
