@@ -15,7 +15,7 @@ pytestmark = pytest.mark.asyncio
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
-@pytest_asyncio.fixture
+@pytest_asyncio.fixture(scope="session")
 async def guild_and_space(client, fresh_agent):
     """Create a guild, trading space, and return owner credentials + IDs."""
     owner = await fresh_agent()
