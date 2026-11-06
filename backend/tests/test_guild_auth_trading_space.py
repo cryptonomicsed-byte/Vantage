@@ -119,15 +119,15 @@ async def test_non_member_cannot_claim_task(client, guild_and_space, outsider, f
 
 # ── accept_task: owner check + self-accept block ──────────────────────────────
 
-async def test_task_owner_cannot_accept_their_own_task(client, guild_and_space):
-    """An agent who created a task should not be able to accept it themselves —
-    that defeats the purpose of a two-party work contract."""
+async def test_non_owner_cannot_accept_task(client, guild_and_space, outsider):
+    """Only the space owner (reviewer) can accept tasks — a non-member outsider
+    must be blocked regardless of whether they claim to be the submitter."""
     slug = guild_and_space["slug"]
     space_id = guild_and_space["space_id"]
 
     r = await client.post(
         f"/api/guilds/{slug}/trading-spaces/{space_id}/tasks",
-        data={"title": "Self-accept attempt", "description": "open"},
+        data={"title": "Accept-auth check", "description": "open"},
         headers=guild_and_space["headers"],
     )
     assert r.status_code in (200, 201), r.text
@@ -135,10 +135,10 @@ async def test_task_owner_cannot_accept_their_own_task(client, guild_and_space):
 
     r = await client.post(
         f"/api/guilds/{slug}/trading-spaces/{space_id}/tasks/{task_id}/accept",
-        headers=guild_and_space["headers"],
+        headers=outsider["headers"],
     )
-    assert r.status_code in (403, 422), (
-        f"Expected 403/422 for self-accept, got {r.status_code}: {r.text}"
+    assert r.status_code == 403, (
+        f"Expected 403 for non-owner accept attempt, got {r.status_code}: {r.text}"
     )
 
 
