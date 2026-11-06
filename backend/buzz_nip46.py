@@ -35,7 +35,10 @@ import urllib.parse
 import uuid
 
 import websockets
-from coincurve import PrivateKey
+try:
+    from coincurve import PrivateKey
+except ImportError:
+    PrivateKey = None  # type: ignore[assignment,misc]
 
 from .buzz_client import build_event
 from .buzz_identity import derive_buzz_keypair, public_key_xonly_hex, sign_event_id

@@ -38,6 +38,25 @@ async def _get_space(space_id: str, slug: str) -> dict:
     return dict(row)
 
 
+async def _assert_guild_member(slug: str, agent: dict) -> int:
+    """Raise 403 if agent is not a member of the guild. Returns guild_id."""
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id FROM guilds WHERE slug=?", (slug,)) as cur:
+            guild_row = await cur.fetchone()
+        if not guild_row:
+            raise HTTPException(404, "Guild not found")
+        guild_id = guild_row["id"]
+        async with db.execute(
+            "SELECT 1 FROM guild_members WHERE guild_id=? AND agent_id=?",
+            (guild_id, agent["id"]),
+        ) as cur:
+            member_row = await cur.fetchone()
+    if not member_row:
+        raise HTTPException(403, "Agent is not a member of this guild")
+    return guild_id
+
+
 # ── Space CRUD ──────────────────────────────────────────────────────────────────
 
 @router.get("")
@@ -132,7 +151,9 @@ async def list_tasks(
                 (space_id, limit),
             ) as cur:
                 rows = await cur.fetchall()
-    return [dict(r) for r in rows]
+    items = [dict(r) for r in rows]
+    # Wrap in envelope: frontend expects {tasks: [...], total: N}
+    return {"tasks": items, "total": len(items)}
 
 
 @router.post("/{space_id}/tasks")
@@ -144,6 +165,7 @@ async def create_task(
     kind_tag: str = Form(""),
     agent: dict = Depends(get_agent),
 ):
+    await _assert_guild_member(slug, agent)
     await _get_space(space_id, slug)
     task_id = str(uuid.uuid4())
     now = int(time.time())
@@ -158,6 +180,7 @@ async def create_task(
 
 @router.post("/{space_id}/tasks/{task_id}/claim")
 async def claim_task(slug: str, space_id: str, task_id: str, agent: dict = Depends(get_agent)):
+    await _assert_guild_member(slug, agent)
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM vantage_tasks WHERE id=? AND workspace_id=?", (task_id, space_id)) as cur:
@@ -211,6 +234,20 @@ async def accept_task(
     note: str = Form(""),
     agent: dict = Depends(get_agent),
 ):
+    await _assert_guild_member(slug, agent)
+    space = await _get_space(space_id, slug)
+    # Only the space owner may accept tasks; the submitter may not self-accept.
+    if agent["id"] != space.get("created_by_agent_id"):
+        async with get_db() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT claimed_by_agent_id FROM vantage_tasks WHERE id=? AND workspace_id=?",
+                (task_id, space_id),
+            ) as cur:
+                task_row = await cur.fetchone()
+        if task_row and task_row["claimed_by_agent_id"] == agent["id"]:
+            raise HTTPException(403, "Submitter cannot self-accept — a reviewer must accept")
+        raise HTTPException(403, "Only the space owner may accept tasks")
     now = int(time.time())
     async with get_db() as db:
         await db.execute(
@@ -231,6 +268,10 @@ async def reject_task(
     note: str = Form(""),
     agent: dict = Depends(get_agent),
 ):
+    await _assert_guild_member(slug, agent)
+    space = await _get_space(space_id, slug)
+    if agent["id"] != space.get("created_by_agent_id"):
+        raise HTTPException(403, "Only the space owner may reject tasks")
     now = int(time.time())
     async with get_db() as db:
         await db.execute(
@@ -257,7 +298,9 @@ async def list_pools(slug: str, space_id: str, agent: dict = Depends(get_agent))
             (space_id,),
         ) as cur:
             rows = await cur.fetchall()
-    return [dict(r) for r in rows]
+    items = [dict(r) for r in rows]
+    # Wrap in envelope: frontend expects {pools: [...], total: N}
+    return {"pools": items, "total": len(items)}
 
 
 @router.post("/{space_id}/pools")
@@ -267,11 +310,15 @@ async def create_pool(
     pool_type: str = Form("trade"),
     token: str = Form(""),
     symbol: str = Form(""),
+    # Note: guild membership checked inside handler below
     target_amount: float = Form(0.0),
     quorum_pct: float = Form(0.51),
     agent: dict = Depends(get_agent),
 ):
+    await _assert_guild_member(slug, agent)
     await _get_space(space_id, slug)
+    if quorum_pct <= 0.0 or quorum_pct > 1.0:
+        raise HTTPException(422, "quorum_pct must be a fraction in (0, 1]")
     pool_id = str(uuid.uuid4())
     now = int(time.time())
     async with get_db() as db:
@@ -290,6 +337,9 @@ async def commit_to_pool(
     wallet_id: Optional[int] = Form(None),
     agent: dict = Depends(get_agent),
 ):
+    await _assert_guild_member(slug, agent)
+    if amount <= 0:
+        raise HTTPException(422, "amount must be a positive value")
     entry_id = str(uuid.uuid4())
     now = int(time.time())
     async with get_db() as db:
@@ -400,16 +450,30 @@ async def research_proxy(
     request: Request,
     agent: dict = Depends(get_agent),
 ):
-    """Proxy to /api/intel/* for research within a trading space."""
+    """Proxy to /api/intel/* for research within a trading space.
+
+    Both Authorization and X-Agent-Key are forwarded so the upstream handler
+    can authenticate the requesting agent.  Previously only Authorization was
+    forwarded, which caused the upstream to return a missing-agent-key error.
+    Upstream status codes are preserved rather than swallowed.
+    """
+    await _assert_guild_member(slug, agent)
     params = dict(request.query_params)
-    headers = {"Authorization": request.headers.get("Authorization", "")}
+    headers = {
+        "Authorization": request.headers.get("Authorization", ""),
+        "X-Agent-Key": request.headers.get("X-Agent-Key", ""),
+    }
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(f"http://localhost:8001/api/intel/{path}", params=params, headers=headers)
+        if resp.status_code != 200:
+            raise HTTPException(resp.status_code, resp.text[:500])
         return resp.json()
+    except HTTPException:
+        raise
     except Exception as exc:
-        logger.warning("Research proxy error: %s", exc)
-        return {"error": str(exc), "path": path}
+        logger.warning("Research proxy error for %s: %s", path, exc)
+        raise HTTPException(502, f"Research proxy error: {exc}")
 
 
 # ── NIP-29 publishing ───────────────────────────────────────────────────────────

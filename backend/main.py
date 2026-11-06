@@ -11,7 +11,10 @@ from contextlib import asynccontextmanager
 
 import aiosqlite
 import httpx
-from coincurve import PublicKeyXOnly
+try:
+    from coincurve import PublicKeyXOnly as PublicKeyXOnly
+except ImportError:  # libsecp256k1 not available (CI / Termux)
+    PublicKeyXOnly = None
 from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -366,9 +369,12 @@ async def _federation_gossip_loop():
                                     from .steward_client import verify_schnorr as _steward_verify
                                     sig_invalid = not await _steward_verify(pinned_pubkey, digest_hex, sig_header.strip())
                                 except Exception:
-                                    # Steward unreachable — use local coincurve
-                                    xonly = PublicKeyXOnly(bytes.fromhex(pinned_pubkey))
-                                    sig_invalid = not xonly.verify(bytes.fromhex(sig_header.strip()), bytes.fromhex(digest_hex))
+                                    # Steward unreachable — use local coincurve if available
+                                    if PublicKeyXOnly is not None:
+                                        xonly = PublicKeyXOnly(bytes.fromhex(pinned_pubkey))
+                                        sig_invalid = not xonly.verify(bytes.fromhex(sig_header.strip()), bytes.fromhex(digest_hex))
+                                    else:
+                                        sig_invalid = True  # can't verify without coincurve
                             except Exception:
                                 sig_invalid = True
                             if sig_invalid:
@@ -679,8 +685,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("reputation init skipped: %s", e)
 
+    # ARP receipt outbox reconciliation: detects pending rows left by crashes
+    # and re-verifies them against the chain so the receipt chain stays clean.
+    from .receipt_reconciler import reconciliation_loop
+    reconciler_task = asyncio.create_task(reconciliation_loop())
+
     yield
-    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, mention_poller_task, scoring_task, last30days_task, outcome_learner_task, event_bus_task, tier_recompute_task]
+    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, mention_poller_task, scoring_task, last30days_task, outcome_learner_task, event_bus_task, tier_recompute_task, reconciler_task]
     if execution_engine_task is not None:
         shutdown_tasks.append(execution_engine_task)
     for t in shutdown_tasks:
@@ -1015,10 +1026,6 @@ from .routers.artifacts import router as artifacts_router
 app.include_router(artifacts_router)
 from .routers.workspace_memory import router as workspace_memory_router
 app.include_router(workspace_memory_router)
-from .routers.trading_space import router as trading_space_router
-app.include_router(trading_space_router)
-from .routers.content_space import router as content_space_router
-app.include_router(content_space_router)
 from .routers.trading_space import router as trading_space_router
 app.include_router(trading_space_router)
 from .routers.content_space import router as content_space_router

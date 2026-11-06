@@ -114,3 +114,41 @@ async def refresh_smart_money_scores(db) -> int:
         logger.warning(f"smart_money: commit failed: {exc}")
 
     return updated
+
+
+LOOM_URL = "http://localhost:8889"
+
+
+async def fetch_loom_smart_money() -> list:
+    """Fetch Loom smart-money composite. Fail-open: returns [] on error."""
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"{LOOM_URL}/api/signals/composite")
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        signals = data.get("signals", [])
+        updated = data.get("updated", 0)
+        result = []
+        for sig in signals:
+            cluster_id = sig.get("token") or sig.get("mint") or sig.get("id", "")
+            if not cluster_id:
+                continue
+            raw_score = sig.get("score") or sig.get("conviction") or 0.0
+            try:
+                score = float(raw_score)
+            except (TypeError, ValueError):
+                score = 0.0
+            result.append({
+                "cluster_id": cluster_id,
+                "score": round(min(score, 1.0), 4),
+                "computed_ts": updated,
+                "source": "loom_composite",
+                "direction": sig.get("direction", ""),
+                "momentum": sig.get("momentum", 0.0),
+            })
+        return result
+    except Exception as e:
+        logger.debug("fetch_loom_smart_money failed (fail-open): %s", e)
+        return []

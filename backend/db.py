@@ -2366,6 +2366,16 @@ async def init_workspace_tasks_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_prediction_signals_source
             ON prediction_signals(source, ingested_ts DESC)
         """)
+        # Upserts look a market up by (source, market_id). Without this index that
+        # is a full scan of ~98,000 rows per market, which turns a 600-market
+        # collector poll into minutes of held write lock -- long enough to starve
+        # the API's own startup migrations. Non-unique on purpose: the table
+        # already contains historical duplicates from the uuid-per-insert era and
+        # a UNIQUE index would refuse to build.
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_prediction_signals_market
+            ON prediction_signals(source, market_id)
+        """)
         await db.commit()
 
 
@@ -2481,6 +2491,9 @@ async def init_workspace_tasks_db() -> None:
             "market_id": "TEXT",
             "reasoning": "TEXT",
             "resolved_ts": "INTEGER",
+            # p_yes: venue-reported P(YES) at forecast time. Distinct from
+            # confidence (model certainty). Required for Brier scoring.
+            "p_yes": "REAL",
         }
         _brier_cur = await db.execute("PRAGMA table_info(brier_predictions)")
         _brier_have = {_r[1] for _r in await _brier_cur.fetchall()}

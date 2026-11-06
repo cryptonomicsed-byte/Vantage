@@ -287,9 +287,9 @@ function TemplateMode({ templates, wallets, tradingApi, onCreated }: { templates
     if (!walletId) { setError('Pick a wallet'); return }
     setBusy(true); setError('')
     try {
-      const r = await tradingApi(`/strategies/from-template?wallet_id=${walletId}`, {
+      const r = await tradingApi('/strategies/from-template', {
         method: 'POST',
-        body: JSON.stringify({ template: templateKey, name: name || undefined }),
+        body: JSON.stringify({ template: templateKey, wallet_id: Number(walletId), name: name || undefined }),
       })
       if (r.ok) onCreated()
       else { const d = await r.json(); setError(d.detail || 'Create failed') }
@@ -355,9 +355,9 @@ function AiDescribeMode({ templates, wallets, tradingApi, onCreated }: { templat
     if (!result) return
     setBusy(true); setError('')
     try {
-      const cr = await tradingApi(`/strategies/from-template?wallet_id=${walletId}`, {
+      const cr = await tradingApi('/strategies/from-template', {
         method: 'POST',
-        body: JSON.stringify({ template: result.strategy_type, name: result.name }),
+        body: JSON.stringify({ template: result.strategy_type, wallet_id: Number(walletId), name: result.name }),
       })
       const created = await cr.json()
       if (!cr.ok) { setError(created.detail || 'Create failed'); setBusy(false); return }
@@ -456,9 +456,9 @@ function CustomMode({ templates, wallets, tradingApi, onCreated }: { templates: 
     }
     setBusy(true); setError('')
     try {
-      const cr = await tradingApi(`/strategies/from-template?wallet_id=${walletId}`, {
+      const cr = await tradingApi('/strategies/from-template', {
         method: 'POST',
-        body: JSON.stringify({ template: templateKey, name: name || undefined }),
+        body: JSON.stringify({ template: templateKey, wallet_id: Number(walletId), name: name || undefined }),
       })
       const created = await cr.json()
       if (!cr.ok) { setError(created.detail || 'Create failed'); setBusy(false); return }

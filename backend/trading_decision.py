@@ -69,6 +69,28 @@ async def jev_decide(signal: dict) -> dict:
     should_trade_prob = float(should_trade_ans.get("probability", 0.0))
     should_trade_val = should_trade_ans.get("value", False)
 
+    confidence = should_trade_prob
+
+    # should_trade=False is a hard policy abstention regardless of confidence.
+    # A high-confidence "do not trade" must never produce a directional verdict
+    # that could create an order.  Check this before the threshold gate and
+    # before direction mapping so the distinction is auditable.
+    if not should_trade_val:
+        return {
+            "verdict": "skip",
+            "confidence": confidence,
+            "p_yes": float(state.get("yes_price", 0.5)),
+            "reasoning": (
+                f"model_abstain: should_trade=False({confidence:.2f}) "
+                f"direction={direction_val} conviction={conviction_val} "
+                f"model={result.get('model_used', '?')}"
+            ),
+            "direction": direction_val,
+            "conviction": conviction_val,
+            "should_trade": False,
+            "abstained": True,
+        }
+
     # map direction to verdict
     if direction_val == "up":
         verdict = "yes"
@@ -76,8 +98,6 @@ async def jev_decide(signal: dict) -> dict:
         verdict = "no"
     else:
         verdict = "skip"
-
-    confidence = should_trade_prob
 
     # apply threshold gate
     if confidence < CONFIDENCE_THRESHOLD:
@@ -94,13 +114,45 @@ async def jev_decide(signal: dict) -> dict:
     # caller's control flow: the Brier gate stores why a decision came out
     # "skip" (pass direction vs. below-threshold conviction) so abstentions are
     # auditable instead of indistinguishable from a model failure.
+    #
+    # Emitted to the substrate as a `decision` trace (J1). Without it the
+    # prediction pipeline is invisible to every miner -- 19,580 traces on the
+    # server, none of them a prediction decision -- so "why does this engine
+    # abstain on 99.9% of markets" could only be answered by reading the DB by
+    # hand. Fail-soft: the bridge never raises, and this block never re-raises.
+    try:
+        from .mycelium_bridge import emit_prediction_decision
+
+        emit_prediction_decision(
+            source=signal.get("source", "unknown"),
+            market_id=signal.get("market_id", ""),
+            verdict=verdict,
+            confidence=confidence,
+            direction=direction_val,
+            conviction=conviction_val,
+            should_trade=bool(should_trade_val),
+            abstained=verdict == "skip",
+            context_sources=[
+                c.get("source") for c in (signal.get("context") or []) if c.get("source")
+            ],
+            reasoning=reasoning,
+        )
+    except Exception:
+        pass
+
     return {
         "verdict": verdict,
+        # confidence = model's certainty in its should_trade decision (0–1).
+        # This is NOT P(YES) — it must not be used as a calibrated probability.
         "confidence": confidence,
+        # p_yes = venue-reported probability of YES outcome (from yes_price).
+        # This is the quantity that Brier scoring is defined over.
+        "p_yes": float(state.get("yes_price", 0.5)),
         "reasoning": reasoning,
         "direction": direction_val,
         "conviction": conviction_val,
         "should_trade": bool(should_trade_val),
+        "abstained": verdict == "skip",
     }
 
 

@@ -976,11 +976,20 @@ async def money_flow(
 # --- Smart Money endpoints ---
 @router.get("/alpha/smart-money", operation_id="get_smart_money_scores")
 async def get_smart_money():
+    from backend.smart_money import fetch_loom_smart_money
     async with get_db() as db:
         rows = await (await db.execute(
             "SELECT cluster_id, score, computed_ts FROM smart_money_scores ORDER BY score DESC LIMIT 100"
         )).fetchall()
-    return {"scores": [{"cluster_id": r[0], "score": r[1], "computed_ts": r[2]} for r in rows]}
+    db_scores = [{"cluster_id": r[0], "score": r[1], "computed_ts": r[2], "source": "cluster"} for r in rows]
+    loom_scores = await fetch_loom_smart_money()
+    merged = {s["cluster_id"]: s for s in db_scores}
+    for ls in loom_scores:
+        cid = ls["cluster_id"]
+        if cid not in merged or ls["score"] > merged[cid]["score"]:
+            merged[cid] = ls
+    scores = sorted(merged.values(), key=lambda x: x["score"], reverse=True)[:100]
+    return {"scores": scores, "loom_signals": len(loom_scores), "db_clusters": len(db_scores)}
 
 @router.post("/alpha/smart-money/refresh", operation_id="refresh_smart_money_scores")
 async def refresh_smart_money():

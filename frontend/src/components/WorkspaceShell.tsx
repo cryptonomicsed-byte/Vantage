@@ -582,25 +582,32 @@ function WorkspaceFederation({
   const [freenetStatus, setFreenetStatus] = useState<string>('unknown')
   const [healthOk, setHealthOk] = useState<boolean | null>(null)
   const [nostrPubkey, setNostrPubkey] = useState<string | null>(null)
+  const [giteaOk, setGiteaOk] = useState<boolean | null>(null)
+  const [omokodaOk, setOmokodaOk] = useState<boolean | null>(null)
 
   useEffect(() => {
     const h = authHeaders()
     // Fetch health
     fetch('/api/health', { headers: h })
       .then(r => { setHealthOk(r.ok); return r.ok ? r.json() : null })
-      .then(d => {
-        if (d?.nostr_pubkey) setNostrPubkey(d.nostr_pubkey)
-      })
+      .then(d => { if (d?.nostr_pubkey) setNostrPubkey(d.nostr_pubkey) })
       .catch(() => setHealthOk(false))
 
     // Fetch freenet status
     fetch('/api/freenet/status', { headers: h })
       .then(r => r.ok ? r.json() : null)
-      .then(d => {
-        if (d?.status) setFreenetStatus(d.status)
-        else setFreenetStatus('unavailable')
-      })
+      .then(d => { setFreenetStatus(d?.status ?? 'unavailable') })
       .catch(() => setFreenetStatus('unavailable'))
+
+    // Probe Gitea via the backend proxy (avoids CORS)
+    fetch('/api/code/stats', { headers: h })
+      .then(r => setGiteaOk(r.ok))
+      .catch(() => setGiteaOk(false))
+
+    // Probe Ọmọ Kọ́dà2 via backend health endpoint
+    fetch('/api/agents/federation/identity', { headers: h })
+      .then(r => setOmokodaOk(r.ok))
+      .catch(() => setOmokodaOk(false))
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const ROWS: Array<{
@@ -622,8 +629,16 @@ function WorkspaceFederation({
       statusDot: freenetStatus === 'connected' ? 'green' : 'dim',
       statusText: freenetStatus === 'connected' ? 'connected' : `Phase F1 (${freenetStatus})`,
     },
-    { scope: 'CODE', label: 'Gitea', addr: 'localhost:3001', statusDot: 'green', statusText: 'localhost:3001' },
-    { scope: 'SOVEREIGN', label: 'Ọmọ Kọ́dà2', addr: 'localhost:7777', statusDot: 'green', statusText: 'localhost:7777' },
+    {
+      scope: 'CODE', label: 'Gitea', addr: 'localhost:3001',
+      statusDot: giteaOk === true ? 'green' : giteaOk === false ? 'amber' : 'dim',
+      statusText: giteaOk === true ? 'localhost:3001' : giteaOk === false ? 'unreachable' : '…',
+    },
+    {
+      scope: 'SOVEREIGN', label: 'Ọmọ Kọ́dà2', addr: 'localhost:7777',
+      statusDot: omokodaOk === true ? 'green' : omokodaOk === false ? 'amber' : 'dim',
+      statusText: omokodaOk === true ? 'localhost:7777' : omokodaOk === false ? 'not running' : '…',
+    },
     { scope: 'SETTLEMENT', label: 'Sui', addr: '', statusDot: 'dim', statusText: 'testnet' },
     { scope: 'ARCHIVE', label: 'Arweave', addr: '', statusDot: 'dim', statusText: 'external' },
   ]

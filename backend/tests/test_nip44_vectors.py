@@ -18,7 +18,8 @@ import os
 from pathlib import Path
 
 import pytest
-from coincurve import PrivateKey
+coincurve = pytest.importorskip("coincurve", reason="libsecp256k1 not available")
+PrivateKey = coincurve.PrivateKey
 
 from backend import nip44
 

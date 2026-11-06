@@ -116,12 +116,12 @@ export default function BacktestEngine() {
   // Auto-run on mount
   useEffect(() => { runBacktest() }, [])
 
-  // Build equity curve points from strategy return
-  const equityPoints = result
-    ? Array.from({ length: 20 }, (_, i) => ({
-        label: `t${i}`,
-        value: capital + (result.strategy_pnl * (i / 19)),
-      }))
+  // The backtest API returns a terminal return figure, not a time series.
+  // A straight-line interpolation from capital to final_value fabricates data
+  // that never existed and misrepresents drawdowns, volatility and trade timing.
+  // equityPoints is left empty until the API supplies per-trade equity snapshots.
+  const equityPoints: { label: string; value: number }[] = result?.equity_curve
+    ? (result.equity_curve as { label: string; value: number }[])
     : []
 
   return (
@@ -220,7 +220,15 @@ export default function BacktestEngine() {
                 {strategy.label} on {pair}/{periodDays}d
               </span>
             </div>
-            <EquityCurve points={equityPoints} />
+            {equityPoints.length > 0
+              ? <EquityCurve points={equityPoints} />
+              : (
+                <div style={{ padding: '18px 0', textAlign: 'center', color: '#6b7280', fontSize: 11 }}>
+                  Equity curve unavailable — API supplies terminal return only, not a time series.
+                  Per-trade snapshots are needed to render a meaningful curve.
+                </div>
+              )
+            }
           </div>
 
           {/* Actions */}

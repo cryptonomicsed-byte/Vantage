@@ -5,7 +5,10 @@ Maintains schema parity between backends.
 import logging
 import asyncio
 from typing import Optional
-import asyncpg
+try:
+    import asyncpg
+except ImportError:
+    asyncpg = None
 
 from .config import settings
 from .db_adapter import get_db_connection, init_pg_pool, close_pg_pool

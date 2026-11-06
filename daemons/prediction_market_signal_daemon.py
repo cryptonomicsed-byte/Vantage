@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Prediction market signal daemon: fetch signals -> Jev decision -> Brier gate -> emit to signal bus."""
+"""Prediction market signal daemon: fetch signals -> Jev decision -> Brier record.
+
+Deliberately ends at the record. A prediction decision is a claim about a future
+event, not an order, and there is no code path from this daemon to the trading
+engine (tests/test_no_prediction_orders.py enforces it).
+"""
 import asyncio, time, sys, os
 sys.path.insert(0, "/opt/ares/Vantage")
-os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:////opt/ares/Vantage/vantage.db")
+os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:////opt/ares/Vantage/data/vantage.db")
 
 POLL_INTERVAL = 300
-JEV_CONFIDENCE_THRESHOLD = float(os.environ.get("JEV_CONFIDENCE_THRESHOLD", "0.65"))
 
 async def process_unprocessed_signals():
     from backend.db import get_db
@@ -14,8 +18,14 @@ async def process_unprocessed_signals():
 
     gated, brier_score = await should_gate()
     if gated:
-        print(f"[jev_daemon] Brier gate CLOSED (score={brier_score:.3f}). Skipping.", flush=True)
-        return
+        # Gate is CLOSED: block live eligibility but keep collecting paper
+        # evidence.  Returning early here creates a deadlock — no paper
+        # forecasts means calibration can never improve and the gate never
+        # reopens.  Instead we continue processing with forced_abstain=True
+        # so every decision is recorded as abstained (excluded from Brier
+        # scoring) and the calibration corpus grows safely.
+        print(f"[jev_daemon] Brier gate CLOSED (score={brier_score:.3f}). Paper-only run.", flush=True)
+    forced_abstain = gated
 
     async with get_db() as db:
         # Rows come back as tuples (no row_factory), so dict(row) raised
@@ -37,36 +47,34 @@ async def process_unprocessed_signals():
         # "skip" by default, so the filter admitted nothing and the gate was
         # left permanently open. A skip is stored with abstained=1 and is
         # excluded from the score by the gate itself, not by this filter.
+        # When the Brier gate is closed, force abstain=1 regardless of the
+        # model verdict.  Paper evidence accumulates; no live action is taken.
+        forced_abstain_int = 1 if forced_abstain else None
         await record_prediction(
             signal["id"],
             decision["verdict"],
             decision["confidence"],
+            p_yes=decision.get("p_yes"),
             direction=decision.get("direction"),
             conviction=decision.get("conviction"),
             should_trade=decision.get("should_trade"),
             market_id=signal.get("market_id"),
             reasoning=decision.get("reasoning"),
+            abstained=forced_abstain_int,
         )
 
-        if decision["verdict"] in ("yes", "no") and decision["confidence"] >= JEV_CONFIDENCE_THRESHOLD:
-            try:
-                import httpx
-                tool_key = os.environ.get("VANTAGE_TOOL_KEY", "")
-                async with httpx.AsyncClient(timeout=15) as client:
-                    await client.post(
-                        "http://localhost:8001/api/trading/signals/ingest",
-                        headers={"X-Vantage-Tool-Key": tool_key, "Content-Type": "application/json"},
-                        json={
-                            "source": "jev-prediction",
-                            "signal_type": "prediction_market",
-                            "market_id": signal["market_id"],
-                            "verdict": decision["verdict"],
-                            "confidence": decision["confidence"],
-                            "reasoning": decision.get("reasoning", ""),
-                        }
-                    )
-            except Exception as e:
-                print(f"[jev_daemon] Signal bus error: {e}", flush=True)
+        # There used to be a POST to /api/trading/signals/ingest here: the
+        # order-creating endpoint. It never worked (it sends no
+        # X-Vantage-Tool header, and the env carries no tool key, so every call
+        # 401'd into a bare except), which is exactly why it was dangerous --
+        # dead code aimed at a live order path. That endpoint turns
+        # direction in (BUY, LONG, BULLISH) + conviction > 0.7 into a real
+        # order, and BULLISH is the direction word the context signals emit, so
+        # one "forward contexts to the decision bus" change would have armed it.
+        #
+        # A prediction decision is a claim, not an order. There is no code path
+        # from here to the trading engine; tests/test_no_prediction_orders.py
+        # enforces that by grepping this daemon directory.
 
         async with get_db() as db:
             await db.execute("UPDATE prediction_signals SET processed=1 WHERE id=?", (signal["id"],))

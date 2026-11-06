@@ -277,11 +277,12 @@ function SimPlaceholder() {
   return (
     <div style={{ padding: '0 16px' }}>
       <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12, color: '#e0e0e0' }}>Scenario Simulator</div>
-      <div style={{ background: 'rgba(255,170,0,0.08)', border: '1px solid rgba(255,170,0,0.2)', borderRadius: 8, padding: 16 }}>
-        <div style={{ fontSize: 12, color: '#ffaa00', fontWeight: 600, marginBottom: 8 }}>Coming Soon</div>
+      <div style={{ background: 'rgba(255,100,100,0.08)', border: '1px solid rgba(255,100,100,0.2)', borderRadius: 8, padding: 16 }}>
+        <div style={{ fontSize: 12, color: '#ff6464', fontWeight: 600, marginBottom: 8 }}>Not Implemented</div>
         <div style={{ fontSize: 12, color: '#6b7280' }}>
-          What-if simulator: "If SOL goes to $300..." or "If BTC drops 20%..."
-          <br />Full scenario modeling with portfolio impact analysis.
+          Scenario simulator is not yet built. This panel is disabled until a real
+          implementation exists — it will not be shown as "Coming Soon" to avoid
+          misrepresenting available capabilities.
         </div>
       </div>
     </div>

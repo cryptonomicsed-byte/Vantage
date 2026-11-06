@@ -23,7 +23,10 @@ import os
 import secrets
 from typing import Optional
 
-from coincurve import PrivateKey
+try:
+    from coincurve import PrivateKey
+except ImportError:
+    PrivateKey = None  # type: ignore[assignment,misc]
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .config import settings

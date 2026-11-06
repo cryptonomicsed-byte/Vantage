@@ -4,11 +4,20 @@ correctness (that lives upstream) — just proves the extraction didn't
 break: registry loads, a factor computes on a Vantage-shaped panel, and
 statistical validation runs on a real trade series.
 """
+import platform
+import sys
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from backend.factors.registry import Registry
+
+# pandas date_range segfaults on ARM64 Android (Termux) — skip the whole module
+pytestmark = pytest.mark.skipif(
+    sys.platform == "android" or ("com.termux" in sys.executable),
+    reason="pandas C-extension segfaults on ARM64 Android; run on VPS/HERDR",
+)
 
 
 @pytest.fixture(scope="module")

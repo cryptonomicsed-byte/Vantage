@@ -178,10 +178,11 @@ def _ranked(address="ADDR1", symbol="FOO", total_score=0.75, components=None):
 
 
 def test_aggregate_score_emits_the_real_winner(sent):
+    from backend.mycelium_privacy import pseudonymize_agent
     assert mb.emit_aggregate_score_trace(_ranked(), disqualified=[{"a": 1}]) is True
     assert len(sent) == 1
     body = sent[0]["body"]
-    assert body["agent"] == "aggregate_score"
+    assert body["agent"] == pseudonymize_agent("aggregate_score")
     assert body["kind"] == "observation"
     assert body["action"] == "aggregate_winner"
     assert body["target"] == "ADDR1"
@@ -263,9 +264,10 @@ def test_platform_leaders_dedup_scoped_per_platform(sent):
 # ── emit_narrative_theme_trace ──────────────────────────────────────────
 
 def test_narrative_theme_emits_real_heat(sent):
+    from backend.mycelium_privacy import pseudonymize_agent
     assert mb.emit_narrative_theme_trace("kw_moon", "Moon", 3, ["m1", "m2", "m3"]) is True
     body = sent[0]["body"]
-    assert body["agent"] == "narrative_detection"
+    assert body["agent"] == pseudonymize_agent("narrative_detection")
     assert body["action"] == "narrative_theme_heat"
     assert body["target"] == "kw_moon"
     assert body["payload"] == {"label": "Moon", "heat_score": 3, "sample_mints": ["m1", "m2", "m3"]}
@@ -292,12 +294,13 @@ def test_narrative_theme_re_emits_on_changed_heat(sent):
 # ── post_observation (shared primitive) ─────────────────────────────────
 
 def test_post_observation_real_shape(sent):
+    from backend.mycelium_privacy import pseudonymize_agent
     ok = mb.post_observation(agent="pine_signal", session="pine-1", action="pine_signal_triggered",
                               target="BTC", payload={"side": "BUY"})
     assert ok is True
     body = sent[0]["body"]
     assert body == {
-        "agent": "pine_signal", "session": "pine-1", "kind": "observation",
+        "agent": pseudonymize_agent("pine_signal"), "session": "pine-1", "kind": "observation",
         "action": "pine_signal_triggered", "target": "BTC", "outcome": "info",
         "payload": {"side": "BUY"},
     }
@@ -322,16 +325,18 @@ def _wallet_row(address="W1", score=45.2, **extra):
 
 
 def test_wallet_reputation_emits_top_n_only(sent):
+    from backend.mycelium_privacy import pseudonymize_wallet
     rows = [_wallet_row("W1", 45.2), _wallet_row("W2", 10.0), _wallet_row("W3", 99.0)]
     assert mb.emit_wallet_reputation_traces(rows, top_n=2) == 2
     targets = {c["body"]["target"] for c in sent}
-    assert targets == {"W1", "W3"}  # W2 (lowest) excluded by top_n=2
+    assert targets == {pseudonymize_wallet("W1"), pseudonymize_wallet("W3")}  # W2 (lowest) excluded by top_n=2
 
 
 def test_wallet_reputation_skips_zero_or_missing_score(sent):
+    from backend.mycelium_privacy import pseudonymize_wallet
     rows = [_wallet_row("W1", 0), {"wallet_address": "W2"}, _wallet_row("W3", 5.0)]
     assert mb.emit_wallet_reputation_traces(rows) == 1
-    assert sent[0]["body"]["target"] == "W3"
+    assert sent[0]["body"]["target"] == pseudonymize_wallet("W3")
 
 
 def test_wallet_reputation_dedups_on_unchanged_score(sent):
@@ -348,11 +353,12 @@ def test_wallet_reputation_re_emits_on_changed_score(sent):
 
 
 def test_wallet_reputation_real_payload_shape(sent):
+    from backend.mycelium_privacy import pseudonymize_agent
     rows = [_wallet_row("W1", 45.2, display_name="@foo (twitter)", name_source="social_claim",
                          first_buyer_count=3, currently_hot_tokens=2, reasoning="first buyer on 3 token(s)")]
     mb.emit_wallet_reputation_traces(rows)
     body = sent[0]["body"]
-    assert body["agent"] == "wallet_learner"
+    assert body["agent"] == pseudonymize_agent("wallet_learner")
     assert body["action"] == "wallet_reputation"
     assert body["payload"]["display_name"] == "@foo (twitter)"
     assert body["payload"]["copy_trade_score"] == 45.2
@@ -370,11 +376,12 @@ def _verified_call(wallet="W1", **extra):
 
 
 def test_verified_call_emits_real_shape(sent):
+    from backend.mycelium_privacy import pseudonymize_agent
     assert mb.emit_verified_call_trace(_verified_call()) is True
     body = sent[0]["body"]
-    assert body["agent"] == "social_tracker"
+    assert body["agent"] == pseudonymize_agent("social_tracker")
     assert body["action"] == "verified_social_call"
-    assert body["target"] == "W1"
+    assert body["target"] == "W1"  # target is wallet addr; pseudonymized by emitter if needed
     assert body["payload"]["pct_change"] == 100.0
     assert body["payload"]["entry_tx_signature"] == "sig123"
 
