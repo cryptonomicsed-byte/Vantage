@@ -24,8 +24,8 @@ PREFIX = "test-deep-"
 @pytest.fixture(autouse=True)
 async def _clean(client):
     async with get_db() as db:
-        await db.execute("DELETE FROM brier_predictions WHERE signal_id LIKE ?", (PREFIX + "%",))
-        await db.execute("DELETE FROM prediction_signals WHERE id LIKE ?", (PREFIX + "%",))
+        await db.execute("DELETE FROM brier_predictions")
+        await db.execute("DELETE FROM prediction_signals")
         await db.execute("DELETE FROM context_signals")
         await db.commit()
     yield
