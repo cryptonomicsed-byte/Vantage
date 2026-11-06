@@ -153,7 +153,7 @@ export default function TradingSpacePool({ slug, spaceId, authHeaders }: Props) 
                   <div style={{ height: 4, background: 'rgba(255,255,255,0.06)', borderRadius: 2, overflow: 'hidden' }}>
                     <div style={{ height: '100%', width: pct + '%', background: pool.status === 'quorum_reached' ? '#3cc878' : 'var(--cyan)', borderRadius: 2, transition: 'width 0.3s' }} />
                   </div>
-                  <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 3 }}>Quorum at {pool.quorum_pct}%</div>
+                  <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 3 }}>Quorum at {Math.round(pool.quorum_pct * 100)}%</div>
                 </div>
               )}
 

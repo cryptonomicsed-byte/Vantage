@@ -18,8 +18,14 @@ async def process_unprocessed_signals():
 
     gated, brier_score = await should_gate()
     if gated:
-        print(f"[jev_daemon] Brier gate CLOSED (score={brier_score:.3f}). Skipping.", flush=True)
-        return
+        # Gate is CLOSED: block live eligibility but keep collecting paper
+        # evidence.  Returning early here creates a deadlock — no paper
+        # forecasts means calibration can never improve and the gate never
+        # reopens.  Instead we continue processing with forced_abstain=True
+        # so every decision is recorded as abstained (excluded from Brier
+        # scoring) and the calibration corpus grows safely.
+        print(f"[jev_daemon] Brier gate CLOSED (score={brier_score:.3f}). Paper-only run.", flush=True)
+    forced_abstain = gated
 
     async with get_db() as db:
         # Rows come back as tuples (no row_factory), so dict(row) raised
@@ -41,15 +47,20 @@ async def process_unprocessed_signals():
         # "skip" by default, so the filter admitted nothing and the gate was
         # left permanently open. A skip is stored with abstained=1 and is
         # excluded from the score by the gate itself, not by this filter.
+        # When the Brier gate is closed, force abstain=1 regardless of the
+        # model verdict.  Paper evidence accumulates; no live action is taken.
+        forced_abstain_int = 1 if forced_abstain else None
         await record_prediction(
             signal["id"],
             decision["verdict"],
             decision["confidence"],
+            p_yes=decision.get("p_yes"),
             direction=decision.get("direction"),
             conviction=decision.get("conviction"),
             should_trade=decision.get("should_trade"),
             market_id=signal.get("market_id"),
             reasoning=decision.get("reasoning"),
+            abstained=forced_abstain_int,
         )
 
         # There used to be a POST to /api/trading/signals/ingest here: the

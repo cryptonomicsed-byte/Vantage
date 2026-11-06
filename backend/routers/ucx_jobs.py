@@ -8,10 +8,12 @@ Routes:
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Query
+from typing import Optional
 
 from ..db import get_db
 from ..deps import get_agent
+from ..config import settings
 from ..ucx_job_visibility import (
     ensure_table, record_job, update_job_status, list_jobs, get_job,
 )
@@ -43,7 +45,19 @@ async def create_job(request: Request, agent: dict = Depends(get_agent)):
 
 
 @router.post("/jobs/{job_id}/status", summary="Update UCX job status")
-async def update_status(job_id: str, request: Request, agent: dict = Depends(get_agent)):
+async def update_status(
+    job_id: str,
+    request: Request,
+    agent: dict = Depends(get_agent),
+    x_vantage_tool_key: Optional[str] = Header(None),
+):
+    """Broker posts job status transitions.
+
+    Completion attestation (status='Complete' with a receipt) requires the
+    X-Vantage-Tool-Key header containing the TOOL_TRADING secret so that
+    only the UCX broker — not the agent that submitted the job — can confirm
+    that compute work was delivered and settle the provider obligation.
+    """
     await _ensure()
     try:
         body = await request.json()
@@ -52,6 +66,22 @@ async def update_status(job_id: str, request: Request, agent: dict = Depends(get
     status = body.get("status", "Pending")
     receipt = body.get("receipt")
     price_cents = body.get("price_cents")
+
+    # Provider payment obligations must be attested by the broker, not by the
+    # agent that placed the job.  Any agent can transition to Pending/Running,
+    # but only the broker (authenticated with TOOL_TRADING key) may confirm
+    # Complete + attach a receipt.
+    if status == "Complete" and receipt is not None:
+        expected_key = getattr(settings, "TOOL_TRADING", None)
+        if not expected_key or x_vantage_tool_key != expected_key:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Job completion with a receipt requires X-Vantage-Tool-Key "
+                    "— only the UCX broker may attest provider obligations."
+                ),
+            )
+
     async with get_db() as db:
         result = await update_job_status(db, job_id, status, receipt, price_cents)
     return result

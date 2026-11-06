@@ -55,6 +55,9 @@ async def settle_receipt_sui(receipt_id: str, agent: dict = Depends(get_agent)):
     if row is None:
         raise HTTPException(status_code=404, detail="Receipt not found")
 
+    if row["agent_id"] != agent_id:
+        raise HTTPException(status_code=403, detail="Not the receipt owner")
+
     # Derive receipt hash from the receipt body if a dedicated column doesn't exist
     import hashlib, json as _json
     receipt_body = row["receipt_body"] or ""
@@ -111,6 +114,12 @@ async def confirm_receipt_settlement(
         if row is None:
             raise HTTPException(status_code=404, detail="Receipt not found")
 
+        # Ownership: only the agent who owns the receipt may confirm its settlement.
+        # Previously missing — any authenticated agent could confirm any receipt,
+        # allowing cross-agent settlement spoofing.
+        if row["agent_id"] != agent_id:
+            raise HTTPException(status_code=403, detail="Not the receipt owner")
+
         # Store settlement info (columns added by tasks_db.py ALTER TABLE)
         try:
             await db.execute(
@@ -123,6 +132,24 @@ async def confirm_receipt_settlement(
         except Exception as exc:
             logger.error("confirm_receipt_settlement: DB update failed: %s", exc)
             raise HTTPException(status_code=500, detail="Failed to store settlement")
+
+        # Bind the on-chain settlement back into the ARP receipt envelope so the
+        # canonical receipt can be audited against the tx_digest.  Best-effort:
+        # the guild_execution_receipt is the durable fact; the ARP update is
+        # telemetry that must not roll back the settlement on failure.
+        try:
+            await db.execute(
+                """UPDATE arp_receipts
+                   SET outcome = 'settled', raw_json = json_patch(
+                       COALESCE(raw_json, '{}'),
+                       json_object('sui_tx_digest', ?, 'settled_at', datetime('now'))
+                   )
+                   WHERE receipt_id = ?""",
+                (tx_digest, receipt_id),
+            )
+            await db.commit()
+        except Exception:
+            pass  # arp_receipts row may not exist for receipts predating this integration
 
     # Emit event
     try:

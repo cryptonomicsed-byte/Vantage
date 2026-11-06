@@ -21,9 +21,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/trading", tags=["trading"])
 
 
-async def _emit_trade_receipt(order: dict, agent_id, outcome: str) -> None:
-    """Fire-and-forget ARP economic receipt for a trade event (P0-7).
-    Persists the receipt envelope to the arp_receipts table."""
+async def _emit_trade_receipt(order: dict, agent_id, outcome: str) -> Optional[str]:
+    """Write an ARP economic receipt to arp_receipts. Returns receipt_id on
+    success, None on failure (always fail-open so callers never raise).
+
+    Call this with outcome='pending' before an irreversible submission
+    (the outbox write), then call _update_receipt_outcome() after the
+    result is known.  For non-live order events (create, paper-fill) a
+    single call with the final outcome is sufficient."""
     import json as _json
     from datetime import datetime, timezone
     try:
@@ -75,8 +80,52 @@ async def _emit_trade_receipt(order: dict, agent_id, outcome: str) -> None:
                     logger.warning("arp_receipt insert failed: %s", insert_exc)
         logger.info("trade_receipt kind=economic order_id=%s outcome=%s hash=%s",
                     order.get("id"), outcome, receipt_hash)
+        return receipt.receipt_id
     except Exception as exc:
         logger.warning("trade receipt emission failed: %s", exc)
+        return None
+
+
+async def _update_receipt_outcome(receipt_id: Optional[str], outcome: str, tx_hash: Optional[str] = None) -> None:
+    """Finalize a receipt that was written with outcome='pending'.
+
+    Updates the outcome column and, when a tx_hash is supplied, merges it
+    into the stored raw_json so the envelope stays self-consistent.  Fail-
+    open: a missing or already-finalized receipt is not an error that should
+    surface to the caller — the durable fact is the order row, not this
+    envelope."""
+    if not receipt_id:
+        return
+    import json as _json
+    try:
+        async with get_db() as db:
+            if tx_hash:
+                row = await (await db.execute(
+                    "SELECT raw_json FROM arp_receipts WHERE receipt_id=?", (receipt_id,)
+                )).fetchone()
+                if row:
+                    try:
+                        blob = _json.loads(row[0])
+                        action = blob.get("action", {})
+                        action["tx_hash"] = tx_hash
+                        blob["action"] = action
+                        updated_json = _json.dumps(blob)
+                    except Exception:
+                        updated_json = None
+                    if updated_json:
+                        await db.execute(
+                            "UPDATE arp_receipts SET outcome=?, raw_json=? WHERE receipt_id=?",
+                            (outcome, updated_json, receipt_id),
+                        )
+                        await db.commit()
+                        return
+            await db.execute(
+                "UPDATE arp_receipts SET outcome=? WHERE receipt_id=?",
+                (outcome, receipt_id),
+            )
+            await db.commit()
+    except Exception as exc:
+        logger.warning("receipt outcome update failed receipt_id=%s: %s", receipt_id, exc)
 
 
 async def _sync_to_tracked_wallets(db, agent_id: int, chain: str, address: str, label: str):
@@ -261,12 +310,17 @@ async def wallets_live(agent: dict = Depends(get_agent)):
     }
 
 @router.post("/strategies")
-async def create_strategy(data: StrategyCreate, wallet_id: int = Query(...), agent: dict = Depends(get_agent)):
+async def create_strategy(data: StrategyCreate, agent: dict = Depends(get_agent)):
     """Create a trading strategy linked to a wallet. Always created UNARMED
     (armed=0) — funding the linked wallet never causes this strategy to
     trade. An agent must explicitly POST /strategies/{id}/arm before
     strategy_bots.py will act on it. `enabled` only controls visibility/
-    listing; `armed` is the actual execution gate."""
+    listing; `armed` is the actual execution gate.
+
+    wallet_id comes from the JSON body (StrategyCreate.wallet_id); the old
+    Query parameter was removed — it caused 422 when clients sent wallet_id
+    in the body as documented."""
+    wallet_id = data.wallet_id
     async with get_db() as db:
         cur = await db.execute(
             """INSERT INTO trading_strategies
@@ -858,20 +912,20 @@ async def create_order(data: OrderCreate, agent: dict = Depends(get_agent)):
         )
         await db.commit()
 
-        asyncio.create_task(_emit_trade_receipt(
+        await _emit_trade_receipt(
             {"id": order_id, "side": data.side, "quantity": data.quantity,
              "price": data.price, "chain": data.chain, "order_type": data.order_type,
              "strategy_id": data.strategy_id, "symbol": data.symbol},
             agent["id"], "pending",
-        ))
-        asyncio.create_task(_anchor_receipt(
+        )
+        await _anchor_receipt(
             principal_id=str(agent["id"]),
             action_kind="execute_trade",
             capability="trade",
             evidence={"order_id": str(order_id), "symbol": data.symbol,
                       "side": data.side},
             gate_alignment=1.0,
-        ))
+        )
         return {"id": order_id, "status": "pending", "symbol": data.symbol, "side": data.side}
 
 @router.get("/orders")
@@ -908,10 +962,40 @@ async def get_order(order_id: int, agent: dict = Depends(get_agent)):
         return dict(row)
 
 @router.patch("/orders/{order_id}")
-async def update_order(order_id: int, data: OrderUpdate, agent: dict = Depends(get_agent)):
+async def update_order(
+    order_id: int,
+    data: OrderUpdate,
+    agent: dict = Depends(get_agent),
+    x_vantage_tool_key: Optional[str] = Header(None),
+):
     """Update an order's execution state — used by settlement daemons (e.g.
     ares_jupiter_signer) reporting a real on-chain fill, as opposed to the
-    paper-fill simulation endpoint below."""
+    paper-fill simulation endpoint below.
+
+    Fill attestation (status='filled' with a real tx_hash) requires the
+    X-Vantage-Tool-Key header containing the TOOL_TRADING secret. This
+    prevents agents from self-reporting arbitrary fills — only the
+    settlement daemon that actually broadcast the transaction has the key
+    and can attest the result. Paper fills go through /paper-fill instead.
+    """
+    # Determine whether this is a fill attestation with a real on-chain tx.
+    is_fill_attestation = (
+        data.status == "filled"
+        and data.tx_hash is not None
+        and not data.tx_hash.startswith("paper:")
+    )
+    if is_fill_attestation:
+        expected_key = getattr(settings, "TOOL_TRADING", None)
+        if not expected_key or x_vantage_tool_key != expected_key:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Fill attestation requires X-Vantage-Tool-Key with the "
+                    "TOOL_TRADING secret — only the settlement daemon may attest "
+                    "real on-chain fills. Use POST /paper-fill for simulated fills."
+                ),
+            )
+
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute(
@@ -1020,18 +1104,18 @@ async def paper_fill_order(order_id: int, agent: dict = Depends(get_agent)):
     _asyncio.create_task(post_private_trading_message(
         agent["id"], f"[SIMULATED] Filled {order['side']} {order['quantity']} {order['symbol']} @ {fill_price} ({tx_hash})",
     ))
-    asyncio.create_task(_emit_trade_receipt(
+    await _emit_trade_receipt(
         {**order, "avg_fill_price": fill_price, "tx_hash": tx_hash},
         agent["id"], "success",
-    ))
-    asyncio.create_task(_anchor_receipt(
+    )
+    await _anchor_receipt(
         principal_id=str(agent["id"]),
         action_kind="execute_trade",
         capability="trade",
         evidence={"order_id": str(order_id), "symbol": order["symbol"],
                   "side": order["side"], "tx_hash": tx_hash},
         gate_alignment=1.0,
-    ))
+    )
 
     return dict(updated)
 
@@ -1454,9 +1538,15 @@ async def disarm_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
 @router.post("/strategies/{strategy_id}/enable-live")
 async def enable_live_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
     """Allow this strategy to create real (unsigned, pending) orders instead
-    of paper-filling. Requires the strategy to already be armed, and its
-    wallet to actually hold a private key (length > 0) — otherwise there is
-    nothing to sign with and this fails loudly instead of silently no-op'ing."""
+    of paper-filling. Three gates must all pass:
+
+      1. Strategy must be armed (explicit intent to go live).
+      2. Linked wallet must have a private key (something to sign with).
+      3. Brier calibration gate must be open with non-vacuous evidence
+         (non-empty prediction history, score within threshold) — live
+         execution is only enabled after the prediction pipeline has
+         demonstrated calibrated accuracy, not before evidence exists.
+    """
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute(
@@ -1470,11 +1560,45 @@ async def enable_live_strategy(strategy_id: int, agent: dict = Depends(get_agent
         if not row["keylen"]:
             raise HTTPException(422, "Linked wallet has no private key on file — nothing to sign with. "
                                       "Generate or import a key for this wallet first.")
+
+    # Gate 3: Brier calibration check.  Live execution is only unlocked when
+    # the prediction pipeline has accumulated scored evidence and the rolling
+    # Brier score is within threshold.  A vacuous gate (zero scored calls)
+    # means the pipeline has never produced a verifiable prediction — allowing
+    # live execution there is "trust without evidence," which is exactly what
+    # the three-gate model is designed to prevent.
+    try:
+        from ..brier_calibration_gate import brier_stats
+        stats = await brier_stats()
+        if stats.get("vacuous"):
+            raise HTTPException(
+                422,
+                f"Brier calibration gate is vacuous (0 scored predictions). "
+                f"Live execution requires evidence: run the prediction daemon until "
+                f"at least one forecast resolves, then retry."
+            )
+        if stats.get("gated"):
+            raise HTTPException(
+                422,
+                f"Brier calibration gate is CLOSED (score={stats['brier_score']:.3f} > "
+                f"threshold={stats['threshold']:.2f}). Improve prediction accuracy "
+                f"before enabling live execution."
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        # Fail-open for environments where brier_calibration_gate is not
+        # available — log and proceed.  The gate is a safeguard, not the
+        # only one, and a missing calibration module must not silently
+        # prevent legitimate use in non-prediction deployments.
+        logger.warning("Brier gate check skipped (import or query error) — proceeding without gate")
+
+    async with get_db() as db:
         await db.execute("UPDATE trading_strategies SET live=1, updated_at=datetime('now') WHERE id=?", (strategy_id,))
         await db.commit()
-        return {"id": strategy_id, "live": True,
-                "note": "strategy_bots.py will now create real pending orders for this strategy. "
-                        "Nothing executes until you call POST /orders/{id}/execute-live on each one."}
+    return {"id": strategy_id, "live": True,
+            "note": "strategy_bots.py will now create real pending orders for this strategy. "
+                    "Nothing executes until you call POST /orders/{id}/execute-live on each one."}
 
 @router.post("/strategies/{strategy_id}/disable-live")
 async def disable_live_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
@@ -1747,13 +1871,26 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent), x_
             await db.commit()
         raise HTTPException(422, f"Order quantity resolves to a zero/invalid on-chain amount: {zero_amount_reason}")
 
+    # Transactional outbox: write the intent as a durable 'pending' receipt
+    # BEFORE the irreversible on-chain submission.  If the process dies after
+    # broadcast but before the status update we still have the receipt; if the
+    # broadcast fails we update it to 'failed'.  Without this record the only
+    # evidence of the live submission attempt was the asyncio.create_task that
+    # fired after a successful return — which could silently die if the event
+    # loop shut down before the task ran.
+    _outbox_receipt_id = await _emit_trade_receipt(
+        order, agent["id"], "pending"
+    )
+
     try:
         order_slippage_bps = order["slippage_bps"] if order["slippage_bps"] else 300
         quote = await _jupiter_quote(input_mint, output_mint, amount_lamports, slippage_bps=order_slippage_bps)
         if quote.get("error"):
+            await _update_receipt_outcome(_outbox_receipt_id, "failed")
             raise HTTPException(422, f"Jupiter quote error: {quote['error']}")
         tx_b64 = await _jupiter_swap_tx(quote, str(keypair.pubkey()))
         if not tx_b64:
+            await _update_receipt_outcome(_outbox_receipt_id, "failed")
             raise HTTPException(502, "Jupiter did not return a swap transaction")
 
         tx = VersionedTransaction.from_bytes(b64decode(tx_b64))
@@ -1776,10 +1913,12 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent), x_
             )
             if "result" not in rpc_result:
                 rpc_err = (rpc_result.get("error") or {}).get("message", "unknown RPC error")
+                await _update_receipt_outcome(_outbox_receipt_id, "failed")
                 raise HTTPException(502, f"Swap broadcast failed (sendTransaction, both RPC providers): {rpc_err}")
     except HTTPException:
         raise
     except Exception as e:
+        await _update_receipt_outcome(_outbox_receipt_id, "failed")
         raise HTTPException(502, f"Swap execution failed: {e}")
 
     tx_id = rpc_result.get("result")
@@ -1799,17 +1938,21 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent), x_
         await db.commit()
 
     if not tx_id:
+        await _update_receipt_outcome(_outbox_receipt_id, "failed")
         raise HTTPException(502, note)
 
-    # Fire-and-forget justice receipt for live order execution (Move FIRE layer)
-    asyncio.create_task(_anchor_receipt(
+    # Finalize the outbox receipt and emit a justice anchor now that we have
+    # the confirmed tx_id.  Both are awaited (not fire-and-forget) so the
+    # caller's response always reflects the durable write.
+    await _update_receipt_outcome(_outbox_receipt_id, "success", tx_hash=tx_id)
+    await _anchor_receipt(
         principal_id=str(agent["id"]),
         action_kind="execute_trade",
         capability="trade",
         evidence={"order_id": str(order_id), "symbol": order["symbol"],
                   "side": order["side"], "tx_hash": tx_id},
         gate_alignment=1.0,
-    ))
+    )
 
     return {"order_id": order_id, "status": "submitted", "tx_hash": tx_id}
 
@@ -2310,12 +2453,12 @@ async def ingest_signal(request: Request, tool: dict = Depends(get_system_tool))
                     result["order_created"] = cur.lastrowid
                     result["action"] = side
                     result["wallet_address"] = wallet["address"]
-                    asyncio.create_task(_emit_trade_receipt(
+                    await _emit_trade_receipt(
                         {"id": cur.lastrowid, "side": side, "quantity": quantity,
                          "chain": chain, "order_type": "market", "symbol": symbol,
                          "strategy_id": strategy_id},
                         agent_id, "pending",
-                    ))
+                    )
         else:
             result["warning"] = f"No {chain} wallet configured for agent {agent_id}."
     else:

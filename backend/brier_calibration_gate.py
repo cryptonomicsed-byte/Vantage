@@ -50,6 +50,7 @@ async def record_prediction(
     verdict: str,
     confidence: float,
     *,
+    p_yes: Optional[float] = None,
     direction: Optional[str] = None,
     conviction: Optional[str] = None,
     should_trade: Optional[bool] = None,
@@ -69,13 +70,14 @@ async def record_prediction(
     async with get_db() as db:
         await db.execute(
             """INSERT OR IGNORE INTO brier_predictions
-               (signal_id, verdict, confidence, predicted_ts, outcome, scored,
+               (signal_id, verdict, confidence, p_yes, predicted_ts, outcome, scored,
                 abstained, direction, conviction, should_trade, market_id, reasoning)
-               VALUES (?, ?, ?, ?, NULL, 0, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?, ?, ?)""",
             (
                 signal_id,
                 verdict,
                 float(confidence),
+                float(p_yes) if p_yes is not None else None,
                 int(time.time()),
                 int(bool(abstained)),
                 direction,
@@ -127,7 +129,20 @@ async def record_outcome(
             return updated
 
     try:
-        correct = outcome == "yes"
+        # Fetch the stored verdict so we can determine actual correctness.
+        # "outcome == yes" alone is wrong: a "no" prediction that resolved "no"
+        # is a correct call and must be labelled correct=True, not False.
+        async with get_db() as _db:
+            _db.row_factory = __import__("aiosqlite").Row
+            async with _db.execute(
+                "SELECT verdict FROM brier_predictions WHERE signal_id=?", (signal_id,)
+            ) as _cur:
+                _row = await _cur.fetchone()
+        stored_verdict = _row["verdict"] if _row else None
+        correct = (
+            (stored_verdict == "yes" and outcome == "yes")
+            or (stored_verdict == "no" and outcome == "no")
+        )
         novelty = 0.3 if source in ("kalshi", "polymarket") else 0.6
         collective_value = 0.7 if correct else 0.4
         rem = score_memory(

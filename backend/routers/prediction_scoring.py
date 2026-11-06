@@ -33,20 +33,19 @@ async def record_call(request: Request, agent: dict = Depends(get_agent)):
     if market_prob is None:
         raise HTTPException(422, "yes_prob or no_prob is required to resolve a market probability for this call")
 
-    is_correct = body.get("is_correct")
-    value = None
-    resolved_at_sql = "NULL"
-    if is_correct is not None:
-        value = compute_prediction_value(call, market_prob, bool(is_correct))
-        resolved_at_sql = "datetime('now')"
+    # Caller-supplied is_correct is intentionally ignored at record time.
+    # Self-reported outcomes make the leaderboard unverifiable reputation.
+    # Resolution must come through POST /{score_id}/resolve with authoritative
+    # venue data, not from the agent making the call.
+    if body.get("is_correct") is not None:
+        pass  # silently ignored; stored as pending
 
     async with get_db() as db:
         cur = await db.execute(
-            f"""INSERT INTO prediction_scores
+            """INSERT INTO prediction_scores
                 (agent_id, order_id, market_slug, call, market_prob, is_correct, value, resolved_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, {resolved_at_sql})""",
-            (agent["id"], order_id, market_slug, call, market_prob,
-             int(bool(is_correct)) if is_correct is not None else None, value),
+                VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL)""",
+            (agent["id"], order_id, market_slug, call, market_prob),
         )
         score_id = cur.lastrowid
         await db.commit()
@@ -81,6 +80,10 @@ async def resolve_call(score_id: int, request: Request, agent: dict = Depends(ge
         )).fetchone()
         if not row:
             raise HTTPException(404, "Score not found")
+        # Block repeat resolution: corrections must be new records, not overwrites.
+        # Overwriting lets the owner re-resolve until they get a good result.
+        if row["resolved_at"] is not None:
+            raise HTTPException(409, "Score already resolved — record a new call rather than re-resolving")
         value = compute_prediction_value(row["call"], row["market_prob"], is_correct)
         await db.execute(
             "UPDATE prediction_scores SET is_correct=?, value=?, resolved_at=datetime('now') WHERE id=?",

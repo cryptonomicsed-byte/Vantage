@@ -70,16 +70,29 @@ class ActionReceipt:
     mood_commitment: Optional[str] = None
 
     def canonical_hash(self) -> str:
-        """SHA-256 over stable fields (matches arp-types receipt.rs hash())."""
+        """SHA-256 over the complete immutable business payload (schema v1).
+
+        Every field that changes the meaning of a receipt is bound here.
+        Prior to v1, action_outcome, action_params, evidence_ids and
+        capabilities were excluded, so mutations to those fields left the
+        hash unchanged.  Cross-language golden vectors against arp-types
+        receipt.rs hash() are required before treating them as equivalent —
+        the Rust implementation hashes a different field set.
+        """
         data = json.dumps({
-            "receipt_id":    self.receipt_id,
-            "kind":          self.kind,
-            "principal_id":  self.principal_id,
-            "agent_id":      self.agent_id,
-            "action_kind":   self.action_kind,
-            "action_target": self.action_target,
-            "timestamp":     self.timestamp,
-            "previous_hash": self.previous_hash,
+            "schema_version": "v1",
+            "receipt_id":     self.receipt_id,
+            "kind":           self.kind,
+            "principal_id":   self.principal_id,
+            "agent_id":       self.agent_id,
+            "action_kind":    self.action_kind,
+            "action_target":  self.action_target,
+            "action_outcome": self.action_outcome,
+            "action_params":  self.action_params,
+            "evidence_ids":   self.evidence_ids,
+            "capabilities":   self.capabilities,
+            "timestamp":      self.timestamp,
+            "previous_hash":  self.previous_hash,
         }, sort_keys=True)
         return hashlib.sha256(data.encode()).hexdigest()
 
