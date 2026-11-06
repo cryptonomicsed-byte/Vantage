@@ -44,3 +44,5 @@ third_party/river/
 
 # stray empty db from a wrong-cwd invocation
 vantage.db
+vantage.db-shm
+vantage.db-wal

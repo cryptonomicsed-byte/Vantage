@@ -181,13 +181,27 @@ async def list_clusters(
 @router.get("/clusters/{cluster_id}")
 async def get_cluster(
     cluster_id: str,
+    include_quality_tags: bool = Query(False, description=(
+        "Compute and return P1-6 quality tags: bundle_detected, fresh_wallet, "
+        "concentration_pct."
+    )),
     _caller: dict = Depends(get_agent),
 ):
-    """Get all wallets in a specific cluster."""
+    """Get all wallets in a specific cluster.
+
+    Optional ?include_quality_tags=true appends three quality indicators:
+      - bundle_detected   (bool)   — any two wallets co-funded within 60s
+      - fresh_wallet      (bool)   — at least one wallet age < 7 days
+      - concentration_pct (float)  — top-1 holder % of cluster token balance
+    """
     members = await wallet_cluster_engine.get_cluster_members(cluster_id)
     if not members:
         raise HTTPException(404, f"Cluster {cluster_id} not found")
-    return {"cluster_id": cluster_id, "members": members, "count": len(members)}
+    response: dict = {"cluster_id": cluster_id, "members": members, "count": len(members)}
+    if include_quality_tags:
+        quality = await wallet_cluster_engine.compute_quality_tags(members, cluster_id)
+        response["quality_tags"] = quality
+    return response
 
 
 @router.get("/wallet-cluster/{wallet}")
