@@ -46,6 +46,10 @@ _CREATE_ORDERS = """
 CREATE TABLE IF NOT EXISTS trading_orders (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id   TEXT NOT NULL DEFAULT '1',
+    order_type TEXT NOT NULL DEFAULT 'market',
+    side       TEXT NOT NULL DEFAULT 'buy',
+    symbol     TEXT NOT NULL DEFAULT 'SOL/USDC',
+    chain      TEXT NOT NULL DEFAULT 'sui',
     tx_hash    TEXT,
     created_at TEXT NOT NULL
 )
@@ -130,8 +134,10 @@ async def test_stale_pending_chain_ok_resolves_to_success():
             (rid, "economic", "1", "pending", created_at_ts, "{}", accepted),
         )
         await db.execute(
-            "INSERT INTO trading_orders (agent_id, tx_hash, created_at) VALUES (?,?,?)",
-            ("1", "valid_chain_tx_abc", datetime.fromtimestamp(created_at_ts, timezone.utc).isoformat()),
+            "INSERT INTO trading_orders "
+            "(agent_id, side, symbol, chain, tx_hash, created_at) VALUES (?,?,?,?,?,?)",
+            ("1", "buy", "SOL/USDC", "sui", "valid_chain_tx_abc",
+             datetime.fromtimestamp(created_at_ts, timezone.utc).isoformat()),
         )
         await db.commit()
 
@@ -165,8 +171,10 @@ async def test_stale_pending_chain_fail_resolves_to_failed():
             (rid, "economic", "1", "pending", created_at_ts, "{}", accepted),
         )
         await db.execute(
-            "INSERT INTO trading_orders (agent_id, tx_hash, created_at) VALUES (?,?,?)",
-            ("1", "failed_chain_tx_xyz", datetime.fromtimestamp(created_at_ts, timezone.utc).isoformat()),
+            "INSERT INTO trading_orders "
+            "(agent_id, side, symbol, chain, tx_hash, created_at) VALUES (?,?,?,?,?,?)",
+            ("1", "buy", "SOL/USDC", "sui", "failed_chain_tx_xyz",
+             datetime.fromtimestamp(created_at_ts, timezone.utc).isoformat()),
         )
         await db.commit()
 
