@@ -22,10 +22,11 @@ async def guild_and_space(client, fresh_agent):
     headers = {"X-Agent-Key": owner["api_key"]}
 
     # All guild/space/task/pool endpoints use Form(...), not JSON body.
-    slug_prefix = owner["name"][:6].lower().replace("_", "-")
+    # Use the unique hash suffix (chars 11+) not the common "FreshAgent_" prefix.
+    unique = owner["name"][11:17].lower()
     r = await client.post(
         "/api/guilds",
-        data={"slug": f"tg-{slug_prefix}", "name": f"TradingGuild_{owner['name'][:6]}", "bio": "test"},
+        data={"slug": f"tg-{unique}", "name": f"TradingGuild_{unique}", "bio": "test"},
         headers=headers,
     )
     assert r.status_code in (200, 201), r.text
