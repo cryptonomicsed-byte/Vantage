@@ -410,6 +410,7 @@ async def money_flow(
     mint_backtrack: Optional[str] = Query(None, description="Token mint to backtrack early buyers for (cached after first call)"),
     cluster_id: Optional[str] = Query(None, description="Filter graph to wallets in this cluster_id"),
     early_buyers_only: bool = Query(False, description="Show only early-buyer tagged nodes"),
+    smart_money_only: bool = Query(False, description="Show only wallets flagged as smart money"),
     show_clusters: bool = Query(True, description="Decorate wallet nodes with cluster_id and category"),
 ):
     """Money Flow Galaxy graph: wallets + tokens + social accounts as nodes,
@@ -461,6 +462,17 @@ async def money_flow(
             _cluster_map = await _wce.load_cluster_map()
         except Exception as _e:
             logger.debug('cluster_map load failed: %s', _e)
+
+    _smart_money_map: dict = {}  # cluster_id -> score
+    if smart_money_only or show_clusters:
+        try:
+            async with get_db() as _smdb:
+                _smrows = await (await _smdb.execute(
+                    SELECT cluster_id, score FROM smart_money_scores
+                )).fetchall()
+            _smart_money_map = {r[0]: r[1] for r in _smrows}
+        except Exception as _e:
+            logger.debug('smart_money_scores load failed: %s', _e)
 
     async with get_db() as db:
         await db.execute(_WALLET_TRADES_DDL)
