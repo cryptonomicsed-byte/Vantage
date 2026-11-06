@@ -21,14 +21,21 @@ async def guild_and_space(client, fresh_agent):
     owner = await fresh_agent()
     headers = {"X-Agent-Key": owner["api_key"]}
 
-    # Create guild
+    # All guild/space/task/pool endpoints use Form(...), not JSON body.
     slug_prefix = owner["name"][:6].lower().replace("_", "-")
-    r = await client.post("/api/guilds", json={"slug": f"tg-{slug_prefix}", "name": f"TradingGuild_{owner['name'][:6]}", "description": "test"}, headers=headers)
+    r = await client.post(
+        "/api/guilds",
+        data={"slug": f"tg-{slug_prefix}", "name": f"TradingGuild_{owner['name'][:6]}", "bio": "test"},
+        headers=headers,
+    )
     assert r.status_code in (200, 201), r.text
     slug = r.json()["slug"]
 
-    # Create trading space
-    r = await client.post(f"/api/guilds/{slug}/trading-spaces", json={"name": "Alpha Space", "description": "test"}, headers=headers)
+    r = await client.post(
+        f"/api/guilds/{slug}/trading-spaces",
+        data={"name": "Alpha Space"},
+        headers=headers,
+    )
     assert r.status_code in (200, 201), r.text
     space_id = r.json()["id"]
 
@@ -49,7 +56,7 @@ async def test_non_member_cannot_create_task(client, guild_and_space, outsider):
     space_id = guild_and_space["space_id"]
     r = await client.post(
         f"/api/guilds/{slug}/trading-spaces/{space_id}/tasks",
-        json={"title": "Sneak task", "description": "should be blocked"},
+        data={"title": "Sneak task", "description": "should be blocked"},
         headers=outsider["headers"],
     )
     assert r.status_code == 403, f"Expected 403, got {r.status_code}: {r.text}"
@@ -60,7 +67,7 @@ async def test_owner_can_create_task(client, guild_and_space):
     space_id = guild_and_space["space_id"]
     r = await client.post(
         f"/api/guilds/{slug}/trading-spaces/{space_id}/tasks",
-        json={"title": "Owner task", "description": "should succeed"},
+        data={"title": "Owner task", "description": "should succeed"},
         headers=guild_and_space["headers"],
     )
     assert r.status_code in (200, 201), f"Owner should create task: {r.text}"
@@ -72,16 +79,14 @@ async def test_non_member_cannot_claim_task(client, guild_and_space, outsider, f
     slug = guild_and_space["slug"]
     space_id = guild_and_space["space_id"]
 
-    # Owner creates a task
     r = await client.post(
         f"/api/guilds/{slug}/trading-spaces/{space_id}/tasks",
-        json={"title": "Claimable task", "description": "open"},
+        data={"title": "Claimable task", "description": "open"},
         headers=guild_and_space["headers"],
     )
     assert r.status_code in (200, 201), r.text
     task_id = r.json()["id"]
 
-    # Outsider tries to claim it
     r = await client.post(
         f"/api/guilds/{slug}/trading-spaces/{space_id}/tasks/{task_id}/claim",
         headers=outsider["headers"],
@@ -99,7 +104,7 @@ async def test_task_owner_cannot_accept_their_own_task(client, guild_and_space):
 
     r = await client.post(
         f"/api/guilds/{slug}/trading-spaces/{space_id}/tasks",
-        json={"title": "Self-accept attempt", "description": "open"},
+        data={"title": "Self-accept attempt", "description": "open"},
         headers=guild_and_space["headers"],
     )
     assert r.status_code in (200, 201), r.text
@@ -121,7 +126,7 @@ async def test_non_member_cannot_create_pool(client, guild_and_space, outsider):
     space_id = guild_and_space["space_id"]
     r = await client.post(
         f"/api/guilds/{slug}/trading-spaces/{space_id}/pools",
-        json={"name": "Sneak pool", "target_usd": 1000, "quorum_pct": 0.6},
+        data={"name": "Sneak pool", "target_amount": "1000", "quorum_pct": "0.6"},
         headers=outsider["headers"],
     )
     assert r.status_code == 403, f"Expected 403, got {r.status_code}: {r.text}"
@@ -136,7 +141,7 @@ async def test_pool_quorum_pct_above_1_is_rejected(client, guild_and_space):
     space_id = guild_and_space["space_id"]
     r = await client.post(
         f"/api/guilds/{slug}/trading-spaces/{space_id}/pools",
-        json={"name": "Bad quorum", "target_usd": 1000, "quorum_pct": 51},
+        data={"name": "Bad quorum", "target_amount": "1000", "quorum_pct": "51"},
         headers=guild_and_space["headers"],
     )
     assert r.status_code == 422, (
@@ -149,7 +154,7 @@ async def test_pool_quorum_pct_zero_is_rejected(client, guild_and_space):
     space_id = guild_and_space["space_id"]
     r = await client.post(
         f"/api/guilds/{slug}/trading-spaces/{space_id}/pools",
-        json={"name": "Zero quorum", "target_usd": 1000, "quorum_pct": 0},
+        data={"name": "Zero quorum", "target_amount": "1000", "quorum_pct": "0"},
         headers=guild_and_space["headers"],
     )
     assert r.status_code == 422, (
@@ -162,7 +167,7 @@ async def test_pool_quorum_pct_valid_fraction_is_accepted(client, guild_and_spac
     space_id = guild_and_space["space_id"]
     r = await client.post(
         f"/api/guilds/{slug}/trading-spaces/{space_id}/pools",
-        json={"name": "Valid pool", "target_usd": 1000, "quorum_pct": 0.6},
+        data={"name": "Valid pool", "target_amount": "1000", "quorum_pct": "0.6"},
         headers=guild_and_space["headers"],
     )
     assert r.status_code in (200, 201), (
@@ -176,10 +181,9 @@ async def test_commit_zero_amount_is_rejected(client, guild_and_space):
     slug = guild_and_space["slug"]
     space_id = guild_and_space["space_id"]
 
-    # Create a pool first
     r = await client.post(
         f"/api/guilds/{slug}/trading-spaces/{space_id}/pools",
-        json={"name": "Commit test pool", "target_usd": 1000, "quorum_pct": 0.5},
+        data={"name": "Commit test pool", "target_amount": "1000", "quorum_pct": "0.5"},
         headers=guild_and_space["headers"],
     )
     assert r.status_code in (200, 201), r.text
@@ -187,11 +191,11 @@ async def test_commit_zero_amount_is_rejected(client, guild_and_space):
 
     r = await client.post(
         f"/api/guilds/{slug}/trading-spaces/{space_id}/pools/{pool_id}/commit",
-        json={"amount_usd": 0},
+        data={"amount": "0"},
         headers=guild_and_space["headers"],
     )
     assert r.status_code == 422, (
-        f"Expected 422 for amount_usd=0, got {r.status_code}: {r.text}"
+        f"Expected 422 for amount=0, got {r.status_code}: {r.text}"
     )
 
 
