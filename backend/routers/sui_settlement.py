@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from backend.db import get_db
 from backend.deps import get_agent
 from backend.event_bus import VantageEvent, emit
-from backend.sui_client import build_settlement_ptb, verify_sui_tx
+from backend.sui_client import build_settlement_ptb, verify_sui_settlement_effects
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/receipts", tags=["sui-settlement"])
@@ -86,39 +86,52 @@ async def confirm_receipt_settlement(
 ):
     """Confirm a Sui settlement by providing the submitted transaction digest.
 
-    Verifies the TX on-chain, stores the digest, and emits SettlementCompleted.
+    Verifies the TX on-chain against expected effects, then stores the digest.
+    Checks verified: finality, sender identity, receipt-hash commitment.
+
+    What is NOT yet verified (documented gap, not silently skipped):
+    - Transfer asset type, amount, and recipient — requires build_settlement_ptb
+      to include an explicit coin-transfer move call.  The current PTB is an
+      attestation transaction (data-posting), not a payment transaction.  Until
+      the PTB is upgraded, storing the digest proves identity and commitment but
+      not that any specific obligation was discharged.
     """
     agent_id: int = agent["id"]
+    sui_address: Optional[str] = agent.get("sui_address") or ""
     tx_digest = body.tx_digest.strip()
 
     if not tx_digest:
         raise HTTPException(status_code=400, detail="tx_digest is required")
 
-    # Verify TX is confirmed on-chain
-    confirmed = await verify_sui_tx(tx_digest)
-    if not confirmed:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Transaction not confirmed on Sui. "
-                "Ensure the TX has been submitted and wait for finality."
-            ),
-        )
-
+    # Fetch the receipt to get the hash we expect the TX to commit to.
+    # Do this before the RPC call so we can pass expected values to the verifier.
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute(
-            "SELECT id, agent_id FROM guild_execution_receipts WHERE id = ?",
+            "SELECT id, agent_id, receipt_body FROM guild_execution_receipts WHERE id = ?",
             (receipt_id,),
         )).fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail="Receipt not found")
+    if row is None:
+        raise HTTPException(status_code=404, detail="Receipt not found")
+    if row["agent_id"] != agent_id:
+        raise HTTPException(status_code=403, detail="Not the receipt owner")
 
-        # Ownership: only the agent who owns the receipt may confirm its settlement.
-        # Previously missing — any authenticated agent could confirm any receipt,
-        # allowing cross-agent settlement spoofing.
-        if row["agent_id"] != agent_id:
-            raise HTTPException(status_code=403, detail="Not the receipt owner")
+    import hashlib as _hashlib
+    receipt_hash = _hashlib.sha256((row["receipt_body"] or "").encode()).hexdigest()
+
+    # Verify TX effects: finality + sender identity + receipt-hash commitment.
+    ok, reason = await verify_sui_settlement_effects(
+        tx_digest,
+        expected_sender=sui_address or None,
+        expected_receipt_hash=receipt_hash,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Settlement verification failed: {reason}",
+        )
+
+    async with get_db() as db:
 
         # Store settlement info (columns added by tasks_db.py ALTER TABLE)
         try:
