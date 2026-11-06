@@ -11,7 +11,10 @@ from contextlib import asynccontextmanager
 
 import aiosqlite
 import httpx
-from coincurve import PublicKeyXOnly
+try:
+    from coincurve import PublicKeyXOnly as PublicKeyXOnly
+except ImportError:  # libsecp256k1 not available (CI / Termux)
+    PublicKeyXOnly = None
 from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -366,9 +369,12 @@ async def _federation_gossip_loop():
                                     from .steward_client import verify_schnorr as _steward_verify
                                     sig_invalid = not await _steward_verify(pinned_pubkey, digest_hex, sig_header.strip())
                                 except Exception:
-                                    # Steward unreachable — use local coincurve
-                                    xonly = PublicKeyXOnly(bytes.fromhex(pinned_pubkey))
-                                    sig_invalid = not xonly.verify(bytes.fromhex(sig_header.strip()), bytes.fromhex(digest_hex))
+                                    # Steward unreachable — use local coincurve if available
+                                    if PublicKeyXOnly is not None:
+                                        xonly = PublicKeyXOnly(bytes.fromhex(pinned_pubkey))
+                                        sig_invalid = not xonly.verify(bytes.fromhex(sig_header.strip()), bytes.fromhex(digest_hex))
+                                    else:
+                                        sig_invalid = True  # can't verify without coincurve
                             except Exception:
                                 sig_invalid = True
                             if sig_invalid:

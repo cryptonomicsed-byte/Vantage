@@ -39,7 +39,10 @@ import time
 import urllib.parse
 
 import websockets
-from coincurve import PrivateKey
+try:
+    from coincurve import PrivateKey
+except ImportError:
+    PrivateKey = None  # type: ignore[assignment,misc]
 
 from .bech32 import bech32_encode
 from .buzz_client import _event_id, build_event

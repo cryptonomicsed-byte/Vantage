@@ -31,7 +31,10 @@ from bip_utils import (
     Bip84,
     Bip84Coins,
 )
-from solders.keypair import Keypair as SolanaKeypair
+try:
+    from solders.keypair import Keypair as SolanaKeypair
+except ImportError:
+    SolanaKeypair = None  # type: ignore[assignment,misc]
 
 # Same path vanity-cloakseed/src/utils/chains.ts uses for Solana.
 SOLANA_DERIVATION_PATH = "m/44'/501'/0'/0'"
