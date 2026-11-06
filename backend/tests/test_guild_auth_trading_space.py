@@ -22,7 +22,8 @@ async def guild_and_space(client, fresh_agent):
     headers = {"X-Agent-Key": owner["api_key"]}
 
     # Create guild
-    r = await client.post("/api/guilds", json={"name": f"TradingGuild_{owner['name'][:6]}", "description": "test"}, headers=headers)
+    slug_prefix = owner["name"][:6].lower().replace("_", "-")
+    r = await client.post("/api/guilds", json={"slug": f"tg-{slug_prefix}", "name": f"TradingGuild_{owner['name'][:6]}", "description": "test"}, headers=headers)
     assert r.status_code in (200, 201), r.text
     slug = r.json()["slug"]
 

@@ -200,12 +200,6 @@ async def test_cross_agent_cannot_confirm_settlement(client, fresh_agent):
     receipt_id = f"test-receipt-spoof-{agent_a['name'][:8]}"
     async with get_db() as db:
         try:
-            await db.execute(
-                """CREATE TABLE IF NOT EXISTS guild_execution_receipts (
-                    id TEXT PRIMARY KEY, agent_id INTEGER, receipt_body TEXT,
-                    sui_tx_digest TEXT, settled_at TEXT
-                )"""
-            )
             agent_a_id_row = await (await db.execute(
                 "SELECT id FROM agents WHERE name=?", (agent_a["name"],)
             )).fetchone()
@@ -213,8 +207,11 @@ async def test_cross_agent_cannot_confirm_settlement(client, fresh_agent):
                 pytest.skip("Agent A not found in DB")
             agent_a_db_id = agent_a_id_row[0]
             await db.execute(
-                "INSERT OR IGNORE INTO guild_execution_receipts (id, agent_id, receipt_body) VALUES (?,?,?)",
-                (receipt_id, agent_a_db_id, json.dumps({"amount": 100})),
+                """INSERT OR IGNORE INTO guild_execution_receipts
+                   (id, artifact_id, task_id, agent_id, receipt_body)
+                   VALUES (?,?,?,?,?)""",
+                (receipt_id, "artifact-spoof", "task-spoof",
+                 agent_a_db_id, json.dumps({"amount": 100})),
             )
             await db.commit()
         except Exception as e:
