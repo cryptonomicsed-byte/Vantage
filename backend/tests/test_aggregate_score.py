@@ -34,12 +34,6 @@ async def _init_schema():
                 display_name TEXT DEFAULT '', copy_trade_score REAL DEFAULT 0
             )
         """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS social_signals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, ticker TEXT, contract_address TEXT,
-                sentiment TEXT, confidence REAL, created_at TEXT DEFAULT (datetime('now'))
-            )
-        """)
         await db.execute("DELETE FROM token_wallet_roles")
         await db.execute("DELETE FROM wallet_reputation")
         await db.execute("DELETE FROM social_signals")
