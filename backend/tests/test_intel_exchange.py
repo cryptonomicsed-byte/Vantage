@@ -10,7 +10,8 @@ import time
 
 import pytest
 import pytest_asyncio
-from coincurve import PrivateKey
+coincurve = pytest.importorskip("coincurve", reason="libsecp256k1 not available")
+PrivateKey = coincurve.PrivateKey
 
 from backend import intel_exchange as exchange
 from backend.buzz_client import build_event

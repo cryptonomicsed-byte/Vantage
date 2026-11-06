@@ -4,8 +4,16 @@ per the 2026-08-29 HKUDS pattern audit. Uses synthetic TradeRecord lists
 (unit-level, no DB) plus one real-DB round trip through
 backend/routers/trading.py's GET /api/trading/shadow-account.
 """
+import platform
+import sys
+
 import pandas as pd
 import pytest
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "android" or ("com.termux" in sys.executable),
+    reason="pandas C-extension segfaults on ARM64 Android; run on VPS/HERDR",
+)
 
 from backend.backtest.models import TradeRecord
 from backend.backtest.shadow_account import (
