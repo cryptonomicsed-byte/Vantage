@@ -7,31 +7,53 @@ any guild's trading space regardless of membership.
 
 These tests pin the 403-on-non-member behaviour so it cannot silently regress.
 """
+import hashlib
+import secrets
+import uuid
+
+import aiosqlite
 import pytest
 import pytest_asyncio
+
+from backend.db import DB_PATH
 
 pytestmark = pytest.mark.asyncio
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
-@pytest_asyncio.fixture(scope="session")
-async def guild_and_space(client, fresh_agent):
-    """Create a guild, trading space, and return owner credentials + IDs."""
-    owner = await fresh_agent()
+@pytest_asyncio.fixture
+async def guild_and_space(client):
+    """Create a guild+trading-space via direct DB insert to bypass rate limits."""
+    # Create owner agent (same approach as fresh_agent fixture)
+    raw = f"vantage_{secrets.token_hex(16)}"
+    hashed = hashlib.sha256(raw.encode()).hexdigest()
+    agent_name = f"TSAgent_{hashed[:10]}"
+    slug = f"ts-{hashed[:8]}"
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO agents (name, api_key, bio) VALUES (?,?,?)",
+            (agent_name, hashed, "test"),
+        )
+        agent_db_id = cur.lastrowid
+        guild_key = f"vantage_guild_{secrets.token_hex(24)}"
+        cur2 = await db.execute(
+            """INSERT INTO guilds (slug, name, bio, founder_id, founder_name, guild_api_key)
+               VALUES (?,?,?,?,?,?)""",
+            (slug, f"TradingGuild_{slug}", "test", agent_db_id, agent_name, guild_key),
+        )
+        guild_id = cur2.lastrowid
+        await db.execute(
+            "INSERT INTO guild_members (guild_id, agent_id, agent_name, role) VALUES (?,?,?,'founder')",
+            (guild_id, agent_db_id, agent_name),
+        )
+        await db.commit()
+
+    owner = {"name": agent_name, "api_key": raw}
     headers = {"X-Agent-Key": owner["api_key"]}
 
-    # All guild/space/task/pool endpoints use Form(...), not JSON body.
-    # Use the unique hash suffix (chars 11+) not the common "FreshAgent_" prefix.
-    unique = owner["name"][11:17].lower()
-    r = await client.post(
-        "/api/guilds",
-        data={"slug": f"tg-{unique}", "name": f"TradingGuild_{unique}", "bio": "test"},
-        headers=headers,
-    )
-    assert r.status_code in (200, 201), r.text
-    slug = r.json()["slug"]
-
+    # Create trading space via API (not rate-limited)
     r = await client.post(
         f"/api/guilds/{slug}/trading-spaces",
         data={"name": "Alpha Space"},
