@@ -685,8 +685,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("reputation init skipped: %s", e)
 
+    # ARP receipt outbox reconciliation: detects pending rows left by crashes
+    # and re-verifies them against the chain so the receipt chain stays clean.
+    from .receipt_reconciler import reconciliation_loop
+    reconciler_task = asyncio.create_task(reconciliation_loop())
+
     yield
-    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, mention_poller_task, scoring_task, last30days_task, outcome_learner_task, event_bus_task, tier_recompute_task]
+    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, mention_poller_task, scoring_task, last30days_task, outcome_learner_task, event_bus_task, tier_recompute_task, reconciler_task]
     if execution_engine_task is not None:
         shutdown_tasks.append(execution_engine_task)
     for t in shutdown_tasks:
