@@ -15,6 +15,13 @@ from backend.crypto_utils import encrypt_key_for_agent
 from backend.db import get_db
 
 
+
+@pytest.fixture(autouse=True)
+def _live_switch_on(monkeypatch):
+    """These tests exercise the live-execution path, which since the paper/live
+    split requires the process-wide switch to be on. Without it execute-live
+    refuses at the mode gate before reaching the behaviour under test."""
+    monkeypatch.setenv("VANTAGE_LIVE_TRADING", "1")
 @pytest.fixture(autouse=True)
 def pinned_quote(monkeypatch):
     """Pin the live SOL quote for every test in this module -- these tests

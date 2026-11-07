@@ -18,6 +18,13 @@ from ..action_receipt import from_trade_order
 from ..justice_layer import anchor_receipt as _anchor_receipt
 from .. import trading_mode
 
+# P0-1: endpoint-level gate for high-conviction auto-execution.
+# Daemon-level gates (daemon_settings DB) prevent daemons from calling this
+# endpoint, but any caller with a valid tool key could still trigger an order.
+# This gate defaults False so the endpoint never auto-creates orders unless
+# an operator explicitly opts in.
+SIGNAL_AUTO_EXECUTE_ENABLED = os.environ.get("SIGNAL_AUTO_EXECUTE_ENABLED", "0").strip() == "1"
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/trading", tags=["trading"])
 
@@ -1758,18 +1765,6 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent), x_
         order = dict(order)
         if order["status"] != "pending":
             raise HTTPException(409, f"Order is '{order['status']}'; only pending orders can be executed")
-
-        # The global kill switch. Independent of per-strategy armed/live: with
-        # VANTAGE_LIVE_TRADING unset nothing can be signed no matter how the
-        # strategy is configured. Deliberately does NOT mark the order failed —
-        # this is a process-level mode, not a defect in the order, and the order
-        # may legitimately execute once live is enabled on purpose.
-        if not trading_mode.global_live_enabled():
-            raise HTTPException(
-                422,
-                f"Live trading is disabled globally ({trading_mode.GLOBAL_LIVE_ENV} not enabled). "
-                "Paper trading is unaffected. Set it deliberately to allow signing.",
-            )
         if order["chain"] != "solana":
             await _fail(db, f"Live execution currently only supports chain='solana' (order.chain={order['chain']!r})")
 
@@ -1803,6 +1798,19 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent), x_
                 f"Wallet '{wallet['label']}' is a {wallet['chain']} wallet — "
                 "live execution only supports Solana wallets right now",
             )
+
+    # The global kill switch. Placed after order/wallet validation (so a bad
+    # order still reports why it is bad) and before the key is decrypted or
+    # anything is signed. With VANTAGE_LIVE_TRADING unset nothing can be signed
+    # no matter how the strategy is configured. Deliberately does NOT mark the
+    # order failed: this is a process-level mode, not a defect in the order, and
+    # the order may legitimately execute once live is enabled on purpose.
+    if not trading_mode.global_live_enabled():
+        raise HTTPException(
+            422,
+            f"Live trading is disabled globally ({trading_mode.GLOBAL_LIVE_ENV} not enabled). "
+            "Paper trading is unaffected. Set it deliberately to allow signing.",
+        )
 
     try:
         # F1 fix: raw header, not agent["api_key"] (the DB-stored hash) -- see generate_wallet's comment.
@@ -2193,11 +2201,23 @@ async def pumpfun_premigration_board(agent: dict = Depends(get_agent)):
 
 @router.get("/daemon-settings")
 async def list_daemon_settings(agent: dict = Depends(get_agent)):
+    global_live = trading_mode.global_live_enabled()
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute("SELECT key, value, updated_at FROM daemon_settings")).fetchall()
         existing = {r["key"]: dict(r) for r in rows}
-        return {k: existing.get(k, {"key": k, "value": None, "updated_at": None}) for k in DAEMON_SETTING_KEYS}
+        out = {}
+        for k in DAEMON_SETTING_KEYS:
+            entry = existing.get(k, {"key": k, "value": None, "updated_at": None})
+            # `effective` is what a daemon will actually get: the master switch
+            # overrides a stored arm, so the UI can show "armed but inert"
+            # instead of pretending a dead toggle is live.
+            entry["effective"] = (
+                "0" if (k.endswith("_trading_enabled") and not global_live)
+                else entry.get("value")
+            )
+            out[k] = entry
+        return out
 
 class DaemonSettingUpdate(BaseModel):
     value: str
@@ -2215,6 +2235,16 @@ async def set_daemon_setting(key: str, data: DaemonSettingUpdate, agent: dict = 
             # its own already-configured wallet at all).
             if data.value not in ("0", "1"):
                 raise HTTPException(422, "value must be '0' or '1' for a *_trading_enabled setting")
+            # Disarming is always allowed; arming while the process is paper-only
+            # would create a toggle that looks live and does nothing. Refuse it
+            # and say why, rather than storing an intent the daemon will ignore.
+            if data.value == "1" and not trading_mode.global_live_enabled():
+                raise HTTPException(
+                    409,
+                    f"Cannot arm '{key}': this process is paper-only "
+                    f"({trading_mode.GLOBAL_LIVE_ENV} is not enabled). "
+                    "Disarming is always allowed. Set the master switch deliberately to arm execution.",
+                )
         else:
             # Sanity-check it's actually a wallet the agent owns before
             # letting a standalone root daemon spend from it.
@@ -2228,18 +2258,43 @@ async def set_daemon_setting(key: str, data: DaemonSettingUpdate, agent: dict = 
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
             (key, data.value)
         )
+        if key.endswith("_trading_enabled"):
+            # Arming a standalone signer is a money-moving action; it needs the
+            # same "who, when, what" record the per-strategy gates get.
+            await trading_mode.record_mode_change(
+                db, agent_id=agent["id"], scope="daemon", action="daemon_arm" if data.value == "1" else "daemon_disarm",
+                prev_state=None, new_state="armed" if data.value == "1" else "disarmed",
+                note=key,
+            )
         await db.commit()
         return {"key": key, "value": data.value}
 
 @router.get("/daemon-settings/{key}", operation_id="get_daemon_setting_for_daemon")
 async def get_daemon_setting(key: str, tool: dict = Depends(get_system_tool)):
     """Read path for the daemons themselves — system-tool auth (they run
-    as root, outside any agent session), no UI dependency."""
+    as root, outside any agent session), no UI dependency.
+
+    The master switch is enforced HERE, at the one place every standalone
+    signer consults each cycle (ares-jupiter-signer, base_trader,
+    hyperliquid, sui, polymarket, solana_engine, autotrade, freqtrade…).
+    A stored "1" is reported as "0" while the process is paper-only, so
+    arming a daemon cannot outlive the process-wide mode. `stored` is
+    included so an operator can see that intent was recorded, not lost.
+    """
     if key not in DAEMON_SETTING_KEYS:
         raise HTTPException(422, f"Unknown daemon setting '{key}'")
     async with get_db() as db:
         row = await (await db.execute("SELECT value FROM daemon_settings WHERE key=?", (key,))).fetchone()
-        return {"key": key, "value": row[0] if row else None}
+        stored = row[0] if row else None
+    if key.endswith("_trading_enabled") and not trading_mode.global_live_enabled():
+        return {
+            "key": key,
+            "value": "0",
+            "stored": stored,
+            "global_override": f"{trading_mode.GLOBAL_LIVE_ENV}=off",
+            "note": "paper only — execution disabled by the master switch",
+        }
+    return {"key": key, "value": stored}
 
 
 # ── Performance ─────────────────────────────────────────────
@@ -2427,7 +2482,7 @@ async def ingest_signal(request: Request, tool: dict = Depends(get_system_tool))
 
     Body: {symbol, direction, conviction, source, agent_id, quantity?, chain?}
       - agent_id: which agent should receive this signal
-      - conviction: 0–1 confidence (>0.7 auto-executes if wallet exists)
+      - conviction: 0–1 confidence (>0.7 auto-executes when SIGNAL_AUTO_EXECUTE_ENABLED=1)
       - source: origin (e.g. "freqtrade", "worldmonitor")
 
     Only X-Vantage-Tool (trading) + X-Vantage-Tool-Key can call this.
@@ -2457,9 +2512,9 @@ async def ingest_signal(request: Request, tool: dict = Depends(get_system_tool))
         return {"ok": False, "skipped": True, "reason": "test signals are not ingested to production feed"}
 
     direction_upper = direction.upper()
-    if conviction > 0.7 and direction_upper in ("BUY", "LONG", "BULLISH"):
+    if SIGNAL_AUTO_EXECUTE_ENABLED and conviction > 0.7 and direction_upper in ("BUY", "LONG", "BULLISH"):
         side = "BUY"
-    elif conviction > 0.7 and direction_upper in ("SELL", "SHORT", "BEARISH"):
+    elif SIGNAL_AUTO_EXECUTE_ENABLED and conviction > 0.7 and direction_upper in ("SELL", "SHORT", "BEARISH"):
         side = "SELL"
     else:
         side = None
