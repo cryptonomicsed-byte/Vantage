@@ -1722,6 +1722,17 @@ CREATE TABLE IF NOT EXISTS external_iranti_memories (
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_mode_audit_strategy ON trading_mode_audit(strategy_id, ts)")
 
+        # Created by hand on the deployed box and never added here, so a fresh
+        # install 500'd on /trading/daemon-settings — the read every standalone
+        # signer polls each cycle. Same drift as armed/live above.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS daemon_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS trading_strategy_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
