@@ -164,7 +164,7 @@ async def test_posting_to_unprovisioned_channel_returns_503(client, guild):
         headers=_hdr(guild["founder"]),
     )
     assert resp.status_code == 503, resp.text
-    assert "Relay unavailable" in resp.json()["detail"]
+    assert "Transport unavailable" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio

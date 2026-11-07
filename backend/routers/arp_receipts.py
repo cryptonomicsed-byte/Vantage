@@ -115,3 +115,47 @@ async def list_arp_receipts(agent: dict = Depends(get_agent), limit: int = 50, o
             (agent["name"], limit, offset),
         )
     return [dict(r) for r in rows]
+
+
+@router.get("/receipts/reconciliation/status",
+            summary="Pending-receipt outbox status for ops visibility")
+async def reconciliation_status(agent: dict = Depends(get_agent)):
+    """Return counts of receipts by outcome and the oldest pending row.
+
+    Intended for dashboard monitoring and oncall runbooks.  A non-zero
+    pending count older than 10 minutes indicates receipts that survived
+    the automatic reconciler scan and may need manual review.
+    """
+    await _ensure_table()
+    from datetime import datetime, timezone
+    async with get_db() as db:
+        import aiosqlite as _aio
+        db.row_factory = _aio.Row
+        counts = await db.execute_fetchall(
+            "SELECT outcome, COUNT(*) AS n FROM arp_receipts GROUP BY outcome"
+        )
+        oldest = await (await db.execute(
+            "SELECT receipt_id, accepted_at FROM arp_receipts "
+            "WHERE outcome='pending' ORDER BY accepted_at ASC LIMIT 1"
+        )).fetchone()
+
+    by_outcome = {row["outcome"] or "null": row["n"] for row in counts}
+    pending_count = by_outcome.get("pending", 0)
+    oldest_pending_age_seconds = None
+    if oldest:
+        try:
+            ts = datetime.fromisoformat(oldest["accepted_at"].replace("Z", "+00:00"))
+            oldest_pending_age_seconds = int(
+                (datetime.now(timezone.utc) - ts).total_seconds()
+            )
+        except Exception:
+            pass
+
+    return {
+        "counts_by_outcome": by_outcome,
+        "pending": pending_count,
+        "oldest_pending_receipt_id": oldest["receipt_id"] if oldest else None,
+        "oldest_pending_age_seconds": oldest_pending_age_seconds,
+        "reconciler_staleness_threshold_seconds": 300,
+        "alert": pending_count > 0 and (oldest_pending_age_seconds or 0) > 600,
+    }

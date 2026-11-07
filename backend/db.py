@@ -2491,6 +2491,9 @@ async def init_workspace_tasks_db() -> None:
             "market_id": "TEXT",
             "reasoning": "TEXT",
             "resolved_ts": "INTEGER",
+            # p_yes: venue-reported P(YES) at forecast time. Distinct from
+            # confidence (model certainty). Required for Brier scoring.
+            "p_yes": "REAL",
         }
         _brier_cur = await db.execute("PRAGMA table_info(brier_predictions)")
         _brier_have = {_r[1] for _r in await _brier_cur.fetchall()}

@@ -8,6 +8,7 @@ import hashlib
 
 import pytest
 
+pytest.importorskip("coincurve", reason="bip_utils requires libsecp256k1 not available")
 from backend import hd_wallet
 from backend.crypto_utils import decrypt_key_for_agent, encrypt_key_for_agent
 from backend.db import get_db

@@ -9,7 +9,8 @@ import secrets
 
 import pytest
 import pytest_asyncio
-from coincurve import PrivateKey
+coincurve = pytest.importorskip("coincurve", reason="libsecp256k1 not available")
+PrivateKey = coincurve.PrivateKey
 
 from backend import coordination as coord
 from backend import sovereignty

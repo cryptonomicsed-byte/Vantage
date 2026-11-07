@@ -98,11 +98,20 @@ def test_valid_quantity_passes():
 async def test_ingest_rejects_an_unnormalised_signal(client):
     """End to end: the shape several daemons currently send is refused rather
     than becoming an order."""
+    import aiosqlite
+    from backend.db import DB_PATH
+    mesh_agent_id = "test-signal-hardening-agent"
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO mesh_agents (agent_id, block_id) VALUES (?,?)",
+            (mesh_agent_id, "test-block"),
+        )
+        await db.commit()
     r = await client.post(
         "/api/trading/signals/ingest",
         headers=_tool_headers(),
         json={"symbol": "SOL", "direction": "BUY", "conviction": 7.0,
-              "source": "freqtrade", "agent_id": 1},
+              "source": "freqtrade", "agent_id": mesh_agent_id},
     )
     # This used to accept 401 as well, because no tool key was configured in the
     # test environment -- so it passed without ever reaching the validation it

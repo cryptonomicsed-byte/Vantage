@@ -29,7 +29,10 @@ from typing import Optional
 
 import aiosqlite
 from fastapi import APIRouter, HTTPException, Query
-from coincurve import PublicKeyXOnly
+try:
+    from coincurve import PublicKeyXOnly
+except ImportError:
+    PublicKeyXOnly = None  # type: ignore[assignment,misc]
 
 from ..buzz_identity import (
     derive_instance_keypair,

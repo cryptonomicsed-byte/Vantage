@@ -11,7 +11,10 @@ from typing import Optional
 import asyncio
 from urllib.parse import urlparse
 import websockets
-from coincurve import PrivateKey
+try:
+    from coincurve import PrivateKey
+except ImportError:
+    PrivateKey = None  # type: ignore[assignment,misc]
 
 from ..buzz_identity import public_key_xonly_hex, sign_event_id
 

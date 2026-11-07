@@ -36,8 +36,10 @@ async def _init_schema():
         """)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS social_signals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, ticker TEXT, contract_address TEXT,
-                sentiment TEXT, confidence REAL, created_at TEXT DEFAULT (datetime('now'))
+                id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER, platform TEXT,
+                username TEXT, ticker TEXT, contract_address TEXT, sentiment TEXT,
+                confidence REAL, post_text TEXT, post_url TEXT,
+                signal_type TEXT DEFAULT 'mention', created_at TEXT DEFAULT (datetime('now'))
             )
         """)
         await db.execute("DELETE FROM token_wallet_roles")

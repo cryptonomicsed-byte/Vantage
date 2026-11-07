@@ -162,7 +162,7 @@ async def test_vault_sessions_search_finds_traces(client, fresh_agent):
 @pytest.mark.asyncio
 async def test_federation_galaxy_is_mounted(client, fresh_agent):
     agent = await fresh_agent()
-    r = await client.get(f"/api/federation/galaxy?peers={agent['name']}")
+    r = await client.get(f"/api/federation/galaxy?peers={agent['name']}", headers=_h(agent))
     assert r.status_code == 200, r.text
     assert "peers" in r.json()
 

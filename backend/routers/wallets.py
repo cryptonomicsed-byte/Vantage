@@ -19,9 +19,14 @@ from fastapi import APIRouter, Header, HTTPException, Query, Body
 from pydantic import BaseModel
 import aiosqlite
 import base58
-from solders.keypair import Keypair
-from solders.pubkey import Pubkey
-from solders.signature import Signature
+try:
+    from solders.keypair import Keypair
+    from solders.pubkey import Pubkey
+    from solders.signature import Signature
+except ImportError:
+    Keypair = None  # type: ignore[assignment,misc]
+    Pubkey = None   # type: ignore[assignment,misc]
+    Signature = None  # type: ignore[assignment,misc]
 
 from ..config import settings
 from ..db import connect_bounded

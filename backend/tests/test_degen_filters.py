@@ -180,8 +180,10 @@ def test_stale_last_trade_rejected():
 
 
 def test_fresh_last_trade_at_boundary_accepted():
+    # Use a 2-minute margin: _fresh_ts truncates to second precision, so a
+    # sub-second margin (0.01 min = 0.6 s) is unreliable across test execution.
     assert pumpfun_token_is_alive(**_real_alive_token(
-        last_trade_at=_fresh_ts(PUMPFUN_MAX_STALENESS_MINUTES - 0.01),
+        last_trade_at=_fresh_ts(PUMPFUN_MAX_STALENESS_MINUTES - 2),
     )) is True
 
 

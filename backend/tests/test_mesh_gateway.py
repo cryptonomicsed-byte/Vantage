@@ -12,7 +12,8 @@ import time
 
 import pytest
 import pytest_asyncio
-from coincurve import PrivateKey
+coincurve = pytest.importorskip("coincurve", reason="libsecp256k1 not available")
+PrivateKey = coincurve.PrivateKey
 
 from backend import mesh_gateway as mesh
 from backend.buzz_client import _event_id
