@@ -80,7 +80,7 @@ async def test_arming_refused_while_paper_only(client, registered_agent, monkeyp
     r = await client.put(f"/api/trading/daemon-settings/{KEY}",
                          headers=_agent_h(registered_agent), json={"value": "1"})
     assert r.status_code == 409, r.text
-    assert tm.GLOBAL_LIVE_ENV in r.text
+    assert "master switch" in r.text.lower()
 
 
 @pytest.mark.asyncio

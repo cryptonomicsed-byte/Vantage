@@ -197,6 +197,11 @@ class StrategyCreate(BaseModel):
     name: str
     description: str = ""
     strategy_type: str
+    # The docstring on create_strategy has promised wallet_id in the body for a
+    # while, but the field was never declared — every POST /strategies raised
+    # AttributeError -> 500. Optional here so the error is a 422 naming the
+    # field instead of a traceback.
+    wallet_id: Optional[int] = None
     config: dict = {}
     target_chain: str = ""
     target_symbols: str = ""
@@ -329,7 +334,16 @@ async def create_strategy(data: StrategyCreate, agent: dict = Depends(get_agent)
     Query parameter was removed — it caused 422 when clients sent wallet_id
     in the body as documented."""
     wallet_id = data.wallet_id
+    if not wallet_id:
+        raise HTTPException(422, "wallet_id is required — create or pick a wallet first")
     async with get_db() as db:
+        # A strategy may only be bound to a wallet the caller owns. Without this
+        # any agent could point a strategy at someone else's wallet id and arm it.
+        owned = await (await db.execute(
+            "SELECT id FROM trading_wallets WHERE id=? AND agent_id=?",
+            (wallet_id, agent["id"]))).fetchone()
+        if not owned:
+            raise HTTPException(422, "wallet_id must be a wallet belonging to this agent")
         cur = await db.execute(
             """INSERT INTO trading_strategies
                (agent_id, wallet_id, name, description, strategy_type, config,
@@ -586,14 +600,25 @@ async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent)
         except Exception:
             result = None
     else:
+        # BIP-39 / SLIP-0010, generated in-process via backend/hd_wallet.py — the
+        # same derivation wallets.py already uses. This branch used to POST to a
+        # wallet service on 127.0.0.1:8778 that is no longer running (no unit, no
+        # process), so the UI's default "Generate wallet" button returned a bare
+        # 500 "Wallet generation failed" for every user. Generating locally also
+        # means the private key never crosses a localhost HTTP hop.
         try:
-            r = await _asyncio.to_thread(lambda: _sp.run(
-                ["curl", "-s", "-X", "POST", "http://127.0.0.1:8778/api/wallet/create",
-                 "-H", "Content-Type: application/json", "-d", "{}", "--connect-timeout", "10"],
-                capture_output=True, text=True, timeout=15
-            ))
-            result = _json.loads(r.stdout) if r.stdout else None
-        except Exception:
+            from ..hd_wallet import derive_multichain_wallet, generate_mnemonic
+
+            _wallet = derive_multichain_wallet(generate_mnemonic())
+            _sol_addr = str(_wallet.solana_keypair.pubkey())
+            _sol_key = __import__("base58").b58encode(bytes(_wallet.solana_keypair)).decode()
+            result = {
+                "mnemonic": _wallet.mnemonic,
+                "chains": {chain: {"address": _sol_addr, "privateKey": _sol_key}},
+                "address": _sol_addr,
+            }
+        except Exception as exc:
+            logger.warning("in-process wallet generation failed: %s", exc)
             result = None
     
     if not result:
@@ -1596,7 +1621,18 @@ async def enable_live_strategy(strategy_id: int, agent: dict = Depends(get_agent
          (non-empty prediction history, score within threshold) — live
          execution is only enabled after the prediction pipeline has
          demonstrated calibrated accuracy, not before evidence exists.
+
+    The master switch (live_mode, shown in ExecutionPanel) is checked first:
+    enabling live while the process is paper-only would store an intent that
+    cannot execute, which is exactly the dead-control state this gate set is
+    meant to prevent.
     """
+    if not trading_mode.global_live_enabled():
+        raise HTTPException(
+            409,
+            "Cannot enable live execution: the master switch is OFF (paper only). "
+            "Turn live trading on in the Execution panel first — that action is audited.",
+        )
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         row = await (await db.execute(
@@ -2199,6 +2235,57 @@ async def pumpfun_premigration_board(agent: dict = Depends(get_agent)):
     return {"tiers": tiers, "total_tracked": len(rows)}
 
 
+@router.get("/live-mode")
+async def get_live_mode(agent: dict = Depends(get_agent)):
+    """The master paper/live switch, as the UI must render it.
+
+    `enabled` is what actually governs signing right now (env brake/override
+    folded in); `db_enabled` is the stored intent. When they differ the panel
+    must show why, or the toggle is lying.
+    """
+    return trading_mode.live_mode_status()
+
+
+class LiveModeUpdate(BaseModel):
+    enabled: bool
+    note: str = ""
+
+
+@router.put("/live-mode")
+async def set_live_mode(data: LiveModeUpdate, agent: dict = Depends(get_agent)):
+    """Flip the master switch. Paper is always available; this only ever
+    decides whether anything *may* sign.
+
+    Refused while the environment brake is on: storing an intent the process
+    will ignore is the dead-control problem this whole change exists to remove.
+    """
+    status = trading_mode.live_mode_status()
+    if data.enabled and status["env_brake_active"]:
+        raise HTTPException(
+            409,
+            f"Cannot enable live trading: {trading_mode.GLOBAL_LIVE_ENV} is set to "
+            f"'{status['env']}' in the service environment, which overrides this switch. "
+            "Unset it in the unit and restart, or turn the switch off instead.",
+        )
+    async with get_db() as db:
+        row = await (await db.execute(
+            "SELECT enabled FROM live_mode WHERE id=1")).fetchone()
+        prev_state = "live" if (row and row[0]) else "paper"
+        new_state = "live" if data.enabled else "paper"
+        await db.execute(
+            "UPDATE live_mode SET enabled=?, changed_by=?, changed_at=datetime('now'), note=? WHERE id=1",
+            (1 if data.enabled else 0, agent["id"], (data.note or "")[:500]),
+        )
+        await trading_mode.record_mode_change(
+            db, agent_id=agent["id"], scope="global",
+            action="live_mode_on" if data.enabled else "live_mode_off",
+            prev_state=prev_state, new_state=new_state, note=data.note or "",
+        )
+        await db.commit()
+    trading_mode.invalidate_cache()
+    return trading_mode.live_mode_status()
+
+
 @router.get("/daemon-settings")
 async def list_daemon_settings(agent: dict = Depends(get_agent)):
     global_live = trading_mode.global_live_enabled()
@@ -2241,9 +2328,9 @@ async def set_daemon_setting(key: str, data: DaemonSettingUpdate, agent: dict = 
             if data.value == "1" and not trading_mode.global_live_enabled():
                 raise HTTPException(
                     409,
-                    f"Cannot arm '{key}': this process is paper-only "
-                    f"({trading_mode.GLOBAL_LIVE_ENV} is not enabled). "
-                    "Disarming is always allowed. Set the master switch deliberately to arm execution.",
+                    f"Cannot arm '{key}': the master switch is OFF (paper only). "
+                    "Turn live trading on in the Execution panel first — that action is audited. "
+                    "Disarming is always allowed.",
                 )
         else:
             # Sanity-check it's actually a wallet the agent owns before
