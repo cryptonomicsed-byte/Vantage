@@ -604,3 +604,112 @@ def _prediction_session() -> str:
         from uuid import uuid4
         _prediction_session_id = f"prediction-{uuid4().hex[:12]}"
     return _prediction_session_id
+
+
+# ── Trading mode traces ─────────────────────────────────────────────────────
+# Signals and decisions already emit (emit_prediction_decision). These two add
+# the execution side: the intent to trade, and what came of it. Both carry an
+# explicit `mode`, and neither filters on it — a paper decision is as much
+# evidence as a live one; only order placement differs.
+
+def emit_trade_decision(
+    *,
+    mode: str,
+    symbol: str,
+    side: str,
+    size_usd: Optional[float] = None,
+    quantity: Optional[float] = None,
+    price: Optional[float] = None,
+    strategy_id: Optional[int] = None,
+    order_id: Optional[int] = None,
+    chain: str = "",
+    reason: str = "",
+    confidence: Optional[float] = None,
+) -> bool:
+    """One `decision` trace per trade intent, in either mode. Never raises."""
+    try:
+        body = {
+            "agent": pseudonymize_agent("trade-engine"),
+            "session": _prediction_session(),
+            "kind": "decision",
+            "action": str(side or "hold").lower(),
+            "target": f"{chain or 'unknown'}:{symbol or 'unknown'}",
+            "outcome": "info",
+            "payload": scrub_payload({
+                "mode": "live" if mode == "live" else "paper",
+                "side": side,
+                "symbol": symbol,
+                "chain": chain,
+                "quantity": quantity,
+                "price": price,
+                "size_usd": round(float(size_usd), 4) if size_usd is not None else None,
+                "strategy_id": strategy_id,
+                "order_id": order_id,
+                "confidence": round(float(confidence), 4) if confidence is not None else None,
+                "reason": (reason or "")[:400],
+            }),
+        }
+        return _post_trace(body)
+    except Exception as exc:  # never break a trade over telemetry
+        logger.debug("mycelium_bridge: trade decision trace failed: %s", exc)
+        return False
+
+
+def emit_trade_outcome(
+    *,
+    mode: str,
+    symbol: str,
+    side: str,
+    order_id: Optional[int] = None,
+    quantity: Optional[float] = None,
+    fill_price: Optional[float] = None,
+    pnl_usd: Optional[float] = None,
+    tx_hash: Optional[str] = None,
+    status: str = "filled",
+    chain: str = "",
+    strategy_id: Optional[int] = None,
+) -> bool:
+    """One `outcome` trace per fill or settlement, in either mode. Never raises.
+
+    Paper fills carry tx_hash='paper:<uuid>' from paper_fill_order; that marker is
+    preserved verbatim so a miner can separate simulated P&L from real P&L
+    without a second lookup.
+    """
+    try:
+        body = {
+            "agent": pseudonymize_agent("trade-engine"),
+            "session": _prediction_session(),
+            "kind": "outcome",
+            "action": str(side or "fill").lower(),
+            "target": f"{chain or 'unknown'}:{symbol or 'unknown'}",
+            "outcome": "success" if status in ("filled", "success", "closed") else str(status),
+            "payload": scrub_payload({
+                "mode": "live" if mode == "live" else "paper",
+                "side": side,
+                "symbol": symbol,
+                "chain": chain,
+                "order_id": order_id,
+                "quantity": quantity,
+                "fill_price": fill_price,
+                "pnl_usd": round(float(pnl_usd), 6) if pnl_usd is not None else None,
+                "tx_hash": tx_hash,
+                "simulated": bool(tx_hash and str(tx_hash).startswith("paper:")),
+                "status": status,
+                "strategy_id": strategy_id,
+            }),
+        }
+        return _post_trace(body)
+    except Exception as exc:
+        logger.debug("mycelium_bridge: trade outcome trace failed: %s", exc)
+        return False
+
+
+async def emit_trade_decision_async(**kwargs) -> bool:
+    """Thread-offloaded variant, for request handlers that must not block on HTTP."""
+    import asyncio
+    return await asyncio.to_thread(emit_trade_decision, **kwargs)
+
+
+async def emit_trade_outcome_async(**kwargs) -> bool:
+    import asyncio
+    return await asyncio.to_thread(emit_trade_outcome, **kwargs)

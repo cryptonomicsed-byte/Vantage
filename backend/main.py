@@ -506,6 +506,16 @@ async def lifespan(app: FastAPI):
     _db_init_failures = await init_all_databases()
     if _db_init_failures:
         logger.warning("DB init failures at startup: %s", _db_init_failures)
+
+    # Record which mode this process booted in. The per-strategy gates are
+    # audited in trading_mode_audit when they change; the global switch is an
+    # environment variable, so a row per boot is the only way "was live even
+    # possible during that window" is answerable afterwards.
+    try:
+        from . import trading_mode as _tm
+        await _tm.record_boot_mode()
+    except Exception as _e:  # pragma: no cover - never block startup on an audit row
+        logger.warning("could not record startup trading mode: %s", _e)
     # subscriptions below need this import, which used to live inside the
     # inline init block
     from .reputation import update_on_event as _rep_update_on_event
