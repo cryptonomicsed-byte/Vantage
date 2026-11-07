@@ -216,6 +216,7 @@ async def evaluate_pine_signal(indicator_id: int, request: Request, agent: dict 
     chain = (body.get("chain") or "solana").strip()
     quantity = float(body.get("quantity") or 0)
     execute = bool(body.get("execute", False))
+    wallet_id = body.get("wallet_id")
 
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
@@ -278,12 +279,19 @@ async def evaluate_pine_signal(indicator_id: int, request: Request, agent: dict 
         response["note"] = "preview only -- pass execute=true and a real quantity to place a paper order"
         return response
 
+    # An order must name the wallet it trades from, exactly as a manually placed
+    # one does — a Pine trigger is not a licence to trade a headless order.
+    if not wallet_id:
+        raise HTTPException(422, "wallet_id is required when execute=true — a Pine "
+                                 "trigger must name the wallet it trades from")
+
     # Reuse the real order-creation + paper-fill paths (risk limits, journal
     # entries, live-quote fill price) rather than duplicating that logic.
     from .trading import OrderCreate, create_order, paper_fill_order
 
     order_data = OrderCreate(symbol=symbol.upper(), side=side.lower(), chain=chain,
-                              quantity=quantity, trigger_reason=source)
+                              wallet_id=int(wallet_id), quantity=quantity,
+                              trigger_reason=source)
     created = await create_order(order_data, agent)
     response["order"] = created
 

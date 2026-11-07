@@ -20,6 +20,25 @@ def _no_live_quote(monkeypatch):
 def _h(agent):
     return {"X-Agent-Key": agent["api_key"]}
 
+_WALLET_SEQ = {"n": 0}
+
+
+async def _wallet(client, agent, label=None):
+    """Every order must name a wallet the agent owns (enforced since the
+    no-wallet order was found producing headless paper fills)."""
+    _WALLET_SEQ["n"] += 1
+    label = label or f"unit-test-wallet-{_WALLET_SEQ['n']}"
+    r = await client.post("/api/trading/wallets/generate", headers=_h(agent),
+                          json={"system": "bip39", "chain": "solana", "label": label})
+    assert r.status_code in (200, 409), r.text
+    if r.status_code == 409:
+        lst = await client.get("/api/trading/wallets", headers=_h(agent))
+        data = lst.json()
+        rows = data if isinstance(data, list) else data.get("wallets", [])
+        return next(w["id"] for w in rows if w.get("label") == label)
+    return r.json()["id"]
+
+
 
 @pytest.mark.asyncio
 async def test_paper_fill_marks_order_filled(client, registered_agent):
@@ -27,12 +46,13 @@ async def test_paper_fill_marks_order_filled(client, registered_agent):
     # Notional kept under the  no-strategy fallback risk cap
     # (Hermes audit P1, f656dc8) -- this test exercises paper-fill
     # mechanics, not risk limits, so it must stay within-cap.
+    wid = await _wallet(client, registered_agent)
     r = await client.post(
         "/api/trading/orders",
         headers=_h(registered_agent),
         json={"symbol": "SOL", "side": "buy", "chain": "solana",
               "quantity": 0.3, "price": 150.0, "order_type": "limit",
-              "trigger_reason": "unit-test"},
+              "wallet_id": wid, "trigger_reason": "unit-test"},
     )
     assert r.status_code == 200, r.text
     order_id = r.json()["id"]
@@ -59,11 +79,13 @@ async def test_paper_fill_rejects_non_pending(client, registered_agent):
     # Notional kept under the  no-strategy fallback risk cap
     # (Hermes audit P1, f656dc8) -- this test exercises the
     # non-pending-rejects-refill path, not risk limits.
+    wid = await _wallet(client, registered_agent, label="unit-test-wallet-2")
     r = await client.post(
         "/api/trading/orders",
         headers=_h(registered_agent),
         json={"symbol": "ETH", "side": "buy", "chain": "base",
-              "quantity": 0.01, "price": 3000.0, "order_type": "limit"},
+              "quantity": 0.01, "price": 3000.0, "order_type": "limit",
+              "wallet_id": wid},
     )
     assert r.status_code == 200, r.text
     order_id = r.json()["id"]

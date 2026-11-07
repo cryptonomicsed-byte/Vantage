@@ -129,6 +129,15 @@ async def copy_order(order_id: int, request: Request, agent: dict = Depends(get_
 
         quantity = body.get("quantity", leader_order["quantity"])
         wallet_id = body.get("wallet_id")
+        # Same invariant as POST /trading/orders: a copy is still an order and
+        # must name a wallet, or its fills book against nothing.
+        if not wallet_id:
+            raise HTTPException(422, "wallet_id is required to copy an order")
+        owned = await (await db.execute(
+            "SELECT id FROM trading_wallets WHERE id=? AND agent_id=?",
+            (wallet_id, agent["id"]))).fetchone()
+        if not owned:
+            raise HTTPException(422, "wallet_id must be a wallet belonging to this agent")
 
         cur = await db.execute(
             """INSERT INTO trading_orders

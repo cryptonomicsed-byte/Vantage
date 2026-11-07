@@ -1748,6 +1748,21 @@ CREATE TABLE IF NOT EXISTS external_iranti_memories (
         """)
         await db.execute("INSERT OR IGNORE INTO live_mode (id, enabled) VALUES (1, 0)")
 
+        # One row per hop through the trading pipeline. Without this, "is the
+        # pipeline connected?" is answered by ports, and a quiet pipeline looks
+        # identical to a broken one.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS pipeline_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL DEFAULT (datetime('now')),
+                node TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                ref TEXT DEFAULT '',
+                detail TEXT DEFAULT ''
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_node ON pipeline_events(node, id)")
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS trading_strategy_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
