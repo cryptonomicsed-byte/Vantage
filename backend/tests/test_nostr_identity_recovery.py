@@ -12,7 +12,8 @@ import hashlib
 import time
 
 import pytest
-from coincurve import PrivateKey
+coincurve = pytest.importorskip("coincurve", reason="libsecp256k1 not available")
+PrivateKey = coincurve.PrivateKey
 
 from backend.utils import _federation_nonces
 

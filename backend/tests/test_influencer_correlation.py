@@ -14,6 +14,7 @@ import pytest
 
 from backend import influencer_correlation as ic
 from backend import mycelium_bridge as mb
+from backend.mycelium_bridge import pseudonymize_agent
 
 
 def _row(username, platform="telegram", ticker="", ca="", created_at="2026-08-23 22:14:22"):
@@ -176,7 +177,7 @@ def test_emit_sends_a_real_trace_with_the_full_finding_as_payload(sent):
     assert ic._emit(finding) is True
     assert len(sent) == 1
     body = sent[0]["body"]
-    assert body["agent"] == "influencer_correlation"
+    assert body["agent"] == pseudonymize_agent("influencer_correlation")
     assert body["kind"] == "observation"
     assert body["action"] == "coordinated_mention"
     assert body["target"] == "ticker:FOO"

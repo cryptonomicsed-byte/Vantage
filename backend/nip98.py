@@ -23,7 +23,10 @@ import json
 import time
 from typing import Optional
 
-from coincurve import PublicKeyXOnly
+try:
+    from coincurve import PublicKeyXOnly
+except ImportError:
+    PublicKeyXOnly = None  # type: ignore[assignment,misc]
 
 # NIP-98 HTTP Auth kind
 KIND_HTTP_AUTH = 27235

@@ -14,7 +14,11 @@ import hmac
 import math
 import os
 
-from coincurve import PrivateKey, PublicKey as CoincurvePublicKey
+try:
+    from coincurve import PrivateKey, PublicKey as CoincurvePublicKey
+except ImportError:
+    PrivateKey = None  # type: ignore[assignment,misc]
+    CoincurvePublicKey = None  # type: ignore[assignment,misc]
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
 
 _MIN_PLAINTEXT_LEN = 1

@@ -56,7 +56,9 @@ class KindSpec:
 # them, and a disagreement with the NIP is a Vantage bug.
 
 _NIP_KINDS = [
+    KindSpec(1, "short_text_note", Origin.NIP, "Plain-text broadcast note (the canonical social post kind).", "NIP-01"),
     KindSpec(5, "deletion", Origin.NIP, "Author's request to delete their own events.", "NIP-09"),
+    KindSpec(6, "repost", Origin.NIP, "Repost/boost of a kind-1 event.", "NIP-18"),
     KindSpec(7, "reaction", Origin.NIP, "Reaction (emoji or +) to another event.", "NIP-25"),
     KindSpec(9, "message", Origin.NIP, "Chat message. The guild/workspace log.", "NIP-29"),
     KindSpec(21, "video", Origin.NIP, "First-class video event (recorded stream, VOD).", "NIP-71"),

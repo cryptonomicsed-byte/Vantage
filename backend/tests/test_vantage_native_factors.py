@@ -3,8 +3,16 @@
 with live OHLCV. These are the first zoo factors to use extras_required,
 and degen_pump_density is the first with no OHLCV dependency at all.
 """
+import platform
+import sys
+
 import pandas as pd
 import pytest
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "android" or ("com.termux" in sys.executable),
+    reason="pandas C-extension segfaults on ARM64 Android; run on VPS/HERDR",
+)
 
 from backend.factors.registry import Registry
 

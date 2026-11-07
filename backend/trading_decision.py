@@ -69,6 +69,28 @@ async def jev_decide(signal: dict) -> dict:
     should_trade_prob = float(should_trade_ans.get("probability", 0.0))
     should_trade_val = should_trade_ans.get("value", False)
 
+    confidence = should_trade_prob
+
+    # should_trade=False is a hard policy abstention regardless of confidence.
+    # A high-confidence "do not trade" must never produce a directional verdict
+    # that could create an order.  Check this before the threshold gate and
+    # before direction mapping so the distinction is auditable.
+    if not should_trade_val:
+        return {
+            "verdict": "skip",
+            "confidence": confidence,
+            "p_yes": float(state.get("yes_price", 0.5)),
+            "reasoning": (
+                f"model_abstain: should_trade=False({confidence:.2f}) "
+                f"direction={direction_val} conviction={conviction_val} "
+                f"model={result.get('model_used', '?')}"
+            ),
+            "direction": direction_val,
+            "conviction": conviction_val,
+            "should_trade": False,
+            "abstained": True,
+        }
+
     # map direction to verdict
     if direction_val == "up":
         verdict = "yes"
@@ -76,8 +98,6 @@ async def jev_decide(signal: dict) -> dict:
         verdict = "no"
     else:
         verdict = "skip"
-
-    confidence = should_trade_prob
 
     # apply threshold gate
     if confidence < CONFIDENCE_THRESHOLD:
@@ -122,11 +142,17 @@ async def jev_decide(signal: dict) -> dict:
 
     return {
         "verdict": verdict,
+        # confidence = model's certainty in its should_trade decision (0–1).
+        # This is NOT P(YES) — it must not be used as a calibrated probability.
         "confidence": confidence,
+        # p_yes = venue-reported probability of YES outcome (from yes_price).
+        # This is the quantity that Brier scoring is defined over.
+        "p_yes": float(state.get("yes_price", 0.5)),
         "reasoning": reasoning,
         "direction": direction_val,
         "conviction": conviction_val,
         "should_trade": bool(should_trade_val),
+        "abstained": verdict == "skip",
     }
 
 

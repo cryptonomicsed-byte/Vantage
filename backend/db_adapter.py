@@ -6,7 +6,10 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import Optional, Any
-import asyncpg
+try:
+    import asyncpg
+except ImportError:
+    asyncpg = None
 import aiosqlite
 
 from .config import settings
@@ -14,7 +17,7 @@ from .config import settings
 logger = logging.getLogger(__name__)
 
 # Global connection pool (PostgreSQL only)
-_PG_POOL: Optional[asyncpg.Pool] = None
+_PG_POOL: Optional[object] = None  # asyncpg.Pool when asyncpg is available
 
 # Bound concurrent SQLite connections (single-writer WAL; see db.py).
 _SQLITE_CONN_LIMIT = asyncio.Semaphore(8)
@@ -104,7 +107,7 @@ class DbConnection:
 class PostgresConnection(DbConnection):
     """PostgreSQL connection adapter using asyncpg."""
 
-    def __init__(self, conn: asyncpg.Connection):
+    def __init__(self, conn: "asyncpg.Connection"):
         self.conn = conn
 
     async def execute(self, query: str, params: tuple = ()) -> None:

@@ -68,7 +68,8 @@ async def my_leaders(agent: dict = Depends(get_agent)):
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute("""
-            SELECT a.id AS agent_id, a.name, a.bio, a.reputation, s.created_at AS followed_since
+            SELECT a.id AS leader_id, a.name AS leader_name, a.bio,
+                   a.reputation, s.created_at AS subscribed_at
             FROM copy_trading_subscriptions s JOIN agents a ON a.id = s.leader_agent_id
             WHERE s.follower_agent_id=? AND s.status='active'
             ORDER BY s.created_at DESC

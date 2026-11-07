@@ -1685,6 +1685,43 @@ CREATE TABLE IF NOT EXISTS external_iranti_memories (
                 updated_at TEXT
             )
         """)
+
+        # `armed` and `live` are the execution gates, but they were never in the
+        # CREATE above — deployed databases got them by out-of-band migration, so a
+        # fresh install came up without them and every arming endpoint 500'd. Same
+        # guarded-ALTER pattern as brier_predictions: keeps fresh and migrated
+        # schemas identical without a migration framework.
+        _STRATEGY_MIGRATIONS = {
+            "wallet_id": "INTEGER",
+            "is_active": "BOOLEAN DEFAULT 1",
+            "armed": "INTEGER DEFAULT 0",
+            "live": "INTEGER DEFAULT 0",
+            "target_tiers": "TEXT DEFAULT ''",
+        }
+        _sg_cur = await db.execute("PRAGMA table_info(trading_strategies)")
+        _sg_have = {_r[1] for _r in await _sg_cur.fetchall()}
+        for _col, _decl in _STRATEGY_MIGRATIONS.items():
+            if _col not in _sg_have:
+                await db.execute(f"ALTER TABLE trading_strategies ADD COLUMN {_col} {_decl}")
+
+        # Who armed what, when. Append-only: a mode transition that leaves no row
+        # is indistinguishable from one that never happened.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS trading_mode_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL DEFAULT (datetime('now')),
+                agent_id INTEGER,
+                scope TEXT NOT NULL,
+                strategy_id INTEGER,
+                action TEXT NOT NULL,
+                prev_state TEXT,
+                new_state TEXT,
+                note TEXT DEFAULT '',
+                actor TEXT DEFAULT ''
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_mode_audit_strategy ON trading_mode_audit(strategy_id, ts)")
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS trading_strategy_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2491,6 +2528,9 @@ async def init_workspace_tasks_db() -> None:
             "market_id": "TEXT",
             "reasoning": "TEXT",
             "resolved_ts": "INTEGER",
+            # p_yes: venue-reported P(YES) at forecast time. Distinct from
+            # confidence (model certainty). Required for Brier scoring.
+            "p_yes": "REAL",
         }
         _brier_cur = await db.execute("PRAGMA table_info(brier_predictions)")
         _brier_have = {_r[1] for _r in await _brier_cur.fetchall()}
