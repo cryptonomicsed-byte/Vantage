@@ -108,7 +108,7 @@ export default function ExecutionPanel() {
     { key: 'autotrade_trading_enabled', label: 'Autotrade (Phantom/A14)', hint: 'Social/copy-trade/stop-loss signal pipeline — single execution chokepoint for ares_copy_trader.py and ares_stop_loss.py, which only ever queue into it' },
     { key: 'freqtrade_trading_enabled', label: 'Freqtrade (Kraken)', hint: 'Spot strategy on Kraken — runs its own separate dry_run regardless, wired here for control-plane consistency' },
   ]
-  const [daemonSettings, setDaemonSettings] = useState<Record<string, { value: string | null }>>({})
+  const [daemonSettings, setDaemonSettings] = useState<Record<string, { value: string | null; effective?: string | null }>>({})
   const [daemonBusy, setDaemonBusy] = useState<Record<string, boolean>>({})
 
   const loadDaemonSettings = useCallback(async () => {
@@ -129,6 +129,44 @@ export default function ExecutionPanel() {
       if (r.ok) await loadDaemonSettings()
     } catch { /* best-effort */ }
     setDaemonBusy(b => ({ ...b, [key]: false }))
+  }, [tradingApi, loadDaemonSettings])
+
+  // Master paper/live switch. Declared after loadDaemonSettings because the
+  // setter refreshes the daemon list (their `effective` value depends on it).
+  const [liveMode, setLiveMode] = useState<{
+    enabled: boolean; source: string; db_enabled: boolean;
+    env_brake_active: boolean; env_override_active: boolean; env?: string | null
+  } | null>(null)
+  const [liveBusy, setLiveBusy] = useState(false)
+  const [liveMsg, setLiveMsg] = useState('')
+
+  const loadLiveMode = useCallback(async () => {
+    try {
+      const r = await tradingApi('/live-mode')
+      if (r.ok) setLiveMode(await r.json())
+    } catch { /* best-effort */ }
+  }, [tradingApi])
+  useEffect(() => { loadLiveMode() }, [loadLiveMode])
+
+  const setMasterLive = useCallback(async (next: boolean) => {
+    if (next && !window.confirm(
+      'Enable LIVE trading? Real orders can then be signed once a strategy or daemon is armed. ' +
+      'This is recorded against your agent.')) return
+    setLiveBusy(true); setLiveMsg('')
+    try {
+      const r = await tradingApi('/live-mode', {
+        method: 'PUT',
+        body: JSON.stringify({
+          enabled: next,
+          note: next ? 'enabled from Execution panel' : 'disabled from Execution panel',
+        }),
+      })
+      const d = await r.json().catch(() => ({}))
+      if (r.ok) setLiveMode(d)
+      else setLiveMsg(typeof d.detail === 'string' ? d.detail : 'Could not change the master switch')
+      await loadDaemonSettings()
+    } catch { setLiveMsg('Network error') }
+    setLiveBusy(false)
   }, [tradingApi, loadDaemonSettings])
 
   const handleQuickTrade = useCallback(async () => {
@@ -377,22 +415,68 @@ export default function ExecutionPanel() {
           <Power size={13} style={{ color: '#ff2d4a' }} />
           <span style={styles.sectionTitle}>Auto-Trading Daemons</span>
         </div>
+
+        {/* Master switch — governs every daemon below and every strategy.
+            Paper always runs; this decides whether anything may sign at all. */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px',
+          marginBottom: 8, borderRadius: 4,
+          border: `1px solid ${liveMode?.enabled ? '#39ff14' : '#2a2f3a'}`,
+          background: liveMode?.enabled ? 'rgba(57,255,20,0.06)' : 'rgba(107,114,128,0.06)',
+        }}>
+          <button
+            style={{ padding: 0, background: 'none', border: 'none', cursor: liveBusy || liveMode?.env_brake_active ? 'default' : 'pointer' }}
+            disabled={liveBusy || !!liveMode?.env_brake_active}
+            onClick={() => setMasterLive(!liveMode?.enabled)}
+            title={liveMode?.env_brake_active
+              ? `Locked OFF by ${liveMode?.env ?? 'environment'} in the service unit`
+              : liveMode?.enabled ? 'Return to paper only' : 'Enable live trading'}
+          >
+            {liveMode?.enabled
+              ? <ToggleRight size={24} color="#39ff14" />
+              : <ToggleLeft size={24} color="#6b7280" />}
+          </button>
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            <span style={{ fontSize: 11, fontWeight: 600, color: liveMode?.enabled ? '#39ff14' : '#e0e0e0' }}>
+              Live trading: {liveMode?.enabled ? 'ENABLED' : 'PAPER ONLY'}
+            </span>
+            <span style={{ fontSize: 9, color: '#6b7280' }}>
+              {liveMode?.env_brake_active
+                ? `locked off by env ${liveMode?.env} — the switch is inert until the unit is changed`
+                : liveMode?.env_override_active
+                  ? 'forced on by the service environment (overrides this switch)'
+                  : liveMode?.enabled
+                    ? 'arm a strategy or daemon below to actually execute — each is a separate gate'
+                    : 'signals, scores, decisions and paper fills keep running; nothing can sign'}
+            </span>
+          </div>
+        </div>
+        {liveMsg && (
+          <div style={{ fontSize: 10, color: '#ff2d4a', marginBottom: 6 }}>{liveMsg}</div>
+        )}
+
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {AUTO_TRADE_DAEMONS.map(d => {
-            const on = daemonSettings[d.key]?.value === '1'
+            const stored = daemonSettings[d.key]?.value === '1'
+            const effective = (daemonSettings[d.key]?.effective ?? daemonSettings[d.key]?.value) === '1'
+            const inert = stored && !effective
             return (
               <div key={d.key} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11 }}>
                 <button
                   style={{ padding: 0, background: 'none', border: 'none', cursor: daemonBusy[d.key] ? 'default' : 'pointer' }}
                   disabled={!!daemonBusy[d.key]}
-                  onClick={() => toggleDaemonTrading(d.key, on)}
-                  title={on ? 'Disable live trading' : 'Enable live trading'}
+                  onClick={() => toggleDaemonTrading(d.key, stored)}
+                  title={inert
+                    ? 'Armed, but inert — the master switch is off'
+                    : stored ? 'Disable live trading' : 'Enable live trading'}
                 >
-                  {on ? <ToggleRight size={20} color="#39ff14" /> : <ToggleLeft size={20} color="#6b7280" />}
+                  {effective ? <ToggleRight size={20} color="#39ff14" /> : <ToggleLeft size={20} color={inert ? '#f59e0b' : '#6b7280'} />}
                 </button>
                 <div style={{ display: 'flex', flexDirection: 'column' }}>
                   <span style={{ color: '#e0e0e0' }}>{d.label}</span>
-                  <span style={{ color: '#6b7280', fontSize: 9 }}>{d.hint}</span>
+                  <span style={{ color: inert ? '#f59e0b' : '#6b7280', fontSize: 9 }}>
+                    {inert ? 'armed but inert — master switch is off' : d.hint}
+                  </span>
                 </div>
               </div>
             )
