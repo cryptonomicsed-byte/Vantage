@@ -16,6 +16,13 @@ import pytest
 from backend import market_sources as ms
 
 
+
+@pytest.fixture(autouse=True)
+def _live_switch_on(monkeypatch):
+    """These tests exercise the live-execution path, which since the paper/live
+    split requires the process-wide switch to be on. Without it execute-live
+    refuses at the mode gate before reaching the behaviour under test."""
+    monkeypatch.setenv("VANTAGE_LIVE_TRADING", "1")
 @pytest.mark.parametrize("symbol, expected", [
     ("SOL-USDC", "SOL"),
     ("SOL/USDC", "SOL"),
