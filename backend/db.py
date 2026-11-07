@@ -1763,6 +1763,35 @@ CREATE TABLE IF NOT EXISTS external_iranti_memories (
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_node ON pipeline_events(node, id)")
 
+        # A pooled signal becomes an order at most once. Without this, promotion
+        # is not idempotent: a retry (or two cycles racing) doubles the position.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS signal_promotions (
+                signal_id INTEGER PRIMARY KEY,
+                order_id INTEGER NOT NULL,
+                agent_id INTEGER NOT NULL,
+                source TEXT DEFAULT '',
+                symbol TEXT DEFAULT '',
+                direction TEXT DEFAULT '',
+                conviction REAL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_promotions_order ON signal_promotions(order_id)")
+
+        # The pool every producer writes into. Created here so a fresh database
+        # (tests, a new box) has the schema the promotion path reads, instead of
+        # depending on whichever daemon happened to run first.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS signal_pool (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT, source TEXT, type TEXT,
+                conviction REAL, direction TEXT, detail TEXT, ts INTEGER,
+                mint TEXT DEFAULT ''
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_signal_pool_ts ON signal_pool(ts)")
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS trading_strategy_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
