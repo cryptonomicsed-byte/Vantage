@@ -16,6 +16,20 @@ from backend.config import settings
 from backend.crypto_utils import encrypt_private_key
 
 
+@pytest.fixture(autouse=True)
+def _engine_reaches_execution(monkeypatch):
+    """These tests exercise routing/guards *behind* the master switch.
+
+    process_order() now refuses to touch credentials while the switch is off
+    (paper mode), which is the behaviour a promoted paper order relies on. The
+    tests below are about what happens once execution is permitted, so the switch
+    is forced on here; test_paper_mode_leaves_order_pending covers the gate.
+    """
+    from backend import trading_mode
+
+    monkeypatch.setattr(trading_mode, "global_live_enabled", lambda *a, **k: True)
+
+
 def _make_db(path):
     con = sqlite3.connect(path)
     con.executescript("""
@@ -286,3 +300,26 @@ def test_concurrency_cap_exempts_exposure_reducing_orders(temp_db, monkeypatch):
 
     assert _order(temp_db, sell_id)["status"] == "ready"    # processed despite the cap
     assert _order(temp_db, buy_id)["status"] == "pending"   # withheld by the cap, untouched
+
+
+def test_paper_mode_leaves_order_pending(temp_db, monkeypatch):
+    """With the switch off, a pending order must not be decrypted or broadcast."""
+    from backend import trading_mode
+
+    monkeypatch.setattr(trading_mode, "global_live_enabled", lambda *a, **k: False)
+    oid = _order(temp_db, 1) if False else None
+    # Reuse the suite's own helpers: create a pending order the same way.
+    con = sqlite3.connect(temp_db)
+    con.execute("""INSERT INTO agents (id, name, api_key) VALUES (9, 'a', 'k')""")
+    con.execute("""INSERT INTO trading_wallets (agent_id, label, chain, address, encrypted_private_key)
+                   VALUES (9, 'w', 'solana', 'addr', '')""")
+    cur = con.execute("""INSERT INTO trading_orders (agent_id, wallet_id, order_type, side, symbol,
+                        chain, quantity, status) VALUES (9, 1, 'market', 'BUY', 'SOL', 'solana', 0.1, 'pending')""")
+    con.commit()
+    order_id = cur.lastrowid
+    con.close()
+
+    asyncio.run(ee.process_order(_order(temp_db, order_id)))
+    con = sqlite3.connect(temp_db)
+    assert con.execute("SELECT status FROM trading_orders WHERE id=?", (order_id,)).fetchone()[0] == "pending"
+    con.close()
