@@ -1733,6 +1733,21 @@ CREATE TABLE IF NOT EXISTS external_iranti_memories (
             )
         """)
 
+        # The master paper/live switch. One row, id=1. Before this it was an
+        # environment variable only, so the one control plane that already
+        # exists (ExecutionPanel: wallet + strategy + daemon arms) could not
+        # show it or change it — toggles looked live and did nothing.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS live_mode (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                enabled INTEGER NOT NULL DEFAULT 0,
+                changed_by INTEGER,
+                changed_at TEXT,
+                note TEXT DEFAULT ''
+            )
+        """)
+        await db.execute("INSERT OR IGNORE INTO live_mode (id, enabled) VALUES (1, 0)")
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS trading_strategy_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
