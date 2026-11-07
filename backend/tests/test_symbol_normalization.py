@@ -116,8 +116,16 @@ async def test_a_failed_lookup_is_cached_so_an_outage_costs_one_attempt(monkeypa
         calls["n"] += 1
         return None
 
+    async def dead_exchange(symbol):
+        calls["n"] += 1
+        return None
+
     monkeypatch.setattr(ms, "_pyth_prices", dead_pyth)
     monkeypatch.setattr(ms, "_coingecko_price", dead_cg)
+    # The exchange tickers are real fallbacks now; an "everything is down" test
+    # has to take them down too, or it measures the live market instead.
+    for _name in ("_binance", "_okx", "_coinbase"):
+        monkeypatch.setattr(ms, _name, dead_exchange)
 
     assert await ms.resolve_price("SOL") is None
     first = calls["n"]
