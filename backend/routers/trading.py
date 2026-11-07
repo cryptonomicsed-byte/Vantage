@@ -16,6 +16,7 @@ from backend.crypto_utils import encrypt_key_for_agent, decrypt_key_for_agent
 from ..db import get_db
 from ..action_receipt import from_trade_order
 from ..justice_layer import anchor_receipt as _anchor_receipt
+from .. import trading_mode
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/trading", tags=["trading"])
@@ -926,6 +927,27 @@ async def create_order(data: OrderCreate, agent: dict = Depends(get_agent)):
                       "side": data.side},
             gate_alignment=1.0,
         )
+
+        # Every trade intent reaches the substrate, in both modes. Mode is
+        # recorded, never filtered on: a paper decision is evidence too.
+        try:
+            from ..mycelium_bridge import emit_trade_decision
+            _mode = "paper"
+            if data.strategy_id:
+                _st = await (await db.execute(
+                    "SELECT armed, live FROM trading_strategies WHERE id=?",
+                    (data.strategy_id,))).fetchone()
+                if _st and _st[0] and _st[1]:
+                    _mode = "live"
+            emit_trade_decision(
+                mode=_mode, symbol=data.symbol, side=data.side,
+                quantity=data.quantity, price=data.price,
+                size_usd=(data.quantity or 0) * (data.price or 0),
+                strategy_id=data.strategy_id, order_id=order_id,
+                chain=data.chain, reason=data.trigger_reason or "",
+            )
+        except Exception:
+            pass
         return {"id": order_id, "status": "pending", "symbol": data.symbol, "side": data.side}
 
 @router.get("/orders")
@@ -1108,6 +1130,18 @@ async def paper_fill_order(order_id: int, agent: dict = Depends(get_agent)):
         {**order, "avg_fill_price": fill_price, "tx_hash": tx_hash},
         agent["id"], "success",
     )
+    # Paper outcomes are evidence, not noise — same trace kind as a live fill,
+    # distinguished by mode and by the paper: tx_hash prefix.
+    try:
+        from ..mycelium_bridge import emit_trade_outcome
+        emit_trade_outcome(
+            mode="paper", symbol=order["symbol"], side=order["side"],
+            order_id=order_id, quantity=order["quantity"], fill_price=fill_price,
+            tx_hash=tx_hash, status="filled", chain=order.get("chain", ""),
+            strategy_id=order.get("strategy_id"),
+        )
+    except Exception:
+        pass
     await _anchor_receipt(
         principal_id=str(agent["id"]),
         action_kind="execute_trade",
@@ -1500,6 +1534,11 @@ async def arm_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
         if not row["wallet_id"]:
             raise HTTPException(422, "Strategy has no linked wallet to trade from")
         await db.execute("UPDATE trading_strategies SET armed=1, updated_at=datetime('now') WHERE id=?", (strategy_id,))
+        await trading_mode.record_mode_change(
+            db, agent_id=agent["id"], scope="strategy", strategy_id=strategy_id,
+            action="arm", prev_state="disarmed", new_state="armed",
+            note=f"strategy_type={row['strategy_type']}",
+        )
         await db.commit()
         response = {"id": strategy_id, "armed": True}
         # strategy_bots.py only has execution processors for BOT_TYPES —
@@ -1522,6 +1561,10 @@ async def disarm_strategy(strategy_id: int, agent: dict = Depends(get_agent)):
         await db.commit()
         if cur.rowcount == 0:
             raise HTTPException(404, "Strategy not found")
+        await trading_mode.record_mode_change(
+            db, agent_id=agent["id"], scope="strategy", strategy_id=strategy_id,
+            action="disarm", prev_state="armed", new_state="disarmed",
+        )
         return {"id": strategy_id, "armed": False}
 
 # ── Live execution — a SECOND, separate gate on top of `armed`. `armed`
@@ -1595,6 +1638,11 @@ async def enable_live_strategy(strategy_id: int, agent: dict = Depends(get_agent
 
     async with get_db() as db:
         await db.execute("UPDATE trading_strategies SET live=1, updated_at=datetime('now') WHERE id=?", (strategy_id,))
+        await trading_mode.record_mode_change(
+            db, agent_id=agent["id"], scope="strategy", strategy_id=strategy_id,
+            action="enable_live", prev_state="paper", new_state="live",
+            note="live orders permitted; each still needs POST /orders/{id}/execute-live",
+        )
         await db.commit()
     return {"id": strategy_id, "live": True,
             "note": "strategy_bots.py will now create real pending orders for this strategy. "
@@ -1609,6 +1657,10 @@ async def disable_live_strategy(strategy_id: int, agent: dict = Depends(get_agen
         await db.commit()
         if cur.rowcount == 0:
             raise HTTPException(404, "Strategy not found")
+        await trading_mode.record_mode_change(
+            db, agent_id=agent["id"], scope="strategy", strategy_id=strategy_id,
+            action="disable_live", prev_state="live", new_state="paper",
+        )
         return {"id": strategy_id, "live": False}
 
 SOL_MINT = "So1111111111111111111" "1111111111111111111112"  # wrapped SOL mint, split to avoid secret-scanner false positive
@@ -1706,6 +1758,18 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent), x_
         order = dict(order)
         if order["status"] != "pending":
             raise HTTPException(409, f"Order is '{order['status']}'; only pending orders can be executed")
+
+        # The global kill switch. Independent of per-strategy armed/live: with
+        # VANTAGE_LIVE_TRADING unset nothing can be signed no matter how the
+        # strategy is configured. Deliberately does NOT mark the order failed —
+        # this is a process-level mode, not a defect in the order, and the order
+        # may legitimately execute once live is enabled on purpose.
+        if not trading_mode.global_live_enabled():
+            raise HTTPException(
+                422,
+                f"Live trading is disabled globally ({trading_mode.GLOBAL_LIVE_ENV} not enabled). "
+                "Paper trading is unaffected. Set it deliberately to allow signing.",
+            )
         if order["chain"] != "solana":
             await _fail(db, f"Live execution currently only supports chain='solana' (order.chain={order['chain']!r})")
 
@@ -1945,6 +2009,19 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent), x_
     # the confirmed tx_id.  Both are awaited (not fire-and-forget) so the
     # caller's response always reflects the durable write.
     await _update_receipt_outcome(_outbox_receipt_id, "success", tx_hash=tx_id)
+    # Live outcome to the substrate. Same kind as the paper fill — the only
+    # difference is the mode field and that this one has a real signature.
+    try:
+        from ..mycelium_bridge import emit_trade_outcome
+        emit_trade_outcome(
+            mode="live", symbol=order["symbol"], side=order["side"],
+            order_id=order_id, quantity=order["quantity"],
+            fill_price=order.get("price"), tx_hash=tx_id,
+            status="submitted", chain=order.get("chain", ""),
+            strategy_id=order.get("strategy_id"),
+        )
+    except Exception:
+        pass
     await _anchor_receipt(
         principal_id=str(agent["id"]),
         action_kind="execute_trade",
