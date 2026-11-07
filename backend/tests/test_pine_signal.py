@@ -47,8 +47,13 @@ async def _make_agent(db_mod):
     await init_pine_db()
     async with db_mod.get_db() as db:
         await db.execute("INSERT INTO agents (id, name, api_key) VALUES (1, 'test-agent', 'k')")
+        # Orders must name a wallet the agent owns; a Pine trigger is no exception.
+        cur = await db.execute(
+            """INSERT INTO trading_wallets (agent_id, label, chain, address, encrypted_private_key)
+               VALUES (1, 'pine-test-wallet', 'solana', 'test-address', '')""")
         await db.commit()
-    return {"id": 1, "name": "test-agent"}
+        wallet_id = cur.lastrowid
+    return {"id": 1, "name": "test-agent", "wallet_id": wallet_id}
 
 
 def _fake_candles(n=60):
@@ -169,7 +174,8 @@ async def test_execute_true_creates_and_paper_fills_real_order_tagged_for_learne
     # runs on this path exactly as it would for a manually-placed order.
     result = await evaluate_pine_signal(
         saved["id"],
-        _FakeRequest({"symbol": "BTC", "execute": True, "quantity": 0.0005}),
+        _FakeRequest({"symbol": "BTC", "execute": True, "quantity": 0.0005,
+                      "wallet_id": agent["wallet_id"]}),
         agent,
     )
     assert result["triggered"] is True

@@ -942,6 +942,9 @@ app.include_router(trading_router)
 # (signals, decisions incl. abstentions, calibration gate, settlements).
 from .routers.prediction_api import router as prediction_api_router
 app.include_router(prediction_api_router)
+
+from .routers.pipeline import router as pipeline_router
+app.include_router(pipeline_router)
 from .routers.surfaces import router as surfaces_router
 app.include_router(surfaces_router)
 from .routers.production import router as production_router
