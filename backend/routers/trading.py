@@ -678,6 +678,12 @@ async def generate_wallet(data: WalletGenerate, agent: dict = Depends(get_agent)
     )
 
     async with get_db() as db:
+        dup = await (await db.execute(
+            "SELECT id FROM trading_wallets WHERE agent_id=? AND label=?",
+            (agent["id"], label))).fetchone()
+        if dup:
+            raise HTTPException(409, f"A wallet labelled '{label}' already exists for this agent "
+                                     f"(id {dup[0]}). Pick another label.")
         cur = await db.execute(
             "INSERT INTO trading_wallets (agent_id, label, chain, address, encrypted_private_key, encrypted_api_key) VALUES (?,?,?,?,?,?)",
             (agent["id"], label, chain, address, encrypted, encrypted_pumpportal_key)
@@ -922,6 +928,16 @@ async def _enforce_risk_limits(
 @router.post("/orders")
 async def create_order(data: OrderCreate, agent: dict = Depends(get_agent)):
     async with get_db() as db:
+        # An order with no wallet is unroutable in both modes: paper fills would
+        # book P&L against nothing, and live has no key to sign with. Refuse at
+        # the door instead of leaving a headless row in the pipeline.
+        if not data.wallet_id:
+            raise HTTPException(422, "wallet_id is required — an order must name the wallet it trades from")
+        owned = await (await db.execute(
+            "SELECT id FROM trading_wallets WHERE id=? AND agent_id=?",
+            (data.wallet_id, agent["id"]))).fetchone()
+        if not owned:
+            raise HTTPException(422, "wallet_id must be a wallet belonging to this agent")
         await _enforce_risk_limits(
             db, agent["id"], data.symbol, data.quantity, data.price,
             data.strategy_id, data.chain,
@@ -978,6 +994,16 @@ async def create_order(data: OrderCreate, agent: dict = Depends(get_agent)):
                 strategy_id=data.strategy_id, order_id=order_id,
                 chain=data.chain, reason=data.trigger_reason or "",
             )
+        except Exception:
+            pass
+        # Pipeline hop: intent left the API and is now a row an executor can act on.
+        try:
+            from .. import pipeline as _pl
+            await _pl.record_event(db, "Vantage", "order_created", ref=f"order:{order_id}",
+                                   detail={"mode": _mode, "symbol": data.symbol,
+                                           "side": data.side, "strategy_id": data.strategy_id,
+                                           "source": data.trigger_reason or ""})
+            await db.commit()
         except Exception:
             pass
         return {"id": order_id, "status": "pending", "symbol": data.symbol, "side": data.side}
@@ -1172,6 +1198,15 @@ async def paper_fill_order(order_id: int, agent: dict = Depends(get_agent)):
             tx_hash=tx_hash, status="filled", chain=order.get("chain", ""),
             strategy_id=order.get("strategy_id"),
         )
+    except Exception:
+        pass
+    try:
+        from .. import pipeline as _pl
+        async with get_db() as _pdb:
+            await _pl.record_event(_pdb, "Vantage", "paper_fill", ref=f"order:{order_id}",
+                                   detail={"symbol": order["symbol"], "fill_price": fill_price,
+                                           "tx_hash": tx_hash})
+            await _pdb.commit()
     except Exception:
         pass
     await _anchor_receipt(
