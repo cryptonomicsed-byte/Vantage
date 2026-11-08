@@ -20,6 +20,7 @@ Env:
   FPCONV_WINDOW       tape window                              [1h]
   FPCONV_TOP_TRADERS  number of roster traders to weight       [20]
   FPCONV_POLL_SEC     scan interval in seconds                 [300]
+  FPCONV_CHAIN        chain the tape's contracts live on       [robinhood]
 """
 from __future__ import annotations
 
@@ -44,6 +45,19 @@ TOP_TRADERS   = int(os.environ.get("FPCONV_TOP_TRADERS", "20"))
 POLL_SEC      = int(os.environ.get("FPCONV_POLL_SEC",    "300"))
 
 sys.path.insert(0, os.path.join(FPCONV_REPO, "src"))
+
+
+def _chain_kwargs(bridge_cls) -> dict:
+    """P1-10: pass FPCONV_CHAIN (default robinhood) to a VantageBridge that
+    takes it. An older fpconv checkout without the parameter keeps working,
+    and its pushes simply carry no chain."""
+    import inspect
+    try:
+        if "chain" in inspect.signature(bridge_cls.__init__).parameters:
+            return {"chain": os.environ.get("FPCONV_CHAIN", "robinhood")}
+    except (TypeError, ValueError):
+        pass
+    return {}
 
 
 def _one_scan() -> dict:
@@ -113,7 +127,7 @@ def _one_scan() -> dict:
 
     # 6. Push to Vantage HTTP
     if VANTAGE_KEY:
-        bridge = VantageBridge(base=VANTAGE_URL, tool_key=VANTAGE_KEY)
+        bridge = VantageBridge(base=VANTAGE_URL, tool_key=VANTAGE_KEY, **_chain_kwargs(VantageBridge))
         push_result = bridge.push(actionable, now=now)
         result["pushed"] = push_result.get("accepted", 0)
         log.info(
