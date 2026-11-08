@@ -186,6 +186,9 @@ class OrderCreate(BaseModel):
     strategy_id: Optional[int] = None
     notes: str = ""
     slippage_bps: Optional[int] = None
+    # The exact token. When set, the order is priced and routed by this address
+    # and never by its ticker (tickers collide: a pump.fun token can be "BTC").
+    mint: Optional[str] = None
 
 class OrderUpdate(BaseModel):
     status: Optional[str] = None
@@ -773,14 +776,15 @@ _FALLBACK_MAX_POSITION_USD = 50.0
 _FALLBACK_MAX_CONCURRENT = 3
 
 
-async def _resolve_order_notional_usd(db, symbol: str, quantity: float, price: Optional[float]) -> Optional[float]:
+async def _resolve_order_notional_usd(db, symbol: str, quantity: float, price: Optional[float],
+                                      mint: Optional[str] = None) -> Optional[float]:
     """Best-effort USD notional for a proposed order. Uses the caller's
     limit price if given, otherwise a live quote. Returns None if neither
     is available -- callers must decide how to fail (fail-closed for
     anything that actually risks real funds)."""
     p = price
     if p is None:
-        p = await _fetch_quote(symbol)
+        p = await (_fetch_quote(symbol, mint) if mint else _fetch_quote(symbol))
     if p is None:
         return None
     return quantity * p
@@ -793,7 +797,7 @@ async def _resolve_order_notional_usd(db, symbol: str, quantity: float, price: O
 _MAX_PRICE_DEVIATION = 0.5
 
 
-async def _enforce_price_sanity(symbol: str, price: Optional[float]) -> None:
+async def _enforce_price_sanity(symbol: str, price: Optional[float], mint: Optional[str] = None) -> None:
     """Reject a limit price wildly detached from the market.
 
     Without this, the notional check alone is satisfiable by lying about the
@@ -808,7 +812,7 @@ async def _enforce_price_sanity(symbol: str, price: Optional[float]) -> None:
     """
     if price is None or price <= 0:
         return
-    market = await _fetch_quote(symbol)
+    market = await (_fetch_quote(symbol, mint) if mint else _fetch_quote(symbol))
     if market is None or market <= 0:
         return
     deviation = abs(price - market) / market
@@ -858,7 +862,7 @@ async def _enforce_odu_gate(agent_id, symbol: str, notional_usd: float) -> None:
 
 async def _enforce_risk_limits(
     db, agent_id: int, symbol: str, quantity: float, price: Optional[float],
-    strategy_id: Optional[int], chain: str,
+    strategy_id: Optional[int], chain: str, mint: Optional[str] = None,
 ) -> None:
     """Raises RiskLimitExceeded if the order would violate the strategy's
     own documented risk limits. If no strategy_id is given (e.g. a manual
@@ -889,10 +893,10 @@ async def _enforce_risk_limits(
         max_position_usd = _FALLBACK_MAX_POSITION_USD
         max_concurrent = _FALLBACK_MAX_CONCURRENT
 
-    await _enforce_price_sanity(symbol, price)
+    await _enforce_price_sanity(symbol, price, mint)
 
     if max_position_usd > 0:
-        notional = await _resolve_order_notional_usd(db, symbol, quantity, price)
+        notional = await _resolve_order_notional_usd(db, symbol, quantity, price, mint)
         if notional is None:
             raise RiskLimitExceeded(
                 f"cannot verify order notional for {symbol} against risk limit "
@@ -938,18 +942,20 @@ async def create_order(data: OrderCreate, agent: dict = Depends(get_agent)):
             (data.wallet_id, agent["id"]))).fetchone()
         if not owned:
             raise HTTPException(422, "wallet_id must be a wallet belonging to this agent")
+        mint = (data.mint or "").strip() or None
         await _enforce_risk_limits(
             db, agent["id"], data.symbol, data.quantity, data.price,
-            data.strategy_id, data.chain,
+            data.strategy_id, data.chain, mint,
         )
 
         cur = await db.execute(
             """INSERT INTO trading_orders
-               (agent_id, wallet_id, order_type, side, symbol, chain, quantity, price, trigger_reason, signal_id, strategy_id, notes, slippage_bps, status)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               (agent_id, wallet_id, order_type, side, symbol, chain, quantity, price, trigger_reason, signal_id, strategy_id, notes, slippage_bps, status, mint)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (agent["id"], data.wallet_id, data.order_type, data.side.upper(),
              data.symbol, data.chain, data.quantity, data.price,
-             data.trigger_reason, data.signal_id, data.strategy_id, data.notes, data.slippage_bps, "pending")
+             data.trigger_reason, data.signal_id, data.strategy_id, data.notes, data.slippage_bps, "pending",
+             mint or "")
         )
         order_id = cur.lastrowid
         await db.commit()
@@ -1142,7 +1148,8 @@ async def paper_fill_order(order_id: int, agent: dict = Depends(get_agent)):
             raise HTTPException(409, f"Order is '{order['status']}'; only pending orders can be paper-filled")
 
         # Resolve a fill price: live quote first, then the order's own limit price.
-        fill_price = await _fetch_quote(order["symbol"])
+        fill_price = await (_fetch_quote(order["symbol"], order["mint"]) if order.get("mint")
+                            else _fetch_quote(order["symbol"]))
         if fill_price is None:
             fill_price = order.get("price")
         if not fill_price:
@@ -2523,9 +2530,20 @@ async def list_markets(agent: dict = Depends(get_agent)):
     except Exception as e:
         return {"available": ["solana", "hyperliquid", "base", "polygon"], "error": str(e)}
 
-async def _fetch_quote(symbol: str) -> Optional[float]:
+async def _fetch_quote(symbol: str, mint: Optional[str] = None) -> Optional[float]:
     """Live USD quote: direct no-auth sources (Pyth → CoinGecko) first, external
-    RPC proxy only as a last resort. Returns None on total failure."""
+    RPC proxy only as a last resort. Returns None on total failure.
+
+    With a mint, the quote is for that exact token and nothing else: there is
+    deliberately no fallback to the ticker, because the ticker is the thing that
+    collides. No mint quote means no quote, and the risk check fails closed."""
+    if mint:
+        try:
+            from backend import market_sources as _ms
+            price = await _ms.price_by_mint(mint)
+            return float(price) if price else None
+        except Exception:
+            return None
     # Primary: Vantage-owned direct market sources (no external engine needed).
     try:
         from backend import market_sources as _ms
@@ -2810,7 +2828,8 @@ async def _load_book(agent_id: int) -> dict:
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
-            """SELECT symbol, side, filled_quantity, quantity, avg_fill_price, price
+            """SELECT symbol, side, filled_quantity, quantity, avg_fill_price, price,
+                      COALESCE(mint, '') AS mint
                FROM trading_orders WHERE agent_id=? AND status IN ('filled','submitted')
                ORDER BY COALESCE(executed_at, created_at), id""",
             (agent_id,)
@@ -2822,9 +2841,14 @@ async def _load_book(agent_id: int) -> dict:
         sym = (o["symbol"] or "").upper()
         if not sym:
             continue
+        mint = (o.get("mint") or "").strip()
         qty = o["filled_quantity"] or o["quantity"] or 0
         fill = o["avg_fill_price"] or o["price"] or 0
-        b = book.setdefault(sym, {"net_qty": 0.0, "cost_basis": 0.0, "realized": 0.0})
+        # A mint is its own position. Keyed by ticker alone, a pump.fun "BTC"
+        # merged into real BTC and was then valued at bitcoin's price.
+        key = f"{sym}@{mint}" if mint else sym
+        b = book.setdefault(key, {"net_qty": 0.0, "cost_basis": 0.0, "realized": 0.0,
+                                  "symbol": sym, "mint": mint})
         if str(o["side"]).upper() == "BUY":
             b["net_qty"] += qty
             b["cost_basis"] += qty * fill
@@ -2850,14 +2874,16 @@ async def _value_positions(book: dict) -> dict:
         total_realized += b["realized"]
         if abs(b["net_qty"]) < 1e-9:
             continue
-        live = await _fetch_quote(sym)
+        mint = b.get("mint") or ""
+        live = await (_fetch_quote(b.get("symbol", sym), mint) if mint else _fetch_quote(sym))
         avg_cost = (b["cost_basis"] / b["net_qty"]) if b["net_qty"] else 0
         market_value = (live or 0) * b["net_qty"]
         unrealized = (market_value - b["cost_basis"]) if live else 0
         total_value += market_value
         total_unrealized += unrealized
         positions.append({
-            "symbol": sym,
+            "symbol": b.get("symbol", sym),
+            "mint": mint or None,
             "net_quantity": round(b["net_qty"], 8),
             "avg_cost": round(avg_cost, 6),
             "live_price": live,
