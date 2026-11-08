@@ -18,7 +18,7 @@ import pytest
 from backend import signal_record as sr
 
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-MINT = "So111111111111" + "11111111111111111111111111111112"  # secret-scan:allow (wrapped SOL mint, public constant)
+MINT = "So111111111111" + "11111111111111111111111111112"  # secret-scan:allow (wrapped SOL mint, public constant)
 
 
 def _ulid() -> str:
