@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import os
 import random
 import sys
 import time
@@ -516,6 +517,9 @@ async def _federation_gossip_loop():
             logger.debug("Federation Buzz discovery skipped this cycle: %s", exc)
 
 
+_SHUTDOWN_GRACE_S = float(os.environ.get("VANTAGE_SHUTDOWN_GRACE_S", "10"))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global FFMPEG_AVAILABLE
@@ -727,11 +731,24 @@ async def lifespan(app: FastAPI):
     reconciler_task = asyncio.create_task(reconciliation_loop())
 
     yield
-    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, mention_poller_task, scoring_task, last30days_task, outcome_learner_task, event_bus_task, tier_recompute_task, reconciler_task]
+    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, mention_poller_task, scoring_task, last30days_task, outcome_learner_task, event_bus_task, tier_recompute_task, reconciler_task,
+                      # Started above but never stopped before: they outlived
+                      # every shutdown, still polling the database.
+                      lnurl_watcher_task, live_sweep_task]
     if execution_engine_task is not None:
         shutdown_tasks.append(execution_engine_task)
+    # Cancel all first, then wait a bounded time. Awaiting each cancelled task
+    # with no limit meant one task parked in a database call (aiosqlite runs
+    # statements on a worker thread; a busy wait lasts up to busy_timeout) or
+    # one that swallows cancellation stalled shutdown indefinitely -- seen as
+    # a 180 s test timeout in TestClient.__exit__ on CI.
     for t in shutdown_tasks:
         t.cancel()
+    _done, _pending = await asyncio.wait(shutdown_tasks, timeout=_SHUTDOWN_GRACE_S)
+    for t in _pending:
+        logger.warning("shutdown: background task %s (%s) did not stop within %ss; abandoning it",
+                       t.get_name(), getattr(t.get_coro(), "__qualname__", "?"), _SHUTDOWN_GRACE_S)
+    for t in _done:
         try:
             await t
         except asyncio.CancelledError:

@@ -249,14 +249,22 @@ async def snapshot_submitted_entries(db: aiosqlite.Connection) -> int:
             LIMIT 50""",
         NO_FILL_PRICE_STATUSES,
     )).fetchall()
+    # Quote first, write after. A write opens SQLite's write transaction and
+    # holds the database write lock until commit, so a network quote awaited
+    # after any write in this connection held that lock across every later
+    # quote -- minutes, on a slow price API, with every other writer in the
+    # process (and the CI test session) waiting out busy_timeout behind it.
+    priced = []
     for row in rows:
         order = dict(row)
-        price = await (_fetch_quote(order["symbol"], order["mint"]) if order["mint"] else _fetch_quote(order["symbol"]))
-        if not price:
-            continue  # no live quote yet -- retried next cycle, never a fake snapshot
         source = _source_for_order(order)
         if source is None:
             continue  # probe/unit traffic: no outcome row, no scoreboard entry
+        price = await (_fetch_quote(order["symbol"], order["mint"]) if order["mint"] else _fetch_quote(order["symbol"]))
+        if not price:
+            continue  # no live quote yet -- retried next cycle, never a fake snapshot
+        priced.append((order, source, price))
+    for order, source, price in priced:
         try:
             await db.execute(
                 """INSERT INTO trading_order_outcomes
@@ -331,15 +339,20 @@ async def record_outcomes_once() -> dict[str, int]:
                 (hours, *NO_FILL_PRICE_STATUSES, hours),
             )).fetchall()
 
+            # Quote with no transaction open (see snapshot_submitted_entries):
+            # the previous window committed, and only SELECTs have run since.
+            quoted = []
             for row in rows:
                 order = dict(row)
-                mark_price = await (_fetch_quote(order["symbol"], order["mint"]) if order["mint"] else _fetch_quote(order["symbol"]))
-                if not mark_price:
-                    continue  # try again next cycle rather than mark a fake price
                 source = _source_for_order(order)
                 if source is None:
                     continue  # probe/unit traffic is never marked
+                mark_price = await (_fetch_quote(order["symbol"], order["mint"]) if order["mint"] else _fetch_quote(order["symbol"]))
+                if not mark_price:
+                    continue  # try again next cycle rather than mark a fake price
+                quoted.append((order, source, mark_price))
 
+            for order, source, mark_price in quoted:
                 existing = await (await db.execute(
                     "SELECT order_id, entry_price_usd FROM trading_order_outcomes WHERE order_id=?",
                     (order["id"],),
@@ -365,6 +378,7 @@ async def record_outcomes_once() -> dict[str, int]:
                          order["strategy_id"], entry, mark_price, round(pnl_pct, 4)),
                     )
                 marked[window_label] += 1
+            await db.commit()  # this window's writes: one short transaction
         await db.commit()
     return marked
 
