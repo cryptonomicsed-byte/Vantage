@@ -11,6 +11,8 @@ not public market data.
 """
 from __future__ import annotations
 
+import asyncio
+
 import json
 import os
 from typing import Optional
@@ -247,6 +249,12 @@ _BUY = ("buy", "long", "bullish")
 _SELL = ("sell", "short", "bearish")
 
 
+@router.get("/stale")
+async def stale(agent: dict = Depends(get_agent)):
+    """Daemons running code older than what is on disk -- restart these."""
+    return await asyncio.to_thread(pipeline_mod.stale_processes)
+
+
 @router.post("/promote")
 async def promote_signals(data: PromoteRequest, agent: dict = Depends(get_agent)):
     import asyncio
@@ -256,11 +264,14 @@ async def promote_signals(data: PromoteRequest, agent: dict = Depends(get_agent)
 
     candidates = await asyncio.to_thread(
         pipeline_mod.promotable_signals, data.min_conviction, data.max_age_min,
-        data.limit, data.symbols)
+        data.limit, data.symbols,
+        # Only calls this run can act on compete for the limit.
+        ["buy", "sell"] if data.allow_short else ["buy"])
     plan = [{
         "signal_id": c["id"], "source": c["source"], "symbol": c["symbol"],
         "direction": c["direction"], "conviction": c["conviction"],
         "age_min": c["age_min"], "repeats": c.get("repeats", 1),
+        "mint": c.get("mint") or None,
     } for c in candidates]
 
     if not data.apply:
@@ -289,6 +300,9 @@ async def promote_signals(data: PromoteRequest, agent: dict = Depends(get_agent)
                     quantity=data.quantity, wallet_id=data.wallet_id,
                     trigger_reason=f"signal:{c['source']}",
                     signal_id=c["id"],  # exact attribution for the funnel
+                    # Trade the exact token the producer saw. Without this a
+                    # pump.fun token calling itself "BTC" was priced as bitcoin.
+                    mint=(c.get("mint") or None),
                 ),
                 agent,
             )

@@ -817,6 +817,40 @@ async def defillama_yields(limit: int = 25, min_tvl: float = 1_000_000) -> list[
 
 
 # ── DEX pairs / liquidity (DexScreener) ─────────────────────────────────────────────
+async def price_by_mint(mint: str, chain: str = "solana") -> Optional[float]:
+    """USD price of the token at exactly this mint address, or None.
+
+    Tickers collide: a pump.fun token can call itself "BTC". A signal that
+    carries a mint must be priced by that mint and never by its ticker, or a
+    +367% "BTC" pump is entered at bitcoin's price. Only pairs whose *base*
+    token is the mint are used (a pair quoting against it gives an inverted
+    price); the deepest one wins. Cached 30s.
+    """
+    m = (mint or "").strip()
+    if not m:
+        return None
+    key = f"mintpx:{m}"
+    cached = _cache_get(key, 30)
+    if cached is not None:
+        return cached or None
+    data = await _get_json(f"https://api.dexscreener.com/latest/dex/tokens/{m}", timeout=10)
+    best, best_liq = None, -1.0
+    for p in (data or {}).get("pairs") or []:
+        if (p.get("baseToken") or {}).get("address") != m:
+            continue
+        if chain and p.get("chainId") and p.get("chainId") != chain:
+            continue
+        try:
+            px = float(p.get("priceUsd") or 0)
+            liq = float((p.get("liquidity") or {}).get("usd") or 0)
+        except (TypeError, ValueError):
+            continue
+        if px > 0 and liq > best_liq:
+            best, best_liq = px, liq
+    _cache_put(key, best or 0.0)
+    return best
+
+
 async def dexscreener_search(query: str, limit: int = 20) -> list[dict]:
     """Search DEX pairs by token/symbol; returns price, liquidity, 24h volume. Cached 60s.
 

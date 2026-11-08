@@ -170,26 +170,54 @@ _PROBE_PREFIXES = ("pipeline_e2e", "unit-test", "unit_test", "test:", "test-",
 _PINE_RE = re.compile(r"^(pine:\d+)")
 
 
+# A probe may also mark itself with a trailing token ("quote-fallback-smoke").
+_PROBE_TOKEN_RE = re.compile(r"(^|[-_:\s])(smoke|probe|e2e|selftest)$", re.I)
+
+# Labels the old snapshot logic wrote that mean the same producer today.
+_LEGACY_ALIASES = {"manual": "manual_ui"}
+
+
+def _is_probe_prefix(low: str) -> bool:
+    """Prefix match on a token boundary: "smoke run" is a probe, "smokey_bear" is
+    a producer. A bare startswith() silently dropped any producer whose name
+    happened to begin with a probe word."""
+    for prefix in _PROBE_PREFIXES:
+        if low.startswith(prefix):
+            if prefix[-1] in ":-_" or len(low) == len(prefix) or not low[len(prefix)].isalnum():
+                return True
+    return False
+
+
+def _canonical_label(label: str | None) -> str | None:
+    """The one place a source label is decided. None means "not trading traffic".
+
+    Applied when an outcome is snapshotted *and* again when performance is
+    recomputed, so rows written by older code (or before a normaliser change)
+    converge onto today's label instead of splitting a producer's history.
+    """
+    reason = (label or "").strip()
+    if not reason:
+        return "manual_ui"
+    low = reason.lower()
+    if _is_probe_prefix(low) or _PROBE_TOKEN_RE.search(reason):
+        return None  # probe/unit traffic: recorded nowhere, aggregated never
+    reason = re.split(r"\s+[—–]+\s+", reason)[0]       # drop the score/annotation tail
+    reason = re.sub(r"_conviction_[\d.]+$", "", reason)   # drop the conviction suffix
+    reason = reason[:64] or "manual_ui"
+    return _LEGACY_ALIASES.get(reason, reason)
+
+
 def _source_for_order(order: dict) -> str | None:
     """Source label for an order, or None when it is not real trading traffic.
 
     The label is an identity used to aggregate realised performance, so two
-    orders from the same producer must share it. The raw trigger_reason is free
-    text and carries volatile bits -- "moonshot snipe — score=65" made a new
-    source on every score -- so only those volatile suffixes are stripped. The
-    producer's own name is otherwise preserved: merging distinct labels would
-    blend their results.
+    orders from the same producer must share it. Volatile suffixes are stripped
+    ("moonshot snipe — score=65" made a source per score); the producer's own
+    name is preserved, since merging distinct labels would blend their results.
     """
     if order.get("strategy_id") is not None:
         return f"strategy:{order['strategy_id']}"
-    reason = (order.get("trigger_reason") or "").strip()
-    if not reason:
-        return "manual_ui"
-    if any(reason.lower().startswith(prefix) for prefix in _PROBE_PREFIXES):
-        return None  # probe/unit traffic: recorded nowhere, aggregated never
-    reason = re.split(r"\s+[—–]+\s+", reason)[0]      # drop the score/annotation tail
-    reason = re.sub(r"_conviction_[\d.]+$", "", reason)  # drop the conviction suffix
-    return reason[:64] or "manual_ui"
+    return _canonical_label(order.get("trigger_reason"))
 
 
 async def snapshot_submitted_entries(db: aiosqlite.Connection) -> int:
@@ -213,7 +241,8 @@ async def snapshot_submitted_entries(db: aiosqlite.Connection) -> int:
     snapshotted = 0
     placeholders = ",".join("?" * len(NO_FILL_PRICE_STATUSES))
     rows = await (await db.execute(
-        f"""SELECT o.id, o.symbol, o.agent_id, o.side, o.trigger_reason, o.strategy_id
+        f"""SELECT o.id, o.symbol, o.agent_id, o.side, o.trigger_reason, o.strategy_id,
+                   COALESCE(o.mint, '') AS mint
             FROM trading_orders o
             WHERE o.side='BUY' AND o.status IN ({placeholders}) AND o.executed_at IS NOT NULL
               AND NOT EXISTS (SELECT 1 FROM trading_order_outcomes t WHERE t.order_id = o.id)
@@ -222,7 +251,7 @@ async def snapshot_submitted_entries(db: aiosqlite.Connection) -> int:
     )).fetchall()
     for row in rows:
         order = dict(row)
-        price = await _fetch_quote(order["symbol"])
+        price = await (_fetch_quote(order["symbol"], order["mint"]) if order["mint"] else _fetch_quote(order["symbol"]))
         if not price:
             continue  # no live quote yet -- retried next cycle, never a fake snapshot
         source = _source_for_order(order)
@@ -276,7 +305,7 @@ async def record_outcomes_once() -> dict[str, int]:
         for window_label, col_suffix, hours in WINDOWS:
             rows = await (await db.execute(
                 f"""SELECT o.id, o.symbol, o.avg_fill_price, o.trigger_reason,
-                           o.strategy_id, o.agent_id, o.side
+                           o.strategy_id, o.agent_id, o.side, COALESCE(o.mint, '') AS mint
                     FROM trading_orders o
                     WHERE o.side='BUY' AND o.status='filled'
                       AND o.avg_fill_price IS NOT NULL AND o.avg_fill_price > 0
@@ -290,7 +319,7 @@ async def record_outcomes_once() -> dict[str, int]:
                     UNION
 
                     SELECT o.id, o.symbol, o.avg_fill_price, o.trigger_reason,
-                           o.strategy_id, o.agent_id, o.side
+                           o.strategy_id, o.agent_id, o.side, COALESCE(o.mint, '') AS mint
                     FROM trading_orders o
                     JOIN trading_order_outcomes t ON t.order_id = o.id
                     WHERE o.side='BUY' AND o.status IN ({no_fill_placeholders})
@@ -304,7 +333,7 @@ async def record_outcomes_once() -> dict[str, int]:
 
             for row in rows:
                 order = dict(row)
-                mark_price = await _fetch_quote(order["symbol"])
+                mark_price = await (_fetch_quote(order["symbol"], order["mint"]) if order["mint"] else _fetch_quote(order["symbol"]))
                 if not mark_price:
                     continue  # try again next cycle rather than mark a fake price
                 source = _source_for_order(order)
@@ -356,22 +385,32 @@ async def refresh_source_performance() -> int:
         # and probe traffic that is now excluded lingers as a ghost row.
         await db.execute("DELETE FROM source_performance")
         for window_label, col_suffix, _ in WINDOWS:
-            rows = await (await db.execute(
-                f"""SELECT source,
-                           SUM(CASE WHEN ABS(pnl_pct_{col_suffix}) <= {_PNL_SANITY_PCT} THEN 1 ELSE 0 END) AS n_trades,
-                           SUM(CASE WHEN pnl_pct_{col_suffix} > 0
-                                     AND ABS(pnl_pct_{col_suffix}) <= {_PNL_SANITY_PCT} THEN 1 ELSE 0 END) AS wins,
-                           SUM(CASE WHEN ABS(pnl_pct_{col_suffix}) > {_PNL_SANITY_PCT} THEN 1 ELSE 0 END) AS n_suspect,
-                           AVG(CASE WHEN ABS(pnl_pct_{col_suffix}) <= {_PNL_SANITY_PCT}
-                                    THEN pnl_pct_{col_suffix} END) AS avg_pnl_pct
+            raw = await (await db.execute(
+                f"""SELECT source, pnl_pct_{col_suffix} AS pnl
                     FROM trading_order_outcomes
-                    WHERE pnl_pct_{col_suffix} IS NOT NULL
-                    GROUP BY source"""
+                    WHERE pnl_pct_{col_suffix} IS NOT NULL"""
             )).fetchall()
-            for r in rows:
-                if any((r["source"] or "").startswith(p) for p in _PROBE_PREFIXES):
-                    continue  # legacy probe rows predating the guard
-                if not r["n_trades"]:
+            # Aggregate over the canonical label, not the stored one: a row
+            # snapshotted by older code carries an older label, and grouping
+            # by the raw column kept "moonshot snipe — score=65" and probe
+            # traffic alive on the scoreboard after the normaliser was fixed.
+            agg: dict[str, dict] = {}
+            for r in raw:
+                label = r["source"]
+                if not (label or "").startswith("strategy:"):
+                    label = _canonical_label(label)
+                if label is None:
+                    continue
+                a = agg.setdefault(label, {"n": 0, "wins": 0, "suspect": 0, "sum": 0.0})
+                pnl = float(r["pnl"])
+                if abs(pnl) > _PNL_SANITY_PCT:
+                    a["suspect"] += 1
+                    continue
+                a["n"] += 1
+                a["sum"] += pnl
+                a["wins"] += 1 if pnl > 0 else 0
+            for label, a in agg.items():
+                if not a["n"]:
                     continue  # only suspect marks: no honest average to publish
                 await db.execute(
                     """INSERT INTO source_performance
@@ -381,8 +420,8 @@ async def refresh_source_performance() -> int:
                            n_trades=excluded.n_trades, wins=excluded.wins,
                            avg_pnl_pct=excluded.avg_pnl_pct, n_suspect=excluded.n_suspect,
                            updated_at=excluded.updated_at""",
-                    (r["source"], window_label, r["n_trades"], r["wins"],
-                     round(float(r["avg_pnl_pct"]), 4), r["n_suspect"] or 0),
+                    (label, window_label, a["n"], a["wins"],
+                     round(a["sum"] / a["n"], 4), a["suspect"]),
                 )
                 updated += 1
         await db.commit()

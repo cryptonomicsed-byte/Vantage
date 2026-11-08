@@ -1615,6 +1615,11 @@ CREATE TABLE IF NOT EXISTS external_iranti_memories (
             await db.execute("ALTER TABLE trading_orders ADD COLUMN slippage_bps INTEGER")
         except Exception:
             pass
+        # The exact token an order trades; '' for a plain ticker order.
+        try:
+            await db.execute("ALTER TABLE trading_orders ADD COLUMN mint TEXT DEFAULT ''")
+        except Exception:
+            pass
         # Copy-trading attribution -- which leader/order this order mirrors,
         # if any. Nullable; a normal self-initiated order leaves both null.
         for col, ddl in [
