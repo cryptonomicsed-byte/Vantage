@@ -2737,7 +2737,37 @@ async def ingest_signal(request: Request, tool: dict = Depends(get_system_tool))
         result["action"] = "HOLD"
         result["note"] = "Conviction too low for auto-execution"
 
+    # P1-04: the trading door also writes the ledger (door 'trading'), after
+    # everything above has run. Auto-execute, the agent_id check and
+    # idempotency are untouched; nothing here changes the response, and the
+    # ledger write is scheduled off the request path (flag SIGNAL_LEDGER_ENABLED).
+    _ledger_trading_ingest(body, symbol, source, direction, conviction, chain)
     return result
+
+
+def _ledger_trading_ingest(body: dict, symbol, source, direction, conviction, chain) -> None:
+    try:
+        from backend import signal_ledger as _sl
+        if not _sl.enabled():
+            return
+        record = None
+        if isinstance(body, dict) and "schema" in body:
+            from backend import signal_record as _sr
+            rec, problems = _sr.validate(body)
+            if not problems:
+                # Pre-cap value: this door does not cap (its conviction drives
+                # auto-execute, which this ticket must not change).
+                rec["conviction_raw"] = rec["conviction"]
+                record = rec
+        signal = {
+            "symbol": str(symbol)[:20], "source": str(source)[:30],
+            "type": str(body.get("type") or "signal")[:20], "conviction": conviction,
+            "direction": str(direction or ""), "detail": str(body.get("detail") or ""),
+            "mint": str(body.get("mint") or "")[:64], "chain": str(chain or ""), "ts": int(time.time()),
+        }
+        _sl.schedule("trading", signal, None, record)
+    except Exception as e:  # never fails the ingest
+        logger.warning("trading-door ledger hook failed (ingest unaffected): %s", e)
 
 # ── Trade Journal ───────────────────────────────────────────
 
