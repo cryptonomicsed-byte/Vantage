@@ -68,6 +68,7 @@ dependencies = [
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
+    "pytest-timeout>=2.2.0",
     "pytest-cov>=4.0.0",
     "httpx>=0.27.0",
     "alembic>=1.13.0",
@@ -86,6 +87,11 @@ include = ["backend*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# A hung test must fail by name, not hold the whole CI job until the runner
+# cancels it. Observed: one voice-relay test hung inside the full suite and the
+# job died at 12 minutes with no attributable failure.
+timeout = 180
+timeout_method = "thread"
 testpaths = ["tests", "backend/tests"]
 markers = [
     "live: requires a live external service (skipped unless ECO_LIVE=1)",

@@ -917,6 +917,19 @@ class TestPlatform:
         names = [e["name"] for e in r.json()["leaderboard"]]
         assert "FreshLeaderboardAgent" in names
 
+    def test_leaderboard_ties_put_the_newest_agent_first(self, client):
+        """Deterministic form of the test above: it only failed once a session
+        had registered more agents than the limit, because tied (zero-view)
+        agents came back oldest-first and the newest fell past LIMIT."""
+        _reg(client, "TieOldest")
+        _reg(client, "TieMiddle")
+        key = _reg(client, "TieNewest")
+        r = client.get("/api/agents/leaderboard?limit=1", headers=_headers(key))
+        assert r.status_code == 200
+        board = r.json()["leaderboard"]
+        if board and (board[0].get("total_views") or 0) == 0:
+            assert board[0]["name"] == "TieNewest", board
+
 
 # ---------------------------------------------------------------------------
 # Capability Matchmaking

@@ -69,6 +69,29 @@ class VantageEvent:
 # ── Internal bus state ────────────────────────────────────────────────────────
 
 _event_queue: asyncio.Queue = asyncio.Queue()
+_queue_loop: "asyncio.AbstractEventLoop | None" = None
+
+
+def _queue() -> asyncio.Queue:
+    """The queue for the loop that is running now.
+
+    An asyncio.Queue binds to the first loop that awaits on it. A module-level
+    queue therefore breaks the moment the app runs on a second loop (a second
+    TestClient in one process, a worker restart): every get() raises "bound to a
+    different event loop". Rebinding per loop keeps the bus usable; events left
+    on a dead loop's queue had no consumer anyway.
+    """
+    global _event_queue, _queue_loop
+    loop = asyncio.get_running_loop()
+    if _queue_loop is not loop:
+        if _queue_loop is not None:
+            _event_queue = asyncio.Queue()
+        _queue_loop = loop
+    return _event_queue
+
+
+_ERROR_BACKOFF_MIN = 0.05
+_ERROR_BACKOFF_MAX = 5.0
 _subscribers: dict[str, list[Callable]] = {}
 _sinks: list[Callable] = []
 
@@ -96,7 +119,7 @@ def register_sink(sink: Callable) -> None:
 
 async def emit(event: VantageEvent) -> None:
     """Put an event on the queue. Returns immediately (non-blocking)."""
-    await _event_queue.put(event)
+    await _queue().put(event)
 
 
 # ── SQLite audit log ──────────────────────────────────────────────────────────
@@ -161,9 +184,11 @@ async def _dispatch_loop() -> None:
     """Background coroutine: drains the queue and fans out to subscribers + sinks."""
     await _ensure_event_log_table()
     logger.info("event_bus: dispatch loop started")
+    backoff = _ERROR_BACKOFF_MIN
     while True:
         try:
-            event: VantageEvent = await _event_queue.get()
+            queue = _queue()
+            event: VantageEvent = await queue.get()
             # Persist to audit log
             await _persist_event(event)
 
@@ -194,12 +219,20 @@ async def _dispatch_loop() -> None:
                         exc,
                     )
 
-            _event_queue.task_done()
+            queue.task_done()
+            backoff = _ERROR_BACKOFF_MIN
         except asyncio.CancelledError:
             logger.info("event_bus: dispatch loop cancelled")
             break
         except Exception as exc:
-            logger.error("event_bus: unexpected error in dispatch loop: %s", exc)
+            # Never retry without yielding. An error that recurs instantly (a
+            # loop-bound queue, a dead DB) otherwise becomes a hot spin that
+            # starves the event loop: observed 3.5M identical log lines in three
+            # minutes and an app whose startup never completed.
+            logger.error("event_bus: unexpected error in dispatch loop: %s "
+                         "(retrying in %.2fs)", exc, backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, _ERROR_BACKOFF_MAX)
 
 
 async def start_dispatch_loop() -> None:
