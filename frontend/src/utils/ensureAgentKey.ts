@@ -16,11 +16,18 @@ let inFlight: Promise<string | null> | null = null
 
 async function registerViewer(): Promise<string | null> {
   const name = `viewer-${Math.random().toString(36).slice(2, 10)}`
+  // Registration provisions a Nostr identity server-side and can take tens of
+  // seconds under load. Without a ceiling the AppLayout gate sits on
+  // "Connecting…" indefinitely, so bound it: a slow backend costs a viewer
+  // their auto-identity, not the whole UI.
+  const ctl = new AbortController()
+  const timer = setTimeout(() => ctl.abort(), 8000)
   try {
     const r = await fetch('/api/agents/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, bio: 'Auto-registered browser visitor' }),
+      signal: ctl.signal,
     })
     if (!r.ok) return null
     const data = await r.json()
@@ -30,6 +37,8 @@ async function registerViewer(): Promise<string | null> {
     return data.api_key as string
   } catch {
     return null
+  } finally {
+    clearTimeout(timer)
   }
 }
 
