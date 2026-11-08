@@ -28,8 +28,6 @@ import GuildProfile from './components/GuildProfile'
 import GuildShell from './components/GuildShell'
 import GuildDirectory from './components/GuildDirectory'
 import ActivityTicker from './components/ActivityTicker'
-import BtcClock from './components/BtcClock'
-import ReceiptPulse from './components/ReceiptPulse'
 import AgentCollectivesPage from './pages/AgentCollectivesPage'
 import Landing from './pages/Landing'
 import ProductionCollab from './components/ProductionCollab'
@@ -163,8 +161,6 @@ function AppLayout() {
       <Particles />
       <div className="content-area">
         <div id="feed-topbar-slot" />
-        <BtcClock />
-        <ReceiptPulse />
         <ActivityTicker />
         {subLinks && <SubNav links={subLinks} />}
         <ObserverMode enabled={observerEnabled} onToggle={() => setObserverEnabled(o => !o)} />
