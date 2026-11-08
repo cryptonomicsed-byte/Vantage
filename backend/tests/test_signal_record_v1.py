@@ -209,6 +209,9 @@ def test_validator_maps_legacy_directions_and_catches_unit_bugs():
     assert not p and rec["direction"] == "long"
     rec, p = sr.validate(_record(direction="sell"), now=now)
     assert not p and rec["direction"] == "short"
+    for legacy in ("flat", "NEUTRAL", "WAIT"):  # fpconv, the pool, Loom
+        rec, p = sr.validate(_record(direction=legacy), now=now)
+        assert not p and rec["direction"] == "hold"
     _, p = sr.validate(_record(created_at=now * 1000), now=now)
     assert any("future" in x for x in p)
     _, p = sr.validate(_record(asset={"symbol": "X", "chain": "solana", "address": "0xabc"}), now=now)
