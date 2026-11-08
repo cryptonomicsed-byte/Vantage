@@ -339,10 +339,11 @@ async def test_a_session_without_an_allowlist_has_no_tools(client, fresh_agent, 
     assert calls[0]["is_error"] == 1
 
 
-@pytest.mark.xfail(
-    reason="CI only: another writer in the test session holds the SQLite write lock for more than busy_timeout (90s) -- the voice relay's record/complete/stop writes then wait out the full timeout and fail with 'database is locked' (CI runs 42527783837, and the #102 merge on main). The holder is not in the voice store; it is under investigation. Re-xfailed after #102 removed this mark on the basis of 20/20 local runs, which do not reproduce the CI contention.",
-    strict=False,
-)
+# Twice xfailed for 'database is locked' on CI. The cause was outside the voice
+# relay: trade_outcome_learner (started by the app lifespan that sync_client
+# runs) held SQLite's write lock across its network price quotes, so the
+# relay's writes waited out busy_timeout. Fixed at the source, with a probe
+# test (test_outcome_learner_lock_scope.py); these are normal tests again.
 async def test_an_allowed_tool_actually_executes(client, fresh_agent, sync_client, fake_engine):
     """End to end: the model asks, the relay runs it as the agent, and the real
     endpoint's answer comes back."""
@@ -435,10 +436,6 @@ def _receive_within(ws, seconds: float):
         pool.shutdown(wait=False)
 
 
-@pytest.mark.xfail(
-    reason="CI only: another writer in the test session holds the SQLite write lock for more than busy_timeout (90s) -- the voice relay's record/complete/stop writes then wait out the full timeout and fail with 'database is locked' (CI runs 42527783837, and the #102 merge on main). The holder is not in the voice store; it is under investigation. Re-xfailed after #102 removed this mark on the basis of 20/20 local runs, which do not reproduce the CI contention.",
-    strict=False,
-)
 async def test_audio_keeps_flowing_while_a_tool_call_is_in_flight(
     client, fresh_agent, sync_client, fake_engine, monkeypatch
 ):
@@ -484,8 +481,13 @@ async def test_audio_keeps_flowing_while_a_tool_call_is_in_flight(
         # the announcement is sent from the spawned task, the audio frame from
         # the pump itself, and which gets scheduled first is not a contract
         # worth asserting on -- so collect both by type rather than assume one.
-        first = json.loads(_receive_within(ws, 3.0))
-        second = json.loads(_receive_within(ws, 3.0))
+        # 10 s, not 3: the announcement is sent after the audit row is written
+        # (a recorded-before-it-runs contract), so a 3 s bound measured SQLite
+        # write latency on a loaded runner, not pump blocking. The tool is
+        # held open forever, so a serialised pump would still never deliver
+        # the audio frame -- the test's detection power is unchanged.
+        first = json.loads(_receive_within(ws, 10.0))
+        second = json.loads(_receive_within(ws, 10.0))
         assert {first["type"], second["type"]} == {"tool_call", "audio"}
         audio_msg = first if first["type"] == "audio" else second
         assert audio_msg["audio"] == base64.b64encode(b"\x01\x02\x03").decode()
