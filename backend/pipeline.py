@@ -347,9 +347,24 @@ def _freshness(age_s: float | None) -> str:
 # explicit -- conviction floor, age ceiling, an owner-supplied size, and it never
 # runs unless the caller asks for apply=true.
 
+_BUY_WORDS = ("BUY", "LONG", "BULLISH")
+_SELL_WORDS = ("SELL", "SHORT", "BEARISH")
+_PROMOTE_SCAN_CAP = 5000  # rows read per call; the window is minutes, not weeks
+
+
 def promotable_signals(min_conviction: float = 0.75, max_age_min: int = 60,
-                       limit: int = 25, symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-    """Recent pooled signals above the conviction floor that no order consumed."""
+                       limit: int = 25, symbols: Optional[List[str]] = None,
+                       sides: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """Recent unconsumed pooled signals, one entry per distinct call, ranked.
+
+    A "call" is (source, symbol, direction, mint): a producer repeating itself
+    every 90s is one call, and two tokens that share a ticker are two calls.
+
+    The limit applies to calls, after grouping, and only to calls on an
+    actionable side. Limiting raw rows first let one producer's repeats fill
+    every slot: four repeats of a 1.0-conviction SOL SELL hid ogun_degen's BUYs
+    entirely, and a SELL that paper mode must skip still consumed the slot.
+    """
     import sqlite3
     import time as _time
 
@@ -357,64 +372,51 @@ def promotable_signals(min_conviction: float = 0.75, max_age_min: int = 60,
 
     if not os.path.exists(DB_PATH):
         return []
-    since = int(_time.time()) - max(1, max_age_min) * 60
+    now = _time.time()
+    since = int(now) - max(1, max_age_min) * 60
+    want_sides = {x.lower() for x in (sides or ["buy", "sell"])}
     con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=5.0)
     con.row_factory = sqlite3.Row
     try:
         has_promotions = con.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='signal_promotions'"
         ).fetchone()
-        sql = """SELECT id, symbol, source, type, conviction, direction, mint, ts
-                 FROM signal_pool
-                 WHERE ts >= ? AND conviction >= ?
-                   AND direction IS NOT NULL AND direction != ''
-                   {symbols}
-                 {dedupe}
-                 ORDER BY conviction DESC, ts DESC LIMIT ?"""
         dedupe = ("AND id NOT IN (SELECT signal_id FROM signal_promotions)"
                   if has_promotions else "")
-        # Promotion is per-symbol opt-in: a memecoin with no quote cannot be
-        # risk-sized, so an operator restricts the universe rather than watching
-        # every candidate fail the notional check.
         wanted = [x.strip().upper() for x in (symbols or []) if x.strip()]
-        sym_sql, sym_params = "", ()
-        if wanted:
-            sym_sql = "AND UPPER(symbol) IN (" + ",".join("?" * len(wanted)) + ")"
-            sym_params = tuple(wanted)
-        rows = [dict(r) for r in con.execute(
-            sql.format(dedupe=dedupe, symbols=sym_sql),
-            (since, min_conviction, *sym_params, limit))]
-        for r in rows:
-            r["age_min"] = round((_time.time() - r["ts"]) / 60.0, 1)
-        # One order per (source, symbol, direction): a producer that repeats the
-        # same call every 90s must not become four identical orders.
-        seen: Dict[tuple, Dict[str, Any]] = {}
-        for r in rows:
-            key = (r["source"], (r["symbol"] or "").upper(), (r["direction"] or "").upper())
-            if key not in seen:
-                r["repeats"] = 1
-                r["group_ids"] = [r["id"]]
-                seen[key] = r
+        sym_sql = ("AND UPPER(symbol) IN (" + ",".join("?" * len(wanted)) + ")") if wanted else ""
+        rows = con.execute(
+            f"""SELECT id, symbol, source, type, conviction, direction,
+                       COALESCE(mint, '') AS mint, ts
+                FROM signal_pool
+                WHERE ts >= ? AND conviction >= ?
+                  AND direction IS NOT NULL AND direction != ''
+                  {sym_sql} {dedupe}
+                ORDER BY ts DESC LIMIT ?""",
+            (since, min_conviction, *wanted, _PROMOTE_SCAN_CAP)).fetchall()
+
+        calls: Dict[tuple, Dict[str, Any]] = {}
+        for row in rows:
+            r = dict(row)
+            d = (r["direction"] or "").upper()
+            side = "buy" if d in _BUY_WORDS else ("sell" if d in _SELL_WORDS else None)
+            if side is None or side not in want_sides:
+                continue
+            key = (r["source"], (r["symbol"] or "").upper(), d, r["mint"])
+            c = calls.get(key)
+            if c is None:   # rows are newest-first: the first one seen is the latest
+                r.update(side=side, repeats=1, group_ids=[r["id"]],
+                         age_min=round((now - r["ts"]) / 60.0, 1))
+                calls[key] = r
             else:
-                seen[key]["repeats"] += 1
-                seen[key]["group_ids"].append(r["id"])
-        # The collapse is only honest if promoting the group consumes ALL of its
-        # members: otherwise the next cycle picks the next repeat and places the
-        # same order again under a fresh signal id.
-        for r in seen.values():
-            if r["repeats"] == 1:
-                extra = [x[0] for x in con.execute(
-                    """SELECT id FROM signal_pool
-                       WHERE source=? AND UPPER(symbol)=? AND UPPER(direction)=?
-                         AND ts >= ?""",
-                    (r["source"], (r["symbol"] or "").upper(),
-                     (r["direction"] or "").upper(), since)).fetchall()]
-                if len(extra) > r["repeats"]:
-                    r["group_ids"] = extra
-                    r["repeats"] = len(extra)
-        return list(seen.values())
+                c["repeats"] += 1
+                c["group_ids"].append(r["id"])
+                c["conviction"] = max(c["conviction"], r["conviction"])
+        ranked = sorted(calls.values(), key=lambda c: (-c["conviction"], -c["ts"]))
+        return ranked[:max(0, limit)]
     finally:
         con.close()
+
 
 def signal_flow(days: int = 7) -> Dict[str, Any]:
     """Signal -> order -> outcome funnel, per source, from the real rows."""
@@ -572,3 +574,95 @@ async def events_by_node(db) -> Dict[str, Dict[str, Any]]:
            FROM pipeline_events GROUP BY node""")
     rows = await cur.fetchall()
     return {r["node"]: {"events": r["n"], "last_ts": r["last_ts"]} for r in rows}
+
+def stale_processes(root: str = "/opt/ares") -> Dict[str, Any]:
+    """Running Python processes executing code older than what is on disk.
+
+    A fix can be committed, merged and deployed while a long-lived daemon keeps
+    the old module in memory: the trade-outcome learner ran for a day on its
+    pre-fix code and kept rewriting the scoreboard with probe rows that the
+    on-disk version excluded. Restarting the API does not touch it.
+
+    A process is stale when its own script, or a backend module it imports,
+    was modified after the process started. Imports are read statically from
+    the script (and followed one level into backend/), so a module pulled in
+    only transitively deeper than that is not seen: "not stale" means "nothing
+    it visibly imports changed", not a proof.
+    """
+    out: Dict[str, Any] = {"available": False, "stale": [], "checked": 0}
+    try:
+        btime = next(int(l.split()[1]) for l in open("/proc/stat") if l.startswith("btime"))
+        hz = os.sysconf("SC_CLK_TCK")
+    except Exception as e:  # not Linux /proc
+        out["reason"] = f"no /proc: {e}"
+        return out
+    vantage = os.path.join(root, "Vantage")
+    backend_dir = os.path.join(vantage, "backend")
+    import re as _re
+    _imp = _re.compile(r"^\s*(?:from\s+(?:backend)?\.*([\w.]+)\s+import|import\s+backend\.([\w.]+))", _re.M)
+
+    def _backend_imports(path: str, depth: int = 2, seen=None) -> set:
+        seen = set() if seen is None else seen
+        try:
+            src = open(path, encoding="utf-8", errors="replace").read()
+        except OSError:
+            return seen
+        for a, b in _imp.findall(src):
+            mod = (a or b).split(".")
+            cand = os.path.join(backend_dir, *mod) + ".py"
+            if not os.path.exists(cand):
+                cand = os.path.join(backend_dir, *mod, "__init__.py")
+            if os.path.exists(cand) and cand not in seen:
+                seen.add(cand)
+                if depth > 1:
+                    _backend_imports(cand, depth - 1, seen)
+        return seen
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            argv = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")
+            argv = [a.decode(errors="replace") for a in argv if a]
+            if not argv or "python" not in os.path.basename(argv[0]):
+                continue
+            cwd = os.readlink(f"/proc/{pid}/cwd")
+            script = next((a for a in argv[1:] if a.endswith(".py")), None)
+            module = argv[argv.index("-m") + 1] if "-m" in argv[:-1] else None
+            if script and not os.path.isabs(script):
+                script = os.path.join(cwd, script)
+            home = script or cwd
+            if not home.startswith(root):
+                continue
+            stat = open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()
+            started = btime + int(stat[19]) / hz
+        except (OSError, ValueError, IndexError):
+            continue
+        out["checked"] += 1
+        newest, why = 0.0, ""
+        files = []
+        if script and os.path.exists(script):
+            files.append(script)
+            if script.startswith(vantage):
+                files += sorted(_backend_imports(script))
+        elif module and home.startswith(vantage):
+            mod_path = os.path.join(vantage, *module.split(".")) + ".py"
+            if os.path.exists(mod_path):
+                files.append(mod_path)
+                files += sorted(_backend_imports(mod_path))
+        changed = [f for f in files if os.path.getmtime(f) > started + 1]
+        if changed:
+            newest = max(os.path.getmtime(f) for f in changed)
+            why = ", ".join(os.path.relpath(f, vantage if f.startswith(vantage) else root)
+                            for f in changed[:4]) + (" …" if len(changed) > 4 else "")
+        if newest > started + 1:
+            out["stale"].append({
+                "pid": int(pid),
+                "process": script and os.path.relpath(script, root) or f"-m {module}",
+                "started": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(started)),
+                "code_changed": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(newest)),
+                "changed": why,
+                "behind_s": int(newest - started),
+            })
+    out["stale"].sort(key=lambda x: -x["behind_s"])
+    out["available"] = True
+    return out

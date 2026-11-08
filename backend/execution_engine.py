@@ -293,7 +293,9 @@ async def _process_solana_order(order: dict, wallet_key: str):
 
     parts = symbol.split("/")
     base = parts[0].strip()
-    base_mint = _resolve_solana_mint(base)
+    # An order that names its mint trades that token, never whatever the ticker
+    # resolves to: tickers collide, and a pump.fun "BTC" is not bitcoin.
+    base_mint = (order.get("mint") or "").strip() or _resolve_solana_mint(base)
     if not base_mint:
         return None, "failed", f"unknown Solana token '{base}' (add to SOLANA_TOKENS or use mint)"
 

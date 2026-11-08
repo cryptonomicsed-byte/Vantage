@@ -491,3 +491,22 @@ async def test_filled_submitted_and_confirmed_all_marked_correctly_in_one_cycle(
     assert rows[1]["pnl_pct_1h"] == pytest.approx(10.0)   # BTC: (55000-50000)/50000
     assert rows[2]["pnl_pct_1h"] == pytest.approx(10.0)   # ETH: (3300-3000)/3000
     assert rows[3]["pnl_pct_1h"] == pytest.approx(5.0)    # SOL: (105-100)/100
+
+
+# ── one canonicaliser, applied at snapshot and at recompute ────────────────
+
+from backend import trade_outcome_learner as _tol
+
+
+def test_canonical_label_strips_volatile_tails_and_drops_probes():
+    assert _tol._canonical_label("moonshot snipe — score=65") == "moonshot snipe"
+    assert _tol._canonical_label("moonshot snipe — score=71") == "moonshot snipe"
+    assert _tol._canonical_label("ogun_degen_conviction_0.91") == "ogun_degen"
+    assert _tol._canonical_label("signal:ogun_degen") == "signal:ogun_degen"
+    assert _tol._canonical_label("") == "manual_ui"
+    assert _tol._canonical_label("manual") == "manual_ui"      # legacy alias
+    for probe in ("pipeline_e2e", "manual_test_trade", "quote-fallback-smoke",
+                  "smoke run", "unit-test x", "nightly_e2e"):
+        assert _tol._canonical_label(probe) is None, probe
+    # A producer whose name merely contains a probe word is not a probe.
+    assert _tol._canonical_label("smokey_bear_signals") == "smokey_bear_signals"
