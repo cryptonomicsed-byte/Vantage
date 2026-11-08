@@ -178,24 +178,83 @@ async def create_task(
     return {"id": task_id, "status": "proposed"}
 
 
+# P1-12: a claim is a lease. Same contract as routers/jobs.py claim_task:
+# one atomic UPDATE that succeeds if the task is proposed, already claimed by
+# the same agent (renew), or the previous lease has expired -- so two
+# simultaneous claims cannot both win. A claim made before leases existed has
+# no claim_expires_at; it counts as expired DEFAULT_LEASE_MINUTES after its
+# last update instead of holding the task forever.
+DEFAULT_LEASE_MINUTES = 30
+MAX_LEASE_MINUTES = 1440
+
+
+def _clamped_lease(minutes: int) -> int:
+    return max(1, min(int(minutes), MAX_LEASE_MINUTES))
+
+
+def _lease_expired_sql() -> str:
+    return (f"(claim_expires_at <= datetime('now') OR "
+            f"(claim_expires_at IS NULL AND updated_ts <= unixepoch() - {DEFAULT_LEASE_MINUTES * 60}))")
+
+
 @router.post("/{space_id}/tasks/{task_id}/claim")
-async def claim_task(slug: str, space_id: str, task_id: str, agent: dict = Depends(get_agent)):
+async def claim_task(slug: str, space_id: str, task_id: str,
+                     lease_minutes: int = Query(DEFAULT_LEASE_MINUTES),
+                     agent: dict = Depends(get_agent)):
     await _assert_guild_member(slug, agent)
+    lease = _clamped_lease(lease_minutes)
+    now = int(time.time())
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM vantage_tasks WHERE id=? AND workspace_id=?", (task_id, space_id)) as cur:
-            row = await cur.fetchone()
-        if not row:
-            raise HTTPException(404, "Task not found")
-        if row["status"] != "proposed":
-            raise HTTPException(400, "Task is not claimable")
-        now = int(time.time())
-        await db.execute(
-            "UPDATE vantage_tasks SET status='claimed', claimed_by_agent_id=?, updated_ts=? WHERE id=?",
-            (agent["id"], now, task_id),
+        cur = await db.execute(
+            f"""UPDATE vantage_tasks
+                SET status='claimed', claimed_by_agent_id=?, updated_ts=?,
+                    claim_expires_at=datetime('now', '+{lease} minutes')
+                WHERE id=? AND workspace_id=? AND guild_slug=?
+                  AND (status='proposed'
+                       OR (status='claimed' AND (claimed_by_agent_id=? OR {_lease_expired_sql()})))""",
+            (agent["id"], now, task_id, space_id, slug, agent["id"]),
         )
         await db.commit()
-    return {"ok": True, "status": "claimed"}
+        async with db.execute(
+            "SELECT status, claimed_by_agent_id, claim_expires_at FROM vantage_tasks "
+            "WHERE id=? AND workspace_id=? AND guild_slug=?", (task_id, space_id, slug)) as c:
+            row = await c.fetchone()
+    if not row:
+        raise HTTPException(404, "Task not found")
+    if cur.rowcount == 0:
+        if row["status"] == "claimed":
+            raise HTTPException(409, f"Task is claimed by another agent until {row['claim_expires_at']}")
+        raise HTTPException(400, "Task is not claimable")
+    return {"ok": True, "status": "claimed", "claim_expires_at": row["claim_expires_at"]}
+
+
+@router.post("/{space_id}/tasks/{task_id}/heartbeat")
+async def heartbeat_task(slug: str, space_id: str, task_id: str,
+                         lease_minutes: int = Query(DEFAULT_LEASE_MINUTES),
+                         agent: dict = Depends(get_agent)):
+    """Renew the lease on a claim you hold. 403 if you do not hold it."""
+    await _assert_guild_member(slug, agent)
+    lease = _clamped_lease(lease_minutes)
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            f"""UPDATE vantage_tasks
+                SET claim_expires_at=datetime('now', '+{lease} minutes'), updated_ts=?
+                WHERE id=? AND workspace_id=? AND guild_slug=?
+                  AND status='claimed' AND claimed_by_agent_id=?""",
+            (int(time.time()), task_id, space_id, slug, agent["id"]),
+        )
+        await db.commit()
+        async with db.execute(
+            "SELECT claim_expires_at FROM vantage_tasks WHERE id=? AND workspace_id=? AND guild_slug=?",
+            (task_id, space_id, slug)) as c:
+            row = await c.fetchone()
+    if not row:
+        raise HTTPException(404, "Task not found")
+    if cur.rowcount == 0:
+        raise HTTPException(403, "You do not hold a claim on this task")
+    return {"ok": True, "status": "claimed", "claim_expires_at": row["claim_expires_at"]}
 
 
 @router.post("/{space_id}/tasks/{task_id}/submit")
@@ -275,7 +334,7 @@ async def reject_task(
     now = int(time.time())
     async with get_db() as db:
         await db.execute(
-            "UPDATE vantage_tasks SET status='proposed', claimed_by_agent_id=NULL, updated_ts=? WHERE id=? AND workspace_id=?",
+            "UPDATE vantage_tasks SET status='proposed', claimed_by_agent_id=NULL, claim_expires_at=NULL, updated_ts=? WHERE id=? AND workspace_id=?",
             (now, task_id, space_id),
         )
         await db.execute(
