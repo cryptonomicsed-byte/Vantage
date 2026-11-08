@@ -339,20 +339,11 @@ async def test_a_session_without_an_allowlist_has_no_tools(client, fresh_agent, 
     assert calls[0]["is_error"] == 1
 
 
-@pytest.mark.xfail(
-    reason="real intermittent 'database is locked' on "
-    "voice_session_store.record_tool_call's INSERT (raised, not just slow -- "
-    "exceeds the 20s busy_timeout in db.get_db()). Investigated 2026-08-19 "
-    "(AAA+ audit, vantage2): confirmed the tool call itself still executes "
-    "correctly (engine.tool_results assertion passes), only the audit-log "
-    "write is lost. Root cause not yet isolated -- suspect a concurrent "
-    "get_db() writer on the same event-loop tick (touch()/complete_tool_call "
-    "racing record_tool_call) rather than a simple missing-timeout bug, since "
-    "get_db() already sets busy_timeout=20000 and WAL is enabled. Needs real "
-    "concurrency investigation, not a guessed fix -- xfail'd rather than "
-    "silently skipped or falsely marked passing.",
-    strict=False,
-)
+# Was xfail(strict=False) for an intermittent 'database is locked' on
+# record_tool_call's INSERT, written against a 20s busy_timeout. get_db() now
+# waits 90s, and the test passed 20/20 in isolation plus every CI run (always
+# "1 xpassed"). A strict=False xfail would hide a real regression, so it is a
+# normal test again.
 async def test_an_allowed_tool_actually_executes(client, fresh_agent, sync_client, fake_engine):
     """End to end: the model asks, the relay runs it as the agent, and the real
     endpoint's answer comes back."""
