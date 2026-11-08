@@ -105,16 +105,16 @@ async def _get_json(url: str, timeout: float = 8.0, retries: int = 2):
 # ── Pyth (fast majors, primary price oracle) ──────────────────────────────────────
 PYTH_PRICE = "https://hermes.pyth.network/v2/updates/price/latest"
 PYTH_IDS = {
-    "BTC": "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
-    "ETH": "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace",
-    "SOL": "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
-    "BNB": "2f95862b045670cd22bee3114c39763a4a08beeb663b145d283c31d7d1101c4f",
-    "XRP": "ec5d399846a9209f3fe5881d70aae9268c94339ff9817e8d18ff19fa05eea1c8",
-    "DOGE": "dcef50dd0a4cd2dcc17e45df1676dcb336a11a61c69df7a0299b0150c672d25c",
-    "ADA": "2a01deaec9e51a579277b34b122399984d0bbf57e2458a7e42fecd2829867a0d",
-    "AVAX": "93da3352f9f1d105fdfe4971cfa80e9dd777bfc5d0f683ebb6e1294b92137bb7",
-    "LINK": "8ac0c70fff57e9aefdf5edf44b51d62c2d433653cbb2cf5cc06bb115af04d221",
-    "MATIC": "5de33a9112c2b700b8d30b8a3402c103578ccfa2765696471cc672bd5cf6ac52",
+    "BTC": "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",  # secret-scan:allow (public Pyth feed id)
+    "ETH": "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace",  # secret-scan:allow (public Pyth feed id)
+    "SOL": "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",  # secret-scan:allow (public Pyth feed id)
+    "BNB": "2f95862b045670cd22bee3114c39763a4a08beeb663b145d283c31d7d1101c4f",  # secret-scan:allow (public Pyth feed id)
+    "XRP": "ec5d399846a9209f3fe5881d70aae9268c94339ff9817e8d18ff19fa05eea1c8",  # secret-scan:allow (public Pyth feed id)
+    "DOGE": "dcef50dd0a4cd2dcc17e45df1676dcb336a11a61c69df7a0299b0150c672d25c",  # secret-scan:allow (public Pyth feed id)
+    "ADA": "2a01deaec9e51a579277b34b122399984d0bbf57e2458a7e42fecd2829867a0d",  # secret-scan:allow (public Pyth feed id)
+    "AVAX": "93da3352f9f1d105fdfe4971cfa80e9dd777bfc5d0f683ebb6e1294b92137bb7",  # secret-scan:allow (public Pyth feed id)
+    "LINK": "8ac0c70fff57e9aefdf5edf44b51d62c2d433653cbb2cf5cc06bb115af04d221",  # secret-scan:allow (public Pyth feed id)
+    "MATIC": "5de33a9112c2b700b8d30b8a3402c103578ccfa2765696471cc672bd5cf6ac52",  # secret-scan:allow (public Pyth feed id)
 }
 
 # CoinGecko id aliases for symbols we price via CoinGecko fallback.
@@ -179,7 +179,7 @@ _PRICE_MISS = object()
 # path passes a Solana mint for anything without a ticker. Only the ones we can
 # name are priceable; the rest have no entry in either map by construction.
 _MINT_SYMBOLS = {
-    "So11111111111111111111111111111111111111112": "SOL",
+    "So11111111111111111111111111111111111111112": "SOL",  # secret-scan:allow (public Solana mint)
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "USDC",
     "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": "USDT",
     "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263": "BONK",
@@ -239,6 +239,19 @@ async def resolve_price(symbol: str) -> Optional[float]:
         price = pyth[symbol]
     if price is None:
         price = await _coingecko_price(symbol)
+    # CoinGecko's keyless tier rate-limits hard and Pyth does not list every
+    # asset, which left resolve_price returning None for SOL/BTC/ETH -- and a
+    # None price fails the notional check on every market order, so the order
+    # path was dead rather than mispriced. The exchange tickers were already
+    # implemented for spreads; use them as real fallbacks.
+    if price is None:
+        for _fallback in (_binance, _okx, _coinbase):
+            try:
+                price = await _fallback(symbol)
+            except Exception:  # noqa: BLE001 -- a fallback that errors is just a miss
+                price = None
+            if price:
+                break
     # Failures are cached as well as successes. Each lookup can cost ~24s when
     # upstream is down -- _get_json retries twice at a 6s timeout, across Pyth
     # then CoinGecko -- and callers on the order path run this per order. Caching

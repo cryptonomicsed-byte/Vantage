@@ -921,6 +921,14 @@ app.include_router(presence_router)
 from .routers.sovereignty import router as sovereignty_router
 app.include_router(sovereignty_router)
 
+# Block clock: Bitcoin height + Koodu calendar (koodu_clock.py)
+from .routers.clock import router as clock_router  # noqa: E402
+app.include_router(clock_router)
+
+# Receipt pulse: what the organism last proved (okf_receipt.py output)
+from .routers.receipt_pulse import router as receipt_pulse_router  # noqa: E402
+app.include_router(receipt_pulse_router)
+
 # Opt-in intel exchange between sovereign instances.
 from .routers.intel_exchange import router as intel_exchange_router
 app.include_router(intel_exchange_router)
