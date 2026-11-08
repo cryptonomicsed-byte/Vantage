@@ -496,36 +496,47 @@ async def _handle_tool_call(ws, engine, dispatcher, session_id: str, agent_id: i
     except Exception as exc:
         logger.warning("voice relay could not log tool call on %s: %s", session_id, exc)
 
-    await _send(ws, {"type": "tool_call", "toolName": event.tool_name, "toolArgs": event.tool_args})
-
+    await_result = None
+    duration_ms = None
     started = time.monotonic()
-    result = await dispatcher.execute(event.tool_name, event.tool_args)
-    duration_ms = int((time.monotonic() - started) * 1000)
-
     try:
-        await engine.send_tool_result(event.tool_call_id, event.tool_name, result)
-    except Exception as exc:
-        logger.debug("voice relay could not return tool result on %s: %s", session_id, exc)
+        await _send(ws, {"type": "tool_call", "toolName": event.tool_name, "toolArgs": event.tool_args})
 
-    await _send(ws, {
-        "type": "tool_result",
-        "toolName": event.tool_name,
-        "status": result.get("status"),
-        "durationMs": duration_ms,
-    })
+        result = await dispatcher.execute(event.tool_name, event.tool_args)
+        await_result = result
+        duration_ms = int((time.monotonic() - started) * 1000)
 
-    if call_id:
-        # Shielded for the same reason as the session cleanup: this pump is
-        # cancelled on disconnect, and a tool call that was recorded as
-        # dispatched but never resolved would leave the audit trail claiming it
-        # is still in flight.
         try:
-            await asyncio.shield(store.complete_tool_call(
-                call_id, result,
-                is_error=result.get("status") != "ok",
-                duration_ms=duration_ms,
-            ))
-        except asyncio.CancelledError:
-            pass
+            await engine.send_tool_result(event.tool_call_id, event.tool_name, result)
         except Exception as exc:
-            logger.warning("voice relay could not complete tool call on %s: %s", session_id, exc)
+            logger.debug("voice relay could not return tool result on %s: %s", session_id, exc)
+
+        await _send(ws, {
+            "type": "tool_result",
+            "toolName": event.tool_name,
+            "status": result.get("status"),
+            "durationMs": duration_ms,
+        })
+    finally:
+        # Resolve the audit row however this ends. The pump is cancelled on
+        # disconnect, and asyncio.CancelledError is a BaseException: a cancel
+        # landing on any await above used to skip completion entirely, leaving
+        # a row that claimed the call was still in flight forever (and the
+        # tool-call tests flaking on it). A call that never returned is
+        # recorded as interrupted, not as success and not as pending.
+        if call_id:
+            final = await_result if await_result is not None else {
+                "status": "interrupted",
+                "error": "voice session closed before the tool call resolved",
+            }
+            try:
+                await asyncio.shield(store.complete_tool_call(
+                    call_id, final,
+                    is_error=final.get("status") != "ok",
+                    duration_ms=duration_ms if duration_ms is not None
+                    else int((time.monotonic() - started) * 1000),
+                ))
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning("voice relay could not complete tool call on %s: %s", session_id, exc)
