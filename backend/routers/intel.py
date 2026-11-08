@@ -1214,6 +1214,13 @@ async def ingest_signal(payload: dict, tool: dict = Depends(get_system_tool)):
     Only X-Vantage-Tool (intel) + X-Vantage-Tool-Key can call this.
     Agents cannot post signals directly; signals come from infrastructure only.
     """
+    # signal_record/1 (handoff P1-01): a payload with a `schema` field, when
+    # SIGNAL_RECORD_V1 is on. Off, or no schema field: the legacy path below,
+    # byte-for-byte as before.
+    from backend import signal_record as _sr
+    if _sr.enabled() and _sr.is_record(payload):
+        return await _ingest_record(payload)
+
     required = ["symbol", "source", "type"]
     for f in required:
         if f not in payload:
@@ -1235,6 +1242,42 @@ async def ingest_signal(payload: dict, tool: dict = Depends(get_system_tool)):
         conviction=conviction, direction=payload.get("direction", ""),
         detail=payload.get("detail", ""), mint=payload.get("mint", ""),
     )
+
+
+async def _ingest_record(payload: dict):
+    """signal_record/1 path. Invalid -> 422 + signal_rejects row. Repeated id ->
+    ignored. Valid -> conviction capped from source_caps, mapped onto the
+    legacy pool fields, and ingest_signal_internal() called unchanged."""
+    from fastapi.responses import JSONResponse
+    from backend import signal_record as _sr
+
+    rec, problems = _sr.validate(payload)
+    async with get_db() as db:
+        await _ensure_signal_tables(db)
+        await _sr.ensure_tables(db)
+        await _sr.snapshot_legacy_sources(db)
+        cap, is_new = (await _sr.cap_for(db, rec["source"])) if "source" in rec else (_sr.NEW_SOURCE_CAP, True)
+        if not problems:
+            why = await _sr.address_problem(rec, is_new, _sr.address_checker)
+            if why:
+                problems.append(why)
+        if problems:
+            await _sr.reject(db, payload, problems)
+            await db.commit()
+            return JSONResponse(status_code=422, content={
+                "status": "rejected", "schema": _sr.SCHEMA, "problems": problems})
+        if not await _sr.claim_id(db, rec["id"], rec["source"]):
+            await db.commit()
+            return {"status": "duplicate", "schema": _sr.SCHEMA, "id": rec["id"],
+                    "signal": rec["asset"]["symbol"], "note": "record id already ingested; ignored"}
+        await db.commit()
+
+    raw = rec["conviction"]
+    rec["conviction"] = min(raw, cap)
+    out = await ingest_signal_internal(**_sr.pool_fields(rec))
+    out.update({"schema": _sr.SCHEMA, "id": rec["id"], "conviction": rec["conviction"],
+                "conviction_raw": raw, "capped": rec["conviction"] < raw})
+    return out
 
 
 async def _durable_pool(limit: int = 50) -> list[dict]:
