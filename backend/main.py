@@ -45,6 +45,32 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+class HttpOnlyStaticFiles(StaticFiles):
+    """StaticFiles that refuses a non-HTTP scope instead of crashing on it.
+
+    Starlette's StaticFiles does `assert scope["type"] == "http"`. The frontend
+    is mounted at "/", so a WebSocket to any path without a WebSocket route
+    fell through to it, raised AssertionError, and was rejected with a 500 and
+    a full traceback -- about 15 a minute in production from one retrying
+    client. A WebSocket now gets a clean close (1008), and the path is logged
+    once per 5 minutes so the caller can be found.
+    """
+    _warned: dict = {}
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            return await super().__call__(scope, receive, send)
+        path = scope.get("path", "?")
+        import time as _t
+        now = _t.monotonic()
+        if now - HttpOnlyStaticFiles._warned.get(path, -1e9) > 300:
+            HttpOnlyStaticFiles._warned[path] = now
+            logger.warning("non-HTTP %s request to static path %s: no such route; closing",
+                           scope["type"], path)
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+
 limiter = Limiter(key_func=get_remote_address)
 FFMPEG_AVAILABLE = False
 
@@ -1729,10 +1755,10 @@ async def platform_capacity(agent: dict = Depends(get_agent)):
 # Serve media files. check_dir=False so the app boots even when the media dirs
 # don't yet exist (fresh install / CI / non-VPS) — routes just 404 until files land.
 settings.MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-app.mount("/media/videos", StaticFiles(directory="/opt/ares/media/videos", check_dir=False), name="media_videos")
-app.mount("/media/thumbnails", StaticFiles(directory="/opt/ares/media/thumbnails", check_dir=False), name="media_thumbnails")
-app.mount("/media/audio", StaticFiles(directory="/opt/ares/media/audio", check_dir=False), name="media_audio")
-app.mount("/media/agents", StaticFiles(directory=str(settings.MEDIA_DIR), check_dir=False), name="media")
+app.mount("/media/videos", HttpOnlyStaticFiles(directory="/opt/ares/media/videos", check_dir=False), name="media_videos")
+app.mount("/media/thumbnails", HttpOnlyStaticFiles(directory="/opt/ares/media/thumbnails", check_dir=False), name="media_thumbnails")
+app.mount("/media/audio", HttpOnlyStaticFiles(directory="/opt/ares/media/audio", check_dir=False), name="media_audio")
+app.mount("/media/agents", HttpOnlyStaticFiles(directory=str(settings.MEDIA_DIR), check_dir=False), name="media")
 
 
 @app.get("/.well-known/nostr.json")
@@ -1825,7 +1851,7 @@ async def serve_spa():
 
 
 if settings.WEBUI_DIR.exists():
-    app.mount("/", StaticFiles(directory=str(settings.WEBUI_DIR), html=True), name="frontend")
+    app.mount("/", HttpOnlyStaticFiles(directory=str(settings.WEBUI_DIR), html=True), name="frontend")
 async def _notify_if_skills_changed(app) -> None:
     """Compute a hash of the current live skill registry and compare against
     the last-known hash (persisted to a small state file, not a DB migration).
