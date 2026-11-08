@@ -66,7 +66,9 @@ NODES: List[Dict[str, Any]] = [
         "name": "strategy-lab", "layer": "signal", "kind": "service", "repo": "/opt/ares/strategy-lab",
         "role": "lane ensemble — convergence surface that produces one early-entry score",
         "flow": "hub reads signals, writes scores back to Vantage; hub runs from strategy-lab-hub-deploy",
-        "probe": {"type": "http", "url": "http://127.0.0.1:8012/"},
+        # P1-07: probe /health (the hub 404s on "/"), at the same base the
+        # enricher calls.
+        "probe": {"type": "http", "url": os.environ.get("STRATEGY_LAB_BASE", "http://127.0.0.1:8012").rstrip("/") + "/health"},
     },
     {
         "name": "grokbot-mycelium", "layer": "signal", "kind": "bridge", "repo": "/opt/ares/grokbot-mycelium",

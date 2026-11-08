@@ -8,11 +8,16 @@ strategy-lab (:8012) GET /api/convergence?token=ADDR -> {score, verdict, ...}
 Both functions are fail-open: on any error they return the signal unchanged.
 """
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
 LOOM_BASE = "http://localhost:8889"
-STRATEGY_LAB_BASE = "http://localhost:8012"
+# P1-07: from env. The deployed hub (strategy-lab-hub-deploy, unit
+# ares-strategy-lab-hub) runs `score.py serve --port 8012` with
+# HUB_BIND_HOST=127.0.0.1 -- verified on the VPS 2026-11-08 -- so the default
+# is unchanged. The repo's own default bind is 10.88.0.1:8010.
+STRATEGY_LAB_BASE = os.environ.get("STRATEGY_LAB_BASE", "http://localhost:8012").rstrip("/")
 
 
 async def enrich_from_loom(signal: dict) -> dict:
