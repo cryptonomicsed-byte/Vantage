@@ -129,19 +129,51 @@ async def trending(limit: int=20, x_agent_key: str=Header(...)):
         return {"trending":[],"count":0,"source":"GeckoTerminal:offline"}
 
 # ════════════════════════════════════════════════════════════════
-# BONDING CURVE — Birdeye price check
+# BONDING CURVE — progress from the curve's reserves (P1-11; see
+# backend/pumpfun_curve.py). Same keys as before plus progress_src,
+# market_cap_usd and tokens_sold_pct.
 # ════════════════════════════════════════════════════════════════
 @router.get("/bonding-curve")
 async def bonding_curve(mint: str=Query(...), x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
+    from backend import pumpfun_curve as pc
+    out = {"mint": mint, "price": 0, "curve_target_usd": pc.GRADUATION_TARGET_USD, "progress_pct": None,
+           "graduated": False, "source": "none", "progress_src": "none",
+           "market_cap_usd": None, "tokens_sold_pct": None}
+    reserves, migrated = None, False
     try:
-        d = await _fetch(f"https://public-api.birdeye.so/defi/price?address={mint}", {"X-API-KEY": BIRDEYE, "accept":"application/json"})
-        price = float(d.get("data",{}).get("value",0))
-        curve_target = 69000
-        progress = min(100, round((price * 1_000_000 / curve_target) * 100, 2)) if price else 0
-        return {"mint":mint,"price":price,"curve_target_usd":curve_target,"progress_pct":progress,"graduated":progress>=100,"source":"Birdeye"}
-    except:
-        return {"mint":mint,"price":0,"curve_target_usd":69000,"progress_pct":0,"source":"Birdeye:offline"}
+        async with get_db() as db:
+            row = await (await db.execute(
+                "SELECT v_sol_in_curve, v_tokens_in_curve, migrated FROM pumpfun_premigration_tokens WHERE mint=?",
+                (mint,))).fetchone()
+        if row and row[0] and row[1]:
+            reserves, migrated, src = {"v_sol": float(row[0]), "v_tokens": float(row[1])}, bool(row[2]), "reserves:db"
+    except aiosqlite.Error:
+        pass
+    if reserves is None:
+        chain = await pc.fetch_onchain(mint)
+        if chain:
+            reserves, migrated, src = chain, bool(chain.get("complete")), "reserves:chain"
+    if reserves is None:
+        return out
+    m_sol = pc.mcap_sol(reserves["v_sol"], reserves["v_tokens"])
+    out["tokens_sold_pct"] = pc.tokens_sold_pct(reserves["v_tokens"])
+    out["graduated"] = migrated
+    out["source"] = src
+    if reserves.get("nonstandard"):
+        out["nonstandard_curve"] = True
+        out["initial_v_sol"] = round(reserves["initial_v_sol"], 3)
+    try:
+        from backend.routers.trading import _fetch_quote
+        sol_usd = await asyncio.wait_for(_fetch_quote("SOL"), 5)
+    except Exception:
+        sol_usd = None
+    if m_sol is None or not sol_usd:
+        return out  # reserves known but no SOL price: still no made-up USD number
+    mcap_usd = m_sol * float(sol_usd)
+    out.update({"price": mcap_usd / pc.TOTAL_SUPPLY, "market_cap_usd": round(mcap_usd, 2),
+                "progress_pct": 100.0 if migrated else pc.progress_pct(mcap_usd), "progress_src": src})
+    return out
 
 # ════════════════════════════════════════════════════════════════
 # GRADUATIONS — was querying trading_signals WHERE type='pumpfun': that
