@@ -726,8 +726,13 @@ async def lifespan(app: FastAPI):
     from .receipt_reconciler import reconciliation_loop
     reconciler_task = asyncio.create_task(reconciliation_loop())
 
+    # P1-08: mirror signal_ledger rows to Mycelium (LEDGER_MIRROR_ENABLED,
+    # read each cycle; off means nothing is posted).
+    from .signal_ledger import mirror_loop as _ledger_mirror_loop
+    ledger_mirror_task = asyncio.create_task(_ledger_mirror_loop())
+
     yield
-    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, mention_poller_task, scoring_task, last30days_task, outcome_learner_task, event_bus_task, tier_recompute_task, reconciler_task]
+    shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, mention_poller_task, scoring_task, last30days_task, outcome_learner_task, event_bus_task, tier_recompute_task, reconciler_task, ledger_mirror_task]
     if execution_engine_task is not None:
         shutdown_tasks.append(execution_engine_task)
     for t in shutdown_tasks:
