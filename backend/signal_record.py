@@ -38,7 +38,8 @@ SCHEMA = "signal_record/1"
 CHAINS = ("solana", "robinhood", "base", "ethereum", "portent", "bitcoin")
 EVM_CHAINS = ("robinhood", "base", "ethereum")
 DIRECTIONS = ("long", "short", "hold", "exit", "alert")
-LEGACY_DIRECTION = {"buy": "long", "bullish": "long", "sell": "short", "bearish": "short"}
+LEGACY_DIRECTION = {"buy": "long", "bullish": "long", "sell": "short", "bearish": "short",
+                    "flat": "hold", "neutral": "hold", "wait": "hold"}
 PRODUCER_KINDS = ("daemon", "guild_agent", "service")
 
 NEW_SOURCE_CAP = 0.69
@@ -141,7 +142,7 @@ def validate(payload: dict, now: Optional[int] = None) -> tuple[dict, list[str]]
     d = (_str(payload.get("direction")) or "").lower()
     d = LEGACY_DIRECTION.get(d, d)
     if d not in DIRECTIONS:
-        p.append(f"direction must be one of {', '.join(DIRECTIONS)} (buy/sell/bullish/bearish map); got {payload.get('direction')!r}")
+        p.append(f"direction must be one of {', '.join(DIRECTIONS)} (buy/sell/bullish/bearish/flat/neutral/wait map); got {payload.get('direction')!r}")
     else:
         rec["direction"] = d
 
