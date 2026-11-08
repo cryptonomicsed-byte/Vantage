@@ -87,6 +87,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+import re
+
 import aiosqlite
 
 from .db import get_db
@@ -141,19 +143,53 @@ async def init_outcome_tables() -> None:
             n_trades INTEGER NOT NULL DEFAULT 0,
             wins INTEGER NOT NULL DEFAULT 0,
             avg_pnl_pct REAL NOT NULL DEFAULT 0,
+            n_suspect INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT DEFAULT (datetime('now')),
             PRIMARY KEY (source, window))""")
+        # Existing production table predates the column; add it in place.
+        _sp_cur = await db.execute("PRAGMA table_info(source_performance)")
+        if "n_suspect" not in {_r[1] for _r in await _sp_cur.fetchall()}:
+            await db.execute("ALTER TABLE source_performance ADD COLUMN n_suspect INTEGER NOT NULL DEFAULT 0")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_outcomes_source ON trading_order_outcomes(source)"
         )
         await db.commit()
 
 
-def _source_for_order(order: dict) -> str:
+# Marks beyond this magnitude are not performance, they are a data fault (a
+# $100 paper entry scored against a live quote for a different token reads as
+# +357,932%). They are counted per source as 'suspect' and kept out of the mean.
+_PNL_SANITY_PCT = 1000.0
+
+# Trigger reasons that are probe/unit traffic, not trades. They must never
+# reach the performance scoreboard: 'pipeline_e2e' and 'manual_test_trade'
+# had become sources with 357,932% average PnL before this guard existed.
+_PROBE_PREFIXES = ("pipeline_e2e", "unit-test", "unit_test", "test:", "test-",
+                   "probe", "manual_test", "smoke")
+
+_PINE_RE = re.compile(r"^(pine:\d+)")
+
+
+def _source_for_order(order: dict) -> str | None:
+    """Source label for an order, or None when it is not real trading traffic.
+
+    The label is an identity used to aggregate realised performance, so two
+    orders from the same producer must share it. The raw trigger_reason is free
+    text and carries volatile bits -- "moonshot snipe — score=65" made a new
+    source on every score -- so only those volatile suffixes are stripped. The
+    producer's own name is otherwise preserved: merging distinct labels would
+    blend their results.
+    """
     if order.get("strategy_id") is not None:
         return f"strategy:{order['strategy_id']}"
     reason = (order.get("trigger_reason") or "").strip()
-    return reason or "manual_ui"
+    if not reason:
+        return "manual_ui"
+    if any(reason.lower().startswith(prefix) for prefix in _PROBE_PREFIXES):
+        return None  # probe/unit traffic: recorded nowhere, aggregated never
+    reason = re.split(r"\s+[—–]+\s+", reason)[0]      # drop the score/annotation tail
+    reason = re.sub(r"_conviction_[\d.]+$", "", reason)  # drop the conviction suffix
+    return reason[:64] or "manual_ui"
 
 
 async def snapshot_submitted_entries(db: aiosqlite.Connection) -> int:
@@ -190,6 +226,8 @@ async def snapshot_submitted_entries(db: aiosqlite.Connection) -> int:
         if not price:
             continue  # no live quote yet -- retried next cycle, never a fake snapshot
         source = _source_for_order(order)
+        if source is None:
+            continue  # probe/unit traffic: no outcome row, no scoreboard entry
         try:
             await db.execute(
                 """INSERT INTO trading_order_outcomes
@@ -270,6 +308,8 @@ async def record_outcomes_once() -> dict[str, int]:
                 if not mark_price:
                     continue  # try again next cycle rather than mark a fake price
                 source = _source_for_order(order)
+                if source is None:
+                    continue  # probe/unit traffic is never marked
 
                 existing = await (await db.execute(
                     "SELECT order_id, entry_price_usd FROM trading_order_outcomes WHERE order_id=?",
@@ -311,23 +351,38 @@ async def refresh_source_performance() -> int:
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         updated = 0
+        # Full recompute means the published table is exactly this cycle's view:
+        # without the delete, a source that stops trading keeps its last average
+        # and probe traffic that is now excluded lingers as a ghost row.
+        await db.execute("DELETE FROM source_performance")
         for window_label, col_suffix, _ in WINDOWS:
             rows = await (await db.execute(
-                f"""SELECT source, COUNT(*) AS n_trades,
-                           SUM(CASE WHEN pnl_pct_{col_suffix} > 0 THEN 1 ELSE 0 END) AS wins,
-                           AVG(pnl_pct_{col_suffix}) AS avg_pnl_pct
+                f"""SELECT source,
+                           SUM(CASE WHEN ABS(pnl_pct_{col_suffix}) <= {_PNL_SANITY_PCT} THEN 1 ELSE 0 END) AS n_trades,
+                           SUM(CASE WHEN pnl_pct_{col_suffix} > 0
+                                     AND ABS(pnl_pct_{col_suffix}) <= {_PNL_SANITY_PCT} THEN 1 ELSE 0 END) AS wins,
+                           SUM(CASE WHEN ABS(pnl_pct_{col_suffix}) > {_PNL_SANITY_PCT} THEN 1 ELSE 0 END) AS n_suspect,
+                           AVG(CASE WHEN ABS(pnl_pct_{col_suffix}) <= {_PNL_SANITY_PCT}
+                                    THEN pnl_pct_{col_suffix} END) AS avg_pnl_pct
                     FROM trading_order_outcomes
                     WHERE pnl_pct_{col_suffix} IS NOT NULL
                     GROUP BY source"""
             )).fetchall()
             for r in rows:
+                if any((r["source"] or "").startswith(p) for p in _PROBE_PREFIXES):
+                    continue  # legacy probe rows predating the guard
+                if not r["n_trades"]:
+                    continue  # only suspect marks: no honest average to publish
                 await db.execute(
-                    """INSERT INTO source_performance (source, window, n_trades, wins, avg_pnl_pct, updated_at)
-                       VALUES (?,?,?,?,?, datetime('now'))
+                    """INSERT INTO source_performance
+                           (source, window, n_trades, wins, avg_pnl_pct, n_suspect, updated_at)
+                       VALUES (?,?,?,?,?,?, datetime('now'))
                        ON CONFLICT(source, window) DO UPDATE SET
                            n_trades=excluded.n_trades, wins=excluded.wins,
-                           avg_pnl_pct=excluded.avg_pnl_pct, updated_at=excluded.updated_at""",
-                    (r["source"], window_label, r["n_trades"], r["wins"], round(float(r["avg_pnl_pct"]), 4)),
+                           avg_pnl_pct=excluded.avg_pnl_pct, n_suspect=excluded.n_suspect,
+                           updated_at=excluded.updated_at""",
+                    (r["source"], window_label, r["n_trades"], r["wins"],
+                     round(float(r["avg_pnl_pct"]), 4), r["n_suspect"] or 0),
                 )
                 updated += 1
         await db.commit()

@@ -56,8 +56,8 @@ ADAPTERS = {}
 
 # Canonical Solana mints for symbol resolution.
 SOLANA_TOKENS = {
-    "SOL": "So11111111111111111111111111111111111111112",
-    "WSOL": "So11111111111111111111111111111111111111112",
+    "SOL": "So11111111111111111111111111111111111111112",  # secret-scan:allow (public Solana mint)
+    "WSOL": "So11111111111111111111111111111111111111112",  # secret-scan:allow (public Solana mint)
     "USDC": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
     "USDT": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
     "BONK": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
@@ -458,6 +458,19 @@ async def process_order(order: dict):
     if _kill_switch_active():
         logger.warning(f"Order #{order_id}: TRADING_KILL_SWITCH active, leaving pending")
         return
+
+    # Master switch before any credential is touched. execution_loop already
+    # skips its tick in paper mode, but process_order() is also reachable
+    # directly (the background poller), and without this check a pending order
+    # created during paper mode could be signed and broadcast the moment a
+    # wallet key was decryptable. Observed: three promoted paper orders were
+    # failed with "Wallet key not available" -- i.e. the engine had already
+    # reached decryption -- while the switch was off.
+    from . import trading_mode
+
+    if not trading_mode.global_live_enabled():
+        logger.info(f"Order #{order_id}: paper mode (master switch off) -- not executing")
+        return  # leave pending; paper fills happen on the paper path, not here
 
     if not wallet_id:
         await _update_order(order_id, "failed", error="No wallet assigned")

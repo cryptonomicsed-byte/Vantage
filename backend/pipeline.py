@@ -314,6 +314,189 @@ def probe_node(node: Dict[str, Any], use_cache: bool = True) -> Dict[str, Any]:
     _PROBE_CACHE[name] = (now, result, _PROBE_TTL if ok else 1.0)
     return result
 
+
+# ── signal flow ───────────────────────────────────────────────────────────────
+# The node probes above answer "is the producer running". They cannot answer
+# "is it producing", and a feed that is up but silent looks identical to a feed
+# that is working. These queries read the actual rows: per source, how many
+# signals landed, how old the newest one is, and whether anything downstream
+# ever turned them into an order and a marked outcome.
+
+_SIGNAL_FRESH_S = 3600          # < 1h  : fresh
+_SIGNAL_WARM_S = 6 * 3600       # < 6h  : warm
+_SIGNAL_STALE_S = 48 * 3600     # < 48h : stale, beyond: dead
+
+
+def _freshness(age_s: float | None) -> str:
+    if age_s is None:
+        return "none"
+    if age_s < _SIGNAL_FRESH_S:
+        return "fresh"
+    if age_s < _SIGNAL_WARM_S:
+        return "warm"
+    if age_s < _SIGNAL_STALE_S:
+        return "stale"
+    return "dead"
+
+
+
+# ── signal promotion ─────────────────────────────────────────────────────────
+# 500 signals land in signal_pool per week and (until this existed) none of them
+# carried a route into an order: the funnel read 0 attributed orders while every
+# source was "fresh". Promotion is the consumer side, and it is deliberately
+# explicit -- conviction floor, age ceiling, an owner-supplied size, and it never
+# runs unless the caller asks for apply=true.
+
+def promotable_signals(min_conviction: float = 0.75, max_age_min: int = 60,
+                       limit: int = 25, symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """Recent pooled signals above the conviction floor that no order consumed."""
+    import sqlite3
+    import time as _time
+
+    from .db import DB_PATH
+
+    if not os.path.exists(DB_PATH):
+        return []
+    since = int(_time.time()) - max(1, max_age_min) * 60
+    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=5.0)
+    con.row_factory = sqlite3.Row
+    try:
+        has_promotions = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='signal_promotions'"
+        ).fetchone()
+        sql = """SELECT id, symbol, source, type, conviction, direction, mint, ts
+                 FROM signal_pool
+                 WHERE ts >= ? AND conviction >= ?
+                   AND direction IS NOT NULL AND direction != ''
+                   {symbols}
+                 {dedupe}
+                 ORDER BY conviction DESC, ts DESC LIMIT ?"""
+        dedupe = ("AND id NOT IN (SELECT signal_id FROM signal_promotions)"
+                  if has_promotions else "")
+        # Promotion is per-symbol opt-in: a memecoin with no quote cannot be
+        # risk-sized, so an operator restricts the universe rather than watching
+        # every candidate fail the notional check.
+        wanted = [x.strip().upper() for x in (symbols or []) if x.strip()]
+        sym_sql, sym_params = "", ()
+        if wanted:
+            sym_sql = "AND UPPER(symbol) IN (" + ",".join("?" * len(wanted)) + ")"
+            sym_params = tuple(wanted)
+        rows = [dict(r) for r in con.execute(
+            sql.format(dedupe=dedupe, symbols=sym_sql),
+            (since, min_conviction, *sym_params, limit))]
+        for r in rows:
+            r["age_min"] = round((_time.time() - r["ts"]) / 60.0, 1)
+        # One order per (source, symbol, direction): a producer that repeats the
+        # same call every 90s must not become four identical orders.
+        seen: Dict[tuple, Dict[str, Any]] = {}
+        for r in rows:
+            key = (r["source"], (r["symbol"] or "").upper(), (r["direction"] or "").upper())
+            if key not in seen:
+                r["repeats"] = 1
+                r["group_ids"] = [r["id"]]
+                seen[key] = r
+            else:
+                seen[key]["repeats"] += 1
+                seen[key]["group_ids"].append(r["id"])
+        # The collapse is only honest if promoting the group consumes ALL of its
+        # members: otherwise the next cycle picks the next repeat and places the
+        # same order again under a fresh signal id.
+        for r in seen.values():
+            if r["repeats"] == 1:
+                extra = [x[0] for x in con.execute(
+                    """SELECT id FROM signal_pool
+                       WHERE source=? AND UPPER(symbol)=? AND UPPER(direction)=?
+                         AND ts >= ?""",
+                    (r["source"], (r["symbol"] or "").upper(),
+                     (r["direction"] or "").upper(), since)).fetchall()]
+                if len(extra) > r["repeats"]:
+                    r["group_ids"] = extra
+                    r["repeats"] = len(extra)
+        return list(seen.values())
+    finally:
+        con.close()
+
+def signal_flow(days: int = 7) -> Dict[str, Any]:
+    """Signal -> order -> outcome funnel, per source, from the real rows."""
+    import sqlite3
+    import time as _time
+
+    from .db import DB_PATH
+
+    out: Dict[str, Any] = {"available": False, "sources": [], "totals": {}}
+    if not os.path.exists(DB_PATH):
+        out["reason"] = f"no database at {DB_PATH}"
+        return out
+
+    now = int(_time.time())
+    cutoff = now - days * 86400
+    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=5.0)
+    con.row_factory = sqlite3.Row
+    try:
+        signals = {r["source"]: dict(r) for r in con.execute(
+            """SELECT source, COUNT(*) AS n_signals, MAX(ts) AS last_ts,
+                      SUM(CASE WHEN ts >= ? THEN 1 ELSE 0 END) AS n_window
+               FROM signal_pool GROUP BY source""", (cutoff,))}
+        # Orders attribute to a source two ways: the explicit signal_id join, and
+        # the trigger_reason the producer stamped on the order.
+        orders = {r["source"]: dict(r) for r in con.execute(
+            """SELECT s.source AS source,
+                      COUNT(*) AS n_orders,
+                      SUM(CASE WHEN o.status IN ('filled','confirmed') THEN 1 ELSE 0 END) AS n_filled,
+                      SUM(CASE WHEN o.status='failed' THEN 1 ELSE 0 END) AS n_failed
+               FROM trading_orders o JOIN signal_pool s ON s.id = o.signal_id
+               GROUP BY s.source""")}
+        by_reason = {r["source"]: dict(r) for r in con.execute(
+            """SELECT lower(substr(trigger_reason, 1, instr(trigger_reason || ' ', ' ') - 1)) AS source,
+                      COUNT(*) AS n_orders
+               FROM trading_orders
+               WHERE trigger_reason IS NOT NULL AND trigger_reason != ''
+               GROUP BY source""")}
+        perf = {(r["source"], r["window"]): dict(r) for r in con.execute(
+            "SELECT source, window, n_trades, wins, avg_pnl_pct, n_suspect FROM source_performance"
+        )} if con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_performance'"
+        ).fetchone() else {}
+
+        names = sorted(set(signals) | set(orders), key=lambda n: -(signals.get(n, {}).get("n_signals") or 0))
+        rows = []
+        for name in names:
+            sig = signals.get(name, {})
+            age = (now - sig["last_ts"]) if sig.get("last_ts") else None
+            orders_row = orders.get(name, {})
+            perf_row = perf.get((name, "24h")) or perf.get((name, "1h")) or {}
+            rows.append({
+                "source": name,
+                "signals_total": sig.get("n_signals", 0),
+                "signals_window": sig.get("n_window", 0),
+                "last_signal_age_s": age,
+                "freshness": _freshness(age),
+                "orders_from_signal_id": orders_row.get("n_orders", 0),
+                "orders_from_trigger": (by_reason.get(name, {}) or {}).get("n_orders", 0),
+                "filled": orders_row.get("n_filled", 0),
+                "failed": orders_row.get("n_failed", 0),
+                "marked_trades": perf_row.get("n_trades", 0),
+                "avg_pnl_pct": perf_row.get("avg_pnl_pct"),
+            })
+        window_rows = [r for r in rows if r["signals_window"]]
+        out.update({
+            "available": True,
+            "window_days": days,
+            "sources": rows,
+            "totals": {
+                "sources": len(rows),
+                "fresh": sum(1 for r in rows if r["freshness"] == "fresh"),
+                "dead": sum(1 for r in rows if r["freshness"] == "dead"),
+                "signals_window": sum(r["signals_window"] for r in rows),
+                "sources_in_window": len(window_rows),
+                "orders_attributed": sum(r["orders_from_signal_id"] for r in rows),
+            },
+            "note": "freshness is read from signal_pool.ts, not from the producer's health",
+        })
+        return out
+    finally:
+        con.close()
+
 def status() -> Dict[str, Any]:
     nodes = [probe_node(n) for n in NODES]
     by_layer: Dict[str, List[str]] = {}
@@ -326,6 +509,7 @@ def status() -> Dict[str, Any]:
         "by_layer": by_layer,
         "counts": {k: v for k, v in counts.items() if v},
         "datasets": _dataset_counts(),
+        "signals": signal_flow(),
     }
 
 

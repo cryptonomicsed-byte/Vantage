@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -221,3 +222,112 @@ def _row_factory():
     import aiosqlite
 
     return aiosqlite.Row
+
+
+class PromoteRequest(BaseModel):
+    """Promote pooled signals into paper orders.
+
+    apply=False is a dry run and the default: the funnel reports what *would*
+    trade. apply=True needs an explicit size and a wallet the caller owns, and
+    every created order still passes the same risk caps and wallet checks as a
+    hand-placed one.
+    """
+    wallet_id: Optional[int] = None
+    quantity: float = 0.0
+    min_conviction: float = 0.75
+    max_age_min: int = 60
+    limit: int = 5
+    chain: str = "solana"
+    symbols: Optional[list[str]] = None  # restrict to a quotable universe
+    allow_short: bool = False  # paper has no position to reduce, so SELL is skipped
+    apply: bool = False
+
+
+_BUY = ("buy", "long", "bullish")
+_SELL = ("sell", "short", "bearish")
+
+
+@router.post("/promote")
+async def promote_signals(data: PromoteRequest, agent: dict = Depends(get_agent)):
+    import asyncio
+
+    from .. import pipeline as pipeline_mod
+    from . import trading as trading_router
+
+    candidates = await asyncio.to_thread(
+        pipeline_mod.promotable_signals, data.min_conviction, data.max_age_min,
+        data.limit, data.symbols)
+    plan = [{
+        "signal_id": c["id"], "source": c["source"], "symbol": c["symbol"],
+        "direction": c["direction"], "conviction": c["conviction"],
+        "age_min": c["age_min"], "repeats": c.get("repeats", 1),
+    } for c in candidates]
+
+    if not data.apply:
+        return {"applied": False, "candidates": len(plan), "plan": plan,
+                "note": "dry run — pass apply=true with wallet_id and quantity to place paper orders"}
+
+    if not data.wallet_id or data.quantity <= 0:
+        raise HTTPException(422, "apply=true requires wallet_id and a quantity greater than zero")
+
+    placed, skipped = [], []
+    for c in candidates:
+        direction = (c.get("direction") or "").lower()
+        side = "buy" if direction in _BUY else ("sell" if direction in _SELL else None)
+        if side is None:
+            skipped.append({"signal_id": c["id"], "reason": f"direction {direction!r} is not directional"})
+            continue
+        if side == "sell" and not data.allow_short:
+            skipped.append({"signal_id": c["id"],
+                            "reason": "SELL without a position: paper mode cannot reduce what it "
+                                      "does not hold (pass allow_short=true to force a pending sell)"})
+            continue
+        try:
+            order = await trading_router.create_order(
+                trading_router.OrderCreate(
+                    symbol=c["symbol"], side=side, chain=data.chain,
+                    quantity=data.quantity, wallet_id=data.wallet_id,
+                    trigger_reason=f"signal:{c['source']}",
+                    signal_id=c["id"],  # exact attribution for the funnel
+                ),
+                agent,
+            )
+        except HTTPException as e:
+            skipped.append({"signal_id": c["id"], "reason": str(e.detail)[:160]})
+            continue
+
+        fill = None
+        if side == "buy":
+            try:
+                fill = await trading_router.paper_fill_order(order["id"], agent)
+            except HTTPException as e:
+                fill = {"error": str(e.detail)[:160]}
+        # Never leave a promoted order pending: a pending order is exactly what
+        # the execution engine sweeps, and promotion is a paper action.
+        if side == "sell" or (isinstance(fill, dict) and fill.get("error")):
+            try:
+                await trading_router.update_order(
+                    order["id"], trading_router.OrderUpdate(status="cancelled"), agent)
+            except Exception:  # noqa: BLE001
+                pass
+
+        async with get_db() as db:
+            for sid in c.get("group_ids") or [c["id"]]:
+                await db.execute(
+                    """INSERT OR IGNORE INTO signal_promotions
+                       (signal_id, order_id, agent_id, source, symbol, direction, conviction)
+                       VALUES (?,?,?,?,?,?,?)""",
+                    (sid, order["id"], agent["id"], c["source"], c["symbol"],
+                     direction, c["conviction"]))
+            await pipeline_mod.record_event(
+                db, "pipeline", "promote", ref=f"signal:{c['id']}",
+                detail={"order_id": order["id"], "source": c["source"],
+                        "symbol": c["symbol"], "side": side},
+            )
+            await db.commit()
+        placed.append({"signal_id": c["id"], "order_id": order["id"], "side": side,
+                       "symbol": c["symbol"], "source": c["source"],
+                       "filled": bool(fill and fill.get("status") == "filled")})
+
+    return {"applied": True, "candidates": len(plan), "placed": placed, "skipped": skipped,
+            "summary": f"{len(placed)} paper order(s) from {len(plan)} candidate signal(s)"}

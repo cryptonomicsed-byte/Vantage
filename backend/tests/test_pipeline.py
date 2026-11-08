@@ -206,3 +206,150 @@ async def test_remember_unknown_order_is_404(client, registered_agent):
     r = await client.post("/api/pipeline/remember", headers=_h(registered_agent),
                           json={"order_id": 987654321})
     assert r.status_code == 404
+
+
+async def _clear_signals():
+    """These tests share one session DB; each must see only its own signals."""
+    async with get_db() as db:
+        await db.execute("DELETE FROM signal_pool")
+        await db.execute("DELETE FROM signal_promotions")
+        await db.commit()
+
+
+async def _signals(rows):
+    """Insert pooled signals: (source, symbol, direction, conviction, age_s)."""
+    import time as _t
+    async with get_db() as db:
+        for source, symbol, direction, conviction, age_s in rows:
+            await db.execute(
+                """INSERT INTO signal_pool (symbol, source, type, conviction, direction, detail, ts)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (symbol, source, "test", conviction, direction, "{}", int(_t.time()) - age_s))
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_promotable_collapses_a_repeating_call(client, registered_agent):
+    """A producer repeating the same call every 90s is one intent, not four orders."""
+    await _clear_signals()
+    await _signals([("ogun_forge_v2", "BONK", "SELL", 1.0, 120),
+                    ("ogun_forge_v2", "BONK", "SELL", 1.0, 60),
+                    ("ogun_forge_v2", "BONK", "SELL", 1.0, 30),
+                    ("dex_new", "GOOBLO", "buy", 0.9, 45)])
+    r = await client.post("/api/pipeline/promote", headers=_h(registered_agent),
+                          json={"min_conviction": 0.75, "max_age_min": 60, "limit": 10})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["applied"] is False
+    assert body["candidates"] == 2, body
+    bonk = next(p for p in body["plan"] if p["symbol"] == "BONK")
+    assert bonk["repeats"] == 3
+
+
+@pytest.mark.asyncio
+async def test_promote_apply_places_one_paper_order_and_never_duplicates(client, registered_agent, monkeypatch):
+    # A promotion is an order, so it meets the same risk check: notional is only
+    # verifiable against a quote. Pin one so this test measures promotion.
+    from backend import market_sources
+
+    async def _quote(symbol):
+        return 100.0
+
+    monkeypatch.setattr(market_sources, "resolve_price", _quote)
+    await _clear_signals()
+    await _signals([("dex_new", "GOOBLO", "buy", 0.95, 60)])
+    rw = await client.post("/api/trading/wallets/generate", headers=_h(registered_agent),
+                           json={"system": "bip39", "chain": "solana", "label": "promote-wallet"})
+    assert rw.status_code in (200, 409), rw.text
+    wid = rw.json()["id"] if rw.status_code == 200 else None
+    if wid is None:
+        lw = await client.get("/api/trading/wallets", headers=_h(registered_agent))
+        rows = lw.json() if isinstance(lw.json(), list) else lw.json().get("wallets", [])
+        wid = next(w["id"] for w in rows if w.get("label") == "promote-wallet")
+
+    payload = {"apply": True, "wallet_id": wid, "quantity": 0.001,
+               "min_conviction": 0.75, "max_age_min": 60, "limit": 1}
+    r = await client.post("/api/pipeline/promote", headers=_h(registered_agent), json=payload)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(body["placed"]) == 1, body
+    assert body["placed"][0]["side"] == "buy"
+
+    # The same pooled signal must not become a second order.
+    r2 = await client.post("/api/pipeline/promote", headers=_h(registered_agent), json=payload)
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["placed"] == [], r2.json()
+
+
+@pytest.mark.asyncio
+async def test_promote_apply_requires_a_wallet_and_a_size(client, registered_agent):
+    await _clear_signals()
+    await _signals([("dex_new", "GOOBLO", "buy", 0.95, 60)])
+    r = await client.post("/api/pipeline/promote", headers=_h(registered_agent),
+                          json={"apply": True, "quantity": 0.0})
+    assert r.status_code == 422
+    assert "wallet_id" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_promoting_a_group_consumes_every_repeat(client, registered_agent, monkeypatch):
+    """Four repeats of one call must not become four orders across four cycles."""
+    from backend import market_sources
+
+    async def _quote(symbol):
+        return 100.0
+
+    monkeypatch.setattr(market_sources, "resolve_price", _quote)
+
+    await _clear_signals()
+    await _signals([("ogun_forge_v2", "BONK", "SELL", 1.0, 300),
+                    ("ogun_forge_v2", "BONK", "SELL", 1.0, 240),
+                    ("ogun_forge_v2", "BONK", "SELL", 1.0, 180),
+                    ("ogun_forge_v2", "BONK", "SELL", 1.0, 120)])
+
+    rw = await client.post("/api/trading/wallets/generate", headers=_h(registered_agent),
+                           json={"system": "bip39", "chain": "solana", "label": "group-wallet"})
+    wid = rw.json()["id"] if rw.status_code == 200 else None
+    if wid is None:
+        lw = await client.get("/api/trading/wallets", headers=_h(registered_agent))
+        rows = lw.json() if isinstance(lw.json(), list) else lw.json().get("wallets", [])
+        wid = next(w["id"] for w in rows if w.get("label") == "group-wallet")
+
+    payload = {"apply": True, "wallet_id": wid, "quantity": 0.001,
+               "min_conviction": 0.75, "max_age_min": 600, "limit": 10,
+               "symbols": ["BONK"], "allow_short": True}
+    first = await client.post("/api/pipeline/promote", headers=_h(registered_agent), json=payload)
+    assert first.status_code == 200, first.text
+    assert len(first.json()["placed"]) == 1, first.json()
+
+    second = await client.post("/api/pipeline/promote", headers=_h(registered_agent), json=payload)
+    assert second.json()["placed"] == [], second.json()
+
+
+@pytest.mark.asyncio
+async def test_sell_signals_are_skipped_unless_shorting_is_asked_for(client, registered_agent, monkeypatch):
+    """Paper has no position to reduce; a pending SELL is swept by the engine."""
+    from backend import market_sources
+
+    async def _quote(symbol):
+        return 100.0
+
+    monkeypatch.setattr(market_sources, "resolve_price", _quote)
+
+    await _clear_signals()
+    await _signals([("ogun_forge_v2", "BONK", "SELL", 1.0, 120)])
+    rw = await client.post("/api/trading/wallets/generate", headers=_h(registered_agent),
+                           json={"system": "bip39", "chain": "solana", "label": "sell-wallet"})
+    wid = rw.json()["id"] if rw.status_code == 200 else None
+    if wid is None:
+        lw = await client.get("/api/trading/wallets", headers=_h(registered_agent))
+        rows = lw.json() if isinstance(lw.json(), list) else lw.json().get("wallets", [])
+        wid = next(w["id"] for w in rows if w.get("label") == "sell-wallet")
+
+    r = await client.post("/api/pipeline/promote", headers=_h(registered_agent),
+                          json={"apply": True, "wallet_id": wid, "quantity": 0.001,
+                                "min_conviction": 0.75, "max_age_min": 600, "limit": 5})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["placed"] == [], body
+    assert "SELL without a position" in body["skipped"][0]["reason"], body
