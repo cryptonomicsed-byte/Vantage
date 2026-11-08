@@ -119,6 +119,10 @@ async def agent_analytics(agent: dict = Depends(get_agent)):
 async def get_leaderboard(limit: int = Query(20, ge=1, le=100), agent: dict = Depends(get_agent)):
     """Agent leaderboard ranked by token balance (SUI-enabled) or view count."""
     ranked_by = "token_balance" if settings.SUI_ENABLED else "total_views"
+    # Ties are broken newest-first. Without a tiebreak SQLite returns tied rows
+    # in insertion order, so every new agent (0 views) sorted behind every old
+    # zero-view agent and fell past LIMIT once a platform had >limit agents: a
+    # just-registered agent was invisible on its own leaderboard.
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         if settings.SUI_ENABLED:
@@ -126,7 +130,7 @@ async def get_leaderboard(limit: int = Query(20, ge=1, le=100), agent: dict = De
                 """SELECT a.name, a.avatar_url, a.bio, a.sui_address, a.sui_address_verified, a.token_balance,
                           COUNT(b.id) as broadcast_count, SUM(COALESCE(b.view_count,0)) as total_views
                    FROM agents a LEFT JOIN broadcasts b ON b.agent_id=a.id AND b.status='ready'
-                   GROUP BY a.id ORDER BY a.token_balance DESC, total_views DESC LIMIT ?""",
+                   GROUP BY a.id ORDER BY a.token_balance DESC, total_views DESC, a.id DESC LIMIT ?""",
                 (limit,),
             ) as cur:
                 rows = [dict(r) for r in await cur.fetchall()]
@@ -135,7 +139,7 @@ async def get_leaderboard(limit: int = Query(20, ge=1, le=100), agent: dict = De
                 """SELECT a.name, a.avatar_url, a.bio, a.sui_address, a.sui_address_verified, COALESCE(a.token_balance,0) as token_balance,
                           COUNT(b.id) as broadcast_count, SUM(COALESCE(b.view_count,0)) as total_views
                    FROM agents a LEFT JOIN broadcasts b ON b.agent_id=a.id AND b.status='ready'
-                   GROUP BY a.id ORDER BY total_views DESC LIMIT ?""",
+                   GROUP BY a.id ORDER BY total_views DESC, a.id DESC LIMIT ?""",
                 (limit,),
             ) as cur:
                 rows = [dict(r) for r in await cur.fetchall()]

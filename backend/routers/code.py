@@ -57,21 +57,29 @@ _headers = {"Accept": "application/json", "Authorization": f"token {GITEA_TOKEN}
 # GIT_ASKPASS helper supplies the same credential (token-as-username, blank
 # password -- mirrors the previous URL scheme's actual auth shape) without
 # ever putting it in argv or writing it into a config file.
-_ASKPASS_SCRIPT = os.path.join(SCAN_DIR, "_git_askpass.sh")
+def _askpass_path() -> str:
+    # Derived per call, not at import: a path frozen at import pointed at the
+    # original SCAN_DIR while _ensure_askpass_script() created the current one,
+    # so the write failed (FileNotFoundError -> 500 on push) on any host where
+    # /tmp/vantage_code_scan did not already exist -- a fresh box, a CI runner,
+    # or after tmp cleanup.
+    return os.path.join(SCAN_DIR, "_git_askpass.sh")
 
 
-def _ensure_askpass_script():
+def _ensure_askpass_script() -> str:
     os.makedirs(SCAN_DIR, exist_ok=True)
-    if not os.path.exists(_ASKPASS_SCRIPT):
-        with open(_ASKPASS_SCRIPT, "w") as f:
+    path = _askpass_path()
+    if not os.path.exists(path):
+        with open(path, "w") as f:
             f.write('#!/bin/sh\ncase "$1" in\n  *sername*) echo "$GIT_ASKPASS_TOKEN" ;;\n  *) echo "" ;;\nesac\n')
-        os.chmod(_ASKPASS_SCRIPT, 0o700)
+        os.chmod(path, 0o700)
+    return path
 
 
 def _git_clone_env() -> dict:
-    _ensure_askpass_script()
+    askpass = _ensure_askpass_script()
     env = os.environ.copy()
-    env["GIT_ASKPASS"] = _ASKPASS_SCRIPT
+    env["GIT_ASKPASS"] = askpass
     env["GIT_ASKPASS_TOKEN"] = GITEA_TOKEN
     env["GIT_TERMINAL_PROMPT"] = "0"
     return env
