@@ -189,7 +189,7 @@ async def recall(order_id: int, agent: dict = Depends(get_agent)):
 async def validate_signal(data: SignalPayload, agent: dict = Depends(get_agent)):
     """Check a signal against TradingOS's SignalGenome schema.
 
-    TradingOS (`/opt/ares/TradingOS/protos/signal.proto`) is not running and does
+    TradingOS (vendored at `protocols/tradingos/signal.proto`) is not running and does
     not need to be: what it contributes is the field contract — asset, direction,
     conviction, and a DNA block that no producer here currently fills. Conformance
     is checked, not enforced at ingest, so producers keep working while the gap is
@@ -217,7 +217,7 @@ async def validate_signal(data: SignalPayload, agent: dict = Depends(get_agent))
         await db.commit()
 
     return {"conforms": not problems, "problems": problems, "warnings": warnings,
-            "schema": "tradingos.v1.SignalGenome", "proto": "/opt/ares/TradingOS/protos/signal.proto"}
+            "schema": "tradingos.v1.SignalGenome", "proto": pipeline.signal_proto_path()}
 
 
 def _row_factory():
