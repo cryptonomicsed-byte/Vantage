@@ -179,6 +179,17 @@ async def test_new_source_needs_a_verified_address(client, v1_on, monkeypatch):
     assert r.status_code == 422 and any("does not exist" in p for p in r.json()["problems"])
 
 
+async def test_a_ticker_level_call_needs_no_address(client, v1_on, monkeypatch):
+    async def never(chain, address):
+        raise AssertionError("no address -> nothing to verify")
+    monkeypatch.setattr(sr, "address_checker", never)
+    rec = _record(asset={"symbol": "BTC", "chain": "bitcoin", "address": ""}, conviction=0.8)
+    r = await client.post("/api/intel/signals/ingest", json=rec, headers=_headers())
+    assert r.status_code == 200, r.text
+    assert r.json()["conviction"] == 0.69  # still a new source, still capped
+    assert (await _pool_row("BTC", rec["source"]))[2] == ""  # no mint: never tradeable by mint
+
+
 async def test_snapshot_freezes_existing_sources_at_cap_one(client, v1_on):
     from backend.db import get_db
     async with get_db() as db:
