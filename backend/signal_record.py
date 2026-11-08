@@ -35,7 +35,7 @@ from typing import Any, Awaitable, Callable, Optional
 SCHEMA = "signal_record/1"
 
 # Add chains here, not ad hoc (handoff section 1).
-CHAINS = ("solana", "robinhood", "base", "ethereum", "portent")
+CHAINS = ("solana", "robinhood", "base", "ethereum", "portent", "bitcoin")
 EVM_CHAINS = ("robinhood", "base", "ethereum")
 DIRECTIONS = ("long", "short", "hold", "exit", "alert")
 LEGACY_DIRECTION = {"buy": "long", "bullish": "long", "sell": "short", "bearish": "short"}
@@ -323,7 +323,10 @@ async def address_problem(rec: dict, is_new_source: bool,
     if not is_new_source or chain == "portent":
         return None
     if not addr:
-        return "asset.address is required for a new source's on-chain token record"
+        # A ticker-level call (BTC, ETH, SOL) has no token address. It is
+        # accepted, and it can never be traded by mint (Vantage trades by
+        # mint, never by ticker -- 816967d). Only an address is verified.
+        return None
     key = (chain, addr)
     if time.time() - _verified.get(key, 0) < _VERIFIED_TTL:
         return None
