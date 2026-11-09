@@ -30,6 +30,8 @@ interface HitRate {
   window: string
   n: number
   hits: number
+  n_eff?: number | null
+  hits_eff?: number | null
   hit_rate: number | null
   brier: number | null
   min_samples_met: boolean
@@ -198,7 +200,9 @@ export default function LearningPanel() {
                   <tr key={`${h.source}-${h.window}`} style={s.tr}>
                     <td style={{ ...s.td, fontWeight: 600 }}>{h.source}</td>
                     <td style={s.dim}>{h.window}</td>
-                    <td style={s.tdMono}>{h.hits} / {h.n}</td>
+                    <td style={s.tdMono} title={h.n_eff != null ? `${h.n} signals collapse to ${h.n_eff} distinct calls (same token, direction and hour count once); the shadow rank uses the distinct count` : ''}>
+                      {h.hits} / {h.n}{h.n_eff != null && h.n_eff < h.n ? <span style={s.dim}> · {Number(h.hits_eff ?? 0).toFixed(1)} / {h.n_eff} eff</span> : null}
+                    </td>
                     <td style={{ ...s.tdMono, color: h.hit_rate === null ? '#6b7280' : h.hit_rate >= 0.5 ? '#39ff14' : '#ffaa00' }}
                         title={h.min_samples_met ? '' : 'Withheld below 30 scored samples'}>
                       {h.min_samples_met ? pct(h.hit_rate) : `need ${30 - h.n} more`}
@@ -233,7 +237,7 @@ export default function LearningPanel() {
                     </td>
                     <td style={s.td}><b>{r.symbol}</b> <span style={s.dim}>{r.direction} · {r.source}</span></td>
                     <td style={s.tdMono}>{r.conviction?.toFixed(2)}</td>
-                    <td style={s.tdMono} title={`${r.hits} hits / ${r.n} marked (prior 15/30)`}>{pct(r.reliability)}</td>
+                    <td style={s.tdMono} title={`${Number(r.hits).toFixed(1)} hits / ${r.n} distinct calls (prior 15/30)`}>{pct(r.reliability)}</td>
                   </tr>
                 ))}
               </tbody>

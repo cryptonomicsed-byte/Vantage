@@ -57,7 +57,7 @@ def _get(url: str, timeout: float = 10.0) -> Optional[dict]:
         return None
 
 
-def fetch_source_hit_rates(window: str = WINDOW) -> Dict[str, Dict[str, int]]:
+def fetch_source_hit_rates(window: str = WINDOW) -> Dict[str, Dict[str, Any]]:
     """source -> {hits, n} from the source_hit_rate findings for one window.
 
     Empty dict on any failure (fail-open to the prior)."""
@@ -75,7 +75,13 @@ def fetch_source_hit_rates(window: str = WINDOW) -> Dict[str, Dict[str, int]]:
         source = p.get("source")
         n, hits = p.get("n"), p.get("hits")
         if source and isinstance(n, int) and isinstance(hits, int):
-            out[source] = {"hits": hits, "n": n}
+            # P3-02: echoes of one call count once. Use the effective counts
+            # when the miner provides them; older findings keep raw counts.
+            n_eff, hits_eff = p.get("n_eff"), p.get("hits_eff")
+            if isinstance(n_eff, int) and isinstance(hits_eff, (int, float)) and n_eff <= n:
+                out[source] = {"hits": float(hits_eff), "n": n_eff, "n_raw": n}
+            else:
+                out[source] = {"hits": hits, "n": n}
     return out
 
 
@@ -202,7 +208,7 @@ def fetch_hit_rate_findings() -> List[Dict[str, Any]]:
             except (TypeError, ValueError):
                 continue
         if isinstance(p, dict) and p.get("source"):
-            out.append({k: p.get(k) for k in ("source", "window", "n", "hits", "hit_rate",
+            out.append({k: p.get(k) for k in ("source", "window", "n", "hits", "n_eff", "hits_eff", "hit_rate",
                                               "brier", "min_samples_met", "updated_at")})
     out.sort(key=lambda r: (-(r.get("n") or 0), r.get("source") or "", r.get("window") or ""))
     return out

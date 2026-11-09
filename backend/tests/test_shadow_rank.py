@@ -80,3 +80,18 @@ async def test_log_ranking_writes_shadow_rank_log():
         assert row[1] == 1 and row[2] == 2
         assert abs(row[3] - 0.8) < 1e-9 and abs(row[4] - 0.5) < 1e-9
         assert row[5] == 0
+
+
+def test_n_eff_preferred_when_present(monkeypatch):
+    """P3-02: ten echoes of one call don't buy ten calls of reliability."""
+    import json as _j
+    from backend import shadow_rank as _sr
+    payloads = [{"source": "echo", "window": "24h", "n": 40, "hits": 40, "n_eff": 4, "hits_eff": 4.0},
+                {"source": "old", "window": "24h", "n": 40, "hits": 20}]
+    monkeypatch.setattr(_sr, "_get", lambda url, timeout=10: {
+        "findings": [{"payload": _j.dumps(p)} for p in payloads]})
+    hr = _sr.fetch_source_hit_rates()
+    assert hr["echo"]["n"] == 4 and hr["echo"]["hits"] == 4.0 and hr["echo"]["n_raw"] == 40
+    assert hr["old"] == {"hits": 20, "n": 40}
+    # (4+15)/(4+30) is far closer to the prior than (40+15)/(40+30)
+    assert _sr.reliability(4.0, 4) < _sr.reliability(40, 40)
