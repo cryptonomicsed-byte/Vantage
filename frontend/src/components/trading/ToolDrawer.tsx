@@ -34,12 +34,17 @@ const TOOLS: ToolDef[] = [
   { id: 'eco', label: 'Eco Map', icon: <RotateCcw size={13} />, primary: false },
 ]
 
+const IMPLEMENTED = new Set<ToolType>(['strategies', 'learning', 'backtest', 'arbitrage', 'debate', 'yields', 'dex', 'sim'])
+
 export default function ToolDrawer() {
   const { state, dispatch, toggleDrawer, tradingApi } = useTradingStore()
   const [showMore, setShowMore] = useState(false)
 
-  const primaryTools = TOOLS.filter(t => t.primary)
-  const secondaryTools = TOOLS.filter(t => !t.primary)
+  // Only tools with a real panel get a button. stress/risk/swarm/journal/
+  // chains/eco are defined above but have no panel yet; showing them opened a
+  // blank drawer. Add the id here when its panel lands.
+  const primaryTools = TOOLS.filter(t => t.primary && IMPLEMENTED.has(t.id))
+  const secondaryTools = TOOLS.filter(t => !t.primary && IMPLEMENTED.has(t.id))
 
   return (
     <div style={styles.container}>
@@ -61,8 +66,8 @@ export default function ToolDrawer() {
             </button>
           ))}
 
-          {/* More button */}
-          <div style={{ position: 'relative' }}>
+          {/* More button -- only when something is behind it */}
+          {secondaryTools.length > 0 && <div style={{ position: 'relative' }}>
             <button
               style={{
                 ...styles.tab,
@@ -90,11 +95,11 @@ export default function ToolDrawer() {
                 ))}
               </div>
             )}
-          </div>
+          </div>}
         </div>
 
         {/* Close button */}
-        <button style={styles.closeBtn} onClick={() => dispatch({ type: 'CLOSE_DRAWER' })}>
+        <button style={{ ...styles.closeBtn, visibility: state.drawerOpen ? 'visible' : 'hidden' }} title="Collapse tools" onClick={() => dispatch({ type: 'CLOSE_DRAWER' })}>
           <X size={16} />
         </button>
       </div>
@@ -109,7 +114,7 @@ export default function ToolDrawer() {
         {state.drawerTool === 'yields' && <YieldsPlaceholder />}
         {state.drawerTool === 'dex' && <DexPlaceholder />}
         {state.drawerTool === 'sim' && <SimPlaceholder />}
-        {!state.drawerTool && <div style={{ padding: 20, color: '#6b7280', textAlign: 'center' }}>Select a tool from the tab bar</div>}
+        {state.drawerOpen && !state.drawerTool && <div style={{ padding: 20, color: '#6b7280', textAlign: 'center' }}>Select a tool from the tab bar</div>}
       </div>
     </div>
   )
