@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react'
-import { Radio, RefreshCw, Rocket, ChevronDown, ChevronRight, Eye } from 'lucide-react'
+import { Radio, RefreshCw, Rocket, ChevronDown, ChevronRight, Eye, Zap } from 'lucide-react'
 import { TokenLink, WalletLink } from './EntityProfileCard'
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -283,6 +283,54 @@ function Watchlist() {
   )
 }
 
+interface ConfEvent {
+  id: number; mint: string; symbol: string | null; rule: string; watch_entities: number; kols: number
+  mcap_usd: number | null; conviction: number; fired_at: number; posted: number
+  evidence: { watch: { entity: string; wallet: string; sol: number }[]; kols: { platform: string; username: string; post_url: string | null }[]; buys_in_window: number }
+  anti_pump: { distinct_buyers: number; labelled_share: number; top_wallet_share: number }
+}
+interface ConfData { enabled: boolean; enricher: boolean; window_min: number; max_mcap_usd: number; max_conviction: number; total: number; events: ConfEvent[] }
+
+const RULE_TEXT: Record<string, string> = { 'watch>=3': '3+ watchlist wallets', 'kols>=2': '2+ KOLs posted the contract', 'watch+kol': 'watchlist wallet + KOL' }
+
+function Confluence() {
+  const { data, status } = usePoll<ConfData>('/api/intel/confluence?limit=20', 30000)
+  const [open, setOpen] = useState<number | null>(null)
+  const err = !data ? notDeployed(status) : null
+  return (
+    <div style={card}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, flexWrap: 'wrap' }}>
+        <Zap size={13} color="#facc15" />
+        <span style={{ fontSize: 12, fontWeight: 600 }}>Confluence pings</span>
+        <span style={{ fontSize: 10, color: 'var(--muted)' }}>under {data ? usd(data.max_mcap_usd) : '$60k'} · {data?.window_min ?? 30} min window · anti-pump filtered · signal conviction ≤ {data?.max_conviction ?? 0.69}</span>
+        {data && <span style={pill(data.enabled)}>{data.enabled ? `${data.total} pings` : 'OFF · CONFLUENCE_ENABLED'}</span>}
+      </div>
+      {err && <div style={muted}>{err}</div>}
+      {data && data.events.length === 0 && <div style={muted}>{data.enabled ? 'No pings yet. Fires when 3+ watchlist wallets, 2+ KOLs (exact contract), or one of each hit the same pre-migration token.' : 'Off. Needs the curve listener and the runner watchlist running.'}</div>}
+      {data?.events.map(e => (
+        <div key={e.id} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+          <div onClick={() => setOpen(open === e.id ? null : e.id)} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, padding: '4px 0', cursor: 'pointer' }}>
+            {open === e.id ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+            <TokenLink ca={e.mint} symbol={e.symbol || e.mint.slice(0, 6)} />
+            <span style={{ color: '#facc15' }}>{RULE_TEXT[e.rule] || e.rule}</span>
+            <span style={{ color: 'var(--muted)' }}>{e.watch_entities}W · {e.kols}K</span>
+            <span style={{ marginLeft: 'auto' }}>{e.mcap_usd != null ? usd(e.mcap_usd) : '—'}</span>
+            <span style={{ color: 'var(--muted)' }}>{new Date(e.fired_at * 1000).toLocaleTimeString()}</span>
+            {e.posted ? <span title="Posted to the signal pool" style={{ fontSize: 9, color: '#22c55e' }}>pool {e.conviction.toFixed(2)}</span> : null}
+          </div>
+          {open === e.id && (
+            <div style={{ padding: '2px 0 6px 18px', fontSize: 11, color: 'var(--muted)' }}>
+              {e.evidence.watch.map(w => <div key={w.entity}><WalletLink address={w.wallet} chain="solana" /> {w.entity.startsWith('radar:') ? '(radar)' : w.entity.startsWith('funder:') ? '(cluster)' : ''} {w.sol} SOL</div>)}
+              {e.evidence.kols.map(k => <div key={k.platform + k.username}>{k.platform}/@{k.username} {k.post_url ? <a href={k.post_url} target="_blank" rel="noreferrer">post</a> : null}</div>)}
+              <div>{e.evidence.buys_in_window} buys in window · {e.anti_pump.distinct_buyers} distinct buyers · labelled share {(e.anti_pump.labelled_share * 100).toFixed(0)}% · top wallet {(e.anti_pump.top_wallet_share * 100).toFixed(0)}%</div>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export default function EarlyRunnerIntel() {
   return (
     <div style={{ marginBottom: 20 }}>
@@ -292,6 +340,7 @@ export default function EarlyRunnerIntel() {
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 8 }}>
         <CurveFeed />
+        <Confluence />
         <Runners />
         <Watchlist />
       </div>

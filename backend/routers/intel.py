@@ -2026,3 +2026,11 @@ async def runner_watchlist(limit: int = Query(50, ge=1, le=500)):
     with the score breakdown, plus the strategy-lab radar import and its age."""
     from .. import runner_watchlist as rw
     return await rw.get(limit)
+
+
+@router.get("/confluence")
+async def confluence_events(limit: int = Query(50, ge=1, le=500), mint: Optional[str] = None):
+    """P4-09: confluence pings -- >=3 watchlist entities, >=2 KOLs on the exact
+    contract, or one of each, under $60k, inside 30 min, anti-pump passed."""
+    from .. import confluence
+    return await confluence.recent(limit, mint)

@@ -176,3 +176,22 @@ async def enrich_from_strategy_lab(signal: dict) -> dict:
     except Exception as e:
         logger.debug("enrich_from_strategy_lab failed (fail-open): %s", e)
     return signal
+
+
+async def enrich_from_confluence(signal: dict) -> dict:
+    """P4-09 (CONFLUENCE_ENRICHER, default off): add confluence_* keys for a
+    signal whose mint had a confluence ping in the last 30 min. Only adds
+    keys; never changes an existing field. Fail-open."""
+    try:
+        from backend import confluence
+        if not confluence.enricher_enabled() or not signal.get("mint"):
+            return signal
+        e = await confluence.latest_for(str(signal["mint"]))
+        if e:
+            signal["confluence_rule"] = e["rule"]
+            signal["confluence_watch_entities"] = e["watch_entities"]
+            signal["confluence_kols"] = e["kols"]
+            signal["confluence_fired_at"] = e["fired_at"]
+    except Exception as e:  # noqa: BLE001
+        logger.debug("enrich_from_confluence failed (fail-open): %s", e)
+    return signal

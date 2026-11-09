@@ -28,4 +28,11 @@ async def jev_decide(signal: dict) -> dict:
     signal = await enrich_from_loom(signal)
     signal = await enrich_from_context(signal)
     signal = await enrich_from_strategy_lab(signal)
+    if os.environ.get("CONFLUENCE_ENRICHER", "0").strip().lower() in ("1", "true", "yes", "on"):
+        # P4-09: only adds confluence_* keys; off by default (no call at all)
+        try:
+            from .signal_fusion import enrich_from_confluence
+        except ImportError:
+            from signal_fusion import enrich_from_confluence
+        signal = await enrich_from_confluence(signal)
     return await _trade_decide(signal)

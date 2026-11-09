@@ -756,6 +756,9 @@ async def lifespan(app: FastAPI):
     # P4-06/07: runner watchlist + strategy-lab radar, every 15 min (RUNNER_WATCHLIST_ENABLED).
     from .runner_watchlist import watchlist_loop as _watchlist_loop
     runner_watchlist_task = asyncio.create_task(_watchlist_loop())
+    # P4-09: confluence ping (CONFLUENCE_ENABLED).
+    from .confluence import confluence_loop as _confluence_loop
+    confluence_task = asyncio.create_task(_confluence_loop())
 
     yield
     shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, mention_poller_task, scoring_task, last30days_task, outcome_learner_task, event_bus_task, tier_recompute_task, reconciler_task,
@@ -766,7 +769,7 @@ async def lifespan(app: FastAPI):
                       ledger_mirror_task, shadow_rank_task,
                       curve_listener_task, runner_detect_task,
                       runner_trace_task, wallet_labels_task,
-                      runner_watchlist_task]
+                      runner_watchlist_task, confluence_task]
     if execution_engine_task is not None:
         shutdown_tasks.append(execution_engine_task)
     # Cancel all first, then wait a bounded time. Awaiting each cancelled task
