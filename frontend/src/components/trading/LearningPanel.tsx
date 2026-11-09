@@ -97,6 +97,50 @@ function Section({ title, sub, flagOn, flagName, children }: {
   )
 }
 
+// P4-15: TradingOS challengers on live calls -- shadow only
+interface ChallengerData {
+  enabled: boolean; configured: boolean; total: number; would_veto: number; failed: number
+  rows: { call_key: string; source: string; symbol: string; direction: string; conviction: number | null; live_rank: number | null; status: string; max_severity: string | null; would_veto: number | null; challenged_at: number }[]
+}
+
+function ChallengerSection() {
+  const [d, setD] = useState<ChallengerData | null>(null)
+  useEffect(() => {
+    const load = () => fetch('/api/pipeline/tradingos-challenger?limit=10').then(r => r.ok ? r.json() : null).then(x => x && setD(x)).catch(() => {})
+    load()
+    const t = setInterval(load, 60_000)
+    return () => clearInterval(t)
+  }, [])
+  if (!d) return null
+  const sev: Record<string, string> = { low: '#6b7280', medium: '#ffaa00', high: '#ff2d4a', critical: '#ff2d4a' }
+  return (
+    <Section title="TradingOS challenger" sub={`shadow only · ${d.total} challenged · ${d.would_veto} would have vetoed`}
+             flagOn={d.enabled} flagName="TRADINGOS_CHALLENGER_ENABLED">
+      {d.rows.length === 0 ? (
+        <div style={s.note}>
+          {!d.configured ? 'TradingOS is not running here (TRADINGOS_INTEL_URL unset). When set, its challengers argue against each live call and the verdict is logged next to the live rank — it never blocks or changes a trade.'
+            : d.enabled ? 'Waiting for the first challenge cycle (every 5 minutes).' : 'Off.'}
+        </div>
+      ) : (
+        <table style={s.table}>
+          <thead><tr><th style={s.th}>Live</th><th style={s.th}>Call</th><th style={s.th}>Severity</th><th style={s.th}>Would veto</th><th style={s.th}>When</th></tr></thead>
+          <tbody>
+            {d.rows.map(r => (
+              <tr key={r.call_key} style={s.tr}>
+                <td style={s.tdMono}>#{r.live_rank ?? '–'}</td>
+                <td style={s.td}><b>{r.symbol}</b> <span style={s.dim}>{r.direction} · {r.source}</span></td>
+                <td style={{ ...s.tdMono, color: sev[r.max_severity || ''] || '#6b7280' }}>{r.status === 'failed' ? 'failed' : (r.max_severity || '–')}</td>
+                <td style={s.tdMono}>{r.would_veto == null ? '–' : r.would_veto ? 'yes' : 'no'}</td>
+                <td style={s.dim}>{ago(r.challenged_at)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Section>
+  )
+}
+
 export default function LearningPanel() {
   const [data, setData] = useState<LearningData | null>(null)
   const [error, setError] = useState('')
@@ -244,6 +288,8 @@ export default function LearningPanel() {
             </table>
           )}
         </Section>
+
+        <ChallengerSection />
       </div>
       {error && <div style={{ ...s.note, color: '#ffaa00' }}>{error}</div>}
     </div>

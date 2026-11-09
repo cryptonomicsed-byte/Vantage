@@ -396,3 +396,11 @@ async def learning_loop_status(agent: dict = Depends(get_agent)):
         out["hit_rates_error"] = str(e)
     out["shadow"] = await shadow_rank.recent_log()
     return out
+
+
+@router.get("/tradingos-challenger")
+async def tradingos_challenger_shadow(limit: int = 50):
+    """P4-15: TradingOS challengers' verdicts on live promotable calls --
+    shadow only, never read by ranking or execution. Read-only."""
+    from backend import tradingos_challenger as tc
+    return await tc.recent(max(1, min(int(limit), 500)))
