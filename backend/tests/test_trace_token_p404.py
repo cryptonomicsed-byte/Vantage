@@ -36,7 +36,8 @@ async def test_first_buyers_come_from_backtrack_in_rank_order(monkeypatch):
     monkeypatch.setattr(eb, "backtrack_early_buyers", fake)
     rows = await pf._first_buyers("M")
     assert [r["wallet"] for r in rows] == ["w1", "w2"]
-    assert rows[0] == {"wallet": "w1", "rank": 1, "sol_spent": 4.0, "funded_by": None, "is_major": True}
+    assert rows[0] == {"wallet": "w1", "rank": 1, "sol_spent": 4.0, "funded_by": None, "is_major": True,
+                       "labels": [], "funder_labels": []}  # label fields added for Market Intel chips
 
 
 @pytest.mark.asyncio
