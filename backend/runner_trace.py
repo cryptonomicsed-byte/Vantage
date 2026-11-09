@@ -32,6 +32,11 @@ from typing import Any, Dict, List, Optional
 log = logging.getLogger("vantage.runner_trace")
 
 FIRST_N = 100
+# A curve can complete inside its own create tx (a dev buy of ~85 SOL fills
+# it), after which everything trades on the AMM and the curve feed holds a
+# single buyer. Fewer curve buyers than this -> walk RPC instead, which parses
+# AMM buys too.
+CURVE_MIN_BUYERS = int(os.environ.get("RUNNER_TRACE_CURVE_MIN_BUYERS", "20"))
 MAX_SIGS = int(os.environ.get("RUNNER_TRACE_MAX_SIGS", "100000"))
 PACE_S = float(os.environ.get("RUNNER_TRACE_PACE_S", "1.0"))
 # Free public RPC by default: the Helius key here has run out of quota, and a
@@ -65,6 +70,14 @@ async def _ensure(db) -> None:
     await db.execute(RUNNER_DDL)
     for d in DDL:
         await db.execute(d)
+    # traces finished from a too-thin curve list (before CURVE_MIN_BUYERS
+    # existed) are re-walked over RPC
+    try:
+        await db.execute(
+            "UPDATE runner_trace_queue SET status='pending', attempts=0, resume_before=NULL "
+            "WHERE status='done' AND source='curve' AND buyers < ?", (CURVE_MIN_BUYERS,))
+    except Exception:  # noqa: BLE001 -- columns not there yet on a fresh table
+        pass
     for col, decl in (("resume_before", "TEXT"), ("resumes", "INTEGER NOT NULL DEFAULT 0")):
         try:  # a queue table from an earlier build lacks these
             await db.execute(f"ALTER TABLE runner_trace_queue ADD COLUMN {col} {decl}")
@@ -111,6 +124,8 @@ def curve_first_buyers(mint: str, n: int = FIRST_N) -> Optional[Dict[str, Any]]:
         if len(seen) >= n:
             break
     buyers = list(seen.values())
+    if len(buyers) < CURVE_MIN_BUYERS:
+        return None  # too thin to stand for "early buyers"; the RPC walk decides
     top_sol = {b["wallet"] for b in sorted(buyers, key=lambda b: -(b["sol"] or 0))[:10]}
     for b in buyers:
         b["is_major"] = 1 if (b["rank"] <= 5 or b["wallet"] in top_sol) else 0
