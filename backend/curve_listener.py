@@ -98,12 +98,25 @@ def db_path() -> Path:
 
 # ── decode ──────────────────────────────────────────────────────────────────
 
+_TS_MIN = 1_700_000_000  # 2023-11; pump.fun launched 2024-01
+
+
+def plausible_ts(ts: int) -> bool:
+    return _TS_MIN <= ts <= int(time.time()) + 86_400
+
+
 def decode_trade_event(raw: bytes) -> Optional[Dict[str, Any]]:
     """TradeEvent bytes -> dict, or None if this isn't one."""
     if len(raw) < 113 or raw[:8] != TRADE_DISC:
         return None
     sol, tok = struct.unpack_from("<QQ", raw, 40)
     ts, vsol, vtok = struct.unpack_from("<qQQ", raw, 89)
+    # The discriminator is sha256("event:TradeEvent")[:8] -- shared by EVERY
+    # Anchor program with an event named TradeEvent, and a pump.fun tx can
+    # carry other programs' events (aggregators, other DEXes). Their bytes
+    # don't fit this layout: reject anything whose fixed fields are impossible.
+    if raw[56] not in (0, 1) or not plausible_ts(ts):
+        return None
     # Curves quoted in something other than SOL (BuyExactQuoteInV3 etc.)
     # carry 0 in the SOL fields; their market cap is not SOL-denominated.
     quote = "sol" if vsol else "other"
@@ -193,6 +206,14 @@ def connect() -> sqlite3.Connection:
     c.execute("PRAGMA synchronous=NORMAL")
     for d in DDL:
         c.execute(d)
+    # rows decoded from other programs' same-named TradeEvent before
+    # plausible_ts existed: their every field is garbage -- drop them
+    try:
+        c.execute("DELETE FROM curve_trades WHERE block_time < ? OR block_time > ?",
+                  (_TS_MIN, int(time.time()) + 86_400))
+        c.commit()
+    except sqlite3.Error:
+        pass
     return c
 
 

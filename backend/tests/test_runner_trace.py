@@ -85,7 +85,7 @@ def test_curve_first_buyers(tmp_path, monkeypatch):
     c = cl.connect()
     rows = []
     for i, (w, side) in enumerate([("dev", "buy"), ("a", "buy"), ("a", "buy"), ("b", "sell"), ("c", "buy")]):
-        rows.append({"sig": f"x{i}", "ix": 0, "slot": 100 + i, "block_time": 1000 + i, "mint": "CM", "wallet": w,
+        rows.append({"sig": f"x{i}", "ix": 0, "slot": 100 + i, "block_time": 1762600000 + i, "mint": "CM", "wallet": w,
                      "side": side, "sol": 1.0, "tokens": 1.0, "v_sol_reserves": 30, "v_token_reserves": 1e9,
                      "mcap_usd": 1.0, "source": "rpc"})
     cl.write_batch(c, rows, {"CM"})
@@ -184,7 +184,7 @@ async def test_trade_event_gives_exact_buyer_and_sol(monkeypatch):
     mint = cl.b58encode(b"\x07" * 32)
     user = cl.b58encode(b"\x09" * 32)
     raw = (cl.TRADE_DISC + unb58(mint) + struct.pack("<QQ", 2_500_000_000, 10_000_000_000) + b"\x01"
-           + unb58(user) + struct.pack("<qQQ", 1, 32_500_000_000, 1_000_000_000_000_000))
+           + unb58(user) + struct.pack("<qQQ", 1762600000, 32_500_000_000, 1_000_000_000_000_000))
 
     async def fake(client, key, method, params):
         return {"blockTime": 5, "meta": {
@@ -224,10 +224,11 @@ async def test_thin_curve_falls_back_to_rpc(tmp_path, monkeypatch):
     single curve buyer: that is not 'early buyers', so the RPC walk decides."""
     monkeypatch.setenv("CURVE_DB", str(tmp_path / "c.db"))
     c = cl.connect()
-    cl.write_batch(c, [{"sig": "create", "ix": 0, "slot": 7, "block_time": 1000, "mint": "THIN", "wallet": "dev",
+    cl.write_batch(c, [{"sig": "create", "ix": 0, "slot": 7, "block_time": 1762600000, "mint": "THIN", "wallet": "dev",
                         "side": "buy", "sol": 85.0, "tokens": 1.0, "v_sol_reserves": 115, "v_token_reserves": 1e9,
                         "mcap_usd": 35000.0, "source": "ws"}], {"THIN"})
-    assert rt.curve_first_buyers("THIN") is None
+    assert c.execute("SELECT COUNT(*) FROM curve_trades WHERE mint='THIN'").fetchone()[0] == 1  # row is real
+    assert rt.curve_first_buyers("THIN") is None  # ...but one buyer is too thin
     called = []
 
     async def rpc(mint, *a, **k):
