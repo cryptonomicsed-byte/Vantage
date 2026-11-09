@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react'
-import { Radio, RefreshCw } from 'lucide-react'
+import { Radio, RefreshCw, Rocket, ChevronDown, ChevronRight } from 'lucide-react'
+import { TokenLink, WalletLink } from './EntityProfileCard'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // EarlyRunnerIntel — the early-runner chain inside Degen Trenches (Phase 4).
@@ -127,6 +128,87 @@ function CurveFeed() {
   )
 }
 
+
+interface Runner {
+  mint: string; symbol: string | null; name: string | null; tier_usd: number; tier_weight: number
+  peak_mcap_usd: number; peak_at: number; last_mcap_usd: number | null; tiers_crossed: Record<string, number>
+  created_seen: number; detected_at: number; trace_status: string
+}
+interface EarlyBuyers {
+  trace: { status: string; source: string | null; reached_origin: number | null; origin_slot: number | null; signatures_scanned: number | null; last_error: string | null; buyers: number } | null
+  buyers: { wallet: string; rank: number; sol: number | null; is_major: number; funded_by: string | null; entry_ts: number | null }[]
+}
+
+export function usd(v?: number | null): string {
+  if (v == null) return '—'
+  if (v >= 1e9) return `$${(v / 1e9).toFixed(2)}B`
+  if (v >= 1e6) return `$${(v / 1e6).toFixed(2)}M`
+  if (v >= 1e3) return `$${(v / 1e3).toFixed(0)}K`
+  return `$${v.toFixed(0)}`
+}
+
+const TRACE_COLOR: Record<string, string> = { done: '#22c55e', partial: '#f59e0b', failed: '#ef4444', tracing: '#60a5fa', pending: '#6b7280' }
+
+function RunnerBuyers({ mint }: { mint: string }) {
+  const { data } = usePoll<EarlyBuyers>(`/api/intel/runners/${encodeURIComponent(mint)}/early-buyers`, 60000)
+  if (!data) return <div style={muted}>Loading…</div>
+  const t = data.trace
+  return (
+    <div style={{ padding: '4px 0 6px 18px' }}>
+      <div style={{ ...muted, marginBottom: 4 }}>
+        {!t ? 'Not traced yet.'
+          : t.status === 'done' ? `Traced to the create${t.origin_slot ? ` (slot ${t.origin_slot.toLocaleString()})` : ''} via ${t.source === 'curve' ? 'the curve feed — no RPC' : `RPC, ${t.signatures_scanned?.toLocaleString() ?? '?'} signatures`}.`
+          : t.status === 'partial' ? `Partial: ${t.last_error}. These are early buyers, not proven first.`
+          : t.status === 'failed' ? `Trace failed: ${t.last_error}`
+          : `Trace ${t.status}…`}
+      </div>
+      {data.buyers.slice(0, 12).map(b => (
+        <div key={b.wallet} style={{ display: 'flex', justifyContent: 'space-between', gap: 6, fontSize: 11, padding: '1px 0' }}>
+          <span><span style={{ color: 'var(--muted)', marginRight: 4 }}>#{b.rank}</span><WalletLink address={b.wallet} chain="solana" />
+            {b.is_major ? <span title="Largest or earliest entry" style={{ marginLeft: 4, color: '#f59e0b' }}>★</span> : null}
+            {b.funded_by ? <span style={{ color: 'var(--muted)', marginLeft: 4 }}>funded by <WalletLink address={b.funded_by} chain="solana" /></span> : null}
+          </span>
+          <span style={{ color: 'var(--muted)', fontFamily: 'monospace' }}>{b.sol != null ? `${b.sol.toFixed(2)} SOL` : ''}</span>
+        </div>
+      ))}
+      {data.buyers.length > 12 && <div style={muted}>+{data.buyers.length - 12} more</div>}
+    </div>
+  )
+}
+
+function Runners() {
+  const { data, status } = usePoll<{ enabled: boolean; tiers: { usd: number; weight: number }[]; runners: Runner[] }>('/api/intel/runners?limit=30', 60000)
+  const [open, setOpen] = useState<string | null>(null)
+  const err = !data ? notDeployed(status) : null
+  return (
+    <div style={card}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, flexWrap: 'wrap' }}>
+        <Rocket size={13} color="#f59e0b" />
+        <span style={{ fontSize: 12, fontWeight: 600 }}>Runners</span>
+        <span style={{ fontSize: 10, color: 'var(--muted)' }}>{data ? `tiers ${data.tiers.map(t => `${usd(t.usd)}×${t.weight}`).join(' · ')}` : ''}</span>
+        {data && <span style={pill(data.enabled)}>{data.enabled ? 'DETECTING' : 'OFF · RUNNER_DETECT_ENABLED'}</span>}
+      </div>
+      {err && <div style={muted}>{err}</div>}
+      {data && data.runners.length === 0 && (
+        <div style={muted}>{data.enabled ? 'No runner detected yet. Graduated curve mints are checked every 5 minutes.' : 'Off. When on, graduated pump.fun tokens are checked against DexScreener every 5 minutes; a token that crosses a tier is a runner and gets traced back to its first buyers.'}</div>
+      )}
+      {data?.runners.map(r => (
+        <div key={r.mint} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+          <div onClick={() => setOpen(open === r.mint ? null : r.mint)} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, padding: '4px 0', cursor: 'pointer' }}>
+            {open === r.mint ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+            <TokenLink ca={r.mint} symbol={r.symbol || r.mint.slice(0, 6)} />
+            <span style={{ ...pill(true), color: '#f59e0b', borderColor: 'rgba(245,158,11,0.4)' }}>{usd(r.tier_usd)} ×{r.tier_weight}</span>
+            <span style={{ color: 'var(--muted)' }} title="Highest market cap this poller has observed (not an all-time high)">peak {usd(r.peak_mcap_usd)}</span>
+            <span style={{ color: 'var(--muted)' }}>now {usd(r.last_mcap_usd)}</span>
+            <span style={{ marginLeft: 'auto', color: TRACE_COLOR[r.trace_status] || '#6b7280', fontSize: 10 }}>{r.trace_status}</span>
+          </div>
+          {open === r.mint && <RunnerBuyers mint={r.mint} />}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export default function EarlyRunnerIntel() {
   return (
     <div style={{ marginBottom: 20 }}>
@@ -136,6 +218,7 @@ export default function EarlyRunnerIntel() {
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 8 }}>
         <CurveFeed />
+        <Runners />
       </div>
     </div>
   )

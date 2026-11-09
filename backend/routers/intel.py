@@ -1978,3 +1978,28 @@ async def runners_check(body: _RunnerCheck, request: Request):
         raise HTTPException(401, "agent key required")
     from .. import runner_detect
     return await runner_detect.check_mints(body.mints)
+
+
+@router.get("/runners/{mint}/early-buyers")
+async def runner_early_buyers(mint: str):
+    """P4-03: a runner's first buyers and how far the trace got (origin slot,
+    whether it reached the create). Public on-chain data."""
+    from .. import runner_trace
+    return await runner_trace.early_buyers(mint)
+
+
+@router.post("/runners/{mint}/trace")
+async def runner_trace_now(mint: str, request: Request):
+    """P4-03: queue (or re-queue) one runner for tracing. Agent key required."""
+    from ..oauth_store import agent_by_key
+    key = request.headers.get("x-agent-key", "")
+    if not key or not await agent_by_key(key):
+        raise HTTPException(401, "agent key required")
+    from .. import runner_trace
+    async with get_db() as db:
+        await runner_trace._ensure(db)
+        await db.execute(
+            "INSERT INTO runner_trace_queue (mint, enqueued_at) VALUES (?,?) ON CONFLICT(mint) DO UPDATE "
+            "SET status='pending', attempts=0, last_error=NULL", (mint, int(time.time())))
+        await db.commit()
+    return {"mint": mint, "queued": True, "worker_enabled": runner_trace.enabled()}

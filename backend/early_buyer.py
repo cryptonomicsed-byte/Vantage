@@ -37,6 +37,12 @@ _SOL_PROGRAMS = frozenset({
     "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
 })
 
+# _parse_buyer_from_tx checks `_EXCLUDED`, which was never defined: every
+# parse raised NameError, asyncio.gather(return_exceptions=True) swallowed
+# it, and every backtrack on the platform returned zero buyers. This set is
+# the one it meant.
+_EXCLUDED = _SOL_PROGRAMS
+
 _EARLY_BUYERS_DDL = """
 CREATE TABLE IF NOT EXISTS token_early_buyers (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -75,8 +81,11 @@ def _helius_key() -> str:
 
 async def _rpc(client: httpx.AsyncClient, key: str, method: str, params: list) -> Optional[dict]:
     try:
+        # P4-03: a full URL in `key` means "use this RPC" (e.g. the free
+        # public endpoint) instead of Helius; existing callers pass a key.
+        url = key if key.startswith("http") else f"https://mainnet.helius-rpc.com/?api-key={key}"
         r = await client.post(
-            f"https://mainnet.helius-rpc.com/?api-key={key}",
+            url,
             json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
             headers={"Content-Type": "application/json"},
             timeout=18,
@@ -109,6 +118,42 @@ async def _paginate_signatures(
         before = result[-1]["signature"]
 
     return all_sigs
+
+
+async def _paginate_to_origin(
+    client: httpx.AsyncClient, key: str, address: str, max_total: int, pace_s: float = 0.0,
+    before: Optional[str] = None, already: int = 0,
+) -> tuple:
+    """P4-03: page newest->oldest (1000 per page) until the address's first
+    signature or max_total. Resumable: start `before` a cursor, with
+    `already` signatures counted by earlier attempts. Returns
+    (sigs newest-first from this attempt, reached_origin, cursor, scanned)."""
+    all_sigs: list = []
+    # cursor that fetched the last good page: a resume re-fetches that page,
+    # so the final attempt always holds >= one full page before the origin
+    # (the oldest-100 window is never split across attempts)
+    last_page_before, last_page_len = before, 0
+    while already + len(all_sigs) < max_total:
+        params: dict = {"limit": 1000}
+        if before:
+            params["before"] = before
+        result = None
+        for attempt in range(6):  # free endpoints 429 under load; back off
+            result = await _rpc(client, key, "getSignaturesForAddress", [address, params])
+            if result is not None:
+                break
+            await asyncio.sleep(min(30.0, max(pace_s, 1.0) * (2 ** attempt)))
+        if pace_s:
+            await asyncio.sleep(pace_s)
+        if result is None:
+            # RPC gave up: not proven to be the origin; resume at the last good page
+            return all_sigs, False, last_page_before, already + len(all_sigs) - last_page_len
+        all_sigs.extend(result)
+        if len(result) < 1000:
+            return all_sigs, True, None, already + len(all_sigs)   # last page: oldest = first tx
+        last_page_before, last_page_len = before, len(result)
+        before = result[-1]["signature"]
+    return all_sigs, False, last_page_before, already + len(all_sigs) - last_page_len
 
 
 async def _parse_buyer_from_tx(
@@ -217,6 +262,13 @@ async def backtrack_early_buyers(
     mint: str,
     max_buyers: int = 50,
     dry_run: bool = False,
+    max_total: int = 500,
+    oldest_first: bool = False,
+    use_cache: bool = True,
+    pace_s: float = 0.0,
+    rpc_url: Optional[str] = None,
+    resume_before: Optional[str] = None,
+    resume_count: int = 0,
 ) -> dict:
     """
     Walk the earliest transactions for `mint` and identify first buyers.
@@ -227,11 +279,21 @@ async def backtrack_early_buyers(
     Each buyer entry:
         {wallet_address, entry_rank, entry_ts, sol_spent, token_amount,
          tx_signature, funded_by, is_major}
+
+    P4-03 (all defaults unchanged): oldest_first=True pages back to the
+    mint's very first signature (up to max_total) so the buyers are the
+    real first buyers, not the oldest of the newest 500; the result then also
+    carries reached_origin, origin {signature, slot, block_time} and
+    signatures_scanned. use_cache=False skips the stored result. pace_s > 0
+    makes every RPC call sequential with that sleep (~1/pace_s rps).
+    rpc_url uses that RPC instead of Helius (no key needed). When the walk
+    stops short, the result carries `cursor`; pass it back as resume_before
+    (with resume_count = signatures_scanned) to continue rather than restart.
     """
     if dry_run:
         return _dry_run_result(mint, max_buyers)
 
-    key = _helius_key()
+    key = rpc_url or _helius_key()
     if not key:
         return {"mint": mint, "error": "no_helius_key", "buyers": [], "new": 0, "total": 0}
 
@@ -244,7 +306,7 @@ async def backtrack_early_buyers(
             "SELECT * FROM token_early_buyers WHERE mint=? ORDER BY entry_rank ASC",
             (mint,),
         )).fetchall()]
-        if cached:
+        if cached and use_cache:
             return {
                 "mint": mint, "buyers": cached,
                 "new": 0, "total": len(cached), "cached": True,
@@ -253,15 +315,31 @@ async def backtrack_early_buyers(
     # ── Helius lookup ────────────────────────────────────────────────────
     async with httpx.AsyncClient(timeout=25) as client:
         # Collect up to 500 signatures; oldest buyers are at the END of list
-        all_sigs = await _paginate_signatures(client, key, mint, max_total=500)
+        reached_origin = None
+        cursor, scanned = None, 0
+        if oldest_first:
+            all_sigs, reached_origin, cursor, scanned = await _paginate_to_origin(
+                client, key, mint, max_total, pace_s, resume_before, resume_count)
+            if not reached_origin:
+                # Not at the create yet: don't parse/persist mid-history txs as
+                # "first buyers". Hand back the cursor so the caller resumes.
+                return {"mint": mint, "buyers": [], "new": 0, "total": 0, "cached": False,
+                        "reached_origin": False, "signatures_scanned": scanned, "cursor": cursor,
+                        "origin": None}
+        else:
+            all_sigs = await _paginate_signatures(client, key, mint, max_total=max_total)
         if not all_sigs:
             return {"mint": mint, "error": "no_signatures", "buyers": [], "new": 0, "total": 0}
 
         # Oldest N signatures (these are at the tail since Helius returns newest-first)
         oldest_sigs = all_sigs[-(min(100, len(all_sigs))):]  # up to 100 oldest
+        if oldest_first:
+            # walk truly oldest-first, so the max_buyers cut-off keeps the
+            # earliest buyers rather than the newest of the oldest 100
+            oldest_sigs = list(reversed(oldest_sigs))
 
         # Parse buyer from each sig concurrently (batched to avoid hammering)
-        BATCH = 10
+        BATCH = 1 if pace_s else 10
         raw_buyers: list[dict] = []
         for i in range(0, len(oldest_sigs), BATCH):
             batch_sigs = oldest_sigs[i:i + BATCH]
@@ -272,6 +350,8 @@ async def backtrack_early_buyers(
             for r in results:
                 if isinstance(r, dict):
                     raw_buyers.append(r)
+            if pace_s:
+                await asyncio.sleep(pace_s)
             if len(raw_buyers) >= max_buyers:
                 break
 
@@ -296,9 +376,18 @@ async def backtrack_early_buyers(
 
         # Find funders for major early buyers (concurrently)
         major_buyers = [b for b in ranked if b["is_major"]]
-        funder_results = await asyncio.gather(*[
-            _find_funder(client, key, b["wallet_address"]) for b in major_buyers
-        ], return_exceptions=True)
+        if pace_s:
+            funder_results = []
+            for b in major_buyers:
+                try:
+                    funder_results.append(await _find_funder(client, key, b["wallet_address"]))
+                except Exception as e:  # noqa: BLE001
+                    funder_results.append(e)
+                await asyncio.sleep(pace_s * 2)  # two RPC calls each
+        else:
+            funder_results = await asyncio.gather(*[
+                _find_funder(client, key, b["wallet_address"]) for b in major_buyers
+            ], return_exceptions=True)
         for b, funder in zip(major_buyers, funder_results):
             b["funded_by"] = funder if isinstance(funder, str) else None
 
@@ -358,13 +447,19 @@ async def backtrack_early_buyers(
 
         await db.commit()
 
-    return {
+    out = {
         "mint": mint,
         "buyers": ranked[:max_buyers],
         "new": new_count,
         "total": len(ranked),
         "cached": False,
     }
+    if oldest_first:
+        oldest = all_sigs[-1]
+        out.update(reached_origin=bool(reached_origin), signatures_scanned=scanned, cursor=None,
+                   origin={"signature": oldest.get("signature"), "slot": oldest.get("slot"),
+                           "block_time": oldest.get("blockTime")})
+    return out
 
 
 def _dry_run_result(mint: str, max_buyers: int) -> dict:
