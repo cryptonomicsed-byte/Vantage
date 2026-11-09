@@ -64,9 +64,10 @@ async def test_status_reports_every_node_with_a_probed_state(client, registered_
     # dormant if not" — never a hardcoded claim either way.
     vantage = next(n for n in d["nodes"] if n["name"] == "Vantage")
     assert vantage["status"] == ("live" if _listening("127.0.0.1", 8001) else "dormant"), vantage
-    # a repo with no caller is never reported live
+    # a repo with no caller is never reported live: kanban is merging into
+    # Vantage (P1-15), reported as merging (or missing), not live
     kanban = next(n for n in d["nodes"] if n["name"] == "kanban")
-    assert kanban["status"] == "archived"
+    assert kanban["status"] in ("merging", "missing") and kanban["merges_into"] == "Vantage"
     blocked = [n for n in d["nodes"] if n["status"] == "blocked"]
     assert blocked and all(n["detail"] for n in blocked)
     assert d["datasets"] and d["flow"]
@@ -552,3 +553,22 @@ async def test_two_tokens_sharing_a_ticker_are_two_calls(client, registered_agen
     assert r.json()["candidates"] == 2, r.json()
     assert {p["mint"] for p in r.json()["plan"]} == {
         "MintAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "MintBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"}
+
+
+@pytest.mark.asyncio
+async def test_registry_lists_all_16_repos_and_none_is_archived(client, registered_agent):
+    """P1-15: the handoff's 16 repos are all nodes, none archived, and each
+    merging repo says where its parts go."""
+    r = await client.get("/api/pipeline/status", headers=_h(registered_agent))
+    nodes = {n["name"]: n for n in r.json()["nodes"]}
+    sixteen = {"Vantage", "mycelium", "mycelium-tools", "grokbot-mycelium", "Crucible", "bondhive",
+               "minipae", "ares-control", "fomopulse-convergence", "Loom", "strategy-lab", "Portent",
+               "project-12-Cassandra-Oracle", "kanban", "TradingOS", "Proof"}
+    assert sixteen <= set(nodes), sixteen - set(nodes)
+    assert not [n for n in nodes.values() if n["status"] == "archived" or n["kind"] == "archived"]
+    assert nodes["kanban"]["merges_into"] == "Vantage" and "P4-14" in nodes["kanban"]["tickets"]
+    assert nodes["project-12-Cassandra-Oracle"]["merges_into"] == "Portent"
+    assert nodes["TradingOS"]["merges_into"] == "Vantage"
+    assert nodes["mycelium-tools"]["merges_into"] == nodes["grokbot-mycelium"]["merges_into"] == "mycelium"
+    assert nodes["Proof"]["merges_into"] == "bondhive"
+    assert nodes["bondhive"]["status"] in ("live", "dormant")  # honest: probed, not asserted
