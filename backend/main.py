@@ -765,6 +765,9 @@ async def lifespan(app: FastAPI):
     from .crucible_calibration import calibration_loop as _crucible_calibration_loop
     crucible_adapter_task = asyncio.create_task(_crucible_adapter_loop())
     crucible_calibration_task = asyncio.create_task(_crucible_calibration_loop())
+    # P4-13: guild router schedules (GUILD_ROUTER_ENABLED; no schedules by default).
+    from .guild_router import schedule_loop as _guild_schedule_loop
+    guild_schedule_task = asyncio.create_task(_guild_schedule_loop())
 
     yield
     shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, mention_poller_task, scoring_task, last30days_task, outcome_learner_task, event_bus_task, tier_recompute_task, reconciler_task,
@@ -776,7 +779,8 @@ async def lifespan(app: FastAPI):
                       curve_listener_task, runner_detect_task,
                       runner_trace_task, wallet_labels_task,
                       runner_watchlist_task, confluence_task,
-                      crucible_adapter_task, crucible_calibration_task]
+                      crucible_adapter_task, crucible_calibration_task,
+                      guild_schedule_task]
     if execution_engine_task is not None:
         shutdown_tasks.append(execution_engine_task)
     # Cancel all first, then wait a bounded time. Awaiting each cancelled task
@@ -1136,6 +1140,8 @@ from .routers.trading_space import router as trading_space_router
 app.include_router(trading_space_router)
 from .routers.guild_reliability import router as guild_reliability_router  # P3-06
 app.include_router(guild_reliability_router)
+from .routers.guild_router import router as guild_router_router  # P4-10
+app.include_router(guild_router_router)
 from .routers.content_space import router as content_space_router
 app.include_router(content_space_router)
 from .routers.workspace_mcp import router as workspace_mcp_router
