@@ -127,6 +127,8 @@ async def register(
         _log.getLogger(__name__).debug("event_bus emit skipped: %s", _evt_exc)
 
     response = {"name": name, "api_key": api_key}
+    from ..trade_recording import RECORDING_NOTICE
+    response["recording_notice"] = RECORDING_NOTICE  # P4-11
     if birth_manifest:
         response["identity"] = birth_manifest["credentials"]
     return response
