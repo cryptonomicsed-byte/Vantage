@@ -169,6 +169,24 @@ export default function ExecutionPanel() {
     setLiveBusy(false)
   }, [tradingApi, loadDaemonSettings])
 
+  // P4-11: per-account trade recording. live_mode above is global; this is yours.
+  const [recording, setRecording] = useState<{ record_live: boolean; leaderboard_opt_in: boolean; notice: string } | null>(null)
+  const [recBusy, setRecBusy] = useState(false)
+  useEffect(() => {
+    (async () => {
+      try { const r = await tradingApi('/recording'); if (r.ok) setRecording(await r.json()) } catch { /* best-effort */ }
+    })()
+  }, [tradingApi])
+  const toggleRecordLive = useCallback(async () => {
+    if (!recording) return
+    setRecBusy(true)
+    try {
+      const r = await tradingApi('/recording', { method: 'PUT', body: JSON.stringify({ record_live: !recording.record_live }) })
+      if (r.ok) setRecording(await r.json())
+    } catch { /* best-effort */ }
+    setRecBusy(false)
+  }, [tradingApi, recording])
+
   const handleQuickTrade = useCallback(async () => {
     const apiKey = localStorage.getItem('vantage_api_key')
     if (!apiKey) { setTradeMsgOk(false); setTradeMsg('Connect API key first'); return }
@@ -454,6 +472,27 @@ export default function ExecutionPanel() {
         {liveMsg && (
           <div style={{ fontSize: 10, color: '#ff2d4a', marginBottom: 6 }}>{liveMsg}</div>
         )}
+        {/* P4-12: what this switch is, and what is per-account. */}
+        <div style={{ fontSize: 9, color: '#6b7280', lineHeight: 1.5, marginBottom: 8, padding: '0 2px' }}>
+          This switch is <b style={{ color: '#9ca3af' }}>global</b> — one setting for the whole server, every account.
+          Recording is <b style={{ color: '#9ca3af' }}>per account</b>:
+          {recording ? (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginLeft: 4 }}>
+              <button
+                style={{ padding: 0, background: 'none', border: 'none', cursor: recBusy ? 'default' : 'pointer', display: 'inline-flex' }}
+                disabled={recBusy}
+                onClick={toggleRecordLive}
+                title={recording.notice}
+              >
+                {recording.record_live ? <ToggleRight size={16} color="#39ff14" /> : <ToggleLeft size={16} color="#6b7280" />}
+              </button>
+              <span style={{ color: recording.record_live ? '#9ca3af' : '#ffaa00' }}>
+                your live trades {recording.record_live ? 'are' : 'are not'} recorded for the learning loop
+              </span>
+              <span>· paper always recorded · {recording.leaderboard_opt_in ? 'leaderboard: opted in' : 'not on any leaderboard'}</span>
+            </span>
+          ) : <span> unavailable</span>}
+        </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {AUTO_TRADE_DAEMONS.map(d => {

@@ -38,7 +38,23 @@ from typing import Any, Dict, List, Optional, Tuple
 #   blocked    cannot run yet for a stated reason (missing input/credential)
 #   reference  not a runtime component; a schema or spec others conform to
 #   archived   deliberately out of the path; kept for history
+#   merging    its parts are moving into another repo (merges_into, tickets);
+#              reported "merging" while its repo is on disk, never "live"
 # ---------------------------------------------------------------------------
+
+# P1-02: the TradingOS SignalGenome schema is vendored into this repo, so
+# validate-signal and the registry probe work without a TradingOS checkout.
+_VENDORED_SIGNAL_PROTO = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "protocols", "tradingos", "signal.proto")
+_TRADINGOS_SIGNAL_PROTO = "/opt/ares/TradingOS/protos/signal.proto"
+
+
+def signal_proto_path() -> str:
+    """Vendored copy first; the TradingOS checkout only as a fallback."""
+    if os.path.isfile(_VENDORED_SIGNAL_PROTO):
+        return _VENDORED_SIGNAL_PROTO
+    return _TRADINGOS_SIGNAL_PROTO
+
 
 NODES: List[Dict[str, Any]] = [
     # ---- core -------------------------------------------------------------
@@ -66,10 +82,13 @@ NODES: List[Dict[str, Any]] = [
         "name": "strategy-lab", "layer": "signal", "kind": "service", "repo": "/opt/ares/strategy-lab",
         "role": "lane ensemble — convergence surface that produces one early-entry score",
         "flow": "hub reads signals, writes scores back to Vantage; hub runs from strategy-lab-hub-deploy",
-        "probe": {"type": "http", "url": "http://127.0.0.1:8012/"},
+        # P1-07: probe /health (the hub 404s on "/"), at the same base the
+        # enricher calls.
+        "probe": {"type": "http", "url": os.environ.get("STRATEGY_LAB_BASE", "http://127.0.0.1:8012").rstrip("/") + "/health"},
     },
     {
         "name": "grokbot-mycelium", "layer": "signal", "kind": "bridge", "repo": "/opt/ares/grokbot-mycelium",
+        "merges_into": "mycelium", "tickets": ["P2-02"],
         "role": "grokbot tape -> Mycelium traces -> calibration -> measured finding",
         "flow": "tools/bridge_daemon.py reads a JSONL tape and emits traces; also ingests to Vantage intel",
         "probe": {"type": "path", "path": "/opt/ares/grokbot-pumpfun/logs/trades.jsonl"},
@@ -82,9 +101,10 @@ NODES: List[Dict[str, Any]] = [
     },
     {
         "name": "TradingOS", "layer": "signal", "kind": "reference", "repo": "/opt/ares/TradingOS",
+        "merges_into": "Vantage", "tickets": ["P1-02", "P4-15"],
         "role": "signal schema of record — protos/signal.proto (SignalGenome: conviction, dna, fitness)",
-        "flow": "reference only: POST /api/pipeline/validate-signal checks Vantage signals against it",
-        "probe": {"type": "path", "path": "/opt/ares/TradingOS/protos/signal.proto"},
+        "flow": "signal.proto is vendored into Vantage (P1-02) and is the base of signal_record/1; the challenger idea runs in shadow (P4-15); validate-signal checks against it",
+        "probe": {"type": "path", "path": signal_proto_path()},
     },
     # ---- probability / truth ----------------------------------------------
     {
@@ -117,6 +137,7 @@ NODES: List[Dict[str, Any]] = [
     },
     {
         "name": "mycelium-tools", "layer": "substrate", "kind": "library", "repo": "/opt/ares/mycelium-tools",
+        "merges_into": "mycelium", "tickets": ["P2-01"],
         "role": "the same substrate as an installable package (storage, a2a, miners, findings)",
         "flow": "imported by Vantage for substrate counts/findings; collector/cycle units not installed",
         "probe": {"type": "import", "module": "mycelium_substrate",
@@ -131,22 +152,32 @@ NODES: List[Dict[str, Any]] = [
     # ---- reputation --------------------------------------------------------
     {
         "name": "Proof", "layer": "reputation", "kind": "library", "repo": "/opt/ares/Proof",
+        "merges_into": "bondhive", "tickets": ["P3-10"],
         "role": "agent reputation economy — attested work (kind 30009) -> tier + score",
         "flow": "Vantage backend/proof_bridge.py -> ProofRelay.store_event -> reputations",
         "probe": {"type": "proof"},
     },
-    # ---- archived / out of path -------------------------------------------
     {
-        "name": "kanban", "layer": "archive", "kind": "archived", "repo": "/opt/ares/kanban",
-        "role": "Trading OS work surface (Next.js app, profiles/backtests/deployments)",
-        "flow": "out of path: needs its own docker stack (postgres/redis) and duplicates Vantage surfaces",
+        "name": "bondhive", "layer": "reputation", "kind": "library", "repo": "/opt/ares/bondhive",
+        "tickets": ["P3-06", "P3-10"],
+        "role": "guild-agent reliability score -- math only, no token (score.rs: start 50, +1/-2/-5, 180-day half-life)",
+        "flow": "Vantage backend/guild_reliability.py ports score.rs (P3-06); scores carried in minipae (P3-08); BONDHIVE_RPC_URL stays unset",
+        "probe": {"type": "path", "path": "/opt/ares/bondhive/core/src/score.rs"},
+    },
+    # ---- merging into other repos (handoff section 6; nothing is retired) --
+    {
+        "name": "kanban", "layer": "execution", "kind": "merging", "repo": "/opt/ares/kanban",
+        "merges_into": "Vantage", "tickets": ["P4-14"],
+        "role": "Julia quant engine (non-repainting indicators, backtests, risk metrics), agent MCP/proto interfaces, whale watcher",
+        "flow": "parts move into Vantage services/quant (ares-quant-julia), daemons/whale_watcher.py, protocols/kanban; the Next.js board, Docker stack and Camoufox scraper are dropped",
         "probe": {"type": "path", "path": "/opt/ares/kanban/README.md"},
     },
     {
-        "name": "project-12-Cassandra-Oracle", "layer": "archive", "kind": "archived",
+        "name": "project-12-Cassandra-Oracle", "layer": "probability", "kind": "merging",
         "repo": "/opt/ares/project-12-Cassandra-Oracle",
-        "role": "paradigm forecasting / autonomous architect experiment",
-        "flow": "out of path: no trading interface, no caller, dockerised only",
+        "merges_into": "Portent", "tickets": ["P3-05"],
+        "role": "forecast types, commit-then-verify, oracle monitoring, similar-question lookup",
+        "flow": "parts move into Portent (sdk types, commitment field, relay monitoring); the Math.random engine and code generator are dropped",
         "probe": {"type": "path", "path": "/opt/ares/project-12-Cassandra-Oracle/README.md"},
     },
 ]
@@ -293,6 +324,8 @@ def probe_node(node: Dict[str, Any], use_cache: bool = True) -> Dict[str, Any]:
         detail = node["blocked_reason"]
     elif static_kind == "archived":
         status = "archived"
+    elif static_kind == "merging":
+        status = "merging" if ok else "missing"
     elif static_kind == "reference":
         status = "reference" if ok else "missing"
     elif ok and static_kind in ("service", "bridge", "library"):
@@ -306,6 +339,7 @@ def probe_node(node: Dict[str, Any], use_cache: bool = True) -> Dict[str, Any]:
         "name": name, "layer": node["layer"], "kind": static_kind,
         "status": status, "detail": detail, "role": node["role"],
         "flow": node["flow"], "repo": node.get("repo"),
+        "merges_into": node.get("merges_into"), "tickets": node.get("tickets", []),
         "repo_present": os.path.isdir(node["repo"]) if node.get("repo") else None,
     }
     # Cache a healthy probed node for a while; re-check a failing one quickly, so
@@ -505,7 +539,7 @@ def status() -> Dict[str, Any]:
     for n in nodes:
         by_layer.setdefault(n["layer"], []).append(f"{n['name']}:{n['status']}")
     counts = {s: sum(1 for n in nodes if n["status"] == s)
-              for s in ("live", "available", "present", "dormant", "blocked", "reference", "archived", "missing")}
+              for s in ("live", "available", "present", "dormant", "blocked", "reference", "merging", "archived", "missing")}
     return {
         "nodes": nodes,
         "by_layer": by_layer,

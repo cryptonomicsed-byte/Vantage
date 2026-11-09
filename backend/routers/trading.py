@@ -993,6 +993,9 @@ async def create_order(data: OrderCreate, agent: dict = Depends(get_agent)):
                     (data.strategy_id,))).fetchone()
                 if _st and _st[0] and _st[1]:
                     _mode = "live"
+            from ..trade_recording import should_record as _should_record
+            if not await _should_record(db, agent["id"], _mode):
+                raise LookupError("live recording off for this account (P4-11)")
             emit_trade_decision(
                 mode=_mode, symbol=data.symbol, side=data.side,
                 quantity=data.quantity, price=data.price,
@@ -2099,6 +2102,10 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent), x_
     # difference is the mode field and that this one has a real signature.
     try:
         from ..mycelium_bridge import emit_trade_outcome
+        from ..trade_recording import should_record as _should_record
+        async with get_db() as _rdb:
+            if not await _should_record(_rdb, agent["id"], "live"):
+                raise LookupError("live recording off for this account (P4-11)")
         emit_trade_outcome(
             mode="live", symbol=order["symbol"], side=order["side"],
             order_id=order_id, quantity=order["quantity"],
@@ -2275,6 +2282,31 @@ async def pumpfun_premigration_board(agent: dict = Depends(get_agent)):
         tiers.setdefault(d["tier"], []).append(d)
 
     return {"tiers": tiers, "total_tracked": len(rows)}
+
+
+class RecordingUpdate(BaseModel):
+    record_live: Optional[bool] = None
+    leaderboard_opt_in: Optional[bool] = None
+
+
+@router.get("/recording")
+async def get_recording(agent: dict = Depends(get_agent)):
+    """P4-11: this account's trade-recording prefs (defaults if never set)."""
+    from ..trade_recording import RECORDING_NOTICE, get_prefs
+    async with get_db() as db:
+        prefs = await get_prefs(db, agent["id"])
+    return {**prefs, "notice": RECORDING_NOTICE, "paper_always_recorded": True}
+
+
+@router.put("/recording")
+async def put_recording(data: RecordingUpdate, agent: dict = Depends(get_agent)):
+    """P4-11: change this account's recording prefs. Only affects whether this
+    account's LIVE trades are traced; never changes trading itself."""
+    from ..trade_recording import RECORDING_NOTICE, set_prefs
+    async with get_db() as db:
+        prefs = await set_prefs(db, agent["id"], record_live=data.record_live,
+                                leaderboard_opt_in=data.leaderboard_opt_in)
+    return {**prefs, "notice": RECORDING_NOTICE, "paper_always_recorded": True}
 
 
 @router.get("/live-mode")
@@ -2737,7 +2769,37 @@ async def ingest_signal(request: Request, tool: dict = Depends(get_system_tool))
         result["action"] = "HOLD"
         result["note"] = "Conviction too low for auto-execution"
 
+    # P1-04: the trading door also writes the ledger (door 'trading'), after
+    # everything above has run. Auto-execute, the agent_id check and
+    # idempotency are untouched; nothing here changes the response, and the
+    # ledger write is scheduled off the request path (flag SIGNAL_LEDGER_ENABLED).
+    _ledger_trading_ingest(body, symbol, source, direction, conviction, chain)
     return result
+
+
+def _ledger_trading_ingest(body: dict, symbol, source, direction, conviction, chain) -> None:
+    try:
+        from backend import signal_ledger as _sl
+        if not _sl.enabled():
+            return
+        record = None
+        if isinstance(body, dict) and "schema" in body:
+            from backend import signal_record as _sr
+            rec, problems = _sr.validate(body)
+            if not problems:
+                # Pre-cap value: this door does not cap (its conviction drives
+                # auto-execute, which this ticket must not change).
+                rec["conviction_raw"] = rec["conviction"]
+                record = rec
+        signal = {
+            "symbol": str(symbol)[:20], "source": str(source)[:30],
+            "type": str(body.get("type") or "signal")[:20], "conviction": conviction,
+            "direction": str(direction or ""), "detail": str(body.get("detail") or ""),
+            "mint": str(body.get("mint") or "")[:64], "chain": str(chain or ""), "ts": int(time.time()),
+        }
+        _sl.schedule("trading", signal, None, record)
+    except Exception as e:  # never fails the ingest
+        logger.warning("trading-door ledger hook failed (ingest unaffected): %s", e)
 
 # ── Trade Journal ───────────────────────────────────────────
 

@@ -129,19 +129,51 @@ async def trending(limit: int=20, x_agent_key: str=Header(...)):
         return {"trending":[],"count":0,"source":"GeckoTerminal:offline"}
 
 # ════════════════════════════════════════════════════════════════
-# BONDING CURVE — Birdeye price check
+# BONDING CURVE — progress from the curve's reserves (P1-11; see
+# backend/pumpfun_curve.py). Same keys as before plus progress_src,
+# market_cap_usd and tokens_sold_pct.
 # ════════════════════════════════════════════════════════════════
 @router.get("/bonding-curve")
 async def bonding_curve(mint: str=Query(...), x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
+    from backend import pumpfun_curve as pc
+    out = {"mint": mint, "price": 0, "curve_target_usd": pc.GRADUATION_TARGET_USD, "progress_pct": None,
+           "graduated": False, "source": "none", "progress_src": "none",
+           "market_cap_usd": None, "tokens_sold_pct": None}
+    reserves, migrated = None, False
     try:
-        d = await _fetch(f"https://public-api.birdeye.so/defi/price?address={mint}", {"X-API-KEY": BIRDEYE, "accept":"application/json"})
-        price = float(d.get("data",{}).get("value",0))
-        curve_target = 69000
-        progress = min(100, round((price * 1_000_000 / curve_target) * 100, 2)) if price else 0
-        return {"mint":mint,"price":price,"curve_target_usd":curve_target,"progress_pct":progress,"graduated":progress>=100,"source":"Birdeye"}
-    except:
-        return {"mint":mint,"price":0,"curve_target_usd":69000,"progress_pct":0,"source":"Birdeye:offline"}
+        async with get_db() as db:
+            row = await (await db.execute(
+                "SELECT v_sol_in_curve, v_tokens_in_curve, migrated FROM pumpfun_premigration_tokens WHERE mint=?",
+                (mint,))).fetchone()
+        if row and row[0] and row[1]:
+            reserves, migrated, src = {"v_sol": float(row[0]), "v_tokens": float(row[1])}, bool(row[2]), "reserves:db"
+    except aiosqlite.Error:
+        pass
+    if reserves is None:
+        chain = await pc.fetch_onchain(mint)
+        if chain:
+            reserves, migrated, src = chain, bool(chain.get("complete")), "reserves:chain"
+    if reserves is None:
+        return out
+    m_sol = pc.mcap_sol(reserves["v_sol"], reserves["v_tokens"])
+    out["tokens_sold_pct"] = pc.tokens_sold_pct(reserves["v_tokens"])
+    out["graduated"] = migrated
+    out["source"] = src
+    if reserves.get("nonstandard"):
+        out["nonstandard_curve"] = True
+        out["initial_v_sol"] = round(reserves["initial_v_sol"], 3)
+    try:
+        from backend.routers.trading import _fetch_quote
+        sol_usd = await asyncio.wait_for(_fetch_quote("SOL"), 5)
+    except Exception:
+        sol_usd = None
+    if m_sol is None or not sol_usd:
+        return out  # reserves known but no SOL price: still no made-up USD number
+    mcap_usd = m_sol * float(sol_usd)
+    out.update({"price": mcap_usd / pc.TOTAL_SUPPLY, "market_cap_usd": round(mcap_usd, 2),
+                "progress_pct": 100.0 if migrated else pc.progress_pct(mcap_usd), "progress_src": src})
+    return out
 
 # ════════════════════════════════════════════════════════════════
 # GRADUATIONS — was querying trading_signals WHERE type='pumpfun': that
@@ -397,6 +429,36 @@ async def token_traders(mint: str = Query(...), x_agent_key: str = Header(...)):
 # event loop if awaited directly inside an async def (the same class of
 # bug found and fixed elsewhere this session, e.g. telegram_webhook.py).
 # ════════════════════════════════════════════════════════════════
+def _call_enrich(fn, mint: str, symbol: str):
+    """P4-04: older daemon copies take enrich_token(mint); newer ones take
+    (mint, symbol). Passing symbol to the old one raised TypeError -> 502 on
+    every trace. Pass it only when the function accepts it."""
+    import inspect
+    try:
+        accepts = len(inspect.signature(fn).parameters) >= 2
+    except (TypeError, ValueError):
+        accepts = False
+    return fn(mint, symbol) if accepts else fn(mint)
+
+
+async def _first_buyers(mint: str, limit: int = 20) -> list:
+    """First buyers in entry order from backend.early_buyer, shaped for the UI
+    ({wallet, rank, sol_spent, funded_by, is_major}). [] on any failure."""
+    try:
+        from ..early_buyer import backtrack_early_buyers
+        out = await backtrack_early_buyers(mint, max_buyers=50)
+    except Exception:  # noqa: BLE001 -- the trace still returns the rest
+        return []
+    rows = []
+    for b in (out or {}).get("buyers") or []:
+        w = b.get("wallet_address")
+        if w:
+            rows.append({"wallet": w, "rank": b.get("entry_rank"), "sol_spent": b.get("sol_spent"),
+                         "funded_by": b.get("funded_by"), "is_major": bool(b.get("is_major"))})
+    rows.sort(key=lambda r: (r["rank"] is None, r["rank"] or 0))
+    return rows[:limit]
+
+
 @router.post("/trace-token/{mint}")
 async def trace_token(mint: str, symbol: str = Query(""), x_agent_key: str = Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
@@ -404,12 +466,16 @@ async def trace_token(mint: str, symbol: str = Query(""), x_agent_key: str = Hea
     sys.path.insert(0, "/opt/ares")
     import pumpfun_wallet_intel as pwi
     try:
-        result = await asyncio.to_thread(pwi.enrich_token, mint, symbol)
+        result = await asyncio.to_thread(_call_enrich, pwi.enrich_token, mint, symbol)
     except Exception as e:
         raise HTTPException(502, f"Enrichment failed: {e}")
     holders = result.get("holders", {}).get("holders", [])
     traders = result.get("traders", {}).get("traders", [])
-    first_buyers = result.get("traders", {}).get("first_buyers", [])
+    # P4-04: first buyers come from the ordered early-buyer walk (entry rank,
+    # SOL spent, funder), which the daemon's trader scan never returned on
+    # older copies. Its old list is the fallback when the walk has nothing.
+    first_buyers = await _first_buyers(mint) or [
+        {"wallet": b.get("wallet")} for b in result.get("traders", {}).get("first_buyers", []) if b.get("wallet")]
     creator = result.get("creator", {}).get("creator", "")
     return {
         "mint": mint, "symbol": symbol,

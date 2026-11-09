@@ -64,7 +64,7 @@ from typing import Optional
 MAJOR_ADDRESSES = {
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC (Solana native)
     "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT (Solana)
-    "So11111111111111111111111111111111111111112",  # Wrapped SOL
+    "So11111111111111111111111111111111111111112",  # Wrapped SOL  # secret-scan:allow -- public wSOL mint
 }
 
 MAJOR_SYMBOLS = {
@@ -261,3 +261,37 @@ def pumpfun_token_is_alive(
         return False
 
     return True
+
+
+# --- P4-09: shared anti-pump filter -----------------------------------------
+# Used by the confluence ping (backend/confluence.py) and available to any
+# pre-migration path. Additive: nothing above calls it, nothing above changed.
+ANTI_PUMP_MAX_LABELLED_SHARE = 0.50   # SOL from dev/sniper/bundler/insider/bot
+ANTI_PUMP_MAX_TOP_WALLET_SHARE = 0.50
+_ANTI_PUMP_BAD = frozenset({"dev", "sniper", "bundler", "insider", "bot"})
+
+
+def anti_pump(trades, labels) -> dict:
+    """trades: [{wallet, sol, side}] for one mint in the window;
+    labels: wallet -> [label]. Returns {ok, reasons, ...stats}."""
+    buys = [t for t in trades if t.get("side") == "buy"]
+    sells = [t for t in trades if t.get("side") == "sell"]
+    total = sum(float(t.get("sol") or 0.0) for t in buys)
+    per: dict = {}
+    for t in buys:
+        per[t["wallet"]] = per.get(t["wallet"], 0.0) + float(t.get("sol") or 0.0)
+    bad = sum(v for w, v in per.items() if _ANTI_PUMP_BAD & set(labels.get(w, [])))
+    top = max(per.values()) if per else 0.0
+    dev_sold = sorted({t["wallet"] for t in sells if "dev" in labels.get(t["wallet"], [])})
+    reasons = []
+    if len(per) < PUMPFUN_MIN_DISTINCT_PARTICIPANTS:
+        reasons.append(f"only {len(per)} distinct buyers")
+    if total > 0 and bad / total > ANTI_PUMP_MAX_LABELLED_SHARE:
+        reasons.append(f"{bad / total:.0%} of buy SOL from dev/sniper/bundler/insider/bot wallets")
+    if total > 0 and top / total > ANTI_PUMP_MAX_TOP_WALLET_SHARE:
+        reasons.append(f"one wallet is {top / total:.0%} of buy SOL")
+    if dev_sold:
+        reasons.append("dev sold in the window")
+    return {"ok": not reasons, "reasons": reasons, "distinct_buyers": len(per),
+            "buy_sol": round(total, 4), "labelled_share": round(bad / total, 4) if total else 0.0,
+            "top_wallet_share": round(top / total, 4) if total else 0.0, "dev_sold": dev_sold}

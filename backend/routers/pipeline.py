@@ -189,7 +189,7 @@ async def recall(order_id: int, agent: dict = Depends(get_agent)):
 async def validate_signal(data: SignalPayload, agent: dict = Depends(get_agent)):
     """Check a signal against TradingOS's SignalGenome schema.
 
-    TradingOS (`/opt/ares/TradingOS/protos/signal.proto`) is not running and does
+    TradingOS (vendored at `protocols/tradingos/signal.proto`) is not running and does
     not need to be: what it contributes is the field contract — asset, direction,
     conviction, and a DNA block that no producer here currently fills. Conformance
     is checked, not enforced at ingest, so producers keep working while the gap is
@@ -217,7 +217,7 @@ async def validate_signal(data: SignalPayload, agent: dict = Depends(get_agent))
         await db.commit()
 
     return {"conforms": not problems, "problems": problems, "warnings": warnings,
-            "schema": "tradingos.v1.SignalGenome", "proto": "/opt/ares/TradingOS/protos/signal.proto"}
+            "schema": "tradingos.v1.SignalGenome", "proto": pipeline.signal_proto_path()}
 
 
 def _row_factory():
@@ -345,3 +345,54 @@ async def promote_signals(data: PromoteRequest, agent: dict = Depends(get_agent)
 
     return {"applied": True, "candidates": len(plan), "placed": placed, "skipped": skipped,
             "summary": f"{len(placed)} paper order(s) from {len(plan)} candidate signal(s)"}
+
+
+@router.get("/shadow-rank")
+async def shadow_rank_endpoint(agent: dict = Depends(get_agent)):
+    """P2-05: the shadow rank -- conviction x source reliability, logged only.
+
+    Returns the current promotable calls re-ranked by shadow_score, plus how
+    many rows were logged to shadow_rank_log. This is never fed back into the
+    live rank; switching shadow to live is a separate, human decision.
+    """
+    from .. import shadow_rank
+    result = await shadow_rank.compute_and_log()
+    return result
+
+
+@router.get("/learning")
+async def learning_loop_status(agent: dict = Depends(get_agent)):
+    """Read-only view of the whole learning loop for the Learning panel.
+
+    Never writes. Each section reports its own flag, so a section that is off
+    says so instead of looking empty-but-broken.
+    """
+    import asyncio as _asyncio
+    from .. import shadow_rank, signal_ledger, signal_record
+
+    out: dict = {
+        "flags": {
+            "SIGNAL_RECORD_V1": signal_record.enabled(),
+            "SIGNAL_LEDGER_ENABLED": signal_ledger.enabled(),
+            "LEDGER_MIRROR_ENABLED": signal_ledger.mirror_enabled(),
+            "SHADOW_RANK_ENABLED": shadow_rank.enabled(),
+        },
+    }
+    try:
+        recent = await signal_ledger.query(limit=10)
+        async with get_db() as db:
+            try:
+                total = (await (await db.execute("SELECT COUNT(*) FROM signal_ledger")).fetchone())[0]
+            except Exception:  # noqa: BLE001 - table absent until the flag is first on
+                total = 0
+        out["ledger"] = {"total": total, "recent": recent}
+    except Exception as e:  # noqa: BLE001
+        out["ledger"] = {"total": 0, "recent": [], "error": str(e)}
+    try:
+        out["hit_rates"] = await _asyncio.to_thread(shadow_rank.fetch_hit_rate_findings)
+        out["mycelium_reachable"] = True
+    except Exception as e:  # noqa: BLE001
+        out["hit_rates"], out["mycelium_reachable"] = [], False
+        out["hit_rates_error"] = str(e)
+    out["shadow"] = await shadow_rank.recent_log()
+    return out

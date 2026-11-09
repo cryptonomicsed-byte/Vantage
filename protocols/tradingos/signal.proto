@@ -1,0 +1,183 @@
+syntax = "proto3";
+package tradingos.v1;
+option go_package = "github.com/tradingos/api-gateway/proto";
+
+// ═══════════════════════════════════════════════════════════════
+// TradingOS Signal Protocol Buffers
+// Used for gRPC communication between services
+// ═══════════════════════════════════════════════════════════════
+
+import "google/protobuf/timestamp.proto";
+
+// ─── SIGNAL ─────────────────────────────────────────────────
+
+message SignalGenome {
+  string id = 1;
+  google.protobuf.Timestamp created_at = 2;
+  AssetId asset = 3;
+  SignalType signal_type = 4;
+  double conviction = 5;
+  SignalDNA dna = 6;
+  double fitness = 7;
+  repeated float temporal_embedding = 8;
+  repeated ChallengeResult challenges = 9;
+  ParliamentRecord parliament_record = 10;
+  SignalState state = 11;
+  MarketContext market_context = 12;
+  map<string, double> indicators = 13;
+  repeated string tags = 14;
+}
+
+message AssetId {
+  string symbol = 1;
+  string chain = 2;
+  string address = 3;
+}
+
+message SignalType {
+  oneof type {
+    LongSignal long = 1;
+    ShortSignal short = 2;
+    HoldSignal hold = 3;
+    ExitSignal exit = 4;
+    AlertSignal alert = 5;
+  }
+}
+
+message LongSignal {
+  double target_pct = 1;
+  double timeframe_hours = 2;
+}
+
+message ShortSignal {
+  double target_pct = 1;
+  double timeframe_hours = 2;
+}
+
+message HoldSignal {}
+
+message ExitSignal {
+  string urgency = 1;
+}
+
+message AlertSignal {
+  string message = 1;
+}
+
+enum SignalState {
+  SPAWNED = 0;
+  UNDER_CHALLENGE = 1;
+  IN_PARLIAMENT = 2;
+  APPROVED = 3;
+  REJECTED = 4;
+  EXECUTING = 5;
+  ACTIVE = 6;
+  COMPLETED = 7;
+  EXPIRED = 8;
+}
+
+// ─── DNA ──────────────────────────────────────────────────────
+
+message SignalDNA {
+  string primary_source_type = 1;
+  repeated AgentContribution agent_lineage = 2;
+  string parent_id = 3;
+  uint32 generation = 4;
+  repeated ConvictionPoint conviction_evolution = 5;
+}
+
+message AgentContribution {
+  string agent_id = 1;
+  string agent_type = 2;
+  google.protobuf.Timestamp timestamp = 3;
+  double conviction_delta = 4;
+  string reason = 5;
+  double confidence = 6;
+}
+
+message ConvictionPoint {
+  google.protobuf.Timestamp timestamp = 1;
+  double value = 2;
+  string agent_id = 3;
+  string reason = 4;
+}
+
+// ─── CHALLENGE ───────────────────────────────────────────────
+
+message ChallengeResult {
+  string id = 1;
+  string challenger_id = 2;
+  google.protobuf.Timestamp timestamp = 3;
+  string challenge_type = 4;
+  repeated string arguments = 5;
+  string outcome = 6;
+  double conviction_impact = 7;
+}
+
+// ─── PARLIAMENT ──────────────────────────────────────────────
+
+message ParliamentRecord {
+  string session_id = 1;
+  google.protobuf.Timestamp started_at = 2;
+  google.protobuf.Timestamp completed_at = 3;
+  repeated ParliamentVote votes = 4;
+  bool quorum_reached = 5;
+  bool approved = 6;
+  double final_conviction = 7;
+}
+
+message ParliamentVote {
+  string voter_id = 1;
+  string voter_type = 2;
+  string vote = 3;
+  double conviction = 4;
+  string rationale = 5;
+  google.protobuf.Timestamp timestamp = 6;
+}
+
+// ─── MARKET CONTEXT ──────────────────────────────────────────
+
+message MarketContext {
+  double price_usd = 1;
+  double volume_24h_usd = 2;
+  double liquidity_usd = 3;
+  double price_change_1h = 4;
+  double price_change_24h = 5;
+  double btc_dominance = 6;
+  uint32 fear_greed_index = 7;
+  double gas_price_gwei = 8;
+}
+
+// ─── SERVICE ─────────────────────────────────────────────────
+
+service SignalService {
+  rpc Submit(SignalGenome) returns (SignalGenome);
+  rpc Get(GetSignalRequest) returns (SignalGenome);
+  rpc List(ListSignalsRequest) returns (ListSignalsResponse);
+  rpc Subscribe(SubscribeRequest) returns (stream BusMessage);
+}
+
+message GetSignalRequest {
+  string id = 1;
+}
+
+message ListSignalsRequest {
+  double min_conviction = 1;
+  string state = 2;
+  string asset = 3;
+  uint32 limit = 4;
+}
+
+message ListSignalsResponse {
+  repeated SignalGenome signals = 1;
+}
+
+message SubscribeRequest {
+  repeated string event_types = 1;
+}
+
+message BusMessage {
+  string type = 1;
+  bytes payload = 2;
+  google.protobuf.Timestamp timestamp = 3;
+}

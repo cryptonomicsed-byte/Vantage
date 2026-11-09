@@ -105,105 +105,153 @@ def _clamp01(v: float) -> float:
     return max(0.0, min(1.0, float(v)))
 
 
+# ── P1-09 ────────────────────────────────────────────────────────────────────
+# The relay answers {"resolutions": [...]}, {"predictions": [...]} and
+# {"leaderboard": [...]} -- dicts, not lists -- so the old `isinstance(data,
+# list)` check sent nothing. Resolution rows name the field `outcome`, not
+# `resolution`; /predictions rows are one per (market, predictor) with `side`
+# and `stake`, so yes/no stakes are summed per market; leaderboard rows carry
+# `composite` (0..100 by contracts/portent_program.composite_score), not
+# `score`. Each push is a signal_record/1 (chain portent, source_ref
+# portent:<market_id>, conviction capped 0.69) with today's legacy fields
+# alongside, and state makes every resolution push once and every skew or
+# reputation push only when it changes.
+CAP = 0.69
+_CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+_MAX_REMEMBERED = 5000
+
+
+def _ulid(ts_s: float | None = None) -> str:
+    import secrets
+    n = (int((ts_s if ts_s is not None else time.time()) * 1000) << 80) | secrets.randbits(80)
+    return "".join(_CROCKFORD[(n >> (5 * i)) & 31] for i in range(25, -1, -1))
+
+
+def _rows(data, key: str) -> list:
+    if isinstance(data, dict):
+        rows = data.get(key)
+        return rows if isinstance(rows, list) else []
+    return data if isinstance(data, list) else []
+
+
+def _record(market_id: str, type_: str, direction: str, conviction: float, detail: str,
+            created_at: float | None, evidence: dict) -> dict:
+    sym = f"PORT:{market_id[:15]}"
+    conv = round(min(CAP, _clamp01(conviction)), 4)
+    return {
+        "schema": "signal_record/1",
+        "id": _ulid(created_at),
+        "created_at": int(created_at or time.time()),
+        "source": "portent",
+        "source_ref": f"portent:{market_id}",
+        "asset": {"symbol": sym, "chain": "portent", "address": ""},
+        "type": type_,
+        "direction": direction,
+        "conviction": conv,
+        "producer": {"kind": "service", "agent_id": None, "version": "portent-bridge/2",
+                     "lineage": "portent-relay", "env": os.environ.get("PORTENT_ENV", "contabo-vps"),
+                     "blind": True},
+        "evidence": evidence,
+        "tags": ["portent"],
+        "detail": detail[:500],
+        # legacy fields alongside: ingested either way, SIGNAL_RECORD_V1 on or off
+        "symbol": sym,
+        "mint": "",
+    }
+
+
+def _remember(state: dict, key: str, ids) -> None:
+    kept = list(dict.fromkeys(list(state.get(key, [])) + list(ids)))
+    state[key] = kept[-_MAX_REMEMBERED:]
+
+
 def _process_resolutions(state: dict) -> int:
-    """Push newly resolved predictions as Vantage signals."""
-    data = _relay_get("/resolutions")
-    if not isinstance(data, list):
-        return 0
-
-    pushed = 0
-    seen_ids = set()
-    for item in data:
-        rid = str(item.get("market_id", ""))
-        if not rid or rid in seen_ids:
+    """Each resolution is pushed exactly once (state: pushed_resolutions)."""
+    rows = _rows(_relay_get("/resolutions"), "resolutions")
+    done = set(state.get("pushed_resolutions", []))
+    pushed, newly = 0, []
+    for item in rows:
+        mid = str(item.get("market_id") or "")
+        if not mid or mid in done:
             continue
-        seen_ids.add(rid)
-
-        resolution = item.get("resolution", "")  # "yes" / "no"
-        confidence = _clamp01(item.get("confidence", 0.5))
-        question = str(item.get("question") or item.get("title") or rid)[:80]
-
-        direction = "bullish" if str(resolution).lower() in ("yes", "true", "1") else "bearish"
-
-        sig = {
-            "symbol": f"PORT:{rid[:20]}",
-            "source": "portent",
-            "type": "resolution",
-            "conviction": confidence,
-            "direction": direction,
-            "detail": f"resolved={resolution} | {question}",
-            "mint": "",
-        }
+        outcome = str(item.get("outcome") or "").lower()
+        if outcome not in ("yes", "no"):
+            continue
+        sig = _record(mid, "resolution", "long" if outcome == "yes" else "short",
+                      float(item.get("confidence") or 0.5),
+                      f"resolved={outcome} oracle={str(item.get('oracle') or '')[:16]}",
+                      item.get("resolved_at"),
+                      {"cross_checks": int(item.get("cross_checks") or 0)})
         if _vantage_ingest(sig):
             pushed += 1
-
+            newly.append(mid)
+            done.add(mid)
+    _remember(state, "pushed_resolutions", newly)
     return pushed
 
 
 def _process_open_markets(state: dict) -> int:
-    """Push momentum signals from open markets with strong staking skew."""
-    data = _relay_get("/predictions?status=open")
-    markets = data if isinstance(data, list) else (data or {}).get("predictions", [])
-    if not markets:
-        return 0
-
+    """Sum stakes by side per market; push a skew only when it is new or its
+    direction or 0.1-bucket changed (state: pushed_momentum)."""
+    rows = _rows(_relay_get("/predictions?status=open"), "predictions")
+    markets: dict[str, dict] = {}
+    for r in rows:
+        mid = str(r.get("market_id") or "")
+        if not mid:
+            continue
+        m = markets.setdefault(mid, {"yes": 0.0, "no": 0.0, "n": 0, "latest": 0})
+        side = str(r.get("side") or "").lower()
+        if side in ("yes", "no"):
+            m[side] += float(r.get("stake") or 0)
+            m["n"] += 1
+            m["latest"] = max(m["latest"], int(r.get("created_at") or 0))
+    seen = dict(state.get("pushed_momentum", {}))
     pushed = 0
-    for m in markets[:20]:  # top 20
-        yes_stake  = float(m.get("yes_stake", 0) or 0)
-        no_stake   = float(m.get("no_stake", 0) or 0)
-        total      = yes_stake + no_stake
-        if total < 500:  # skip markets with no meaningful stake
+    for mid, m in list(markets.items())[:200]:
+        total = m["yes"] + m["no"]
+        if total < 500:
             continue
-
-        skew = abs(yes_stake - no_stake) / total  # 0 = even, 1 = one-sided
-        if skew < 0.3:  # not interesting enough
+        skew = abs(m["yes"] - m["no"]) / total
+        if skew < 0.3:
             continue
-
-        direction = "bullish" if yes_stake > no_stake else "bearish"
-        question = str(m.get("question") or m.get("title") or "")[:80]
-        mid = str(m.get("market_id", ""))[:20]
-
-        sig = {
-            "symbol": f"PORT:{mid}",
-            "source": "portent",
-            "type": "momentum",
-            "conviction": _clamp01(skew),
-            "direction": direction,
-            "detail": f"yes_stake={yes_stake:.0f} no_stake={no_stake:.0f} | {question}",
-            "mint": "",
-        }
+        direction = "long" if m["yes"] > m["no"] else "short"
+        mark = f"{direction}:{int(skew * 10)}"
+        if seen.get(mid) == mark:
+            continue
+        sig = _record(mid, "momentum", direction, skew,
+                      f"yes_stake={m['yes']:.0f} no_stake={m['no']:.0f} predictors={m['n']}",
+                      m["latest"] or None,
+                      {"yes_stake": m["yes"], "no_stake": m["no"], "predictors": m["n"], "skew": round(skew, 4)})
         if _vantage_ingest(sig):
             pushed += 1
-
+            seen[mid] = mark
+    state["pushed_momentum"] = dict(list(seen.items())[-_MAX_REMEMBERED:])
     return pushed
 
 
 def _process_leaderboard(state: dict) -> int:
-    """Push top-predictor reputation pulse."""
-    data = _relay_get("/leaderboard")
-    entries = data if isinstance(data, list) else (data or {}).get("leaderboard", [])
-    if not entries:
-        return 0
-
+    """Top predictors by composite (0..100); push when a composite changes
+    (state: pushed_reputation). Direction 'alert': a reputation pulse is not
+    a call on any market."""
+    rows = _rows(_relay_get("/leaderboard"), "leaderboard")
+    seen = dict(state.get("pushed_reputation", {}))
     pushed = 0
-    for entry in entries[:5]:  # top 5 predictors
-        pubkey = str(entry.get("pubkey", ""))[:64]
-        score  = float(entry.get("score", 0) or 0)
-        if score < 10:
+    for entry in rows[:5]:
+        pubkey = str(entry.get("pubkey") or "")[:64]
+        composite = int(entry.get("composite") or 0)
+        if not pubkey or composite < 10 or seen.get(pubkey) == composite:
             continue
-
-        sig = {
-            "symbol": f"PORT:REP:{pubkey[:16]}",
-            "source": "portent",
-            "type": "reputation_pulse",
-            "conviction": _clamp01(score / 100.0),
-            "direction": "bullish",
-            "detail": f"score={score:.1f} wins={entry.get('wins',0)} trips={entry.get('trips',0)}",
-            "mint": "",
-        }
+        sig = _record(f"REP:{pubkey[:11]}", "reputation_pulse", "alert", composite / 100.0,
+                      f"composite={composite} tier={entry.get('tier', '')} resolved={entry.get('resolved', 0)} "
+                      f"hit_rate_bp={entry.get('hit_rate_bp', 0)}",
+                      entry.get("updated_at"),
+                      {"composite": composite, "resolved": int(entry.get("resolved") or 0),
+                       "hit_rate_bp": int(entry.get("hit_rate_bp") or 0)})
+        sig["source_ref"] = f"portent:reputation/{pubkey}"
         if _vantage_ingest(sig):
             pushed += 1
-
+            seen[pubkey] = composite
+    state["pushed_reputation"] = seen
     return pushed
 
 

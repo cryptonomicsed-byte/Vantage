@@ -1143,6 +1143,9 @@ _SIGNAL_TABLES_DDL = (
 # idempotent like CREATE TABLE IF NOT EXISTS, so it's handled separately
 # with its own "column already exists" tolerance below.
 _SIGNAL_POOL_MINT_MIGRATION = "ALTER TABLE signal_pool ADD COLUMN mint TEXT DEFAULT ''"
+# P1-03: chain rides along so the ledger (and later consumers) know which
+# chain a mint is on. Same tolerant pattern as mint.
+_SIGNAL_POOL_CHAIN_MIGRATION = "ALTER TABLE signal_pool ADD COLUMN chain TEXT DEFAULT ''"
 _POOL_DB_KEEP = 500  # rows retained in the durable pool table
 
 
@@ -1153,10 +1156,15 @@ async def _ensure_signal_tables(db) -> None:
         await db.execute(_SIGNAL_POOL_MINT_MIGRATION)
     except aiosqlite.Error:
         pass  # column already exists
+    try:
+        await db.execute(_SIGNAL_POOL_CHAIN_MIGRATION)
+    except aiosqlite.Error:
+        pass  # column already exists
 
 
 async def ingest_signal_internal(symbol: str, source: str, type_: str, conviction: float = 1.0,
-                                  direction: str = "", detail: str = "", mint: str = "") -> dict:
+                                  direction: str = "", detail: str = "", mint: str = "",
+                                  chain: str = "", record: Optional[dict] = None) -> dict:
     """The real body of POST /signals/ingest, factored out so in-process
     callers (last30days_bridge.py's daemon loop) can post a signal
     directly -- same process, no reason to round-trip through HTTP with
@@ -1177,21 +1185,29 @@ async def ingest_signal_internal(symbol: str, source: str, type_: str, convictio
             _signal_pool.pop(0)
 
     # Durable write-through (best-effort — the in-memory pool is still the fast path).
+    # chain is written to the table only, never added to the in-memory dict:
+    # those dicts are served by GET /signals, whose shape does not change.
+    pool_id = None
     try:
         async with get_db() as db:
             await _ensure_signal_tables(db)
-            await db.execute(
-                "INSERT INTO signal_pool (symbol, source, type, conviction, direction, detail, mint, ts) "
-                "VALUES (?,?,?,?,?,?,?,?)",
+            _cur = await db.execute(
+                "INSERT INTO signal_pool (symbol, source, type, conviction, direction, detail, mint, chain, ts) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
                 (signal["symbol"], signal["source"], signal["type"], signal["conviction"],
-                 signal["direction"], signal["detail"], signal["mint"], signal["ts"]),
+                 signal["direction"], signal["detail"], signal["mint"], str(chain or "")[:20], signal["ts"]),
             )
+            pool_id = _cur.lastrowid
             await db.execute(
                 "DELETE FROM signal_pool WHERE id NOT IN "
                 "(SELECT id FROM signal_pool ORDER BY id DESC LIMIT ?)", (_POOL_DB_KEEP,))
             await db.commit()
     except aiosqlite.Error as e:
         logger.debug("signal_pool persist failed: %s", e)
+    # P1-03: every ingest also lands in the never-trimmed ledger (flag
+    # SIGNAL_LEDGER_ENABLED). Scheduled off the request path; cannot fail this.
+    from backend import signal_ledger as _sl
+    _sl.schedule("intel", {**signal, "chain": chain}, pool_id, record)
     return {"status": "ingested", "signal": signal["symbol"], "pool_size": len(_signal_pool)}
 
 
@@ -1214,6 +1230,13 @@ async def ingest_signal(payload: dict, tool: dict = Depends(get_system_tool)):
     Only X-Vantage-Tool (intel) + X-Vantage-Tool-Key can call this.
     Agents cannot post signals directly; signals come from infrastructure only.
     """
+    # signal_record/1 (handoff P1-01): a payload with a `schema` field, when
+    # SIGNAL_RECORD_V1 is on. Off, or no schema field: the legacy path below,
+    # byte-for-byte as before.
+    from backend import signal_record as _sr
+    if _sr.enabled() and _sr.is_record(payload):
+        return await _ingest_record(payload)
+
     required = ["symbol", "source", "type"]
     for f in required:
         if f not in payload:
@@ -1234,7 +1257,56 @@ async def ingest_signal(payload: dict, tool: dict = Depends(get_system_tool)):
         payload["symbol"], payload["source"], payload["type"],
         conviction=conviction, direction=payload.get("direction", ""),
         detail=payload.get("detail", ""), mint=payload.get("mint", ""),
+        chain=payload.get("chain", "") if isinstance(payload.get("chain", ""), str) else "",
     )
+
+
+async def _ingest_record(payload: dict):
+    """signal_record/1 path. Invalid -> 422 + signal_rejects row. Repeated id ->
+    ignored. Valid -> conviction capped from source_caps, mapped onto the
+    legacy pool fields, and ingest_signal_internal() called unchanged."""
+    from fastapi.responses import JSONResponse
+    from backend import signal_record as _sr
+
+    rec, problems = _sr.validate(payload)
+    async with get_db() as db:
+        await _ensure_signal_tables(db)
+        await _sr.ensure_tables(db)
+        await _sr.snapshot_legacy_sources(db)
+        cap, is_new = (await _sr.cap_for(db, rec["source"])) if "source" in rec else (_sr.NEW_SOURCE_CAP, True)
+        if not problems:
+            why = await _sr.address_problem(rec, is_new, _sr.address_checker)
+            if why:
+                problems.append(why)
+        if problems:
+            await _sr.reject(db, payload, problems)
+            await db.commit()
+            return JSONResponse(status_code=422, content={
+                "status": "rejected", "schema": _sr.SCHEMA, "problems": problems})
+        if not await _sr.claim_id(db, rec["id"], rec["source"]):
+            await db.commit()
+            return {"status": "duplicate", "schema": _sr.SCHEMA, "id": rec["id"],
+                    "signal": rec["asset"]["symbol"], "note": "record id already ingested; ignored"}
+        await db.commit()
+
+    raw = rec["conviction"]
+    rec["conviction"] = min(raw, cap)
+    rec["conviction_raw"] = raw
+    out = await ingest_signal_internal(**_sr.pool_fields(rec), chain=rec["asset"]["chain"], record=rec)
+    out.update({"schema": _sr.SCHEMA, "id": rec["id"], "conviction": rec["conviction"],
+                "conviction_raw": raw, "capped": rec["conviction"] < raw})
+    return out
+
+
+@router.get("/ledger")
+async def get_ledger(source: str = Query("", max_length=64), address: str = Query("", max_length=64),
+                     since: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=1000),
+                     agent: dict = Depends(get_agent)):
+    """Read-only view of signal_ledger (P1-03): every ingested signal, never
+    trimmed, with its entry price. Empty when SIGNAL_LEDGER_ENABLED is off."""
+    from backend import signal_ledger as _sl
+    rows = await _sl.query(source=source, address=address, since=since, limit=limit)
+    return {"rows": rows, "count": len(rows), "enabled": _sl.enabled()}
 
 
 async def _durable_pool(limit: int = 50) -> list[dict]:
@@ -1872,3 +1944,93 @@ async def daily_intel(limit: int = Query(10, ge=1, le=50), agent: dict = Depends
             rows = [dict(r) for r in await cur.fetchall()]
     return {"reports": rows, "count": len(rows)}
 
+
+
+@router.get("/curve/coverage")
+async def curve_coverage():
+    """P4-01: what the free Solana curve listener has actually covered --
+    connection state, trades/mints counted, gaps and how each was backfilled.
+    Read-only; public mints and counts only, no wallet data."""
+    import asyncio as _aio
+    from .. import curve_listener
+    return await _aio.to_thread(curve_listener.coverage)
+
+
+@router.get("/runners")
+async def runners(limit: int = Query(50, ge=1, le=200)):
+    """P4-02: detected runners (tier, weight, peak observed, tiers crossed,
+    trace status). Public token data only."""
+    from .. import runner_detect
+    return await runner_detect.list_runners(limit)
+
+
+class _RunnerCheck(BaseModel):
+    mints: list[str]
+
+
+@router.post("/runners/check")
+async def runners_check(body: _RunnerCheck, request: Request):
+    """P4-02: evaluate specific mints against the runner tiers now -- for
+    runners that launched before the curve listener was on. Agent key required."""
+    from ..oauth_store import agent_by_key
+    key = request.headers.get("x-agent-key", "")
+    if not key or not await agent_by_key(key):
+        raise HTTPException(401, "agent key required")
+    from .. import runner_detect
+    return await runner_detect.check_mints(body.mints)
+
+
+@router.get("/runners/{mint}/early-buyers")
+async def runner_early_buyers(mint: str):
+    """P4-03: a runner's first buyers and how far the trace got (origin slot,
+    whether it reached the create). Public on-chain data."""
+    from .. import runner_trace
+    return await runner_trace.early_buyers(mint)
+
+
+@router.post("/runners/{mint}/trace")
+async def runner_trace_now(mint: str, request: Request):
+    """P4-03: queue (or re-queue) one runner for tracing. Agent key required."""
+    from ..oauth_store import agent_by_key
+    key = request.headers.get("x-agent-key", "")
+    if not key or not await agent_by_key(key):
+        raise HTTPException(401, "agent key required")
+    from .. import runner_trace
+    async with get_db() as db:
+        await runner_trace._ensure(db)
+        await db.execute(
+            "INSERT INTO runner_trace_queue (mint, enqueued_at) VALUES (?,?) ON CONFLICT(mint) DO UPDATE "
+            "SET status='pending', attempts=0, last_error=NULL", (mint, int(time.time())))
+        await db.commit()
+    return {"mint": mint, "queued": True, "worker_enabled": runner_trace.enabled()}
+
+
+@router.get("/wallet-labels")
+async def wallet_labels_summary():
+    """P4-05: how many wallets carry each label, and which labels the
+    runner watchlist excludes."""
+    from .. import wallet_labels
+    return await wallet_labels.summary()
+
+
+@router.get("/wallets/{wallet}/labels")
+async def wallet_labels_for(wallet: str):
+    """P4-05: one wallet's labels with the evidence behind each."""
+    from .. import wallet_labels
+    return await wallet_labels.wallet(wallet)
+
+
+@router.get("/runner-watchlist")
+async def runner_watchlist(limit: int = Query(50, ge=1, le=500)):
+    """P4-06/P4-07: wallets (clusters) that keep getting into runners early,
+    with the score breakdown, plus the strategy-lab radar import and its age."""
+    from .. import runner_watchlist as rw
+    return await rw.get(limit)
+
+
+@router.get("/confluence")
+async def confluence_events(limit: int = Query(50, ge=1, le=500), mint: Optional[str] = None):
+    """P4-09: confluence pings -- >=3 watchlist entities, >=2 KOLs on the exact
+    contract, or one of each, under $60k, inside 30 min, anti-pump passed."""
+    from .. import confluence
+    return await confluence.recent(limit, mint)

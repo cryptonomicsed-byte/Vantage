@@ -274,7 +274,15 @@ function TerminalInner() {
   const rightW = state.rightCollapsed ? '0px' : '300px'
 
   return (
-    <div style={{ ...styles.container, gridTemplateColumns: `${leftW} 1fr ${rightW}` }}>
+    <div style={{
+      ...styles.container,
+      gridTemplateColumns: `${leftW} 1fr ${rightW}`,
+      // The drawer row follows the drawer. It was a fixed 0px, so the drawer --
+      // including its own tab bar, the only way to open it -- was clipped by the
+      // container's overflow and never visible. Closed, the row keeps the tab bar
+      // (DRAWER_BAR px) so every tool stays reachable.
+      gridTemplateRows: `52px 1fr ${state.drawerOpen ? DRAWER_OPEN : DRAWER_BAR}px`,
+    }}>
       {/* TOP BAR */}
       <div style={styles.topBar}>
         <TerminalTopBar />
@@ -312,8 +320,7 @@ function TerminalInner() {
       {/* BOTTOM DRAWER */}
       <div style={{
         ...styles.bottomPanel,
-        height: state.drawerOpen ? 400 : 0,
-        opacity: state.drawerOpen ? 1 : 0,
+        height: state.drawerOpen ? DRAWER_OPEN : DRAWER_BAR,
       }}>
         <ToolDrawer />
       </div>
@@ -332,10 +339,13 @@ export default function TradingTerminal() {
   )
 }
 
+// Drawer heights: open shows the tool; closed keeps just the tab bar visible.
+const DRAWER_OPEN = 400
+const DRAWER_BAR = 38
+
 const styles: Record<string, React.CSSProperties> = {
   container: {
     display: 'grid',
-    gridTemplateRows: '52px 1fr 0px',
     height: 'calc(100vh - 120px)',
     width: '100%',
     overflow: 'hidden',
@@ -345,7 +355,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 13,
     borderRadius: 12,
     border: '1px solid rgba(255,255,255,0.08)',
-    transition: 'grid-template-columns 0.25s cubic-bezier(0.4,0,0.2,1)',
+    transition: 'grid-template-columns 0.25s cubic-bezier(0.4,0,0.2,1), grid-template-rows 0.3s cubic-bezier(0.4,0,0.2,1)',
     position: 'relative',
   },
   topBar: {

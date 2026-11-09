@@ -8,26 +8,39 @@ strategy-lab (:8012) GET /api/convergence?token=ADDR -> {score, verdict, ...}
 Both functions are fail-open: on any error they return the signal unchanged.
 """
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
-LOOM_BASE = "http://localhost:8889"
-STRATEGY_LAB_BASE = "http://localhost:8012"
+LOOM_BASE = os.environ.get("LOOM_BASE", "http://localhost:8889")
+# P1-07: from env. The deployed hub (strategy-lab-hub-deploy, unit
+# ares-strategy-lab-hub) runs `score.py serve --port 8012` with
+# HUB_BIND_HOST=127.0.0.1 -- verified on the VPS 2026-11-08 -- so the default
+# is unchanged. The repo's own default bind is 10.88.0.1:8010.
+STRATEGY_LAB_BASE = os.environ.get("STRATEGY_LAB_BASE", "http://localhost:8012").rstrip("/")
 
 
 async def enrich_from_loom(signal: dict) -> dict:
     """
-    Calls Loom /api/decide with the signal context.
-    Adds loom_conviction, loom_direction to signal dict.
-    Fail-open: returns signal unchanged on any error.
+    Calls Loom /api/decide scoped to this exact token (P1-06).
+
+    Only adds loom_conviction / loom_direction when Loom answers
+    scoped=true for this symbol+mint. A scoped=false, a non-200, or any
+    error leaves the signal unchanged (fail-open): Loom's generic consensus
+    must never leak onto a token it did not actually decide on.
     """
     try:
         import httpx
+        symbol = (signal.get("symbol") or "").strip()
+        mint = (signal.get("mint") or signal.get("address") or "").strip()
+        params = {"symbol": symbol, "mint": mint}
         async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(f"{LOOM_BASE}/api/decide")
+            r = await client.get(f"{LOOM_BASE}/api/decide", params=params)
         if r.status_code != 200:
             return signal
         data = r.json()
+        if not data.get("scoped"):
+            return signal
         consensus = data.get("consensus", {})
         signal = dict(signal)  # shallow copy to avoid mutation
         raw_direction = consensus.get("direction", "WAIT")
@@ -162,4 +175,23 @@ async def enrich_from_strategy_lab(signal: dict) -> dict:
                 pass
     except Exception as e:
         logger.debug("enrich_from_strategy_lab failed (fail-open): %s", e)
+    return signal
+
+
+async def enrich_from_confluence(signal: dict) -> dict:
+    """P4-09 (CONFLUENCE_ENRICHER, default off): add confluence_* keys for a
+    signal whose mint had a confluence ping in the last 30 min. Only adds
+    keys; never changes an existing field. Fail-open."""
+    try:
+        from backend import confluence
+        if not confluence.enricher_enabled() or not signal.get("mint"):
+            return signal
+        e = await confluence.latest_for(str(signal["mint"]))
+        if e:
+            signal["confluence_rule"] = e["rule"]
+            signal["confluence_watch_entities"] = e["watch_entities"]
+            signal["confluence_kols"] = e["kols"]
+            signal["confluence_fired_at"] = e["fired_at"]
+    except Exception as e:  # noqa: BLE001
+        logger.debug("enrich_from_confluence failed (fail-open): %s", e)
     return signal

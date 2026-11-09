@@ -730,11 +730,46 @@ async def lifespan(app: FastAPI):
     from .receipt_reconciler import reconciliation_loop
     reconciler_task = asyncio.create_task(reconciliation_loop())
 
+    # P1-08: mirror signal_ledger rows to Mycelium (LEDGER_MIRROR_ENABLED,
+    # read each cycle; off means nothing is posted).
+    from .signal_ledger import mirror_loop as _ledger_mirror_loop
+    ledger_mirror_task = asyncio.create_task(_ledger_mirror_loop())
+
+    # P2-05: the shadow rank logs on its own cycle (SHADOW_RANK_ENABLED, read
+    # each cycle); readers never write.
+    from .shadow_rank import shadow_loop as _shadow_loop
+    shadow_rank_task = asyncio.create_task(_shadow_loop())
+
+    # P4-01: free Solana curve listener (CURVE_LISTENER_ENABLED, read each
+    # loop; idle when off). Writes its own data/curve.db, not vantage.db.
+    from .curve_listener import listener_loop as _curve_loop
+    curve_listener_task = asyncio.create_task(_curve_loop())
+    # P4-02: runner detection every 5 min (RUNNER_DETECT_ENABLED).
+    from .runner_detect import runner_loop as _runner_loop
+    runner_detect_task = asyncio.create_task(_runner_loop())
+    # P4-03: trace runners to origin, one at a time, ~1 rps (RUNNER_TRACE_ENABLED).
+    from .runner_trace import trace_loop as _trace_loop
+    runner_trace_task = asyncio.create_task(_trace_loop())
+    # P4-05: wallet labels, hourly + after each trace (WALLET_LABELS_ENABLED).
+    from .wallet_labels import label_loop as _label_loop
+    wallet_labels_task = asyncio.create_task(_label_loop())
+    # P4-06/07: runner watchlist + strategy-lab radar, every 15 min (RUNNER_WATCHLIST_ENABLED).
+    from .runner_watchlist import watchlist_loop as _watchlist_loop
+    runner_watchlist_task = asyncio.create_task(_watchlist_loop())
+    # P4-09: confluence ping (CONFLUENCE_ENABLED).
+    from .confluence import confluence_loop as _confluence_loop
+    confluence_task = asyncio.create_task(_confluence_loop())
+
     yield
     shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, mention_poller_task, scoring_task, last30days_task, outcome_learner_task, event_bus_task, tier_recompute_task, reconciler_task,
                       # Started above but never stopped before: they outlived
                       # every shutdown, still polling the database.
-                      lnurl_watcher_task, live_sweep_task]
+                      lnurl_watcher_task, live_sweep_task,
+                      # P1-08
+                      ledger_mirror_task, shadow_rank_task,
+                      curve_listener_task, runner_detect_task,
+                      runner_trace_task, wallet_labels_task,
+                      runner_watchlist_task, confluence_task]
     if execution_engine_task is not None:
         shutdown_tasks.append(execution_engine_task)
     # Cancel all first, then wait a bounded time. Awaiting each cancelled task
