@@ -40,6 +40,20 @@ from typing import Any, Dict, List, Optional, Tuple
 #   archived   deliberately out of the path; kept for history
 # ---------------------------------------------------------------------------
 
+# P1-02: the TradingOS SignalGenome schema is vendored into this repo, so
+# validate-signal and the registry probe work without a TradingOS checkout.
+_VENDORED_SIGNAL_PROTO = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "protocols", "tradingos", "signal.proto")
+_TRADINGOS_SIGNAL_PROTO = "/opt/ares/TradingOS/protos/signal.proto"
+
+
+def signal_proto_path() -> str:
+    """Vendored copy first; the TradingOS checkout only as a fallback."""
+    if os.path.isfile(_VENDORED_SIGNAL_PROTO):
+        return _VENDORED_SIGNAL_PROTO
+    return _TRADINGOS_SIGNAL_PROTO
+
+
 NODES: List[Dict[str, Any]] = [
     # ---- core -------------------------------------------------------------
     {
@@ -84,7 +98,7 @@ NODES: List[Dict[str, Any]] = [
         "name": "TradingOS", "layer": "signal", "kind": "reference", "repo": "/opt/ares/TradingOS",
         "role": "signal schema of record — protos/signal.proto (SignalGenome: conviction, dna, fitness)",
         "flow": "reference only: POST /api/pipeline/validate-signal checks Vantage signals against it",
-        "probe": {"type": "path", "path": "/opt/ares/TradingOS/protos/signal.proto"},
+        "probe": {"type": "path", "path": signal_proto_path()},
     },
     # ---- probability / truth ----------------------------------------------
     {
