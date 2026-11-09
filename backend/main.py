@@ -759,6 +759,12 @@ async def lifespan(app: FastAPI):
     # P4-09: confluence ping (CONFLUENCE_ENABLED).
     from .confluence import confluence_loop as _confluence_loop
     confluence_task = asyncio.create_task(_confluence_loop())
+    # P3-01 / P3-03: Crucible trading adapter + daily calibration events
+    # (CRUCIBLE_ADAPTER_ENABLED, CRUCIBLE_CALIBRATION_ENABLED; both off).
+    from .crucible_adapter import adapter_loop as _crucible_adapter_loop
+    from .crucible_calibration import calibration_loop as _crucible_calibration_loop
+    crucible_adapter_task = asyncio.create_task(_crucible_adapter_loop())
+    crucible_calibration_task = asyncio.create_task(_crucible_calibration_loop())
 
     yield
     shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, mention_poller_task, scoring_task, last30days_task, outcome_learner_task, event_bus_task, tier_recompute_task, reconciler_task,
@@ -769,7 +775,8 @@ async def lifespan(app: FastAPI):
                       ledger_mirror_task, shadow_rank_task,
                       curve_listener_task, runner_detect_task,
                       runner_trace_task, wallet_labels_task,
-                      runner_watchlist_task, confluence_task]
+                      runner_watchlist_task, confluence_task,
+                      crucible_adapter_task, crucible_calibration_task]
     if execution_engine_task is not None:
         shutdown_tasks.append(execution_engine_task)
     # Cancel all first, then wait a bounded time. Awaiting each cancelled task
