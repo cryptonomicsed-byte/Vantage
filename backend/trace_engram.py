@@ -162,3 +162,22 @@ def from_file(path: str, *, agent: str, session: str) -> dict:
     """Read a JSONL trace file and build its engram content."""
     with open(path, encoding="utf-8") as f:
         return to_engram(parse_trace(f), agent=agent, session=session)
+
+
+def build_signed_engram(records: Iterable[dict], *, agent: str, session: str,
+                        seckey: bytes, owner_pubkey_hex: str) -> Optional[dict]:
+    """P3-09: the whole engram, built and signed by minipae (the reference
+    NIP-AE implementation) instead of hand-rolled. None if there is no valid
+    slug for (agent, session) or minipae is not importable here; the caller
+    publishes it. Nothing in here invents a timestamp or inlines results --
+    the payload is exactly to_engram()."""
+    slug = engram_slug(agent, session)
+    if not slug:
+        return None
+    from backend.buzz_engrams import _minipae
+    mp = _minipae()
+    if mp is None:
+        return None
+    payload = to_engram(records, agent=agent, session=session)
+    return mp.build_event(slug, {"slug": slug, "value": json.dumps(payload, separators=(",", ":"))},
+                          seckey, bytes.fromhex(owner_pubkey_hex))
