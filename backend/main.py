@@ -759,6 +759,9 @@ async def lifespan(app: FastAPI):
     # P4-09: confluence ping (CONFLUENCE_ENABLED).
     from .confluence import confluence_loop as _confluence_loop
     confluence_task = asyncio.create_task(_confluence_loop())
+    # P4-13: guild router schedules (GUILD_ROUTER_ENABLED; no schedules by default).
+    from .guild_router import schedule_loop as _guild_schedule_loop
+    guild_schedule_task = asyncio.create_task(_guild_schedule_loop())
 
     yield
     shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, mention_poller_task, scoring_task, last30days_task, outcome_learner_task, event_bus_task, tier_recompute_task, reconciler_task,
@@ -769,7 +772,8 @@ async def lifespan(app: FastAPI):
                       ledger_mirror_task, shadow_rank_task,
                       curve_listener_task, runner_detect_task,
                       runner_trace_task, wallet_labels_task,
-                      runner_watchlist_task, confluence_task]
+                      runner_watchlist_task, confluence_task,
+                      guild_schedule_task]
     if execution_engine_task is not None:
         shutdown_tasks.append(execution_engine_task)
     # Cancel all first, then wait a bounded time. Awaiting each cancelled task
@@ -1127,6 +1131,8 @@ from .routers.workspace_memory import router as workspace_memory_router
 app.include_router(workspace_memory_router)
 from .routers.trading_space import router as trading_space_router
 app.include_router(trading_space_router)
+from .routers.guild_router import router as guild_router_router  # P4-10
+app.include_router(guild_router_router)
 from .routers.content_space import router as content_space_router
 app.include_router(content_space_router)
 from .routers.workspace_mcp import router as workspace_mcp_router

@@ -103,13 +103,21 @@ def _curve_window(since: int) -> Dict[str, Any]:
 
 async def _kol_posts(db, since: int) -> Dict[str, List[dict]]:
     """Exact-contract posts per mint in the window."""
+    # P4-08: when the post's own time is known (posted_at, set by the guild
+    # router), the window is about when it was posted, not when it was stored.
     try:
         rows = await (await db.execute(
             "SELECT contract_address, platform, username, ticker, post_url FROM social_signals "
             "WHERE contract_address IS NOT NULL AND contract_address != '' "
-            "AND created_at >= datetime(?, 'unixepoch')", (since,))).fetchall()
-    except Exception:  # noqa: BLE001 -- table absent on a fresh install
-        return {}
+            "AND COALESCE(posted_at, created_at) >= datetime(?, 'unixepoch')", (since,))).fetchall()
+    except Exception:  # noqa: BLE001 -- no posted_at column yet: the original query
+        try:
+            rows = await (await db.execute(
+                "SELECT contract_address, platform, username, ticker, post_url FROM social_signals "
+                "WHERE contract_address IS NOT NULL AND contract_address != '' "
+                "AND created_at >= datetime(?, 'unixepoch')", (since,))).fetchall()
+        except Exception:  # noqa: BLE001 -- table absent on a fresh install
+            return {}
     out: Dict[str, List[dict]] = defaultdict(list)
     for ca, platform, user, ticker, url in rows:
         out[ca.strip()].append({"platform": platform, "username": user, "ticker": ticker, "post_url": url})
