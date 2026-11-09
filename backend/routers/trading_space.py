@@ -266,22 +266,37 @@ async def submit_task(
     content_uri: str = Form(""),
     agent: dict = Depends(get_agent),
 ):
+    # P1-13: membership first (a removed member's old claim no longer lets
+    # them submit); the task must belong to this space AND this guild; it must
+    # still be claimed, by the caller, under an unexpired lease. The status
+    # move is one conditional UPDATE, so a lease that expires (and is taken by
+    # someone else) between check and write cannot slip a submission through.
+    await _assert_guild_member(slug, agent)
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM vantage_tasks WHERE id=? AND workspace_id=?", (task_id, space_id)) as cur:
+        async with db.execute("SELECT * FROM vantage_tasks WHERE id=? AND workspace_id=? AND guild_slug=?",
+                              (task_id, space_id, slug)) as cur:
             row = await cur.fetchone()
         if not row:
             raise HTTPException(404, "Task not found")
         if row["claimed_by_agent_id"] != agent["id"]:
             raise HTTPException(403, "Only the claimer can submit")
+        if row["status"] != "claimed":
+            raise HTTPException(409, f"Task is {row['status']!r}, not claimed; nothing to submit against")
         artifact_id = str(uuid.uuid4())
         now = int(time.time())
+        cur = await db.execute(
+            f"""UPDATE vantage_tasks SET status='review', updated_ts=?
+                WHERE id=? AND workspace_id=? AND guild_slug=? AND status='claimed'
+                  AND claimed_by_agent_id=? AND NOT {_lease_expired_sql()}""",
+            (now, task_id, space_id, slug, agent["id"]),
+        )
+        if cur.rowcount == 0:
+            await db.rollback()
+            raise HTTPException(409, "Your claim's lease has expired; claim the task again before submitting")
         await db.execute(
             "INSERT INTO artifacts (id, task_id, agent_id, workspace_id, kind, title, content_text, content_uri, status, created_ts, updated_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (artifact_id, task_id, agent["id"], space_id, artifact_kind, title, content_text, content_uri, "submitted", now, now),
-        )
-        await db.execute(
-            "UPDATE vantage_tasks SET status='review', updated_ts=? WHERE id=?", (now, task_id)
         )
         await db.commit()
     return {"ok": True, "artifact_id": artifact_id}
