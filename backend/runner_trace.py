@@ -209,6 +209,12 @@ async def trace_loop(idle_s: int = 30) -> None:
             if mint:
                 out = await trace_one(mint)
                 log.info("runner trace %s", out)
+                if out["status"] == "done":
+                    from . import wallet_labels
+                    if wallet_labels.enabled():
+                        from .db import get_db
+                        async with get_db() as db:
+                            await wallet_labels.label_runner(db, mint)
         except Exception as e:  # noqa: BLE001
             log.warning("runner trace cycle failed: %s", e)
 
@@ -225,6 +231,11 @@ async def early_buyers(mint: str) -> Dict[str, Any]:
                 "is_major", "source"]
         rows = [dict(zip(cols, r)) for r in await (await db.execute(
             f"SELECT {', '.join(cols)} FROM runner_early_buyers WHERE mint=? ORDER BY rank", (mint,))).fetchall()]
+        from .wallet_labels import labels_for
+        labels = await labels_for(db, [r["wallet"] for r in rows] + [r["funded_by"] for r in rows if r["funded_by"]])
+    for r in rows:
+        r["labels"] = labels.get(r["wallet"], [])
+        r["funder_labels"] = labels.get(r["funded_by"], []) if r["funded_by"] else []
     qcols = ["status", "attempts", "last_error", "source", "reached_origin", "origin_slot",
              "origin_signature", "origin_time", "signatures_scanned", "buyers", "finished_at"]
     return {"mint": mint, "trace": dict(zip(qcols, q)) if q else None, "buyers": rows}

@@ -136,7 +136,7 @@ interface Runner {
 }
 interface EarlyBuyers {
   trace: { status: string; source: string | null; reached_origin: number | null; origin_slot: number | null; signatures_scanned: number | null; last_error: string | null; buyers: number } | null
-  buyers: { wallet: string; rank: number; sol: number | null; is_major: number; funded_by: string | null; entry_ts: number | null }[]
+  buyers: { wallet: string; rank: number; sol: number | null; is_major: number; funded_by: string | null; entry_ts: number | null; labels?: string[]; funder_labels?: string[] }[]
 }
 
 export function usd(v?: number | null): string {
@@ -147,7 +147,19 @@ export function usd(v?: number | null): string {
   return `$${v.toFixed(0)}`
 }
 
-const TRACE_COLOR: Record<string, string> = { done: '#22c55e', partial: '#f59e0b', failed: '#ef4444', tracing: '#60a5fa', pending: '#6b7280' }
+const LABEL_COLOR: Record<string, string> = {
+  dev: '#ef4444', sniper: '#f97316', bundler: '#f97316', insider: '#ef4444', bot: '#6b7280',
+  funding_hub: '#6b7280', kol: '#a78bfa', whale: '#60a5fa',
+}
+export function LabelChips({ labels }: { labels?: string[] }) {
+  if (!labels || labels.length === 0) return null
+  return <>{labels.map(l => (
+    <span key={l} title={l === 'funding_hub' ? 'Funded 25+ wallets (exchange or distributor)' : l}
+          style={{ marginLeft: 3, fontSize: 9, padding: '0 4px', borderRadius: 3, border: `1px solid ${LABEL_COLOR[l] || '#6b7280'}`, color: LABEL_COLOR[l] || '#6b7280' }}>{l.replace('_', ' ')}</span>
+  ))}</>
+}
+
+const TRACE_COLOR: Record<string, string> = { done: '#22c55e', partial: '#f59e0b', failed: '#ef4444', tracing: '#60a5fa', walking: '#60a5fa', pending: '#6b7280' }
 
 function RunnerBuyers({ mint }: { mint: string }) {
   const { data } = usePoll<EarlyBuyers>(`/api/intel/runners/${encodeURIComponent(mint)}/early-buyers`, 60000)
@@ -160,13 +172,15 @@ function RunnerBuyers({ mint }: { mint: string }) {
           : t.status === 'done' ? `Traced to the create${t.origin_slot ? ` (slot ${t.origin_slot.toLocaleString()})` : ''} via ${t.source === 'curve' ? 'the curve feed — no RPC' : `RPC, ${t.signatures_scanned?.toLocaleString() ?? '?'} signatures`}.`
           : t.status === 'partial' ? `Partial: ${t.last_error}. These are early buyers, not proven first.`
           : t.status === 'failed' ? `Trace failed: ${t.last_error}`
+          : t.status === 'walking' ? `Walking back to the create: ${t.last_error}. Resumes automatically.`
           : `Trace ${t.status}…`}
       </div>
       {data.buyers.slice(0, 12).map(b => (
         <div key={b.wallet} style={{ display: 'flex', justifyContent: 'space-between', gap: 6, fontSize: 11, padding: '1px 0' }}>
           <span><span style={{ color: 'var(--muted)', marginRight: 4 }}>#{b.rank}</span><WalletLink address={b.wallet} chain="solana" />
             {b.is_major ? <span title="Largest or earliest entry" style={{ marginLeft: 4, color: '#f59e0b' }}>★</span> : null}
-            {b.funded_by ? <span style={{ color: 'var(--muted)', marginLeft: 4 }}>funded by <WalletLink address={b.funded_by} chain="solana" /></span> : null}
+            <LabelChips labels={b.labels} />
+            {b.funded_by ? <span style={{ color: 'var(--muted)', marginLeft: 4 }}>funded by <WalletLink address={b.funded_by} chain="solana" /><LabelChips labels={b.funder_labels} /></span> : null}
           </span>
           <span style={{ color: 'var(--muted)', fontFamily: 'monospace' }}>{b.sol != null ? `${b.sol.toFixed(2)} SOL` : ''}</span>
         </div>

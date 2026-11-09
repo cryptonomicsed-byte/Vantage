@@ -2003,3 +2003,18 @@ async def runner_trace_now(mint: str, request: Request):
             "SET status='pending', attempts=0, last_error=NULL", (mint, int(time.time())))
         await db.commit()
     return {"mint": mint, "queued": True, "worker_enabled": runner_trace.enabled()}
+
+
+@router.get("/wallet-labels")
+async def wallet_labels_summary():
+    """P4-05: how many wallets carry each label, and which labels the
+    runner watchlist excludes."""
+    from .. import wallet_labels
+    return await wallet_labels.summary()
+
+
+@router.get("/wallets/{wallet}/labels")
+async def wallet_labels_for(wallet: str):
+    """P4-05: one wallet's labels with the evidence behind each."""
+    from .. import wallet_labels
+    return await wallet_labels.wallet(wallet)
