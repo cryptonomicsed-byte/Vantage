@@ -345,3 +345,16 @@ async def promote_signals(data: PromoteRequest, agent: dict = Depends(get_agent)
 
     return {"applied": True, "candidates": len(plan), "placed": placed, "skipped": skipped,
             "summary": f"{len(placed)} paper order(s) from {len(plan)} candidate signal(s)"}
+
+
+@router.get("/shadow-rank")
+async def shadow_rank_endpoint(agent: dict = Depends(get_agent)):
+    """P2-05: the shadow rank -- conviction x source reliability, logged only.
+
+    Returns the current promotable calls re-ranked by shadow_score, plus how
+    many rows were logged to shadow_rank_log. This is never fed back into the
+    live rank; switching shadow to live is a separate, human decision.
+    """
+    from .. import shadow_rank
+    result = await shadow_rank.compute_and_log()
+    return result
