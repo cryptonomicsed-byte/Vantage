@@ -57,6 +57,7 @@ import urllib.request
 from typing import Any, Callable, Optional
 
 from backend import crucible_events as ce
+from backend.signal_record import canonical_direction
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ def match_key(row: dict) -> str:
     chain = (row.get("chain") or "").lower()
     addr = (row.get("address") or "").strip()
     asset = addr if addr else f"sym:{(row.get('symbol') or '').upper()}"
-    return f"{chain}|{asset}|{(row.get('direction') or '').lower()}"
+    return f"{chain}|{asset}|{canonical_direction(row.get('direction'))}"
 
 
 def is_guild(row: dict) -> bool:
@@ -164,7 +165,7 @@ def claim_inputs(row: dict, window: str) -> dict:
     return {
         "record_id": row["id"], "source": row.get("source") or "",
         "chain": row.get("chain") or "", "address": row.get("address") or "",
-        "symbol": row.get("symbol") or "", "direction": (row.get("direction") or "").lower(),
+        "symbol": row.get("symbol") or "", "direction": canonical_direction(row.get("direction")),
         "entry_price_usd": float(entry) if isinstance(entry, (int, float)) else None,
         "window": window, "threshold_pct": HIT_THRESHOLD_PCT,
     }
@@ -280,7 +281,7 @@ async def process_once(limit: int = BATCH, now: Optional[int] = None) -> dict:
             await ensure_tables(db)
             rows = await _unprocessed(db, now - LOOKBACK_S, limit)
             for row in rows:
-                direction = (row.get("direction") or "").lower()
+                direction = canonical_direction(row.get("direction"))
                 if direction not in SCORED:
                     await _mark(db, row["id"], "skipped", reason=f"unscored direction {direction or 'none'}")
                     stats["skipped"] += 1

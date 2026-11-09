@@ -42,6 +42,15 @@ LEGACY_DIRECTION = {"buy": "long", "bullish": "long", "sell": "short", "bearish"
                     "flat": "hold", "neutral": "hold", "wait": "hold"}
 PRODUCER_KINDS = ("daemon", "guild_agent", "service")
 
+
+def canonical_direction(d) -> str:
+    """Any stored direction -> long/short/hold/exit/alert ('' if unknown).
+    The ledger keeps what producers sent (BUY, SELL, buy, NEUTRAL, ...);
+    everything that scores calls must read it through this."""
+    d = str(d or "").strip().lower()
+    d = LEGACY_DIRECTION.get(d, d)
+    return d if d in DIRECTIONS else ""
+
 NEW_SOURCE_CAP = 0.69
 EVIDENCE_MAX_BYTES = 8 * 1024
 _ULID = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$")

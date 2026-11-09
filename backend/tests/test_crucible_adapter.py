@@ -181,12 +181,13 @@ async def test_e2e_claim_attest_verdict_with_real_cli(keys, monkeypatch):
     mint = "E2EMint" + secrets.token_hex(6)
     other = "E2EOther" + secrets.token_hex(6)
     tag = secrets.token_hex(4)
+    # the live ledger stores what producers sent (BUY / buy / NEUTRAL / SELL)
     await _ledger([
-        {"id": f"r1-{tag}", "source": "alpha", "address": mint, "direction": "long", "created_at": now - 7200},
-        {"id": f"r2-{tag}", "source": "beta", "address": mint, "direction": "long", "created_at": now - 6600},
-        {"id": f"r3-{tag}", "source": "beta", "address": mint, "direction": "hold", "created_at": now - 6500},
+        {"id": f"r1-{tag}", "source": "alpha", "address": mint, "direction": "BUY", "created_at": now - 7200},
+        {"id": f"r2-{tag}", "source": "beta", "address": mint, "direction": "buy", "created_at": now - 6600},
+        {"id": f"r3-{tag}", "source": "beta", "address": mint, "direction": "NEUTRAL", "created_at": now - 6500},
         {"id": f"r4-{tag}", "source": "nokey", "address": other, "direction": "long", "created_at": now - 6400},
-        {"id": f"r5-{tag}", "source": "gx", "address": other, "direction": "short", "created_at": now - 6300,
+        {"id": f"r5-{tag}", "source": "gx", "address": other, "direction": "SELL", "created_at": now - 6300,
          "producer": json.dumps({"kind": "guild_agent", "agent_id": 42})},
     ])
     st = await ca.process_once(now=now)

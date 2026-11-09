@@ -31,6 +31,7 @@ import urllib.parse
 import urllib.request
 from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional
+from backend.signal_record import canonical_direction
 
 PRIOR_HITS, PRIOR_N = 15.0, 30.0
 MIN_N = 10
@@ -81,7 +82,9 @@ def _scored(mark: Optional[Dict[str, Any]]) -> bool:
 def compute(calls: List[Dict[str, Any]], marks: Dict[str, Dict[str, Any]], start: int, days: int, k: int,
             challenges: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Pure. calls: {id, source, direction, conviction, created_at, mint, symbol}."""
-    calls = [c for c in calls if (c.get("direction") or "").lower() in ("long", "short")]
+    for c in calls:
+        c["direction"] = canonical_direction(c.get("direction"))
+    calls = [c for c in calls if c["direction"] in ("long", "short")]
     by_id = {c["id"]: c for c in calls}
     resolved = [(marks[i]["marked_at"], by_id[i]["source"], marks[i]["hit"])
                 for i in marks if i in by_id and _scored(marks[i]) and marks[i].get("marked_at")]
@@ -133,7 +136,7 @@ def _challenger(calls, marks, challenges) -> Dict[str, Any]:
     for ch in challenges:
         if ch.get("would_veto") is None:
             continue
-        key = (ch.get("source"), (ch.get("direction") or "").lower(),
+        key = (ch.get("source"), canonical_direction(ch.get("direction")),
                ch.get("mint") or (ch.get("symbol") or "").upper())
         best = None
         for c in idx.get(key, []):
