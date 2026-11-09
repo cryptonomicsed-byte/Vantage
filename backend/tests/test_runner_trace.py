@@ -81,6 +81,7 @@ async def test_default_call_shape_unchanged(monkeypatch):
 
 def test_curve_first_buyers(tmp_path, monkeypatch):
     monkeypatch.setenv("CURVE_DB", str(tmp_path / "c.db"))
+    monkeypatch.setattr(rt, "CURVE_MIN_BUYERS", 1)
     c = cl.connect()
     rows = []
     for i, (w, side) in enumerate([("dev", "buy"), ("a", "buy"), ("a", "buy"), ("b", "sell"), ("c", "buy")]):
@@ -215,3 +216,42 @@ async def test_parse_retries_only_when_asked(monkeypatch):
 
 async def _nosleep(*a, **k):
     return None
+
+
+@pytest.mark.asyncio
+async def test_thin_curve_falls_back_to_rpc(tmp_path, monkeypatch):
+    """A curve that completed inside its create tx (one 85 SOL dev buy) has a
+    single curve buyer: that is not 'early buyers', so the RPC walk decides."""
+    monkeypatch.setenv("CURVE_DB", str(tmp_path / "c.db"))
+    c = cl.connect()
+    cl.write_batch(c, [{"sig": "create", "ix": 0, "slot": 7, "block_time": 1000, "mint": "THIN", "wallet": "dev",
+                        "side": "buy", "sol": 85.0, "tokens": 1.0, "v_sol_reserves": 115, "v_token_reserves": 1e9,
+                        "mcap_usd": 35000.0, "source": "ws"}], {"THIN"})
+    assert rt.curve_first_buyers("THIN") is None
+    called = []
+
+    async def rpc(mint, *a, **k):
+        called.append(mint)
+        return {"buyers": [{"wallet": f"w{i}", "rank": i + 1, "entry_ts": 1000 + i, "entry_slot": 7, "sol": 1,
+                            "tokens": 1, "signature": f"s{i}", "funded_by": None, "is_major": 0} for i in range(30)],
+                "reached_origin": True, "origin_slot": 7, "origin_time": 1000, "origin_signature": "create",
+                "signatures_scanned": 5000, "source": "rpc", "cursor": None}
+    monkeypatch.setattr(rt, "rpc_first_buyers", rpc)
+    out = await rt.trace_one("THIN")
+    assert called == ["THIN"] and out["status"] == "done" and out["source"] == "rpc" and out["buyers"] == 30
+
+
+@pytest.mark.asyncio
+async def test_thin_curve_traces_are_requeued():
+    from backend.db import get_db
+    async with get_db() as db:
+        await rt._ensure(db)
+        await db.execute("INSERT OR REPLACE INTO runner_trace_queue (mint, status, attempts, source, buyers, "
+                         "enqueued_at) VALUES ('OLDTHIN','done',1,'curve',1,1)")
+        await db.execute("INSERT OR REPLACE INTO runner_trace_queue (mint, status, attempts, source, buyers, "
+                         "enqueued_at) VALUES ('FULL','done',1,'curve',100,1)")
+        await db.commit()
+        await rt._ensure(db)
+        st = dict(await (await db.execute(
+            "SELECT mint, status FROM runner_trace_queue WHERE mint IN ('OLDTHIN','FULL')")).fetchall())
+    assert st == {"OLDTHIN": "pending", "FULL": "done"}
