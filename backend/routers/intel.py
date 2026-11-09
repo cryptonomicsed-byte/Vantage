@@ -1143,6 +1143,9 @@ _SIGNAL_TABLES_DDL = (
 # idempotent like CREATE TABLE IF NOT EXISTS, so it's handled separately
 # with its own "column already exists" tolerance below.
 _SIGNAL_POOL_MINT_MIGRATION = "ALTER TABLE signal_pool ADD COLUMN mint TEXT DEFAULT ''"
+# P1-03: chain rides along so the ledger (and later consumers) know which
+# chain a mint is on. Same tolerant pattern as mint.
+_SIGNAL_POOL_CHAIN_MIGRATION = "ALTER TABLE signal_pool ADD COLUMN chain TEXT DEFAULT ''"
 _POOL_DB_KEEP = 500  # rows retained in the durable pool table
 
 
@@ -1153,10 +1156,15 @@ async def _ensure_signal_tables(db) -> None:
         await db.execute(_SIGNAL_POOL_MINT_MIGRATION)
     except aiosqlite.Error:
         pass  # column already exists
+    try:
+        await db.execute(_SIGNAL_POOL_CHAIN_MIGRATION)
+    except aiosqlite.Error:
+        pass  # column already exists
 
 
 async def ingest_signal_internal(symbol: str, source: str, type_: str, conviction: float = 1.0,
-                                  direction: str = "", detail: str = "", mint: str = "") -> dict:
+                                  direction: str = "", detail: str = "", mint: str = "",
+                                  chain: str = "", record: Optional[dict] = None) -> dict:
     """The real body of POST /signals/ingest, factored out so in-process
     callers (last30days_bridge.py's daemon loop) can post a signal
     directly -- same process, no reason to round-trip through HTTP with
@@ -1177,21 +1185,29 @@ async def ingest_signal_internal(symbol: str, source: str, type_: str, convictio
             _signal_pool.pop(0)
 
     # Durable write-through (best-effort — the in-memory pool is still the fast path).
+    # chain is written to the table only, never added to the in-memory dict:
+    # those dicts are served by GET /signals, whose shape does not change.
+    pool_id = None
     try:
         async with get_db() as db:
             await _ensure_signal_tables(db)
-            await db.execute(
-                "INSERT INTO signal_pool (symbol, source, type, conviction, direction, detail, mint, ts) "
-                "VALUES (?,?,?,?,?,?,?,?)",
+            _cur = await db.execute(
+                "INSERT INTO signal_pool (symbol, source, type, conviction, direction, detail, mint, chain, ts) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
                 (signal["symbol"], signal["source"], signal["type"], signal["conviction"],
-                 signal["direction"], signal["detail"], signal["mint"], signal["ts"]),
+                 signal["direction"], signal["detail"], signal["mint"], str(chain or "")[:20], signal["ts"]),
             )
+            pool_id = _cur.lastrowid
             await db.execute(
                 "DELETE FROM signal_pool WHERE id NOT IN "
                 "(SELECT id FROM signal_pool ORDER BY id DESC LIMIT ?)", (_POOL_DB_KEEP,))
             await db.commit()
     except aiosqlite.Error as e:
         logger.debug("signal_pool persist failed: %s", e)
+    # P1-03: every ingest also lands in the never-trimmed ledger (flag
+    # SIGNAL_LEDGER_ENABLED). Scheduled off the request path; cannot fail this.
+    from backend import signal_ledger as _sl
+    _sl.schedule("intel", {**signal, "chain": chain}, pool_id, record)
     return {"status": "ingested", "signal": signal["symbol"], "pool_size": len(_signal_pool)}
 
 
@@ -1241,6 +1257,7 @@ async def ingest_signal(payload: dict, tool: dict = Depends(get_system_tool)):
         payload["symbol"], payload["source"], payload["type"],
         conviction=conviction, direction=payload.get("direction", ""),
         detail=payload.get("detail", ""), mint=payload.get("mint", ""),
+        chain=payload.get("chain", "") if isinstance(payload.get("chain", ""), str) else "",
     )
 
 
@@ -1274,10 +1291,22 @@ async def _ingest_record(payload: dict):
 
     raw = rec["conviction"]
     rec["conviction"] = min(raw, cap)
-    out = await ingest_signal_internal(**_sr.pool_fields(rec))
+    rec["conviction_raw"] = raw
+    out = await ingest_signal_internal(**_sr.pool_fields(rec), chain=rec["asset"]["chain"], record=rec)
     out.update({"schema": _sr.SCHEMA, "id": rec["id"], "conviction": rec["conviction"],
                 "conviction_raw": raw, "capped": rec["conviction"] < raw})
     return out
+
+
+@router.get("/ledger")
+async def get_ledger(source: str = Query("", max_length=64), address: str = Query("", max_length=64),
+                     since: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=1000),
+                     agent: dict = Depends(get_agent)):
+    """Read-only view of signal_ledger (P1-03): every ingested signal, never
+    trimmed, with its entry price. Empty when SIGNAL_LEDGER_ENABLED is off."""
+    from backend import signal_ledger as _sl
+    rows = await _sl.query(source=source, address=address, since=since, limit=limit)
+    return {"rows": rows, "count": len(rows), "enabled": _sl.enabled()}
 
 
 async def _durable_pool(limit: int = 50) -> list[dict]:
