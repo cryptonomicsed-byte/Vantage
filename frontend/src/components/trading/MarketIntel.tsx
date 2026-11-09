@@ -651,7 +651,10 @@ function TraceByToken() {
             <div>
               <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', marginBottom: 6, textTransform: 'uppercase' }}>First Buyers</div>
               {result.first_buyers.map((b: any, i: number) => (
-                <div key={i} style={{ fontSize: 12, padding: '4px 0' }}><WalletLink address={b.wallet} chain="solana" /></div>
+                <div key={i} style={{ fontSize: 12, padding: '4px 0', display: 'flex', justifyContent: 'space-between', gap: 6 }}>
+                  <span>{b.rank ? <span style={{ color: 'var(--muted)', marginRight: 4 }}>#{b.rank}</span> : null}<WalletLink address={b.wallet} chain="solana" />{b.is_major ? <span title="Largest or earliest entry" style={{ marginLeft: 4, color: '#ffaa00' }}>★</span> : null}</span>
+                  {typeof b.sol_spent === 'number' && <span style={{ color: 'var(--muted)' }}>{b.sol_spent.toFixed(2)} SOL</span>}
+                </div>
               ))}
             </div>
           </div>

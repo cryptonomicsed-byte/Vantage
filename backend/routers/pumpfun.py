@@ -429,6 +429,36 @@ async def token_traders(mint: str = Query(...), x_agent_key: str = Header(...)):
 # event loop if awaited directly inside an async def (the same class of
 # bug found and fixed elsewhere this session, e.g. telegram_webhook.py).
 # ════════════════════════════════════════════════════════════════
+def _call_enrich(fn, mint: str, symbol: str):
+    """P4-04: older daemon copies take enrich_token(mint); newer ones take
+    (mint, symbol). Passing symbol to the old one raised TypeError -> 502 on
+    every trace. Pass it only when the function accepts it."""
+    import inspect
+    try:
+        accepts = len(inspect.signature(fn).parameters) >= 2
+    except (TypeError, ValueError):
+        accepts = False
+    return fn(mint, symbol) if accepts else fn(mint)
+
+
+async def _first_buyers(mint: str, limit: int = 20) -> list:
+    """First buyers in entry order from backend.early_buyer, shaped for the UI
+    ({wallet, rank, sol_spent, funded_by, is_major}). [] on any failure."""
+    try:
+        from ..early_buyer import backtrack_early_buyers
+        out = await backtrack_early_buyers(mint, max_buyers=50)
+    except Exception:  # noqa: BLE001 -- the trace still returns the rest
+        return []
+    rows = []
+    for b in (out or {}).get("buyers") or []:
+        w = b.get("wallet_address")
+        if w:
+            rows.append({"wallet": w, "rank": b.get("entry_rank"), "sol_spent": b.get("sol_spent"),
+                         "funded_by": b.get("funded_by"), "is_major": bool(b.get("is_major"))})
+    rows.sort(key=lambda r: (r["rank"] is None, r["rank"] or 0))
+    return rows[:limit]
+
+
 @router.post("/trace-token/{mint}")
 async def trace_token(mint: str, symbol: str = Query(""), x_agent_key: str = Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
@@ -436,12 +466,16 @@ async def trace_token(mint: str, symbol: str = Query(""), x_agent_key: str = Hea
     sys.path.insert(0, "/opt/ares")
     import pumpfun_wallet_intel as pwi
     try:
-        result = await asyncio.to_thread(pwi.enrich_token, mint, symbol)
+        result = await asyncio.to_thread(_call_enrich, pwi.enrich_token, mint, symbol)
     except Exception as e:
         raise HTTPException(502, f"Enrichment failed: {e}")
     holders = result.get("holders", {}).get("holders", [])
     traders = result.get("traders", {}).get("traders", [])
-    first_buyers = result.get("traders", {}).get("first_buyers", [])
+    # P4-04: first buyers come from the ordered early-buyer walk (entry rank,
+    # SOL spent, funder), which the daemon's trader scan never returned on
+    # older copies. Its old list is the fallback when the walk has nothing.
+    first_buyers = await _first_buyers(mint) or [
+        {"wallet": b.get("wallet")} for b in result.get("traders", {}).get("first_buyers", []) if b.get("wallet")]
     creator = result.get("creator", {}).get("creator", "")
     return {
         "mint": mint, "symbol": symbol,
