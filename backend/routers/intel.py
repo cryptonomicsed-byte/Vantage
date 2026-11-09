@@ -1944,3 +1944,13 @@ async def daily_intel(limit: int = Query(10, ge=1, le=50), agent: dict = Depends
             rows = [dict(r) for r in await cur.fetchall()]
     return {"reports": rows, "count": len(rows)}
 
+
+
+@router.get("/curve/coverage")
+async def curve_coverage():
+    """P4-01: what the free Solana curve listener has actually covered --
+    connection state, trades/mints counted, gaps and how each was backfilled.
+    Read-only; public mints and counts only, no wallet data."""
+    import asyncio as _aio
+    from .. import curve_listener
+    return await _aio.to_thread(curve_listener.coverage)
