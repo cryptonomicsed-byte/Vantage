@@ -153,6 +153,18 @@ async def init_outcome_tables() -> None:
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_outcomes_source ON trading_order_outcomes(source)"
         )
+        # P2-04: fold source_performance into a stable 'orders' view so the
+        # shadow rank (P2-05) reads source-level outcomes through one name,
+        # whether they come from Vantage's own learner or from Mycelium's
+        # source_hit_rate findings. win_rate is wins/n_trades; a source with
+        # no trades reads NULL rather than a fabricated 0.
+        await db.execute(
+            "CREATE VIEW IF NOT EXISTS orders AS "
+            "SELECT source, window, n_trades AS n, wins, "
+            "       CAST(wins AS REAL) / NULLIF(n_trades, 0) AS win_rate, "
+            "       avg_pnl_pct, n_suspect, updated_at "
+            "FROM source_performance"
+        )
         await db.commit()
 
 
