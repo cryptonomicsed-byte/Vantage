@@ -6,6 +6,7 @@ import CouncilSection from '../CouncilSection'
 import ShadowAccountSection from '../ShadowAccountSection'
 import { TokenLink, WalletLink } from './EntityProfileCard'
 import AgentIntel from './AgentIntel'
+import { LabelChips } from './EarlyRunnerIntel'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Analytics — the deep-dive lenses behind Trading's default Dashboard tab. These
@@ -574,6 +575,19 @@ type TraceHop = { chain: string; address: string }
 // tracked_wallets), so it's a real node in the money-flow graph
 // immediately — this is the actual "high signal token → back-track
 // investors → find wallets to track" loop, just triggerable on demand.
+function FirstBuyersStatus({ t, n }: { t?: any; n: number }) {
+  if (!t) return null
+  const txt = t.from === 'stored_trace'
+    ? `origin trace (${t.source || 'rpc'}${t.reached_origin ? ', reached the create tx' : ', partial'})`
+    : t.from === 'quick_walk' ? 'quick walk (no origin trace yet)'
+    : t.status === 'pending' || t.status === 'tracing' || t.status === 'walking'
+      ? `queued for the origin trace (${t.status}) -- walking to the create tx on the free RPC can take minutes; trace again later`
+    : t.status === 'failed' ? `origin trace failed: ${t.last_error || 'unknown'} -- it will retry`
+    : t.status === 'unavailable' ? 'origin tracer unavailable' : ''
+  if (!txt) return null
+  return <div style={{ fontSize: 11, color: n ? 'var(--muted)' : '#ffaa00', marginBottom: 6 }}>{txt}</div>
+}
+
 function TraceByToken() {
   const [mint, setMint] = useState('')
   const [symbol, setSymbol] = useState('')
@@ -650,10 +664,15 @@ function TraceByToken() {
             </div>
             <div>
               <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', marginBottom: 6, textTransform: 'uppercase' }}>First Buyers</div>
+              <FirstBuyersStatus t={result.first_buyers_trace} n={result.first_buyers.length} />
               {result.first_buyers.map((b: any, i: number) => (
-                <div key={i} style={{ fontSize: 12, padding: '4px 0', display: 'flex', justifyContent: 'space-between', gap: 6 }}>
-                  <span>{b.rank ? <span style={{ color: 'var(--muted)', marginRight: 4 }}>#{b.rank}</span> : null}<WalletLink address={b.wallet} chain="solana" />{b.is_major ? <span title="Largest or earliest entry" style={{ marginLeft: 4, color: '#ffaa00' }}>★</span> : null}</span>
-                  {typeof b.sol_spent === 'number' && <span style={{ color: 'var(--muted)' }}>{b.sol_spent.toFixed(2)} SOL</span>}
+                <div key={i} style={{ fontSize: 12, padding: '4px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 6 }}>
+                    <span>{b.rank ? <span style={{ color: 'var(--muted)', marginRight: 4 }}>#{b.rank}</span> : null}<WalletLink address={b.wallet} chain="solana" />{b.is_major ? <span title="Largest or earliest entry" style={{ marginLeft: 4, color: '#ffaa00' }}>★</span> : null}</span>
+                    {typeof b.sol_spent === 'number' && <span style={{ color: 'var(--muted)' }}>{b.sol_spent.toFixed(2)} SOL</span>}
+                  </div>
+                  {(b.labels?.length > 0) && <div style={{ marginTop: 2 }}><LabelChips labels={b.labels} /></div>}
+                  {b.funded_by && <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>funded by <WalletLink address={b.funded_by} chain="solana" /> {b.funder_labels?.length > 0 && <LabelChips labels={b.funder_labels} />}</div>}
                 </div>
               ))}
             </div>

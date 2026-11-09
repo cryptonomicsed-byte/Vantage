@@ -441,22 +441,65 @@ def _call_enrich(fn, mint: str, symbol: str):
     return fn(mint, symbol) if accepts else fn(mint)
 
 
-async def _first_buyers(mint: str, limit: int = 20) -> list:
-    """First buyers in entry order from backend.early_buyer, shaped for the UI
-    ({wallet, rank, sol_spent, funded_by, is_major}). [] on any failure."""
+def _ui_row(b: dict) -> dict:
+    return {"wallet": b.get("wallet"), "rank": b.get("rank"), "sol_spent": b.get("sol"),
+            "funded_by": b.get("funded_by"), "is_major": bool(b.get("is_major")),
+            "labels": b.get("labels") or [], "funder_labels": b.get("funder_labels") or []}
+
+
+async def _first_buyers_with_status(mint: str, limit: int = 20) -> tuple:
+    """(first buyers in entry order, trace status) for the Market Intel trace.
+
+    1. A stored origin trace (runner_trace, P4-03) -- the oldest buyers with
+       SOL, funder and wallet labels -- when one has finished.
+    2. Otherwise the one-shot early_buyer walk (the old path).
+    3. If that is empty too, the mint is queued for the background tracer
+       ahead of the runner backlog, and the status says so -- instead of an
+       empty list that looks like 'nobody bought'."""
+    from .. import runner_trace as rt
+    try:
+        eb = await rt.early_buyers(mint)
+    except Exception:  # noqa: BLE001
+        eb = {"trace": None, "buyers": []}
+    tr = eb.get("trace") or {}
+    if eb.get("buyers") and tr.get("status") in ("done", "partial"):
+        return [_ui_row(b) for b in eb["buyers"][:limit]], {**_trace_view(tr), "from": "stored_trace"}
+    rows = []
     try:
         from ..early_buyer import backtrack_early_buyers
         out = await backtrack_early_buyers(mint, max_buyers=50)
+        for b in (out or {}).get("buyers") or []:
+            if b.get("wallet_address"):
+                rows.append({"wallet": b["wallet_address"], "rank": b.get("entry_rank"),
+                             "sol_spent": b.get("sol_spent"), "funded_by": b.get("funded_by"),
+                             "is_major": bool(b.get("is_major")), "labels": [], "funder_labels": []})
     except Exception:  # noqa: BLE001 -- the trace still returns the rest
-        return []
-    rows = []
-    for b in (out or {}).get("buyers") or []:
-        w = b.get("wallet_address")
-        if w:
-            rows.append({"wallet": w, "rank": b.get("entry_rank"), "sol_spent": b.get("sol_spent"),
-                         "funded_by": b.get("funded_by"), "is_major": bool(b.get("is_major"))})
+        rows = []
     rows.sort(key=lambda r: (r["rank"] is None, r["rank"] or 0))
-    return rows[:limit]
+    if rows:
+        return rows[:limit], {"status": "done", "from": "quick_walk"}
+    if not tr:
+        try:
+            from ..db import get_db
+            async with get_db() as db:
+                await rt._ensure(db)
+                # enqueued_at=1: a token someone asked about goes ahead of the
+                # runner backlog (the queue is taken by attempts, then age)
+                await db.execute("INSERT OR IGNORE INTO runner_trace_queue (mint, enqueued_at) VALUES (?, 1)", (mint,))
+                await db.commit()
+            tr = {"status": "pending"}
+        except Exception:  # noqa: BLE001
+            return [], {"status": "unavailable", "from": None}
+    return [], {**_trace_view(tr), "from": "queued"}
+
+
+def _trace_view(tr: dict) -> dict:
+    return {k: tr.get(k) for k in ("status", "attempts", "last_error", "source", "reached_origin",
+                                   "signatures_scanned", "buyers")}
+
+
+async def _first_buyers(mint: str, limit: int = 20) -> list:
+    return (await _first_buyers_with_status(mint, limit))[0]
 
 
 @router.post("/trace-token/{mint}")
@@ -474,7 +517,8 @@ async def trace_token(mint: str, symbol: str = Query(""), x_agent_key: str = Hea
     # P4-04: first buyers come from the ordered early-buyer walk (entry rank,
     # SOL spent, funder), which the daemon's trader scan never returned on
     # older copies. Its old list is the fallback when the walk has nothing.
-    first_buyers = await _first_buyers(mint) or [
+    first_buyers, first_buyers_trace = await _first_buyers_with_status(mint)
+    first_buyers = first_buyers or [
         {"wallet": b.get("wallet")} for b in result.get("traders", {}).get("first_buyers", []) if b.get("wallet")]
     creator = result.get("creator", {}).get("creator", "")
     return {
@@ -483,6 +527,7 @@ async def trace_token(mint: str, symbol: str = Query(""), x_agent_key: str = Hea
         "top_holders": holders,
         "top_traders": traders,
         "first_buyers": first_buyers,
+        "first_buyers_trace": first_buyers_trace,
         "concentrated": result.get("holders", {}).get("concentrated", False),
         "wallets_tracked": len({w for w in [creator] + [h["wallet"] for h in holders] + [t["wallet"] for t in traders] + [b["wallet"] for b in first_buyers] if w}),
     }
