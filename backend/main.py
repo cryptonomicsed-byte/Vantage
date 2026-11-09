@@ -768,6 +768,9 @@ async def lifespan(app: FastAPI):
     # P4-13: guild router schedules (GUILD_ROUTER_ENABLED; no schedules by default).
     from .guild_router import schedule_loop as _guild_schedule_loop
     guild_schedule_task = asyncio.create_task(_guild_schedule_loop())
+    # P4-15: TradingOS challenger in shadow (TRADINGOS_CHALLENGER_ENABLED, off).
+    from .tradingos_challenger import challenger_loop as _challenger_loop
+    tradingos_challenger_task = asyncio.create_task(_challenger_loop())
 
     yield
     shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, mention_poller_task, scoring_task, last30days_task, outcome_learner_task, event_bus_task, tier_recompute_task, reconciler_task,
@@ -780,7 +783,8 @@ async def lifespan(app: FastAPI):
                       runner_trace_task, wallet_labels_task,
                       runner_watchlist_task, confluence_task,
                       crucible_adapter_task, crucible_calibration_task,
-                      guild_schedule_task]
+                      guild_schedule_task,
+                      tradingos_challenger_task]
     if execution_engine_task is not None:
         shutdown_tasks.append(execution_engine_task)
     # Cancel all first, then wait a bounded time. Awaiting each cancelled task
