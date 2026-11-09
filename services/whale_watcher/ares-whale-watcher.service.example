@@ -1,0 +1,22 @@
+# P4-14: kanban whale_watcher. Shipped in the repo, NOT installed.
+# Class: INTEL (reads public chain data, writes a JSONL file; places no orders).
+# Flag WHALE_WATCHER_ENABLED, default off: run.py exits 0 without importing web3.
+# Needs ETH_WSS_URL pointing at a free/self-hosted node (no keyed default).
+[Unit]
+Description=Ares Whale Watcher (kanban whale_watcher, INTEL, read-only)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=-/etc/ares-env/ares-whale-watcher.env
+Environment=WHALE_WATCHER_ENABLED=0
+WorkingDirectory=/opt/ares/Vantage
+ExecStart=/opt/ares/venv/bin/python /opt/ares/Vantage/services/whale_watcher/run.py
+Restart=on-failure
+RestartSec=120
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

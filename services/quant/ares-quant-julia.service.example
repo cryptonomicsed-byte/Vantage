@@ -1,0 +1,25 @@
+# P4-14: TradingOSQuant (Julia) HTTP service. Shipped in the repo, NOT installed.
+# Class: INTEL (read-only analytics; places no orders). Flag QUANT_JULIA_ENABLED,
+# default off: with the flag off ExecStart exits 0 immediately and nothing listens.
+# Install is Bino's call: copy to /etc/systemd/system/, set the flag in the env file,
+# run `julia --project=. -e 'using Pkg; Pkg.instantiate()'` once in WorkingDirectory.
+[Unit]
+Description=Ares Quant Julia (TradingOSQuant backtest engine, INTEL, read-only)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=-/etc/ares-env/ares-quant-julia.env
+Environment=QUANT_JULIA_ENABLED=0
+Environment=JULIA_HOST=127.0.0.1
+Environment=JULIA_PORT=8083
+WorkingDirectory=/opt/ares/Vantage/services/quant/julia/TradingOSQuant
+ExecStart=/bin/sh -c 'case "$QUANT_JULIA_ENABLED" in 1|true|yes|on) exec julia --project=. src/server.jl ;; *) echo "QUANT_JULIA_ENABLED off; not starting"; exit 0 ;; esac'
+Restart=on-failure
+RestartSec=60
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

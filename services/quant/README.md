@@ -10,7 +10,7 @@ service is not exposed off-box by default. Everything else is verbatim.
 
 | | |
 |---|---|
-| Service | `ares-quant-julia` (`ares-quant-julia.service`, shipped only, **not installed**) |
+| Service | `ares-quant-julia` (`ares-quant-julia.service.example`, shipped only, **not installed**) |
 | Class | INTEL -- analytics only, places no orders |
 | Flag | `QUANT_JULIA_ENABLED`, default off (unit exits 0; Vantage client returns `enabled:false`) |
 | Endpoints | `GET /health`, `POST /backtest` on `JULIA_HOST:JULIA_PORT` (127.0.0.1:8083) |

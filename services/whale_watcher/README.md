@@ -10,7 +10,7 @@ re-vendor instead. The kanban copy stays where it is.
   self-hosted node); the module's keyed provider default is never reached.
   Appends alerts as JSON lines to `WHALE_WATCHER_OUT`
   (default `$VANTAGE_DATA_DIR/whale_watcher.jsonl`).
-- `ares-whale-watcher.service` -- systemd unit, shipped only, not installed.
+- `ares-whale-watcher.service.example` -- systemd unit, shipped only, not installed.
   Class INTEL.
 - Read side: `GET /api/intel/quant/whales` (backend/quant_client.py), read-only.
   Nothing posts to the signal pool.
