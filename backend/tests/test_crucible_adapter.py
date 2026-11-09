@@ -19,11 +19,24 @@ from backend import crucible_calibration as cc
 from backend import crucible_events as ce
 from backend.db import get_db
 
-SCRATCH = Path("/root/.hermes/cache/scratch")
-BIN = Path(os.environ.get("CRUCIBLE_TEST_BIN", SCRATCH / "crucible-target/debug/crucible"))
-FALS = Path(os.environ.get("CRUCIBLE_TEST_FALSIFIERS", SCRATCH / "sub-P3-01-Crucible/examples/falsifiers"))
-HAVE_CLI = BIN.is_file() and os.access(BIN, os.X_OK) and (FALS / "signal-outcome.wat").is_file()
-needs_cli = pytest.mark.skipif(not HAVE_CLI, reason="crucible binary / signal-outcome.wat not built here")
+import shutil
+
+# The end-to-end tests need a built crucible CLI and Crucible's
+# examples/falsifiers (with signal-outcome.wat): point CRUCIBLE_TEST_BIN and
+# CRUCIBLE_TEST_FALSIFIERS at them. Without both they skip -- never error.
+BIN = Path(os.environ.get("CRUCIBLE_TEST_BIN") or shutil.which("crucible") or "/nonexistent/crucible")
+FALS = Path(os.environ.get("CRUCIBLE_TEST_FALSIFIERS") or "/nonexistent/falsifiers")
+
+
+def _have_cli() -> bool:
+    try:
+        return BIN.is_file() and os.access(BIN, os.X_OK) and (FALS / "signal-outcome.wat").is_file()
+    except OSError:  # e.g. a path under a directory the runner can't read
+        return False
+
+
+HAVE_CLI = _have_cli()
+needs_cli = pytest.mark.skipif(not HAVE_CLI, reason="set CRUCIBLE_TEST_BIN + CRUCIBLE_TEST_FALSIFIERS to run")
 
 
 def _key(path: Path) -> bytes:
