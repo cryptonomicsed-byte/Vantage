@@ -142,3 +142,67 @@ async def compute_and_log(limit: int = 25) -> Dict[str, Any]:
     logged = await log_ranking(ranked)
     return {"logged": logged, "calls": ranked,
             "shadow_rank_enabled": SHADOW_RANK_ENABLED}
+
+
+# ── background cycle + read side (P2-05 follow-up) ────────────────────────────
+# compute_and_log() used to run only when GET /shadow-rank was called, so either
+# nothing was ever logged or every UI poll wrote a batch. The loop below owns
+# logging; readers use recent_log(), which never writes.
+
+def enabled() -> bool:
+    """Read each cycle, so the flag toggles without a restart."""
+    return os.environ.get("SHADOW_RANK_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+async def shadow_loop(interval_s: int = 300) -> None:
+    import asyncio
+    while True:
+        await asyncio.sleep(interval_s)
+        if not enabled():
+            continue
+        try:
+            out = await compute_and_log()
+            if out["logged"]:
+                log.info("shadow rank logged %d calls", out["logged"])
+        except Exception as e:  # noqa: BLE001
+            log.warning("shadow rank cycle failed: %s", e)
+
+
+async def recent_log(limit: int = 25) -> Dict[str, Any]:
+    """The most recent logged ranking batch (one ts), read-only."""
+    from backend.db import get_db
+    async with get_db() as db:
+        await db.execute(DDL)
+        row = await (await db.execute("SELECT MAX(ts) FROM shadow_rank_log")).fetchone()
+        ts = row[0] if row else None
+        if not ts:
+            return {"ts": None, "rows": [], "batches": 0}
+        cur = await db.execute(
+            "SELECT call_key, live_rank, shadow_rank, conviction, reliability, hits, n "
+            "FROM shadow_rank_log WHERE ts=? ORDER BY shadow_rank LIMIT ?", (ts, limit))
+        cols = ["call_key", "live_rank", "shadow_rank", "conviction", "reliability", "hits", "n"]
+        rows = [dict(zip(cols, r)) for r in await cur.fetchall()]
+        batches = (await (await db.execute("SELECT COUNT(DISTINCT ts) FROM shadow_rank_log")).fetchone())[0]
+    for r in rows:
+        src, sym, direction, mint = (r["call_key"].split("|") + ["", "", "", ""])[:4]
+        r.update(source=src, symbol=sym, direction=direction, mint=mint,
+                 moved=(r["live_rank"] or 0) - (r["shadow_rank"] or 0))
+    return {"ts": ts, "rows": rows, "batches": batches}
+
+
+def fetch_hit_rate_findings() -> List[Dict[str, Any]]:
+    """Every source_hit_rate finding payload (all windows) from Mycelium."""
+    data = _get(f"{MYCELIUM_URL}/api/findings?miner=source_hit_rate&limit=5000")
+    out: List[Dict[str, Any]] = []
+    for f in (data or {}).get("findings") or []:
+        p = f.get("payload")
+        if isinstance(p, str):
+            try:
+                p = json.loads(p)
+            except (TypeError, ValueError):
+                continue
+        if isinstance(p, dict) and p.get("source"):
+            out.append({k: p.get(k) for k in ("source", "window", "n", "hits", "hit_rate",
+                                              "brier", "min_samples_met", "updated_at")})
+    out.sort(key=lambda r: (-(r.get("n") or 0), r.get("source") or "", r.get("window") or ""))
+    return out

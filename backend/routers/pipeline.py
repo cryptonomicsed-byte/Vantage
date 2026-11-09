@@ -358,3 +358,41 @@ async def shadow_rank_endpoint(agent: dict = Depends(get_agent)):
     from .. import shadow_rank
     result = await shadow_rank.compute_and_log()
     return result
+
+
+@router.get("/learning")
+async def learning_loop_status(agent: dict = Depends(get_agent)):
+    """Read-only view of the whole learning loop for the Learning panel.
+
+    Never writes. Each section reports its own flag, so a section that is off
+    says so instead of looking empty-but-broken.
+    """
+    import asyncio as _asyncio
+    from .. import shadow_rank, signal_ledger, signal_record
+
+    out: dict = {
+        "flags": {
+            "SIGNAL_RECORD_V1": signal_record.enabled(),
+            "SIGNAL_LEDGER_ENABLED": signal_ledger.enabled(),
+            "LEDGER_MIRROR_ENABLED": signal_ledger.mirror_enabled(),
+            "SHADOW_RANK_ENABLED": shadow_rank.enabled(),
+        },
+    }
+    try:
+        recent = await signal_ledger.query(limit=10)
+        async with get_db() as db:
+            try:
+                total = (await (await db.execute("SELECT COUNT(*) FROM signal_ledger")).fetchone())[0]
+            except Exception:  # noqa: BLE001 - table absent until the flag is first on
+                total = 0
+        out["ledger"] = {"total": total, "recent": recent}
+    except Exception as e:  # noqa: BLE001
+        out["ledger"] = {"total": 0, "recent": [], "error": str(e)}
+    try:
+        out["hit_rates"] = await _asyncio.to_thread(shadow_rank.fetch_hit_rate_findings)
+        out["mycelium_reachable"] = True
+    except Exception as e:  # noqa: BLE001
+        out["hit_rates"], out["mycelium_reachable"] = [], False
+        out["hit_rates_error"] = str(e)
+    out["shadow"] = await shadow_rank.recent_log()
+    return out
