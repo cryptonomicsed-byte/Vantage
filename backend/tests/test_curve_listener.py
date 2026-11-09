@@ -161,3 +161,28 @@ async def test_writer_survives_flushes_on_different_threads(tmp_path, monkeypatc
         await w.add([_row(f"t{i}", 0, "M", int(time.time()), 1.0)], set())
         await w.flush()
     assert cl.connect().execute("SELECT COUNT(*) FROM curve_trades").fetchone()[0] == 12
+
+
+
+def test_foreign_tradeevent_with_same_discriminator_is_rejected(tmp_path, monkeypatch):
+    """Any Anchor program's `TradeEvent` shares the discriminator; bytes that
+    don't fit pump.fun's layout (garbage timestamp / is_buy) are not trades."""
+    import struct as _s
+    import time as _t
+    good = bytearray(cl.TRADE_DISC + bytes(32) + _s.pack("<QQ", 10**9, 10**6) + b"\x01" + bytes(32)
+                     + _s.pack("<qQQ", int(_t.time()), 30 * 10**9, 10**15))
+    assert cl.decode_trade_event(bytes(good)) is not None
+    bad_ts = bytearray(good); _s.pack_into("<q", bad_ts, 89, -8935141660572423392)
+    assert cl.decode_trade_event(bytes(bad_ts)) is None
+    bad_flag = bytearray(good); bad_flag[56] = 7
+    assert cl.decode_trade_event(bytes(bad_flag)) is None
+    # and existing garbage rows are purged on connect
+    monkeypatch.setenv("CURVE_DB", str(tmp_path / "g.db"))
+    c = cl.connect()
+    base = {"ix": 0, "slot": 1, "mint": "M", "wallet": "w", "side": "buy", "sol": 1.0, "tokens": 1.0,
+            "v_sol_reserves": 30, "v_token_reserves": 1e9, "mcap_usd": 1.0, "source": "rpc"}
+    cl.write_batch(c, [dict(base, sig="ok", block_time=int(_t.time())),
+                       dict(base, sig="junk", block_time=-8935141660572423392)], set())
+    c.close()
+    c = cl.connect()
+    assert [r[0] for r in c.execute("SELECT sig FROM curve_trades")] == ["ok"]
