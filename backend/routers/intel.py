@@ -1954,3 +1954,27 @@ async def curve_coverage():
     import asyncio as _aio
     from .. import curve_listener
     return await _aio.to_thread(curve_listener.coverage)
+
+
+@router.get("/runners")
+async def runners(limit: int = Query(50, ge=1, le=200)):
+    """P4-02: detected runners (tier, weight, peak observed, tiers crossed,
+    trace status). Public token data only."""
+    from .. import runner_detect
+    return await runner_detect.list_runners(limit)
+
+
+class _RunnerCheck(BaseModel):
+    mints: list[str]
+
+
+@router.post("/runners/check")
+async def runners_check(body: _RunnerCheck, request: Request):
+    """P4-02: evaluate specific mints against the runner tiers now -- for
+    runners that launched before the curve listener was on. Agent key required."""
+    from ..oauth_store import agent_by_key
+    key = request.headers.get("x-agent-key", "")
+    if not key or not await agent_by_key(key):
+        raise HTTPException(401, "agent key required")
+    from .. import runner_detect
+    return await runner_detect.check_mints(body.mints)
