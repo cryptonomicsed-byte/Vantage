@@ -146,3 +146,18 @@ async def test_endpoint(client, tmp_path, monkeypatch):
 def test_flag_default_off(monkeypatch):
     monkeypatch.delenv("CURVE_LISTENER_ENABLED", raising=False)
     assert cl.enabled() is False
+
+
+@pytest.mark.asyncio
+async def test_writer_survives_flushes_on_different_threads(tmp_path, monkeypatch):
+    """Regression: the writer's connection is reused across to_thread calls."""
+    import concurrent.futures
+    import asyncio
+    monkeypatch.setenv("CURVE_DB", str(tmp_path / "w.db"))
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=4))
+    w = cl._Writer()
+    for i in range(12):  # many flushes -> several pool threads
+        await w.add([_row(f"t{i}", 0, "M", int(time.time()), 1.0)], set())
+        await w.flush()
+    assert cl.connect().execute("SELECT COUNT(*) FROM curve_trades").fetchone()[0] == 12

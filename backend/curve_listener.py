@@ -184,7 +184,11 @@ DDL = [
 def connect() -> sqlite3.Connection:
     p = db_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(str(p), timeout=10)
+    # check_same_thread=False: the writer reuses one connection across
+    # asyncio.to_thread calls, which may land on different pool threads. Use
+    # is strictly serial (each flush is awaited before the next), never
+    # concurrent.
+    c = sqlite3.connect(str(p), timeout=10, check_same_thread=False)
     c.execute("PRAGMA journal_mode=WAL")
     c.execute("PRAGMA synchronous=NORMAL")
     for d in DDL:
