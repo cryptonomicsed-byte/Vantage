@@ -1127,6 +1127,8 @@ from .routers.workspace_memory import router as workspace_memory_router
 app.include_router(workspace_memory_router)
 from .routers.trading_space import router as trading_space_router
 app.include_router(trading_space_router)
+from .routers.guild_reliability import router as guild_reliability_router  # P3-06
+app.include_router(guild_reliability_router)
 from .routers.content_space import router as content_space_router
 app.include_router(content_space_router)
 from .routers.workspace_mcp import router as workspace_mcp_router

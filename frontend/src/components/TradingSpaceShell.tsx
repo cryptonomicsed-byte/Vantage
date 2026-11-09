@@ -5,7 +5,7 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import {
   Activity, BarChart2, BookOpen, Database, DollarSign, Eye, FileCheck,
-  Globe, Package, TrendingUp, Users, Zap, Star, MessageSquare,
+  Globe, Package, TrendingUp, Users, Zap, Star, MessageSquare, ShieldCheck,
 } from 'lucide-react'
 import GuildChat from './GuildChat'
 import WorkspaceMemoryViewer from './WorkspaceMemoryViewer'
@@ -84,6 +84,7 @@ const TABS = [
   { id: 'strategies', label: 'Strategies', icon: <TrendingUp size={13} /> },
   { id: 'memory', label: 'Memory', icon: <Database size={13} /> },
   { id: 'agents', label: 'Agents', icon: <Users size={13} /> },
+  { id: 'reliability', label: 'Reliability', icon: <ShieldCheck size={13} /> },
   { id: 'artifacts', label: 'Artifacts', icon: <Package size={13} /> },
   { id: 'receipts', label: 'Receipts', icon: <FileCheck size={13} /> },
   { id: 'federation', label: 'Federation', icon: <Globe size={13} /> },
@@ -431,6 +432,50 @@ function ArtifactsPanel({ slug, spaceId, authHeaders }: { slug: string; spaceId:
   )
 }
 
+// P3-06: bondhive reliability (read-only; GET .../reliability)
+interface ReliabilityRow {
+  agent_id: number
+  score: number
+  premium_discount: number
+  outcomes: { success: number; failure: number; fraud: number; total: number }
+  last_outcome_at: number | null
+}
+
+function ReliabilityPanel({ slug, spaceId, roster, authHeaders }: { slug: string; spaceId: string; roster: RosterEntry[]; authHeaders: () => Record<string, string> }) {
+  const [rows, setRows] = useState<ReliabilityRow[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const h = authHeaders()
+    fetch('/api/guilds/' + slug + '/trading-spaces/' + spaceId + '/reliability', { headers: h })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => d && setRows(d.agents || []))
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }, [slug, spaceId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const names: Record<number, string> = {}
+  roster.forEach(r => { names[r.agent_id] = r.agent_name })
+  function color(s: number): string { return s >= 60 ? '#3cc878' : s >= 45 ? 'var(--cyan)' : '#ef4444' }
+
+  if (loading) return <div style={{ padding: 24, color: 'var(--muted)', fontSize: 13, textAlign: 'center' }}>Loading reliability...</div>
+
+  return (
+    <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: 10, overflowY: 'auto', height: '100%', boxSizing: 'border-box' }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>Reliability</div>
+      <div style={{ fontSize: 11, color: 'var(--muted)' }}>Starts at 50 · success +1 · failure -2 · fraud -5 · reverts to 50 with a 180-day half-life</div>
+      {rows.length === 0 && <div style={{ color: 'var(--muted)', fontSize: 13, textAlign: 'center', marginTop: 40 }}>No outcomes recorded yet.</div>}
+      {rows.map(r => (
+        <div key={r.agent_id} style={{ display: 'flex', alignItems: 'center', gap: 12, background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 14px' }}>
+          <span style={{ fontSize: 18, fontWeight: 700, color: color(r.score), minWidth: 52, fontFamily: 'monospace' }}>{r.score.toFixed(1)}</span>
+          <span style={{ fontSize: 12, color: 'var(--text)', flex: 1 }}>{names[r.agent_id] || ('agent #' + r.agent_id)}</span>
+          <span style={{ fontSize: 10, color: 'var(--muted)' }}>{r.outcomes.success} ok · {r.outcomes.failure} fail · {r.outcomes.fraud} fraud</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function ReceiptsPanel({ slug, spaceId, authHeaders }: { slug: string; spaceId: string; authHeaders: () => Record<string, string> }) {
   const [receipts, setReceipts] = useState<ReceiptItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -601,6 +646,8 @@ export default function TradingSpaceShell({ slug, spaceId }: Props) {
         return <InlineMemoryViewer slug={slug} spaceId={spaceId} authHeaders={authHeaders} />
       case 'agents':
         return <AgentsPanel roster={roster} />
+      case 'reliability':
+        return <ReliabilityPanel slug={slug} spaceId={spaceId} roster={roster} authHeaders={authHeaders} />
       case 'artifacts':
         return <ArtifactsPanel slug={slug} spaceId={spaceId} authHeaders={authHeaders} />
       case 'receipts':
