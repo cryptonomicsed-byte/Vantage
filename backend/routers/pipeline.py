@@ -404,3 +404,12 @@ async def tradingos_challenger_shadow(limit: int = 50):
     shadow only, never read by ranking or execution. Read-only."""
     from backend import tradingos_challenger as tc
     return await tc.recent(max(1, min(int(limit), 500)))
+
+
+@router.get("/walk-forward")
+async def walk_forward_report(days: int = 30, k: int = 5, window: str = "24h"):
+    """P4-16: day-by-day, using only outcomes known before each day: live top-K
+    hit rate vs shadow-rank top-K hit rate, plus the TradingOS challenger's
+    vetoed-vs-kept hit rates. Read-only."""
+    from backend import walk_forward as wf
+    return await wf.report(days, k, window)
