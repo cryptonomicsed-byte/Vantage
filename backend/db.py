@@ -2313,6 +2313,12 @@ async def init_workspace_tasks_db() -> None:
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_workspace ON vantage_tasks(workspace_id, status)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_claimed ON vantage_tasks(claimed_by_agent_id, status)")
+        # P1-12: claim lease for trading-space tasks (tolerant ALTER: the
+        # column may already exist).
+        try:
+            await db.execute("ALTER TABLE vantage_tasks ADD COLUMN claim_expires_at TEXT")
+        except aiosqlite.OperationalError:
+            pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS task_claims (
                 id TEXT PRIMARY KEY,
