@@ -61,7 +61,9 @@ function useCachedList<T>(key: string, endpoint: string, extractKey: string, int
     const k = localStorage.getItem('vantage_api_key') || ''
     try {
       const r = await fetch(endpoint, { headers: { 'X-Agent-Key': k } })
-      if (!r.ok) return
+      // a 401/5xx used to return here before loading was cleared, so a
+      // signed-out visitor sat on 'Loading trenches…' forever
+      if (!r.ok) { if (mounted.current) setLoading(false); return }
       const data = await r.json()
       const next = data?.[extractKey]
       if (Array.isArray(next) && next.length > 0) {
