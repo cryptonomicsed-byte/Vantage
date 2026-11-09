@@ -157,12 +157,20 @@ async def _paginate_to_origin(
 
 
 async def _parse_buyer_from_tx(
-    client: httpx.AsyncClient, key: str, sig: str, mint: str
+    client: httpx.AsyncClient, key: str, sig: str, mint: str, retries: int = 0
 ) -> Optional[dict]:
-    """Fetch one transaction and extract the wallet that bought `mint`."""
-    txn = await _rpc(client, key, "getTransaction", [
-        sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}
-    ])
+    """Fetch one transaction and extract the wallet that bought `mint`.
+
+    retries (default 0, unchanged): re-ask when the RPC returns nothing --
+    on a free endpoint that is usually a 429, not a missing tx."""
+    txn = None
+    for attempt in range(retries + 1):
+        txn = await _rpc(client, key, "getTransaction", [
+            sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}
+        ])
+        if txn or attempt == retries:
+            break
+        await asyncio.sleep(min(20.0, 2.0 * (2 ** attempt)))
     if not txn:
         return None
 
@@ -198,12 +206,31 @@ async def _parse_buyer_from_tx(
                 token_received = delta
                 break
 
+    # P4-03: a pump.fun TradeEvent in the logs names the exact buyer and SOL.
+    # The fee-payer estimate below is wrong for bundled create+buy txs (other
+    # signers buy; the payer only pays fees) -- prefer the event when present.
+    ev_buy = None
+    try:
+        from backend.curve_listener import events_from_logs
+        for ev in events_from_logs(meta.get("logMessages") or []):
+            if ev["mint"] == mint and ev["side"] == "buy" and ev["wallet"] not in _EXCLUDED:
+                if buyer_wallet is None or ev["wallet"] == buyer_wallet:
+                    ev_buy = ev
+                    break
+    except Exception:  # noqa: BLE001 -- never let decoding break the parse
+        ev_buy = None
+    if ev_buy:
+        buyer_wallet = ev_buy["wallet"]
+        token_received = token_received or ev_buy["tokens"]
+
     if not buyer_wallet:
         return None
 
     # Estimate SOL spent: account index 0 is usually the fee payer / buyer
     sol_spent = 0.0
-    if pre_sol and post_sol and len(pre_sol) > 0 and len(post_sol) > 0:
+    if ev_buy and ev_buy["sol"]:
+        sol_spent = ev_buy["sol"]
+    elif pre_sol and post_sol and len(pre_sol) > 0 and len(post_sol) > 0:
         sol_spent = max(0.0, (pre_sol[0] - post_sol[0]) / 1e9)
 
     return {
@@ -216,16 +243,23 @@ async def _parse_buyer_from_tx(
 
 
 async def _find_funder(
-    client: httpx.AsyncClient, key: str, wallet: str
+    client: httpx.AsyncClient, key: str, wallet: str, retries: int = 0
 ) -> Optional[str]:
-    """Find the wallet that funded `wallet` (first SOL transfer to it)."""
-    sigs = await _rpc(client, key, "getSignaturesForAddress", [wallet, {"limit": 50}])
+    """Find the wallet that funded `wallet` (first SOL transfer to it).
+    retries (default 0): re-ask on an empty RPC answer (usually a 429)."""
+    async def _ask(method, params):
+        for attempt in range(retries + 1):
+            r = await _rpc(client, key, method, params)
+            if r or attempt == retries:
+                return r
+            await asyncio.sleep(min(20.0, 2.0 * (2 ** attempt)))
+    sigs = await _ask("getSignaturesForAddress", [wallet, {"limit": 50}])
     if not sigs:
         return None
 
     # Oldest sig is last in the list
     oldest_sig = sigs[-1]["signature"]
-    txn = await _rpc(client, key, "getTransaction", [
+    txn = await _ask("getTransaction", [
         oldest_sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}
     ])
     if not txn:
@@ -344,7 +378,7 @@ async def backtrack_early_buyers(
         for i in range(0, len(oldest_sigs), BATCH):
             batch_sigs = oldest_sigs[i:i + BATCH]
             results = await asyncio.gather(*[
-                _parse_buyer_from_tx(client, key, s["signature"], mint)
+                _parse_buyer_from_tx(client, key, s["signature"], mint, retries=4 if pace_s else 0)
                 for s in batch_sigs
             ], return_exceptions=True)
             for r in results:
@@ -380,7 +414,7 @@ async def backtrack_early_buyers(
             funder_results = []
             for b in major_buyers:
                 try:
-                    funder_results.append(await _find_funder(client, key, b["wallet_address"]))
+                    funder_results.append(await _find_funder(client, key, b["wallet_address"], retries=4))
                 except Exception as e:  # noqa: BLE001
                     funder_results.append(e)
                 await asyncio.sleep(pace_s * 2)  # two RPC calls each

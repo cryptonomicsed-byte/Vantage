@@ -164,3 +164,54 @@ async def test_parse_buyer_no_longer_nameerrors(monkeypatch):
     assert b["wallet_address"] == "w3" and b["sol_spent"] == 1.0
     monkeypatch.setattr(eb, "_rpc", _fake_rpc(10, lambda i: "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"))
     assert await eb._parse_buyer_from_tx(None, "k", "s3", "MINT") is None  # programs excluded
+
+
+@pytest.mark.asyncio
+async def test_trade_event_gives_exact_buyer_and_sol(monkeypatch):
+    """A bundled create+buy: the fee payer only pays fees; the TradeEvent
+    names the real buyer and SOL."""
+    import base64
+    import struct
+    from backend import curve_listener as cl
+    B58 = cl._B58
+
+    def unb58(s):
+        n = 0
+        for ch in s:
+            n = n * 58 + B58.index(ch)
+        return n.to_bytes(32, "big")
+    mint = cl.b58encode(b"\x07" * 32)
+    user = cl.b58encode(b"\x09" * 32)
+    raw = (cl.TRADE_DISC + unb58(mint) + struct.pack("<QQ", 2_500_000_000, 10_000_000_000) + b"\x01"
+           + unb58(user) + struct.pack("<qQQ", 1, 32_500_000_000, 1_000_000_000_000_000))
+
+    async def fake(client, key, method, params):
+        return {"blockTime": 5, "meta": {
+            "preTokenBalances": [], "postTokenBalances": [
+                {"mint": mint, "accountIndex": 1, "owner": user, "uiTokenAmount": {"uiAmount": 10000}}],
+            "preBalances": [1_000_000_000], "postBalances": [998_500_000],
+            "logMessages": ["Program data: " + base64.b64encode(raw).decode()]}}
+    monkeypatch.setattr(eb, "_rpc", fake)
+    b = await eb._parse_buyer_from_tx(None, "k", "sig", mint)
+    assert b["wallet_address"] == user and b["sol_spent"] == 2.5  # not the payer's 0.0015
+
+
+@pytest.mark.asyncio
+async def test_parse_retries_only_when_asked(monkeypatch):
+    calls = {"n": 0}
+
+    async def flaky(client, key, method, params):
+        calls["n"] += 1
+        return None if calls["n"] < 3 else {"blockTime": 1, "meta": {
+            "preTokenBalances": [], "postTokenBalances": [
+                {"mint": "M", "accountIndex": 1, "owner": "W", "uiTokenAmount": {"uiAmount": 1}}],
+            "preBalances": [2], "postBalances": [1]}}
+    monkeypatch.setattr(eb, "_rpc", flaky)
+    monkeypatch.setattr(eb.asyncio, "sleep", _nosleep)
+    assert await eb._parse_buyer_from_tx(None, "k", "s", "M") is None and calls["n"] == 1  # default: no retry
+    calls["n"] = 0
+    assert (await eb._parse_buyer_from_tx(None, "k", "s", "M", retries=4))["wallet_address"] == "W"
+
+
+async def _nosleep(*a, **k):
+    return None
