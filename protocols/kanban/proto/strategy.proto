@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+package tradingos.strategy.v1;
+
+option go_package = "github.com/trading-os/services/go/proto/strategy/v1;strategyv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// ── Data Types ────────────────────────────────────────────────────────────────
+
+message StrategyParams {
+  int32 hma_len = 1;
+  int32 mom_req = 2;        // momentum indicators required (out of 4)
+  int32 vol_req = 3;        // volume indicators required (out of 2)
+  bool use_fib = 4;
+  double sl_mult = 5;       // ATR stop loss multiplier
+  double tp_mult = 6;       // ATR take profit multiplier
+  double min_adx = 7;
+  string mtf_timeframe = 8; // e.g., "240" for 4h
+  string regime_mode = 9;   // "Trend & Range", "Trend Only", "Range Only"
+  int32 fib_right = 10;     // pivot right confirmation bars
+  int32 max_fib_age = 11;   // max age of fibonacci pivot in bars
+}
+
+message BacktestRequest {
+  string strategy_id = 1;
+  string ticker = 2;
+  string exchange = 3;
+  string timeframe = 4;
+  google.protobuf.Timestamp from = 5;
+  google.protobuf.Timestamp to = 6;
+  StrategyParams params = 7;
+  double initial_capital = 8;
+  double commission_pct = 9;
+}
+
+message BacktestResult {
+  string job_id = 1;
+  string strategy_id = 2;
+  string ticker = 3;
+  string timeframe = 4;
+  double sharpe_ratio = 5;
+  double sortino_ratio = 6;
+  double max_drawdown_pct = 7;
+  double profit_factor = 8;
+  double win_rate = 9;
+  int32 total_trades = 10;
+  int32 winning_trades = 11;
+  int32 losing_trades = 12;
+  double net_profit = 13;
+  double net_profit_pct = 14;
+  double calmar_ratio = 15;
+  double avg_trade_duration_hours = 16;
+  google.protobuf.Timestamp completed_at = 17;
+  google.protobuf.Struct equity_curve = 18;  // JSON: [{ts, equity}]
+}
+
+message SignalResult {
+  string ticker = 1;
+  string action = 2;         // "BUY", "SELL", "HOLD"
+  int32 confidence = 3;      // 0-100
+  repeated string reasons = 4;
+  double stop_loss = 5;
+  double take_profit = 6;
+  double position_size_pct = 7;
+  google.protobuf.Struct indicator_snapshot = 8;  // full indicator values at signal time
+  google.protobuf.Timestamp generated_at = 9;
+}
+
+// ── Service ───────────────────────────────────────────────────────────────────
+
+service StrategyService {
+  // Run a backtest job (async — returns job_id, poll for result)
+  rpc RunBacktest(BacktestRequest) returns (BacktestJobResponse);
+
+  // Stream backtest results as they complete
+  rpc StreamBacktestProgress(BacktestJobRequest) returns (stream BacktestProgressEvent);
+
+  // Get the latest signal for a ticker given current params
+  rpc GetSignal(SignalRequest) returns (SignalResult);
+}
+
+message BacktestJobResponse {
+  string job_id = 1;
+  string status = 2;  // "queued", "running", "complete", "failed"
+}
+
+message BacktestJobRequest {
+  string job_id = 1;
+}
+
+message BacktestProgressEvent {
+  string job_id = 1;
+  double progress_pct = 2;
+  string status = 3;
+  BacktestResult result = 4;  // populated when status = "complete"
+}
+
+message SignalRequest {
+  string ticker = 1;
+  string timeframe = 2;
+  StrategyParams params = 3;
+}
