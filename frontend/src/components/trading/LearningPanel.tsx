@@ -97,6 +97,97 @@ function Section({ title, sub, flagOn, flagName, children }: {
   )
 }
 
+// P4-15: TradingOS challengers on live calls -- shadow only
+interface ChallengerData {
+  enabled: boolean; configured: boolean; total: number; would_veto: number; failed: number
+  rows: { call_key: string; source: string; symbol: string; direction: string; conviction: number | null; live_rank: number | null; status: string; max_severity: string | null; would_veto: number | null; challenged_at: number }[]
+}
+
+function ChallengerSection() {
+  const [d, setD] = useState<ChallengerData | null>(null)
+  useEffect(() => {
+    const load = () => fetch('/api/pipeline/tradingos-challenger?limit=10').then(r => r.ok ? r.json() : null).then(x => x && setD(x)).catch(() => {})
+    load()
+    const t = setInterval(load, 60_000)
+    return () => clearInterval(t)
+  }, [])
+  if (!d) return null
+  const sev: Record<string, string> = { low: '#6b7280', medium: '#ffaa00', high: '#ff2d4a', critical: '#ff2d4a' }
+  return (
+    <Section title="TradingOS challenger" sub={`shadow only · ${d.total} challenged · ${d.would_veto} would have vetoed`}
+             flagOn={d.enabled} flagName="TRADINGOS_CHALLENGER_ENABLED">
+      {d.rows.length === 0 ? (
+        <div style={s.note}>
+          {!d.configured ? 'TradingOS is not running here (TRADINGOS_INTEL_URL unset). When set, its challengers argue against each live call and the verdict is logged next to the live rank — it never blocks or changes a trade.'
+            : d.enabled ? 'Waiting for the first challenge cycle (every 5 minutes).' : 'Off.'}
+        </div>
+      ) : (
+        <table style={s.table}>
+          <thead><tr><th style={s.th}>Live</th><th style={s.th}>Call</th><th style={s.th}>Severity</th><th style={s.th}>Would veto</th><th style={s.th}>When</th></tr></thead>
+          <tbody>
+            {d.rows.map(r => (
+              <tr key={r.call_key} style={s.tr}>
+                <td style={s.tdMono}>#{r.live_rank ?? '–'}</td>
+                <td style={s.td}><b>{r.symbol}</b> <span style={s.dim}>{r.direction} · {r.source}</span></td>
+                <td style={{ ...s.tdMono, color: sev[r.max_severity || ''] || '#6b7280' }}>{r.status === 'failed' ? 'failed' : (r.max_severity || '–')}</td>
+                <td style={s.tdMono}>{r.would_veto == null ? '–' : r.would_veto ? 'yes' : 'no'}</td>
+                <td style={s.dim}>{ago(r.challenged_at)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Section>
+  )
+}
+
+// P4-16: walk-forward -- only outcomes known before each day inform that day
+interface WFDay { day: string; n: number; k: number; live_top_k_hit_rate: number | null; shadow_top_k_hit_rate: number | null; base_hit_rate: number | null }
+interface WFData {
+  status: string; window: string; k: number; days: WFDay[]
+  summary: { calls_scored: number; top_k_slots: number; live_top_k_hit_rate: number | null; shadow_top_k_hit_rate: number | null; base_hit_rate: number | null; enough_data: boolean } | null
+  challenger: { matched: number; vetoed: number; kept: number; vetoed_hit_rate: number | null; kept_hit_rate: number | null; min_n: number } | null
+}
+
+function WalkForwardSection() {
+  const [d, setD] = useState<WFData | null>(null)
+  useEffect(() => {
+    fetch('/api/pipeline/walk-forward?days=14&k=5').then(r => r.ok ? r.json() : null).then(x => x && setD(x)).catch(() => {})
+  }, [])
+  if (!d) return null
+  const sm = d.summary
+  return (
+    <Section title="Walk-forward" sub={`${d.window} outcomes · top ${d.k} per day · each day ranked with only what was known before it`}>
+      {d.status !== 'ok' || !sm ? (
+        <div style={s.note}>Outcomes unavailable ({d.status}). Needs the Mycelium resolver marking ledger calls.</div>
+      ) : sm.calls_scored === 0 ? (
+        <div style={s.note}>No scored calls in the last 14 days yet — the report fills in as the resolver marks outcomes.</div>
+      ) : (
+        <>
+          <div style={{ ...s.note, marginBottom: 6 }}>
+            Top-{d.k}: live <b>{pct(sm.live_top_k_hit_rate)}</b> vs shadow <b>{pct(sm.shadow_top_k_hit_rate)}</b> · base rate {pct(sm.base_hit_rate)} · {sm.calls_scored} scored calls
+            {!sm.enough_data && <span style={{ color: '#ffaa00' }}> · too few to judge yet</span>}
+            {d.challenger && d.challenger.matched > 0 && <> · TradingOS vetoed {d.challenger.vetoed}/{d.challenger.matched}: hit rate vetoed {pct(d.challenger.vetoed_hit_rate)} vs kept {pct(d.challenger.kept_hit_rate)}</>}
+          </div>
+          <table style={s.table}>
+            <thead><tr><th style={s.th}>Day</th><th style={s.th}>Scored</th><th style={s.th}>Live top-k</th><th style={s.th}>Shadow top-k</th><th style={s.th}>Base</th></tr></thead>
+            <tbody>
+              {d.days.filter(x => x.n > 0).slice(-10).reverse().map(x => (
+                <tr key={x.day} style={s.tr}>
+                  <td style={s.tdMono}>{x.day}</td><td style={s.tdMono}>{x.n}</td>
+                  <td style={s.tdMono}>{pct(x.live_top_k_hit_rate)}</td>
+                  <td style={{ ...s.tdMono, color: (x.shadow_top_k_hit_rate ?? 0) > (x.live_top_k_hit_rate ?? 0) ? '#39ff14' : (x.shadow_top_k_hit_rate ?? 0) < (x.live_top_k_hit_rate ?? 0) ? '#ff2d4a' : '#e0e0e0' }}>{pct(x.shadow_top_k_hit_rate)}</td>
+                  <td style={s.tdMono}>{pct(x.base_hit_rate)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+    </Section>
+  )
+}
+
 export default function LearningPanel() {
   const [data, setData] = useState<LearningData | null>(null)
   const [error, setError] = useState('')
@@ -244,6 +335,9 @@ export default function LearningPanel() {
             </table>
           )}
         </Section>
+
+        <ChallengerSection />
+        <WalkForwardSection />
       </div>
       {error && <div style={{ ...s.note, color: '#ffaa00' }}>{error}</div>}
     </div>

@@ -5,7 +5,7 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import {
   Activity, BarChart2, BookOpen, Database, DollarSign, Eye, FileCheck,
-  Globe, Package, TrendingUp, Users, Zap, Star, MessageSquare,
+  Globe, Package, TrendingUp, Users, Zap, Star, MessageSquare, ShieldCheck, Radio,
 } from 'lucide-react'
 import GuildChat from './GuildChat'
 import WorkspaceMemoryViewer from './WorkspaceMemoryViewer'
@@ -84,6 +84,8 @@ const TABS = [
   { id: 'strategies', label: 'Strategies', icon: <TrendingUp size={13} /> },
   { id: 'memory', label: 'Memory', icon: <Database size={13} /> },
   { id: 'agents', label: 'Agents', icon: <Users size={13} /> },
+  { id: 'reliability', label: 'Reliability', icon: <ShieldCheck size={13} /> },
+  { id: 'intel', label: 'Intel', icon: <Radio size={13} /> },
   { id: 'artifacts', label: 'Artifacts', icon: <Package size={13} /> },
   { id: 'receipts', label: 'Receipts', icon: <FileCheck size={13} /> },
   { id: 'federation', label: 'Federation', icon: <Globe size={13} /> },
@@ -392,6 +394,47 @@ function AgentsPanel({ roster }: { roster: RosterEntry[] }) {
   )
 }
 
+// P4-10: guild router -- intel_record/1 filed by guild agents on this space's tasks
+interface IntelRecord { id: string; task_id: string; agent_id: number; lane: string; status: string; reasons: string[]; items: number; routed: number; created_at: number }
+interface IntelLane { lane: string; agent: string; allowlist: string[]; open: boolean }
+
+function IntelPanel({ slug, spaceId, authHeaders }: { slug: string; spaceId: string; authHeaders: () => Record<string, string> }) {
+  const [data, setData] = useState<{ enabled: boolean; lanes: IntelLane[]; records: IntelRecord[] } | null>(null)
+  const [err, setErr] = useState('')
+  useEffect(() => {
+    fetch('/api/guilds/' + slug + '/trading-spaces/' + spaceId + '/intel', { headers: authHeaders() })
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(setData)
+      .catch(e => setErr(e === 403 ? 'Members only.' : 'Could not load intel.'))
+  }, [slug, spaceId]) // eslint-disable-line react-hooks/exhaustive-deps
+  const color: Record<string, string> = { accepted: '#3cc878', partial: '#f59e0b', rejected: '#ef4444' }
+  if (err) return <div style={{ padding: 24, color: 'var(--muted)', fontSize: 13 }}>{err}</div>
+  if (!data) return <div style={{ padding: 24, color: 'var(--muted)', fontSize: 13, textAlign: 'center' }}>Loading intel...</div>
+  return (
+    <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 10, overflowY: 'auto', height: '100%', boxSizing: 'border-box' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>Guild intel</span>
+        <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, border: '1px solid var(--border)', color: data.enabled ? '#3cc878' : 'var(--muted)' }}>{data.enabled ? 'router on' : 'router off · GUILD_ROUTER_ENABLED'}</span>
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--muted)' }}>
+        {data.lanes.map(l => <span key={l.lane} style={{ marginRight: 12 }}>{l.lane} ({l.agent}): {l.open ? 'open' : 'closed — no one listed yet'}</span>)}
+      </div>
+      {data.records.length === 0 && <div style={{ color: 'var(--muted)', fontSize: 13, textAlign: 'center', marginTop: 30 }}>No intel filed yet. Agents claim a task, then submit an intel_record/1 to …/tasks/&lt;id&gt;/intel.</div>}
+      {data.records.map(r => (
+        <div key={r.id} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: 10, padding: '8px 12px', fontSize: 12 }}>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+            <span style={{ color: color[r.status] || 'var(--muted)', fontWeight: 600 }}>{r.status}</span>
+            <span style={{ fontFamily: 'monospace' }}>{r.lane}</span>
+            <span style={{ color: 'var(--muted)' }}>{r.routed}/{r.items} routed · agent #{r.agent_id}</span>
+            <span style={{ marginLeft: 'auto', color: 'var(--muted)', fontSize: 11 }}>{new Date(r.created_at * 1000).toLocaleString()}</span>
+          </div>
+          {r.reasons.length > 0 && <div style={{ marginTop: 4, color: 'var(--muted)', fontSize: 11 }}>{r.reasons.slice(0, 4).join(' · ')}{r.reasons.length > 4 ? ` · +${r.reasons.length - 4} more` : ''}</div>}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function ArtifactsPanel({ slug, spaceId, authHeaders }: { slug: string; spaceId: string; authHeaders: () => Record<string, string> }) {
   const [artifacts, setArtifacts] = useState<ArtifactItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -425,6 +468,50 @@ function ArtifactsPanel({ slug, spaceId, authHeaders }: { slug: string; spaceId:
             {art.agent_name && <span style={{ fontSize: 10, color: '#a78bfa' }}>{art.agent_name}</span>}
           </div>
           <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)' }}>{fmt(art.created_at)}{art.hash ? ' · hash: ' + trunc(art.hash, 10) : ''}</div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// P3-06: bondhive reliability (read-only; GET .../reliability)
+interface ReliabilityRow {
+  agent_id: number
+  score: number
+  premium_discount: number
+  outcomes: { success: number; failure: number; fraud: number; total: number }
+  last_outcome_at: number | null
+}
+
+function ReliabilityPanel({ slug, spaceId, roster, authHeaders }: { slug: string; spaceId: string; roster: RosterEntry[]; authHeaders: () => Record<string, string> }) {
+  const [rows, setRows] = useState<ReliabilityRow[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const h = authHeaders()
+    fetch('/api/guilds/' + slug + '/trading-spaces/' + spaceId + '/reliability', { headers: h })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => d && setRows(d.agents || []))
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }, [slug, spaceId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const names: Record<number, string> = {}
+  roster.forEach(r => { names[r.agent_id] = r.agent_name })
+  function color(s: number): string { return s >= 60 ? '#3cc878' : s >= 45 ? 'var(--cyan)' : '#ef4444' }
+
+  if (loading) return <div style={{ padding: 24, color: 'var(--muted)', fontSize: 13, textAlign: 'center' }}>Loading reliability...</div>
+
+  return (
+    <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: 10, overflowY: 'auto', height: '100%', boxSizing: 'border-box' }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>Reliability</div>
+      <div style={{ fontSize: 11, color: 'var(--muted)' }}>Starts at 50 · success +1 · failure -2 · fraud -5 · reverts to 50 with a 180-day half-life</div>
+      {rows.length === 0 && <div style={{ color: 'var(--muted)', fontSize: 13, textAlign: 'center', marginTop: 40 }}>No outcomes recorded yet.</div>}
+      {rows.map(r => (
+        <div key={r.agent_id} style={{ display: 'flex', alignItems: 'center', gap: 12, background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 14px' }}>
+          <span style={{ fontSize: 18, fontWeight: 700, color: color(r.score), minWidth: 52, fontFamily: 'monospace' }}>{r.score.toFixed(1)}</span>
+          <span style={{ fontSize: 12, color: 'var(--text)', flex: 1 }}>{names[r.agent_id] || ('agent #' + r.agent_id)}</span>
+          <span style={{ fontSize: 10, color: 'var(--muted)' }}>{r.outcomes.success} ok · {r.outcomes.failure} fail · {r.outcomes.fraud} fraud</span>
         </div>
       ))}
     </div>
@@ -601,6 +688,10 @@ export default function TradingSpaceShell({ slug, spaceId }: Props) {
         return <InlineMemoryViewer slug={slug} spaceId={spaceId} authHeaders={authHeaders} />
       case 'agents':
         return <AgentsPanel roster={roster} />
+      case 'reliability':
+        return <ReliabilityPanel slug={slug} spaceId={spaceId} roster={roster} authHeaders={authHeaders} />
+      case 'intel':
+        return <IntelPanel slug={slug} spaceId={spaceId} authHeaders={authHeaders} />
       case 'artifacts':
         return <ArtifactsPanel slug={slug} spaceId={spaceId} authHeaders={authHeaders} />
       case 'receipts':

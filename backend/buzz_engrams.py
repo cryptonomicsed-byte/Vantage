@@ -20,6 +20,8 @@ import hashlib
 import hmac
 import json
 import logging
+import os
+import sys
 
 from .buzz_client import BuzzSession
 from .buzz_identity import derive_buzz_keypair, derive_instance_keypair, public_key_xonly_hex
@@ -36,6 +38,59 @@ def _derive_d_tag(conversation_key: bytes, slug: str) -> str:
     return hmac.new(conversation_key, D_TAG_DOMAIN + slug.encode(), hashlib.sha256).hexdigest()
 
 
+# ── P3-09: engrams via minipae ───────────────────────────────────────────────
+# minipae is the ecosystem's reference NIP-AE implementation; Vantage kept its
+# own copy here. With BUZZ_ENGRAMS_VIA_MINIPAE=1 the engram (d-tag, NIP-44
+# body, id, BIP-340 sig) is built by minipae and published over the same
+# relay session with the same keys; reads decrypt with minipae. The two are
+# wire-identical (same d-tag domain + 0x00, same {"slug","value"} body), so
+# engrams written either way read back either way. BUZZ_ENGRAMS_LEGACY=1
+# forces this module's own path; any minipae failure falls back to it.
+_MINIPAE = None
+
+
+def _flag(name: str) -> bool:
+    return os.environ.get(name, "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def use_minipae() -> bool:
+    return _flag("BUZZ_ENGRAMS_VIA_MINIPAE") and not _flag("BUZZ_ENGRAMS_LEGACY")
+
+
+def _minipae():
+    """The minipae module, or None when it isn't importable here."""
+    global _MINIPAE
+    if _MINIPAE is None:
+        repo = os.environ.get("VANTAGE_MINIPAE_REPO", "/opt/ares/minipae")
+        if repo and repo not in sys.path and os.path.isdir(repo):
+            sys.path.append(repo)
+        try:
+            import minipae as _m  # noqa: PLC0415
+            _MINIPAE = _m
+        except Exception:  # noqa: BLE001
+            _MINIPAE = False
+    return _MINIPAE or None
+
+
+async def _write_via_minipae(agent_pk, owner_pubkey: str, slug: str, value) -> dict:
+    mp = _minipae()
+    if mp is None:
+        raise RuntimeError("minipae not importable")
+    ev = mp.build_event(slug, {"slug": slug, "value": value}, agent_pk.secret, bytes.fromhex(owner_pubkey))
+    sess = BuzzSession(RELAY_WS_URL, agent_pk)
+    await sess.connect()
+    await sess.authenticate()
+    try:
+        await sess.ws.send(json.dumps(["EVENT", ev]))
+        ack = await sess._recv_json()
+    finally:
+        await sess.close()
+    if not (isinstance(ack, list) and len(ack) >= 3 and ack[2]):
+        return {"ok": False, "error": str(ack), "via": "minipae"}
+    d = next(t[1] for t in ev["tags"] if t[0] == "d")
+    return {"ok": True, "event_id": ev["id"], "d_tag": d, "via": "minipae"}
+
+
 async def write_engram(agent_id: int, slug: str, value: str) -> dict:
     """Writes (or tombstones, if value is None) a memory-body engram for
     slug. Never raises -- mirrors this codebase's other fire-and-forget
@@ -45,9 +100,15 @@ async def write_engram(agent_id: int, slug: str, value: str) -> dict:
     owner_pk = await derive_instance_keypair()
     owner_pubkey = public_key_xonly_hex(owner_pk)
 
+    body = json.dumps({"slug": slug, "value": value}, separators=(",", ":"))
+    if use_minipae() and len(body.encode()) <= 65535:
+        try:
+            return await _write_via_minipae(agent_pk, owner_pubkey, slug, value)
+        except Exception as e:  # noqa: BLE001 -- fall back to this module's own path
+            logger.warning("buzz_engrams: minipae path failed, using legacy: %s", e)
+
     conversation_key = nip44.get_conversation_key(agent_pk, owner_pubkey)
     d_tag = _derive_d_tag(conversation_key, slug)
-    body = json.dumps({"slug": slug, "value": value}, separators=(",", ":"))
     if len(body.encode()) > 65535:
         return {"ok": False, "error": "body exceeds NIP-44's 65535 byte plaintext limit"}
     ciphertext = nip44.encrypt(body, conversation_key)
@@ -94,7 +155,14 @@ async def read_engram(agent_id: int, slug: str) -> dict:
         return {"found": False}
     head = max(events, key=lambda e: (e["created_at"], -int(e["id"], 16)))
     try:
-        plaintext = nip44.decrypt(head["content"], conversation_key)
+        mp = _minipae() if use_minipae() else None
+        if mp is not None:
+            try:
+                plaintext = mp.nip44_decrypt(head["content"], conversation_key)
+            except Exception:  # noqa: BLE001 -- legacy decrypt below
+                plaintext = nip44.decrypt(head["content"], conversation_key)
+        else:
+            plaintext = nip44.decrypt(head["content"], conversation_key)
         body = json.loads(plaintext)
     except Exception as e:
         return {"found": False, "error": f"decrypt/parse failed: {e}"}

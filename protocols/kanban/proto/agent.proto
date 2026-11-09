@@ -1,0 +1,129 @@
+syntax = "proto3";
+
+package tradingos.agent.v1;
+
+option go_package = "github.com/trading-os/services/go/proto/agent/v1;agentv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// ── Data Types ────────────────────────────────────────────────────────────────
+
+enum AgentStatus {
+  AGENT_STATUS_UNSPECIFIED = 0;
+  AGENT_STATUS_STARTING = 1;
+  AGENT_STATUS_RUNNING = 2;
+  AGENT_STATUS_IDLE = 3;
+  AGENT_STATUS_CRASHED = 4;
+  AGENT_STATUS_STOPPED = 5;
+}
+
+message AgentProfile {
+  string id = 1;
+  string name = 2;
+  string model = 3;         // e.g., "claude-sonnet-4-6", "grok-2", "llama3"
+  string runtime = 4;       // "elixir", "go", "python", "rust", "wasm"
+  string domain = 5;        // "sentiment", "strategy", "onchain", "execution", etc.
+  repeated string tools = 6;
+  string memory_namespace = 7;
+  repeated string goals = 8;
+  double trust_score = 9;
+  google.protobuf.Struct metadata = 10;
+  google.protobuf.Timestamp created_at = 11;
+}
+
+message AgentMessage {
+  string id = 1;
+  string from_agent_id = 2;
+  string to_agent_id = 3;
+  string message_type = 4;  // "signal", "request", "response", "alert"
+  google.protobuf.Struct payload = 5;
+  google.protobuf.Timestamp sent_at = 6;
+  double trust_weight = 7;  // sender's current trust score at time of send
+}
+
+message KanbanCard {
+  string id = 1;
+  string workspace_id = 2;
+  string ticker = 3;
+  string state = 10;         // INGESTED, PARSING, SYNTHESIZED, BACKTESTING, RISK_RANKED, MONITORING, EXECUTING, COMPLETE, REJECTED
+  google.protobuf.Struct context = 4;
+  string risk_rating = 5;   // "HIGH", "MEDIUM", "LOW"
+  int32 rug_score = 6;       // 0-100
+  string assigned_agent_id = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+message KanbanEvent {
+  string id = 1;
+  string card_id = 2;
+  string from_state = 3;
+  string to_state = 4;
+  string triggered_by_agent_id = 5;
+  google.protobuf.Struct payload = 6;
+  string hash = 7;           // SHA3-256(event_json + prev_hash)
+  google.protobuf.Timestamp created_at = 8;
+}
+
+message AuditEntry {
+  string id = 1;
+  string workspace_id = 2;
+  string agent_id = 3;
+  string action = 4;
+  google.protobuf.Struct payload = 5;
+  string hash = 6;           // SHA3-256(entry_json + prev_hash)
+  string prev_hash = 7;
+  google.protobuf.Timestamp created_at = 8;
+}
+
+// ── Service ───────────────────────────────────────────────────────────────────
+
+service AgentService {
+  // Agent lifecycle
+  rpc SpawnAgent(SpawnAgentRequest) returns (AgentProfile);
+  rpc StopAgent(AgentIdRequest) returns (AgentStatusResponse);
+  rpc GetAgentStatus(AgentIdRequest) returns (AgentStatusResponse);
+
+  // A2A messaging
+  rpc SendMessage(AgentMessage) returns (MessageAck);
+  rpc SubscribeMessages(AgentIdRequest) returns (stream AgentMessage);
+
+  // Kanban operations
+  rpc MoveCard(MoveCardRequest) returns (KanbanCard);
+  rpc GetCard(CardIdRequest) returns (KanbanCard);
+  rpc StreamCardEvents(CardIdRequest) returns (stream KanbanEvent);
+}
+
+message SpawnAgentRequest {
+  string agent_type = 1;
+  string workspace_id = 2;
+  google.protobuf.Struct config = 3;
+}
+
+message AgentIdRequest {
+  string agent_id = 1;
+}
+
+message CardIdRequest {
+  string card_id = 1;
+}
+
+message AgentStatusResponse {
+  string agent_id = 1;
+  AgentStatus status = 2;
+  google.protobuf.Timestamp last_heartbeat = 3;
+  string current_task = 4;
+}
+
+message MessageAck {
+  string message_id = 1;
+  bool delivered = 2;
+}
+
+message MoveCardRequest {
+  string card_id = 1;
+  string new_state = 2;
+  string agent_id = 3;
+  google.protobuf.Struct payload = 4;
+}
