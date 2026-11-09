@@ -2018,3 +2018,11 @@ async def wallet_labels_for(wallet: str):
     """P4-05: one wallet's labels with the evidence behind each."""
     from .. import wallet_labels
     return await wallet_labels.wallet(wallet)
+
+
+@router.get("/runner-watchlist")
+async def runner_watchlist(limit: int = Query(50, ge=1, le=500)):
+    """P4-06/P4-07: wallets (clusters) that keep getting into runners early,
+    with the score breakdown, plus the strategy-lab radar import and its age."""
+    from .. import runner_watchlist as rw
+    return await rw.get(limit)

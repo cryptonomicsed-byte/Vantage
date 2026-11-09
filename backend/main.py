@@ -753,6 +753,9 @@ async def lifespan(app: FastAPI):
     # P4-05: wallet labels, hourly + after each trace (WALLET_LABELS_ENABLED).
     from .wallet_labels import label_loop as _label_loop
     wallet_labels_task = asyncio.create_task(_label_loop())
+    # P4-06/07: runner watchlist + strategy-lab radar, every 15 min (RUNNER_WATCHLIST_ENABLED).
+    from .runner_watchlist import watchlist_loop as _watchlist_loop
+    runner_watchlist_task = asyncio.create_task(_watchlist_loop())
 
     yield
     shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, mention_poller_task, scoring_task, last30days_task, outcome_learner_task, event_bus_task, tier_recompute_task, reconciler_task,
@@ -762,7 +765,8 @@ async def lifespan(app: FastAPI):
                       # P1-08
                       ledger_mirror_task, shadow_rank_task,
                       curve_listener_task, runner_detect_task,
-                      runner_trace_task, wallet_labels_task]
+                      runner_trace_task, wallet_labels_task,
+                      runner_watchlist_task]
     if execution_engine_task is not None:
         shutdown_tasks.append(execution_engine_task)
     # Cancel all first, then wait a bounded time. Awaiting each cancelled task

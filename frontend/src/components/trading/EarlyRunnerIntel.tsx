@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react'
-import { Radio, RefreshCw, Rocket, ChevronDown, ChevronRight } from 'lucide-react'
+import { Radio, RefreshCw, Rocket, ChevronDown, ChevronRight, Eye } from 'lucide-react'
 import { TokenLink, WalletLink } from './EntityProfileCard'
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -223,6 +223,66 @@ function Runners() {
   )
 }
 
+interface WatchEntity {
+  entity: string; wallets: string[]; score: number; runners: number; labels: string[]; radar_conviction: number | null
+  contributions: { mint: string; symbol: string | null; wallet: string; rank: number; sol: number | null; c: number }[]
+}
+interface WatchData {
+  enabled: boolean; total: number; min_runners: number; half_life_days: number; entities: WatchEntity[]
+  radar: { wallets: number; generated_at: string | null; loaded_at: number | null; min_conviction: number }
+}
+
+function Watchlist() {
+  const { data, status } = usePoll<WatchData>('/api/intel/runner-watchlist?limit=25', 120000)
+  const [open, setOpen] = useState<string | null>(null)
+  const err = !data ? notDeployed(status) : null
+  const radarAgeDays = data?.radar.generated_at ? Math.floor((Date.now() - Date.parse(data.radar.generated_at)) / 86400000) : null
+  return (
+    <div style={card}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, flexWrap: 'wrap' }}>
+        <Eye size={13} color="#a78bfa" />
+        <span style={{ fontSize: 12, fontWeight: 600 }}>Runner watchlist</span>
+        <span style={{ fontSize: 10, color: 'var(--muted)' }}>early in {data?.min_runners ?? 2}+ runners · bots, devs, snipers, bundlers excluded</span>
+        {data && <span style={pill(data.enabled)}>{data.enabled ? `${data.total} entities` : 'OFF · RUNNER_WATCHLIST_ENABLED'}</span>}
+      </div>
+      {err && <div style={muted}>{err}</div>}
+      {data && data.entities.length === 0 && (
+        <div style={muted}>{data.enabled ? 'Nobody has been early in two traced runners yet.' : 'Off. When on, scores every wallet by how early and how big it got into each runner (tier × 1/rank × size, 90-day half-life); wallets funded by the same funder count as one.'}</div>
+      )}
+      {data?.entities.map(e => (
+        <div key={e.entity} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+          <div onClick={() => setOpen(open === e.entity ? null : e.entity)} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, padding: '4px 0', cursor: 'pointer' }}>
+            {open === e.entity ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+            {e.wallets.length === 1 ? <WalletLink address={e.wallets[0]} chain="solana" /> : <span>cluster of {e.wallets.length}{e.entity.startsWith('funder:') ? <> via <WalletLink address={e.entity.slice(7)} chain="solana" /></> : ''}</span>}
+            <LabelChips labels={e.labels} />
+            {e.radar_conviction != null && <span title="Also on strategy-lab's radar" style={{ fontSize: 9, color: '#a78bfa' }}>radar {e.radar_conviction.toFixed(2)}</span>}
+            <span style={{ marginLeft: 'auto', fontFamily: 'monospace' }}>{e.score.toFixed(2)}</span>
+            <span style={{ color: 'var(--muted)' }}>{e.runners} runners</span>
+          </div>
+          {open === e.entity && (
+            <div style={{ padding: '2px 0 6px 18px' }}>
+              {e.contributions.map(c => (
+                <div key={c.mint} style={{ display: 'flex', gap: 6, fontSize: 11, color: 'var(--muted)' }}>
+                  <TokenLink ca={c.mint} symbol={c.symbol || c.mint.slice(0, 6)} />
+                  <span>#{c.rank}</span><span>{c.sol != null ? `${c.sol.toFixed(2)} SOL` : ''}</span>
+                  <span style={{ marginLeft: 'auto', fontFamily: 'monospace' }}>+{c.c.toFixed(3)}</span>
+                </div>
+              ))}
+              {e.wallets.length > 1 && <div style={{ ...muted, marginTop: 2 }}>wallets: {e.wallets.slice(0, 6).map(w => <span key={w} style={{ marginRight: 6 }}><WalletLink address={w} chain="solana" /></span>)}</div>}
+            </div>
+          )}
+        </div>
+      ))}
+      {data && (
+        <div style={{ ...muted, marginTop: 6, borderTop: '1px solid rgba(255,255,255,0.04)', paddingTop: 4 }}>
+          strategy-lab radar: {data.radar.wallets ? `${data.radar.wallets} wallets ≥ ${data.radar.min_conviction} conviction (separate method, not blended)` : 'not loaded'}
+          {radarAgeDays != null && <span style={{ color: radarAgeDays > 7 ? '#f59e0b' : undefined }}> · generated {radarAgeDays}d ago{radarAgeDays > 7 ? ' — stale' : ''}</span>}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function EarlyRunnerIntel() {
   return (
     <div style={{ marginBottom: 20 }}>
@@ -233,6 +293,7 @@ export default function EarlyRunnerIntel() {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 8 }}>
         <CurveFeed />
         <Runners />
+        <Watchlist />
       </div>
     </div>
   )
