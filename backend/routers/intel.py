@@ -2034,3 +2034,47 @@ async def confluence_events(limit: int = Query(50, ge=1, le=500), mint: Optional
     contract, or one of each, under $60k, inside 30 min, anti-pump passed."""
     from .. import confluence
     return await confluence.recent(limit, mint)
+
+
+# ── P4-14: kanban quant (ares-quant-julia) + whale_watcher, read-only ────────
+# Flags QUANT_JULIA_ENABLED / WHALE_WATCHER_ENABLED, both default off. These
+# routes only read; nothing here touches the signal pool or any trading path.
+
+@router.get("/quant/status")
+async def quant_status(agent: dict = Depends(get_agent)):
+    """P4-14: flags + health of the vendored kanban quant pieces (fail-open)."""
+    from .. import quant_client as qc
+    return await qc.status()
+
+
+@router.get("/quant/backtest/{symbol}")
+async def quant_backtest(
+    symbol: str,
+    interval: str = Query("1d"),
+    limit: int = Query(300, ge=60, le=500),
+    hma_len: Optional[int] = Query(None, ge=2, le=200),
+    sl_mult: Optional[float] = Query(None, gt=0, le=20),
+    tp_mult: Optional[float] = Query(None, gt=0, le=50),
+    min_adx: Optional[float] = Query(None, ge=0, le=100),
+    agent: dict = Depends(get_agent),
+):
+    """P4-14: TradingOSQuant (Julia) backtest over free public candles.
+    QUANT_JULIA_ENABLED off -> {"enabled": false}; service down -> ok=false."""
+    from .. import quant_client as qc
+    if not qc.quant_enabled():
+        return {**qc._disabled("QUANT_JULIA_ENABLED"), "symbol": symbol.upper()}
+    candles = await ms.ohlc(symbol, interval, limit)
+    params = {"hma_len": hma_len, "sl_mult": sl_mult, "tp_mult": tp_mult, "min_adx": min_adx}
+    return await qc.backtest(symbol, candles or [], params, interval)
+
+
+@router.get("/quant/whales")
+async def quant_whales(
+    limit: int = Query(50, ge=1, le=500),
+    chain: Optional[str] = None,
+    min_usd: float = Query(0.0, ge=0),
+    agent: dict = Depends(get_agent),
+):
+    """P4-14: newest whale_watcher alerts (WHALE_WATCHER_ENABLED, fail-open)."""
+    from .. import quant_client as qc
+    return qc.whale_alerts(limit, chain, min_usd)

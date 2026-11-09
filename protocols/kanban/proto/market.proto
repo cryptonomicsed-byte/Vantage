@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package tradingos.market.v1;
+
+option go_package = "github.com/trading-os/services/go/proto/market/v1;marketv1";
+
+import "google/protobuf/timestamp.proto";
+
+// ── Data Types ────────────────────────────────────────────────────────────────
+
+message Tick {
+  string ticker = 1;
+  string exchange = 2;
+  double open = 3;
+  double high = 4;
+  double low = 5;
+  double close = 6;
+  double volume = 7;
+  double quote_volume = 8;
+  string timeframe = 9;  // "1m", "5m", "15m", "1h", "4h", "1d"
+  google.protobuf.Timestamp timestamp = 10;
+  bool is_closed = 11;  // false = in-progress candle, true = closed candle
+}
+
+message OrderBookLevel {
+  double price = 1;
+  double quantity = 2;
+}
+
+message OrderBook {
+  string ticker = 1;
+  string exchange = 2;
+  repeated OrderBookLevel bids = 3;
+  repeated OrderBookLevel asks = 4;
+  google.protobuf.Timestamp timestamp = 5;
+  int64 last_update_id = 6;
+}
+
+message HistoricalOHLCVRequest {
+  string ticker = 1;
+  string exchange = 2;
+  string timeframe = 3;
+  google.protobuf.Timestamp from = 4;
+  google.protobuf.Timestamp to = 5;
+  int32 limit = 6;
+}
+
+message SubscribeTicksRequest {
+  repeated string tickers = 1;
+  string timeframe = 2;
+  string exchange = 3;
+}
+
+message SubscribeOrderBookRequest {
+  repeated string tickers = 1;
+  int32 depth = 2;
+  string exchange = 3;
+}
+
+// ── Service ───────────────────────────────────────────────────────────────────
+
+service MarketDataService {
+  // Stream live OHLCV candles for subscribed tickers
+  rpc StreamTicks(SubscribeTicksRequest) returns (stream Tick);
+
+  // Stream live order book updates
+  rpc StreamOrderBook(SubscribeOrderBookRequest) returns (stream OrderBook);
+
+  // Fetch historical OHLCV data
+  rpc GetHistoricalOHLCV(HistoricalOHLCVRequest) returns (stream Tick);
+}
