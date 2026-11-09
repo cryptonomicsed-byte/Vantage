@@ -66,8 +66,10 @@ async def test_global_bot_hub_and_kol_rules(tmp_path, monkeypatch):
                     "username TEXT, wallet_address TEXT NOT NULL, chain TEXT DEFAULT 'solana', post_url TEXT, "
                     "post_excerpt TEXT, extracted_at TEXT, UNIQUE(platform, username, wallet_address))"):
             await db.execute(ddl)
-        await db.execute("INSERT OR IGNORE INTO wallet_edges VALUES ('solana','HUB','a1','funded',1,0,'','')")
-        await db.execute("INSERT OR IGNORE INTO wallet_edges VALUES ('solana','HUB','a2','funded',1,0,'','')")
+        await db.execute("INSERT OR IGNORE INTO wallet_edges (chain, address_a, address_b, role, tx_count, "
+                         "total_value, first_seen, last_seen) VALUES ('solana','HUB','a1','funded',1,0,'','')")
+        await db.execute("INSERT OR IGNORE INTO wallet_edges (chain, address_a, address_b, role, tx_count, "
+                         "total_value, first_seen, last_seen) VALUES ('solana','HUB','a2','funded',1,0,'','')")
         for addr in ("KOLW", "MINT1", "NEVERBOUGHT", "XYZpump"):
             await db.execute("INSERT OR IGNORE INTO social_wallet_links (platform, username, wallet_address) "
                              "VALUES ('x','caller',?)", (addr,))
