@@ -110,6 +110,28 @@ _ECOSYSTEM_KINDS = [
         "Portable agent memory. Vantage's KIND_ENGRAM is this kind.",
         "minipae (NIP-AE)",
     ),
+    # Crucible (falsifiable claims). Vantage's trading adapter (P3-01/P3-03)
+    # publishes these; Crucible owns them.
+    KindSpec(
+        47001, "crucible_claim", Origin.ECOSYSTEM,
+        "A falsifiable proposition with the falsifier that would refute it.",
+        "Crucible docs/SPEC.md + crates/crucible-core/src/kinds.rs",
+    ),
+    KindSpec(
+        47002, "crucible_attestation", Origin.ECOSYSTEM,
+        "One agent's signed record of running a claim's falsifier.",
+        "Crucible docs/SPEC.md + crates/crucible-core/src/kinds.rs",
+    ),
+    KindSpec(
+        47005, "crucible_calibration", Origin.ECOSYSTEM,
+        "A scoring-rule update to an agent's reliability.",
+        "Crucible docs/SPEC.md + crates/crucible-core/src/kinds.rs",
+    ),
+    KindSpec(
+        47010, "crucible_oracle_verdict", Origin.ECOSYSTEM,
+        "An oracle's ground-truth verdict that settle() scores claims against.",
+        "Crucible crates/crucible-core/src/kinds.rs (oracle seam, 0cea415)", locked=False,
+    ),
     KindSpec(
         31900, "ip_root", Origin.ECOSYSTEM,
         "Root of an intellectual-property lineage.",
