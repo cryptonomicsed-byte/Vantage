@@ -158,12 +158,12 @@ def test_runner_off_and_roundtrip(tmp_path, monkeypatch, capsys):
 def test_vendored_files_present():
     for rel in ("services/quant/julia/TradingOSQuant/src/TradingOSQuant.jl",
                 "services/quant/julia/TradingOSQuant/test/runtests.jl",
-                "services/quant/ares-quant-julia.service",
+                "services/quant/ares-quant-julia.service.example",
                 "services/whale_watcher/whale_watcher.py",
                 "protocols/kanban/proto/strategy.proto",
                 "protocols/kanban/mcp/kanban_tools.ex"):
         assert (REPO / rel).is_file(), rel
-    unit = (REPO / "services/quant/ares-quant-julia.service").read_text()
+    unit = (REPO / "services/quant/ares-quant-julia.service.example").read_text()
     assert "Environment=QUANT_JULIA_ENABLED=0" in unit and "JULIA_HOST=127.0.0.1" in unit
     assert 'get(ENV, "JULIA_HOST", "127.0.0.1")' in (
         REPO / "services/quant/julia/TradingOSQuant/src/server.jl").read_text()
