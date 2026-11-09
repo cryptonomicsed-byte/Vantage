@@ -57,6 +57,7 @@ import urllib.request
 from typing import Any, Callable, Optional
 
 from backend import crucible_events as ce
+from backend.signal_record import canonical_direction
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ def match_key(row: dict) -> str:
     chain = (row.get("chain") or "").lower()
     addr = (row.get("address") or "").strip()
     asset = addr if addr else f"sym:{(row.get('symbol') or '').upper()}"
-    return f"{chain}|{asset}|{(row.get('direction') or '').lower()}"
+    return f"{chain}|{asset}|{canonical_direction(row.get('direction'))}"
 
 
 def is_guild(row: dict) -> bool:
@@ -164,7 +165,7 @@ def claim_inputs(row: dict, window: str) -> dict:
     return {
         "record_id": row["id"], "source": row.get("source") or "",
         "chain": row.get("chain") or "", "address": row.get("address") or "",
-        "symbol": row.get("symbol") or "", "direction": (row.get("direction") or "").lower(),
+        "symbol": row.get("symbol") or "", "direction": canonical_direction(row.get("direction")),
         "entry_price_usd": float(entry) if isinstance(entry, (int, float)) else None,
         "window": window, "threshold_pct": HIT_THRESHOLD_PCT,
     }
@@ -214,6 +215,22 @@ async def _open_claim(db, key: str, at: int) -> Optional[dict]:
         "ORDER BY created_at DESC LIMIT 1", (key, at, at - MATCH_WINDOW_S))).fetchone()
     db.row_factory = None
     return dict(r) if r else None
+
+
+async def _release_keyed(db) -> int:
+    """Rows parked as no_key whose source now has a key go back to the queue."""
+    cur = await db.execute(
+        "SELECT DISTINCT l.source FROM crucible_record_map m JOIN signal_ledger l ON l.id = m.record_id "
+        "WHERE m.role = 'no_key'")
+    keyed = [r[0] for r in await cur.fetchall() if r[0] and ce.source_key(r[0]) is not None]
+    if not keyed:
+        return 0
+    q = ",".join("?" * len(keyed))
+    cur = await db.execute(
+        f"DELETE FROM crucible_record_map WHERE role = 'no_key' AND record_id IN "
+        f"(SELECT id FROM signal_ledger WHERE source IN ({q}))", keyed)
+    await db.commit()
+    return cur.rowcount or 0
 
 
 async def _mark(db, record_id: str, role: str, claim_id: Optional[str] = None, reason: str = "") -> None:
@@ -278,22 +295,30 @@ async def process_once(limit: int = BATCH, now: Optional[int] = None) -> dict:
         async with get_db() as db:
             await ensure_ledger(db)
             await ensure_tables(db)
+            await _release_keyed(db)
             rows = await _unprocessed(db, now - LOOKBACK_S, limit)
             for row in rows:
-                direction = (row.get("direction") or "").lower()
+                direction = canonical_direction(row.get("direction"))
                 if direction not in SCORED:
                     await _mark(db, row["id"], "skipped", reason=f"unscored direction {direction or 'none'}")
+                    await db.commit()
                     stats["skipped"] += 1
                     continue
                 secret, attested = signer_for(row)
                 if secret is None:
-                    stats["no_key"] += 1  # left unprocessed: a key may be installed later
+                    # recorded so the batch advances; released by _release_keyed()
+                    # once a key for this source is installed
+                    await _mark(db, row["id"], "no_key", reason=f"no key for source {row.get('source') or '?'}")
+                    await db.commit()
+                    stats["no_key"] += 1
                     continue
                 key = match_key(row)
                 claim = await _open_claim(db, key, event_time(row, now))
                 if claim:
                     ev = await asyncio.to_thread(build_attestation, row, claim, secret, attested, now)
                     if ev is None:
+                        await _mark(db, row["id"], "failed", reason="attestation build failed")
+                        await db.commit()
                         stats["failed"] += 1
                         continue
                     await ce.store(db, ev, claim_id=claim["claim_id"], record_id=row["id"],
@@ -305,6 +330,8 @@ async def process_once(limit: int = BATCH, now: Optional[int] = None) -> dict:
                 else:
                     built = await asyncio.to_thread(build_claim, row, secret, attested, window, now)
                     if built is None:
+                        await _mark(db, row["id"], "failed", reason="claim build failed")
+                        await db.commit()
                         stats["failed"] += 1
                         continue
                     ev, meta = built

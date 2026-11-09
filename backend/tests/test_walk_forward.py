@@ -74,3 +74,15 @@ async def test_report_fail_open_and_endpoint(client):
     assert out["status"] == "ok" and len(out["days"]) == 3
     r = await client.get("/api/pipeline/walk-forward?days=2")
     assert r.status_code == 200 and "status" in r.json()
+
+
+def test_legacy_directions_are_scored_like_long_short():
+    """The live ledger holds BUY/SELL/buy/NEUTRAL, not long/short."""
+    from backend.signal_record import canonical_direction
+    assert [canonical_direction(d) for d in ("BUY", "buy", "SELL", "NEUTRAL", "", None, "bullish", "x")] == \
+        ["long", "long", "short", "hold", "", "", "long", ""]
+    calls = [_call(0, "s", 0.9, 0, direction="BUY"), _call(1, "s", 0.8, 0, direction="SELL"),
+             _call(2, "s", 0.7, 0, direction="NEUTRAL")]
+    marks = {f"r{i}": {"hit": True, "scored": True, "marked_at": T0 + DAY + 60} for i in range(3)}
+    out = wf.compute(calls, marks, T0, 1, k=5)
+    assert out["days"][0]["n"] == 2  # BUY + SELL scored, NEUTRAL (hold) not

@@ -181,12 +181,13 @@ async def test_e2e_claim_attest_verdict_with_real_cli(keys, monkeypatch):
     mint = "E2EMint" + secrets.token_hex(6)
     other = "E2EOther" + secrets.token_hex(6)
     tag = secrets.token_hex(4)
+    # the live ledger stores what producers sent (BUY / buy / NEUTRAL / SELL)
     await _ledger([
-        {"id": f"r1-{tag}", "source": "alpha", "address": mint, "direction": "long", "created_at": now - 7200},
-        {"id": f"r2-{tag}", "source": "beta", "address": mint, "direction": "long", "created_at": now - 6600},
-        {"id": f"r3-{tag}", "source": "beta", "address": mint, "direction": "hold", "created_at": now - 6500},
+        {"id": f"r1-{tag}", "source": "alpha", "address": mint, "direction": "BUY", "created_at": now - 7200},
+        {"id": f"r2-{tag}", "source": "beta", "address": mint, "direction": "buy", "created_at": now - 6600},
+        {"id": f"r3-{tag}", "source": "beta", "address": mint, "direction": "NEUTRAL", "created_at": now - 6500},
         {"id": f"r4-{tag}", "source": "nokey", "address": other, "direction": "long", "created_at": now - 6400},
-        {"id": f"r5-{tag}", "source": "gx", "address": other, "direction": "short", "created_at": now - 6300,
+        {"id": f"r5-{tag}", "source": "gx", "address": other, "direction": "SELL", "created_at": now - 6300,
          "producer": json.dumps({"kind": "guild_agent", "agent_id": 42})},
     ])
     st = await ca.process_once(now=now)
@@ -222,3 +223,38 @@ async def test_e2e_claim_attest_verdict_with_real_cli(keys, monkeypatch):
             (f"%-{tag}",))).fetchall())
     assert v["pubkey"] == ce.pubkey_hex(keys["resolver"]) and ce.verify(v) and _cli_verify(v)
     assert oc == {f"r1-{tag}": "holds", f"r5-{tag}": "indeterminate"}
+
+
+@pytest.mark.asyncio
+async def test_a_batch_of_only_unscored_or_keyless_rows_still_advances(keys, tmp_path, monkeypatch):
+    """Live bug: skipped / no_key rows were never committed, so a batch made
+    only of them rolled back and every pass re-read the same oldest rows --
+    the adapter never reached a single BUY/SELL call."""
+    monkeypatch.setattr(ce, "cli_available", lambda: True)
+    monkeypatch.setattr(ca, "build_claim", lambda *a, **k: None)  # no CLI needed: claims 'fail'
+    now = int(time.time())
+    tag = secrets.token_hex(4)
+    rows = [{"id": f"n{i}-{tag}", "source": "alpha", "address": f"A{i}{tag}", "direction": "NEUTRAL",
+             "created_at": now - 3000 + i} for i in range(5)]
+    rows += [{"id": f"k{i}-{tag}", "source": f"nokey{tag}", "address": f"B{i}{tag}", "direction": "BUY",
+              "created_at": now - 2000 + i} for i in range(5)]
+    rows += [{"id": f"b-{tag}", "source": "alpha", "address": f"C{tag}", "direction": "BUY", "created_at": now - 1000}]
+    await _ledger(rows)
+
+    async def roles():
+        async with get_db() as db:
+            return dict(await (await db.execute(
+                "SELECT record_id, role FROM crucible_record_map WHERE record_id LIKE ?", (f"%-{tag}",))).fetchall())
+    st = await ca.process_once(limit=4, now=now)
+    assert st["skipped"] == 4
+    st = await ca.process_once(limit=4, now=now)            # moves on instead of re-reading the same 4
+    assert st["skipped"] == 1 and st["no_key"] == 3
+    st = await ca.process_once(limit=4, now=now)
+    assert st["no_key"] == 2 and st["failed"] == 1          # reached the keyed BUY row
+    r = await roles()
+    assert sum(v == "skipped" for v in r.values()) == 5 and sum(v == "no_key" for v in r.values()) == 5
+    assert r[f"b-{tag}"] == "failed"
+    # installing the missing source's key releases its parked rows
+    _key(tmp_path / "sources" / f"nokey{tag}.key")
+    st = await ca.process_once(limit=50, now=now)
+    assert st["failed"] == 5 and st["no_key"] == 0
