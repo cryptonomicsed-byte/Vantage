@@ -175,3 +175,123 @@ async def query(source: str = "", address: str = "", since: int = 0, limit: int 
                 pass
         out.append(d)
     return out
+
+
+# ── P1-08: mirror ledger rows to Mycelium ────────────────────────────────────
+# Every 60 s, unmirrored rows go to POST :8811/api/trace as agent
+# vantage_ledger, kind observation, action signal_record, target = ledger id,
+# payload = the row; mirrored_at is set on a 2xx. The gateway assigns its own
+# trace ids, so idempotency is ours: before posting a batch we read back this
+# agent's signal_record traces since the batch's oldest row and skip any
+# target already there -- a retry after a lost ack never doubles a trace.
+#
+# Privacy: agent is the system name (it is a component, not a user). The
+# token address is kept: it is a public mint, and Mycelium's resolver (P2-03)
+# prices the record by it. producer.agent_id is pseudonymized and evidence is
+# scrubbed, the two places a wallet or user id can appear.
+MIRROR_AGENT = "vantage_ledger"
+MIRROR_ACTION = "signal_record"
+MIRROR_INTERVAL_S = 60
+MIRROR_BATCH = 200
+
+
+def mirror_enabled() -> bool:
+    return os.environ.get("LEDGER_MIRROR_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _iso(ts: int) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+def _mirror_payload(row: dict) -> dict:
+    from backend.mycelium_privacy import pseudonymize_agent, scrub_payload
+    out = dict(row)
+    for k in ("parents", "producer", "evidence", "tags"):
+        if isinstance(out.get(k), str):
+            try:
+                out[k] = json.loads(out[k])
+            except (TypeError, ValueError):
+                pass
+    prod = out.get("producer")
+    if isinstance(prod, dict) and prod.get("agent_id") not in (None, ""):
+        out["producer"] = {**prod, "agent_id": pseudonymize_agent(str(prod["agent_id"]))}
+    if isinstance(out.get("evidence"), dict):
+        out["evidence"] = scrub_payload(out["evidence"])
+    out.pop("mirrored_at", None)
+    return out
+
+
+def _gateway_targets(since_ts: int) -> Optional[set]:
+    """Targets this agent already mirrored since since_ts; None if unreachable."""
+    import urllib.parse
+    import urllib.request
+    from backend.mycelium_bridge import MYCELIUM_URL
+    q = urllib.parse.urlencode({"agent": MIRROR_AGENT, "action": MIRROR_ACTION,
+                                "since": _iso(since_ts), "limit": 1000})
+    try:
+        with urllib.request.urlopen(f"{MYCELIUM_URL}/api/traces?{q}", timeout=10) as r:
+            body = json.loads(r.read() or b"{}")
+    except Exception:
+        return None
+    return {t.get("target") for t in (body.get("traces") or []) if isinstance(t, dict)}
+
+
+def _post(row: dict) -> bool:
+    from backend.mycelium_bridge import _post_trace
+    return _post_trace({"agent": MIRROR_AGENT, "session": "ledger", "kind": "observation",
+                        "action": MIRROR_ACTION, "target": row["id"], "outcome": "info",
+                        "payload": _mirror_payload(row)})
+
+
+async def mirror_once(limit: int = MIRROR_BATCH) -> dict:
+    """One batch. Returns {posted, skipped, pending}. Never raises."""
+    from backend.db import get_db
+    import aiosqlite
+    try:
+        async with get_db() as db:
+            await ensure_tables(db)
+            db.row_factory = aiosqlite.Row
+            rows = [dict(r) for r in await (await db.execute(
+                "SELECT * FROM signal_ledger WHERE mirrored_at IS NULL "
+                "ORDER BY ingested_at, rowid LIMIT ?", (int(limit),))).fetchall()]
+    except Exception as e:
+        logger.warning("ledger mirror: read failed: %s", e)
+        return {"posted": 0, "skipped": 0, "pending": -1}
+    if not rows:
+        return {"posted": 0, "skipped": 0, "pending": 0}
+    existing = await asyncio.to_thread(_gateway_targets, min(r["ingested_at"] for r in rows) - 120)
+    if existing is None:
+        return {"posted": 0, "skipped": 0, "pending": len(rows)}  # gateway down: try next cycle
+    done, posted, skipped = [], 0, 0
+    for row in rows:
+        if row["id"] in existing:
+            done.append(row["id"]); skipped += 1
+            continue
+        if await asyncio.to_thread(_post, row):
+            done.append(row["id"]); posted += 1
+        else:
+            break  # outage mid-batch: leave the rest unmirrored, catch up later
+    if done:
+        now = int(time.time())
+        try:
+            async with get_db() as db:
+                await db.executemany("UPDATE signal_ledger SET mirrored_at=? WHERE id=?",
+                                     [(now, i) for i in done])
+                await db.commit()
+        except Exception as e:
+            logger.warning("ledger mirror: marking failed (will dedup next cycle): %s", e)
+    return {"posted": posted, "skipped": skipped, "pending": len(rows) - len(done)}
+
+
+async def mirror_loop() -> None:
+    """Background task (app lifespan). The flag is read each cycle, so turning
+    it on or off needs no restart; off means mirror_once is never entered."""
+    while True:
+        await asyncio.sleep(MIRROR_INTERVAL_S)
+        if mirror_enabled():
+            try:
+                out = await mirror_once()
+                if out["posted"] or out["skipped"]:
+                    logger.info("ledger mirror: %s", out)
+            except Exception as e:  # never kill the loop
+                logger.warning("ledger mirror cycle failed: %s", e)
