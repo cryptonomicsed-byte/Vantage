@@ -1,6 +1,7 @@
 """Degen Alpha Router — Ultra-degen signals: early calls, smart wallets, volume surges, rug checks.
 Uses existing keys: Helius RPC, Birdeye, GeckoTerminal.
 """
+import time
 import asyncio, json, logging, os, urllib.request, hashlib, time
 from pathlib import Path
 from typing import Optional
@@ -619,17 +620,54 @@ async def fresh_deployers(limit: int=20, x_agent_key: str=Header(...)):
 # nothing here is guessed, a blank display_name means genuinely
 # unattributed, not a bug).
 # ════════════════════════════════════════════════════════════════
+MASS_DEPLOYER_MIN = 20
+_MASS_DEPLOYER_SQL = (f"(COALESCE(deployer_count,0) >= {MASS_DEPLOYER_MIN} "
+                      "AND COALESCE(deployer_count,0) * 2 >= COALESCE(tokens_tracked,0))")
+
+# Short response caches for the two Top 5 endpoints that took ~20 s each
+# (per-token conviction joins / multi-platform fetches on every request).
+# Auth is checked before the cache, so a cached body never skips it.
+_RESP_CACHE: dict = {}
+
+
+def _ttl_cache(name: str, ttl: float):
+    import functools
+
+    def deco(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            if not await get_agent(kwargs.get("x_agent_key")):
+                raise HTTPException(401)
+            key = name + repr(sorted((k, v) for k, v in kwargs.items() if k != "x_agent_key"))
+            hit = _RESP_CACHE.get(key)
+            if hit and time.time() - hit[0] < ttl:
+                return hit[1]
+            val = await fn(*args, **kwargs)
+            _RESP_CACHE[key] = (time.time(), val)
+            return val
+        return wrapper
+    return deco
+
+
 @router.get("/top-wallets-to-copy")
 async def top_wallets_to_copy(limit: int=20, x_agent_key: str=Header(...)):
     if not await get_agent(x_agent_key): raise HTTPException(401)
+    # Mass deployers are launch bots, not traders to copy: wallet_learner's
+    # score rewards deploying "hot" tokens, so a wallet that launched 2,237
+    # tokens ranked #1. Excluded here (deployed >= MASS_DEPLOYER_MIN tokens
+    # and deploying is most of what it does). The score itself is unchanged.
     async with _db() as db:
-        cur = await db.execute("""
+        cur = await db.execute(f"""
             SELECT * FROM wallet_reputation
-            WHERE copy_trade_score > 0
+            WHERE copy_trade_score > 0 AND NOT {_MASS_DEPLOYER_SQL}
             ORDER BY copy_trade_score DESC LIMIT ?
         """, (limit,))
         rows = await cur.fetchall()
-    return {"wallets": rows, "count": len(rows)}
+        meta = await (await db.execute(f"""
+            SELECT MAX(updated_at), SUM(CASE WHEN {_MASS_DEPLOYER_SQL} THEN 1 ELSE 0 END)
+            FROM wallet_reputation WHERE copy_trade_score > 0""")).fetchone()
+    return {"wallets": rows, "count": len(rows), "scores_updated_at": meta[0],
+            "excluded_mass_deployers": meta[1] or 0}
 
 # ════════════════════════════════════════════════════════════════
 # CONVICTION SCORE — "% of this token held/traded by known-good wallets."
@@ -641,11 +679,11 @@ async def top_wallets_to_copy(limit: int=20, x_agent_key: str=Header(...)):
 # leaderboard.
 # ════════════════════════════════════════════════════════════════
 async def _token_conviction(db, mint: str) -> dict:
-    cur = await db.execute("""
+    cur = await db.execute(f"""
         SELECT twr.role, twr.wallet_address, wr.copy_trade_score, wr.display_name
         FROM token_wallet_roles twr
         JOIN wallet_reputation wr ON wr.wallet_address = twr.wallet_address
-        WHERE twr.mint = ? AND wr.copy_trade_score > 0
+        WHERE twr.mint = ? AND wr.copy_trade_score > 0 AND NOT {_MASS_DEPLOYER_SQL}
     """, (mint,))
     rows = await cur.fetchall()
     smart_wallets = {r["wallet_address"]: r for r in rows}  # dedupe — one wallet can hold multiple roles
@@ -667,6 +705,7 @@ async def token_conviction(mint: str, x_agent_key: str=Header(...)):
     return {"mint": mint, **result}
 
 @router.get("/high-conviction")
+@_ttl_cache("high-conviction", 60)
 async def high_conviction_tokens(limit: int=20, x_agent_key: str=Header(...)):
     """Every currently-tracked token ranked by smart-money overlap — the
     'finding plays before they run' view: which tokens have known-good
@@ -965,6 +1004,7 @@ async def _gather_platform_leaders() -> list[dict]:
 
 
 @router.get("/platform-leaders")
+@_ttl_cache("platform-leaders", 120)
 async def platform_leaders(x_agent_key: str = Header(...)):
     """The #1 top-ranked token from each of the 6 real platforms Vantage
     gathers token intel from -- one row per platform, each platform's own

@@ -31,6 +31,14 @@ function Badge({ status }: { status: string }) {
 // what was there a moment ago, which is what "info was here, I came back and
 // it's gone" was actually caused by.
 function cacheKeyFor(path: string) { return `vantage_cache_intel_${path}` }
+// Feed status: useAresApi keeps showing the last cached body when a fetch
+// fails, which made a dead feed look live. Every mounted feed reports here and
+// <FeedStatus/> names the ones serving stale data.
+type FeedState = { path: string; interval: number; lastOk: number | null; error: string | null }
+const FEEDS = new Map<string, FeedState>()
+const FEED_EVENT = 'ares-feed-status'
+function reportFeed(s: FeedState) { FEEDS.set(s.path, s); try { window.dispatchEvent(new Event(FEED_EVENT)) } catch { /* */ } }
+
 function useAresApi(path: string, interval = 60000) {
   const [data, setData] = useState<any>(() => {
     try {
@@ -40,19 +48,52 @@ function useAresApi(path: string, interval = 60000) {
   })
   const [loading, setLoading] = useState(data === null)
   const load = useCallback(async () => {
+    const prev = FEEDS.get(path)
     try {
       const r = await fetch(path)
       if (r.ok) {
         const json = await r.json()
         setData(json)
         try { localStorage.setItem(cacheKeyFor(path), JSON.stringify(json)) } catch { /* quota — non-fatal */ }
+        reportFeed({ path, interval, lastOk: Date.now(), error: null })
+      } else {
+        reportFeed({ path, interval, lastOk: prev?.lastOk ?? null, error: `HTTP ${r.status}` })
       }
-    } catch { /* offline — keep showing last-known data */ }
+    } catch (e: any) {
+      reportFeed({ path, interval, lastOk: prev?.lastOk ?? null, error: e?.message || 'network error' })
+    }
     setLoading(false)
-  }, [path])
-  useEffect(() => { load(); const t = setInterval(load, interval); return () => clearInterval(t) }, [load, interval])
+  }, [path, interval])
+  useEffect(() => {
+    load(); const t = setInterval(load, interval)
+    return () => { clearInterval(t); FEEDS.delete(path); try { window.dispatchEvent(new Event(FEED_EVENT)) } catch { /* */ } }
+  }, [load, interval, path])
   return { data, loading, refresh: load }
 }
+
+function FeedStatus() {
+  const [, tick] = useState(0)
+  useEffect(() => {
+    const on = () => tick(x => x + 1)
+    window.addEventListener(FEED_EVENT, on); const t = setInterval(on, 30000)
+    return () => { window.removeEventListener(FEED_EVENT, on); clearInterval(t) }
+  }, [])
+  const now = Date.now()
+  const bad = [...FEEDS.values()].filter(f => f.error || (f.lastOk != null && now - f.lastOk > 3 * f.interval))
+  if (!bad.length) return null
+  return (
+    <div style={{ border: '1px solid #f59e0b55', background: 'rgba(245,158,11,0.06)', borderRadius: 8, padding: '8px 12px', marginBottom: 12, fontSize: 12 }}>
+      {bad.map(f => (
+        <div key={f.path}>
+          <b style={{ color: '#f59e0b' }}>Stale feed</b> <code>{f.path.split('?')[0]}</code>
+          {' — '}{f.error ? `last request failed (${f.error})` : 'no fresh data'}
+          {'; '}{f.lastOk ? `showing data from ${Math.round((now - f.lastOk) / 60000)}m ago` : 'showing cached data from an earlier visit'}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 
 // Watchlist is the one intel endpoint group that's agent-authenticated (add/
 // remove/refresh mutate shared state) — mirrors Portfolio.tsx's localStorage
@@ -186,12 +227,13 @@ function AresHealth() {
               <span style={{ fontWeight: 600, fontSize: 14, textTransform: 'capitalize' }}>{k}</span>
               <Badge status={v.health || '?'} />
             </div>
-            {Object.entries(v).filter(([k2]) => k2 !== 'health').map(([k2, v2]) => (
+            {Object.entries(v).filter(([k2]) => k2 !== 'health' && k2 !== 'error').map(([k2, v2]) => (
               <div key={k2} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--muted)', padding: '2px 0' }}>
                 <span>{k2}</span>
-                <span style={{ color: 'var(--text)', fontFamily: 'monospace' }}>{String(v2)}</span>
+                <span style={{ color: 'var(--text)', fontFamily: 'monospace' }} title={v2 == null ? 'not measured by this probe' : undefined}>{v2 == null ? '—' : typeof v2 === 'number' ? v2.toLocaleString() : String(v2)}</span>
               </div>
             ))}
+            {v.error && <div style={{ fontSize: 11, color: 'var(--danger)', marginTop: 4 }}>{String(v.error)}</div>}
           </div>
         ))}
       </div>
@@ -300,12 +342,13 @@ function AresAlpha() {
     <div>
       <div className="ares-section-title">{items.length} Active Signals</div>
       <table className="ares-table">
-        <thead><tr><th>Token</th><th>Conviction</th><th>24h Change</th><th>Price</th><th>Volume 24h</th></tr></thead>
+        <thead><tr><th>Token</th><th title="abs(24h change) / 5, capped at 5">Conviction (0–5)</th><th>Signal</th><th>24h Change</th><th>Price</th><th>Volume 24h</th></tr></thead>
         <tbody>
           {items.map((i: any, idx: number) => (
             <tr key={idx}>
               <td style={{ fontWeight: 600 }}>{i.symbol ? <TokenLink symbol={i.symbol} ca={i.ca || i.address} chain={i.chain} /> : '?'}</td>
               <td style={{ color: (i.conviction||0) > 3 ? 'var(--danger)' : 'var(--warning)', fontWeight: 700 }}>{(i.conviction||0).toFixed(2)}</td>
+              <td style={{ color: i.signal === 'breakdown' ? 'var(--danger)' : i.signal === 'breakout' ? 'var(--green)' : 'var(--muted)' }}>{i.signal || '—'}</td>
               <td style={{ fontFamily: 'monospace', color: i.direction === 'down' ? 'var(--danger)' : 'var(--green)', fontWeight: 700 }}>
                 {i.direction === 'down' ? '▼' : '▲'} {(i.change_24h||0).toFixed(2)}%
               </td>
@@ -542,7 +585,7 @@ function AresBacktest() {
         <div style={{ color: 'var(--muted)', padding: 20 }}>{data.error === 'insufficient data' ? `Not enough history for ${data.symbol} over ${days} days.` : data.error}</div>
       ) : data ? (
         <div>
-          <div className="ares-section-title">{data.strategy} vs Buy &amp; Hold — {data.symbol} ({data.days}d, {data.data_points} closes)</div>
+          <div className="ares-section-title">{data.strategy} vs Buy &amp; Hold — {data.symbol} ({data.days}d, {data.data_points} closes{data.price_src ? ` · ${data.price_src === 'ohlc' ? 'Kraken/Binance' : 'CoinGecko'}` : ''})</div>
           <div className="ares-stat-grid">
             <div className="ares-stat-tile"><div className="ares-stat-label">Strategy Return</div><div className="ares-stat-value" style={{ color: data.strategy_return_pct >= 0 ? 'var(--green)' : 'var(--danger)' }}>{data.strategy_return_pct}%</div></div>
             <div className="ares-stat-tile"><div className="ares-stat-label">Buy &amp; Hold Return</div><div className="ares-stat-value">{data.buy_hold_return_pct}%</div></div>
@@ -995,6 +1038,7 @@ export default function MarketIntel() {
           </button>
         ))}
       </div>
+      <FeedStatus />
       {tab === 'top5' && <Top5Degen />}
       {tab === 'ingest' && <AresIngest />}
       {tab === 'overview' && <AresOverview />}
