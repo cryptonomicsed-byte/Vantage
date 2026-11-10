@@ -64,6 +64,8 @@ async def init_all_databases() -> list[str]:
     )
     from .presence import init_presence_db
     from .space_provisioning import init_space_provisioning_db, backfill_space_channels
+    from .routers.content_space import init_content_db
+    from .repo_providers import init_repo_bindings_db
     from .receipts import init_receipts_db
     # Aliased: backend/mesh_store.py already exports init_mesh_db for the
     # Block Mesh coordination tables. A bare `from .mesh_gateway import
@@ -102,6 +104,8 @@ async def init_all_databases() -> list[str]:
         init_presence_db,
         init_space_provisioning_db,
         backfill_space_channels,
+        init_content_db,
+        init_repo_bindings_db,
         init_receipts_db,
         init_meshnet_db,
         init_join_db,

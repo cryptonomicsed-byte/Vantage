@@ -1,4 +1,11 @@
-"""Workspace task management endpoints."""
+"""Workspace task board: tasks that belong to one workspace channel.
+
+Every route requires membership of the guild (G0). Creating a task needs
+``post`` on the workspace, claiming needs ``claim`` (an observer can read
+the board but not take work), accepting or rejecting needs ``review`` and
+is never done by the claimant (G2). Claims are leases, taken in one atomic
+UPDATE, the same rule as every other vantage_tasks route (backend/space_tasks).
+"""
 import time
 import uuid
 from typing import Optional
@@ -9,7 +16,10 @@ from pydantic import BaseModel, Field
 
 from ..db import get_db
 from ..deps import get_agent
+from ..guild_access import guild_by_slug, require_member, require_not_claimant, require_space_capability
+from ..space_tasks import DEFAULT_LEASE_MINUTES, claim_sql, clamped_lease, submit_sql
 from ..work_states import envelope
+from ..task_events import emit
 
 router = APIRouter(
     prefix="/api/guilds/{slug}/workspaces/{ws_id}/tasks",
@@ -17,27 +27,27 @@ router = APIRouter(
 )
 
 
-async def _get_guild_id(slug: str) -> int:
+async def _workspace(slug: str, ws_id: str) -> dict:
+    """The workspace channel, by id or slug, shaped like a space so the
+    capability resolver can read its roster."""
+    guild = await guild_by_slug(slug)
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT id FROM guilds WHERE slug=?", (slug,)) as cur:
-            row = await cur.fetchone()
+        if ws_id.isdigit():
+            cur = await db.execute("SELECT * FROM guild_channels WHERE guild_id=? AND id=?", (guild["id"], int(ws_id)))
+        else:
+            cur = await db.execute("SELECT * FROM guild_channels WHERE guild_id=? AND slug=?", (guild["id"], ws_id))
+        row = await cur.fetchone()
     if not row:
-        raise HTTPException(404, "Guild not found")
-    return row["id"]
+        raise HTTPException(404, "Workspace not found")
+    ch = dict(row)
+    return {"id": ws_id, "guild_slug": slug, "chat_channel_slug": ch["slug"], "channel_id": ch["id"],
+            "created_by_agent_id": None, "name": ch["name"]}
 
 
-async def _is_founder_or_maintainer(guild_id: int, agent_id: int) -> bool:
-    async with get_db() as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT role FROM guild_members WHERE guild_id=? AND agent_id=?",
-            (guild_id, agent_id),
-        ) as cur:
-            row = await cur.fetchone()
-    if not row:
-        return False
-    return row["role"] in ("founder", "maintainer")
+async def _member_workspace(slug: str, ws_id: str, agent: dict) -> dict:
+    await require_member(slug, agent)
+    return await _workspace(slug, ws_id)
 
 
 async def _get_task(task_id: str, ws_id: str) -> dict:
@@ -62,6 +72,7 @@ async def list_tasks(
     agent: dict = Depends(get_agent),
 ):
     """List tasks in a workspace, optionally filtered by status."""
+    await _member_workspace(slug, ws_id, agent)
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         if status:
@@ -94,12 +105,9 @@ async def create_task(
     ws_id: str,
     agent: dict = Depends(get_agent)
 ):
-    """Create a new task in the workspace."""
-    title = body.title
-    description = body.description
-    priority = body.priority
-    kind_tag = body.kind_tag
-    due_ts = body.due_ts
+    """Create a new task in a workspace."""
+    ws = await _member_workspace(slug, ws_id, agent)
+    await require_space_capability(slug, ws, agent, "post")
     task_id = str(uuid.uuid4())
     now = int(time.time())
     async with get_db() as db:
@@ -108,15 +116,13 @@ async def create_task(
                (id, workspace_id, guild_slug, title, description, status, priority,
                 created_by_agent_id, kind_tag, due_ts, created_ts, updated_ts)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (task_id, ws_id, slug, title, description, "proposed", priority,
-             agent["id"], kind_tag, due_ts, now, now),
+            (task_id, ws_id, slug, body.title, body.description, "proposed", body.priority,
+             agent["id"], body.kind_tag, body.due_ts, now, now),
         )
         await db.commit()
-    async with get_db() as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM vantage_tasks WHERE id=?", (task_id,)) as cur:
-            row = await cur.fetchone()
-    return dict(row)
+    await emit(guild_slug=slug, channel_slug=ws["chat_channel_slug"], event="created", kind="vtask",
+               ref_id=task_id, actor=agent, title=body.title)
+    return await _get_task(task_id, ws_id)
 
 
 @router.get("/{task_id}")
@@ -127,6 +133,7 @@ async def get_task(
     agent: dict = Depends(get_agent),
 ):
     """Get a single task by ID."""
+    await _member_workspace(slug, ws_id, agent)
     return await _get_task(task_id, ws_id)
 
 
@@ -145,43 +152,29 @@ async def update_task(
     agent: dict = Depends(get_agent),
     body: Optional[UpdateTaskBody] = None,
 ):
-    """Update task fields. Status beyond 'proposed' requires founder/maintainer or task creator."""
+    """Edit a task's fields. The creator or a reviewer may edit; status
+    changes go through claim / submit / accept / reject, not here."""
     body = body or UpdateTaskBody()
-    title = body.title
-    description = body.description
-    priority = body.priority
-    status = body.status
+    ws = await _member_workspace(slug, ws_id, agent)
     task = await _get_task(task_id, ws_id)
+    if task.get("created_by_agent_id") != agent["id"]:
+        await require_space_capability(slug, ws, agent, "review")
+    if body.status is not None:
+        raise HTTPException(422, "status is driven by claim, submit, accept and reject")
     now = int(time.time())
-
-    if status and status != task["status"]:
-        # Only founder/maintainer or task creator can change status
-        guild_id = await _get_guild_id(slug)
-        is_privileged = await _is_founder_or_maintainer(guild_id, agent["id"])
-        is_creator = task["created_by_agent_id"] == agent["id"]
-        if not is_privileged and not is_creator:
-            raise HTTPException(403, "Only founder, maintainer, or task creator can update status")
-
-    updates = {}
-    if title is not None:
-        updates["title"] = title
-    if description is not None:
-        updates["description"] = description
-    if priority is not None:
-        updates["priority"] = priority
-    if status is not None:
-        updates["status"] = status
+    updates: dict = {}
+    if body.title is not None:
+        updates["title"] = body.title
+    if body.description is not None:
+        updates["description"] = body.description
+    if body.priority is not None:
+        updates["priority"] = body.priority
     updates["updated_ts"] = now
-
-    if updates:
-        set_clause = ", ".join(f"{k}=?" for k in updates)
-        values = list(updates.values()) + [task_id]
-        async with get_db() as db:
-            await db.execute(
-                f"UPDATE vantage_tasks SET {set_clause} WHERE id=?", values
-            )
-            await db.commit()
-
+    set_clause = ", ".join(f"{k}=?" for k in updates)
+    values = list(updates.values()) + [task_id, ws_id]
+    async with get_db() as db:
+        await db.execute(f"UPDATE vantage_tasks SET {set_clause} WHERE id=? AND workspace_id=?", values)
+        await db.commit()
     return await _get_task(task_id, ws_id)
 
 
@@ -190,24 +183,34 @@ async def claim_task(
     slug: str,
     ws_id: str,
     task_id: str,
+    lease_minutes: int = Query(DEFAULT_LEASE_MINUTES),
     agent: dict = Depends(get_agent),
 ):
-    """Claim a proposed task."""
-    task = await _get_task(task_id, ws_id)
-    if task["status"] != "proposed":
-        raise HTTPException(409, "Task is not in 'proposed' state")
+    """Take a lease on a proposed task."""
+    ws = await _member_workspace(slug, ws_id, agent)
+    await require_space_capability(slug, ws, agent, "claim")
+    lease = clamped_lease(lease_minutes)
     now = int(time.time())
     claim_id = str(uuid.uuid4())
     async with get_db() as db:
-        await db.execute(
-            "UPDATE vantage_tasks SET claimed_by_agent_id=?, status='claimed', updated_ts=? WHERE id=?",
-            (agent["id"], now, task_id),
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            claim_sql(open_status="proposed", claimed_status="claimed", lease_minutes=lease),
+            ("claimed", agent["id"], now, task_id, ws_id, slug, agent["id"]),
         )
+        if cur.rowcount == 0:
+            await db.rollback()
+            task = await _get_task(task_id, ws_id)
+            if task["status"] == "claimed":
+                raise HTTPException(409, f"Task is claimed by another agent until {task.get('claim_expires_at')}")
+            raise HTTPException(409, "Task is not in 'proposed' state")
         await db.execute(
             "INSERT INTO task_claims (id, task_id, agent_id, action, ts) VALUES (?,?,?,?,?)",
             (claim_id, task_id, agent["id"], "claimed", now),
         )
         await db.commit()
+    await emit(guild_slug=slug, channel_slug=ws["chat_channel_slug"], event="claimed", kind="vtask",
+               ref_id=task_id, actor=agent)
     return await _get_task(task_id, ws_id)
 
 
@@ -219,6 +222,7 @@ async def release_task(
     agent: dict = Depends(get_agent),
 ):
     """Release a claimed task back to proposed. Only the claimer can release."""
+    await _member_workspace(slug, ws_id, agent)
     task = await _get_task(task_id, ws_id)
     if task["status"] != "claimed":
         raise HTTPException(409, "Task is not in 'claimed' state")
@@ -228,7 +232,7 @@ async def release_task(
     claim_id = str(uuid.uuid4())
     async with get_db() as db:
         await db.execute(
-            "UPDATE vantage_tasks SET claimed_by_agent_id=NULL, status='proposed', updated_ts=? WHERE id=?",
+            "UPDATE vantage_tasks SET claimed_by_agent_id=NULL, claim_expires_at=NULL, status='proposed', updated_ts=? WHERE id=?",
             (now, task_id),
         )
         await db.execute(
@@ -251,22 +255,41 @@ async def submit_task(
     task_id: str,
     agent: dict = Depends(get_agent)
 ):
-    """Submit an artifact for review, setting task status to 'review'."""
-    artifact_id = body.artifact_id
+    """Submit an artifact for review, setting task status to 'review'.
+    Only the agent holding a live claim can submit."""
+    await _member_workspace(slug, ws_id, agent)
     task = await _get_task(task_id, ws_id)
+    if task["claimed_by_agent_id"] != agent["id"]:
+        raise HTTPException(403, "Only the claimer can submit")
+    if task["status"] != "claimed":
+        raise HTTPException(409, f"Task is {task['status']!r}, not claimed; nothing to submit against")
     now = int(time.time())
     async with get_db() as db:
-        await db.execute(
-            "UPDATE vantage_tasks SET status='review', updated_ts=? WHERE id=?",
-            (now, task_id),
+        cur = await db.execute(
+            submit_sql(claimed_status="claimed", review_status="review"),
+            (now, task_id, ws_id, slug, agent["id"]),
         )
+        if cur.rowcount == 0:
+            await db.rollback()
+            raise HTTPException(409, "Your claim's lease has expired; claim the task again before submitting")
         # Link artifact to task via review note
         await db.execute(
             "UPDATE artifacts SET status='submitted', review_note=?, updated_ts=? WHERE id=?",
-            (f"submitted_for_task:{task_id}", now, artifact_id),
+            (f"submitted_for_task:{task_id}", now, body.artifact_id),
         )
         await db.commit()
+    ws = await _workspace(slug, ws_id)
+    await emit(guild_slug=slug, channel_slug=ws["chat_channel_slug"], event="delivered", kind="vtask",
+               ref_id=task_id, actor=agent, title=task["title"], note=f"artifact {body.artifact_id}")
     return await _get_task(task_id, ws_id)
+
+
+async def _task_for_review(slug: str, ws_id: str, task_id: str, agent: dict) -> dict:
+    ws = await _member_workspace(slug, ws_id, agent)
+    task = await _get_task(task_id, ws_id)
+    require_not_claimant(task, agent)
+    await require_space_capability(slug, ws, agent, "review")
+    return task
 
 
 @router.post("/{task_id}/accept")
@@ -276,10 +299,10 @@ async def accept_task(
     task_id: str,
     agent: dict = Depends(get_agent),
 ):
-    """Accept a task in review. Only guild founder/maintainer."""
-    guild_id = await _get_guild_id(slug)
-    if not await _is_founder_or_maintainer(guild_id, agent["id"]):
-        raise HTTPException(403, "Only guild founder or maintainer can accept tasks")
+    """Accept a task in review. Needs `review` on the workspace; never the claimant."""
+    task = await _task_for_review(slug, ws_id, task_id, agent)
+    if task["status"] != "review":
+        raise HTTPException(409, f"Task is {task['status']!r}, not in review; nothing to accept")
     now = int(time.time())
     async with get_db() as db:
         await db.execute(
@@ -287,6 +310,9 @@ async def accept_task(
             (now, task_id),
         )
         await db.commit()
+    ws = await _workspace(slug, ws_id)
+    await emit(guild_slug=slug, channel_slug=ws["chat_channel_slug"], event="accepted", kind="vtask",
+               ref_id=task_id, actor=agent, title=task["title"])
     return await _get_task(task_id, ws_id)
 
 
@@ -302,19 +328,23 @@ async def reject_task(
     agent: dict = Depends(get_agent),
     body: Optional[RejectTaskBody] = None,
 ):
-    """Reject a task in review. Only guild founder/maintainer."""
+    """Reject a task in review, sending it back to proposed. Needs `review`."""
     body = body or RejectTaskBody()
-    note = body.note
-    guild_id = await _get_guild_id(slug)
-    if not await _is_founder_or_maintainer(guild_id, agent["id"]):
-        raise HTTPException(403, "Only guild founder or maintainer can reject tasks")
+    task = await _task_for_review(slug, ws_id, task_id, agent)
+    if task["status"] not in ("claimed", "review"):
+        raise HTTPException(409, f"Task is {task['status']!r}; only claimed or in-review work can be rejected")
     now = int(time.time())
     async with get_db() as db:
         await db.execute(
-            "UPDATE vantage_tasks SET status='rejected', updated_ts=? WHERE id=?",
+            "UPDATE vantage_tasks SET status='proposed', claimed_by_agent_id=NULL, claim_expires_at=NULL, updated_ts=? WHERE id=?",
             (now, task_id),
         )
+        await db.execute(
+            "UPDATE artifacts SET status='rejected', review_note=?, updated_ts=? WHERE review_note=? AND status='submitted'",
+            (body.note, now, f"submitted_for_task:{task_id}"),
+        )
         await db.commit()
-    task = await _get_task(task_id, ws_id)
-    task["reject_note"] = note
-    return task
+    ws = await _workspace(slug, ws_id)
+    await emit(guild_slug=slug, channel_slug=ws["chat_channel_slug"], event="rejected", kind="vtask",
+               ref_id=task_id, actor=agent, title=task["title"], note=body.note)
+    return await _get_task(task_id, ws_id)

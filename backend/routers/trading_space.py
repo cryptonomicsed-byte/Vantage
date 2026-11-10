@@ -18,7 +18,10 @@ from ..db import get_db
 from ..deps import get_agent
 from ..space_provisioning import provision_space_channel
 from ..work_states import envelope
-from ..guild_access import require_member, require_not_claimant, require_owner_or_staff
+from ..task_events import emit_for_space
+from ..guild_access import (
+    require_member, require_not_claimant, require_owner_or_staff, require_space_capability,
+)
 from ..space_tasks import (
     DEFAULT_LEASE_MINUTES, MAX_LEASE_MINUTES, claim_sql, clamped_lease, lease_expired_sql, submit_sql,
 )
@@ -180,7 +183,8 @@ async def create_task(
     description = body.description
     priority = body.priority
     kind_tag = body.kind_tag
-    await _member_space(slug, space_id, agent)
+    space = await _member_space(slug, space_id, agent)
+    await require_space_capability(slug, space, agent, "post")
     task_id = str(uuid.uuid4())
     now = int(time.time())
     async with get_db() as db:
@@ -189,6 +193,8 @@ async def create_task(
             (task_id, space_id, slug, title, description, "proposed", priority, agent["id"], kind_tag, now, now),
         )
         await db.commit()
+    await emit_for_space(guild_slug=slug, table="trading_spaces", space_id=space_id, event="created",
+                         kind="vtask", ref_id=task_id, actor=agent, title=title)
     return {"id": task_id, "status": "proposed"}
 
 
@@ -206,7 +212,9 @@ def _lease_expired_sql() -> str:
 async def claim_task(slug: str, space_id: str, task_id: str,
                      lease_minutes: int = Query(DEFAULT_LEASE_MINUTES),
                      agent: dict = Depends(get_agent)):
-    await _assert_guild_member(slug, agent)
+    # G2: an observer on this space can read the board but not take work.
+    space = await _member_space(slug, space_id, agent)
+    await require_space_capability(slug, space, agent, "claim")
     lease = _clamped_lease(lease_minutes)
     now = int(time.time())
     async with get_db() as db:
@@ -226,6 +234,8 @@ async def claim_task(slug: str, space_id: str, task_id: str,
         if row["status"] == "claimed":
             raise HTTPException(409, f"Task is claimed by another agent until {row['claim_expires_at']}")
         raise HTTPException(400, "Task is not claimable")
+    await emit_for_space(guild_slug=slug, table="trading_spaces", space_id=space_id, event="claimed",
+                         kind="vtask", ref_id=task_id, actor=agent, note=f"lease until {row['claim_expires_at']}")
     return {"ok": True, "status": "claimed", "claim_expires_at": row["claim_expires_at"]}
 
 
@@ -305,6 +315,8 @@ async def submit_task(
             (artifact_id, task_id, agent["id"], space_id, artifact_kind, title, content_text, content_uri, "submitted", now, now),
         )
         await db.commit()
+    await emit_for_space(guild_slug=slug, table="trading_spaces", space_id=space_id, event="delivered",
+                         kind="vtask", ref_id=task_id, actor=agent, title=title, note=f"artifact {artifact_id}")
     return {"ok": True, "artifact_id": artifact_id}
 
 
@@ -326,7 +338,10 @@ async def _task_for_review(slug: str, space_id: str, task_id: str, agent: dict) 
         raise HTTPException(404, "Task not found")
     task = dict(row)
     require_not_claimant(task, agent)
-    await require_owner_or_staff(slug, agent, space.get("created_by_agent_id"), "this trading space")
+    # G2: a reviewer holds `review` on this space -- the owner (lead), guild
+    # staff (maintainer) or a member given operator or above on the space's
+    # channel roster. A plain contributor cannot accept.
+    await require_space_capability(slug, space, agent, "review")
     return task
 
 
@@ -356,6 +371,8 @@ async def accept_task(
             (note, now, task_id),
         )
         await db.commit()
+    await emit_for_space(guild_slug=slug, table="trading_spaces", space_id=space_id, event="accepted",
+                         kind="vtask", ref_id=task_id, actor=agent, title=task["title"], note=note)
     return {"ok": True, "status": "accepted"}
 
 
@@ -385,6 +402,8 @@ async def reject_task(
             (note, now, task_id),
         )
         await db.commit()
+    await emit_for_space(guild_slug=slug, table="trading_spaces", space_id=space_id, event="rejected",
+                         kind="vtask", ref_id=task_id, actor=agent, title=task["title"], note=note)
     return {"ok": True, "status": "proposed"}
 
 
@@ -485,6 +504,48 @@ async def commit_to_pool(
     return {"ok": True, "pool_id": pool_id, "committed": amount}
 
 
+# ── Orders and strategies, scoped to the space's guild (G9) ─────────────────────
+#
+# The Orders and Strategies tabs used to read the caller's personal
+# /api/trading/orders and /strategies, so a guild tab showed one agent's
+# private book. These list what the guild's members run, paper only, and
+# nothing here can place, arm or enable anything: the live path stays
+# outside the guild by design (R-123).
+
+@router.get("/{space_id}/orders")
+async def space_orders(slug: str, space_id: str, limit: int = Query(50, ge=1, le=200),
+                       agent: dict = Depends(get_agent)):
+    await _member_space(slug, space_id, agent)
+    guild_id = await _get_guild_id(slug)
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT o.*, a.name AS agent_name FROM trading_orders o
+                 JOIN guild_members gm ON gm.agent_id = o.agent_id AND gm.guild_id = ?
+                 LEFT JOIN agents a ON a.id = o.agent_id
+                WHERE COALESCE(o.tx_hash, '') = ''  -- no on-chain transaction: paper
+                ORDER BY o.created_at DESC LIMIT ?""", (guild_id, limit)) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    return {"items": rows, "orders": rows, "total": len(rows), "paper_only": True}
+
+
+@router.get("/{space_id}/strategies")
+async def space_strategies(slug: str, space_id: str, agent: dict = Depends(get_agent)):
+    await _member_space(slug, space_id, agent)
+    guild_id = await _get_guild_id(slug)
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT s.id, s.agent_id, a.name AS agent_name, s.name, s.created_at,
+                      COALESCE(s.armed, 0) AS armed, COALESCE(s.live, 0) AS live
+                 FROM trading_strategies s
+                 JOIN guild_members gm ON gm.agent_id = s.agent_id AND gm.guild_id = ?
+                 LEFT JOIN agents a ON a.id = s.agent_id
+                ORDER BY s.created_at DESC LIMIT 200""", (guild_id,)) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    return {"items": rows, "strategies": rows, "total": len(rows), "paper_only": True}
+
+
 # ── Memory (reuse workspace_memory with space_id as workspace_id) ───────────────
 
 @router.get("/{space_id}/memory")
@@ -574,6 +635,15 @@ async def list_receipts(slug: str, space_id: str, agent: dict = Depends(get_agen
 
 # ── Research proxy (intel endpoints) ────────────────────────────────────────────
 
+RESEARCH_ALIASES = {
+    "alpha": "alpha",
+    "signals": "signals",
+    "wallet": "wallet-labels",
+    "degen": "degen/top5",
+    "narratives": "narratives/hot",
+    "watch": "watchlist",
+}
+
 @router.get("/{space_id}/research/{path:path}")
 async def research_proxy(
     slug: str, space_id: str, path: str,
@@ -588,6 +658,10 @@ async def research_proxy(
     Upstream status codes are preserved rather than swallowed.
     """
     await _member_space(slug, space_id, agent)
+    # G9: the Research tab's sub-tabs are names, not intel paths. Four of
+    # six 404'd because they were proxied verbatim; this maps each name to
+    # the route that serves it. A full path still passes through unchanged.
+    path = RESEARCH_ALIASES.get(path.strip("/"), path)
     params = dict(request.query_params)
     headers = {
         "Authorization": request.headers.get("Authorization", ""),

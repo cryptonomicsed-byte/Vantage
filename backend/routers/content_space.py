@@ -18,7 +18,10 @@ from ..db import get_db
 from ..deps import get_agent
 from ..space_provisioning import provision_space_channel
 from ..work_states import envelope
-from ..guild_access import require_member, require_not_claimant, require_owner_or_staff
+from ..task_events import emit_for_space
+from ..guild_access import (
+    require_member, require_not_claimant, require_owner_or_staff, require_space_capability,
+)
 from ..space_tasks import DEFAULT_LEASE_MINUTES, claim_sql, clamped_lease, submit_sql
 
 logger = logging.getLogger(__name__)
@@ -28,6 +31,35 @@ router = APIRouter(prefix="/api/guilds/{slug}/content-spaces", tags=["content-sp
 # Content keeps its own status words for now; G3 maps them onto the shared
 # vocabulary. open -> claimed -> review -> accepted / back to open.
 S_OPEN, S_CLAIMED, S_REVIEW, S_DONE = "brief_submitted", "in_production", "in_review", "published"
+
+#: Providers a content space can bind. Each must be reachable through the
+#: MCP hub before the Providers tab offers it; an unknown name is a 422, not
+#: a silent string.
+CONTENT_PROVIDERS = ("vantage_anvil", "higgsfield", "heygen")
+
+#: Asset publish status machine (G10): draft -> scheduled -> published,
+#: draft -> published. Nothing moves backwards except back to draft.
+ASSET_TRANSITIONS = {
+    "draft": {"scheduled", "published"},
+    "scheduled": {"published", "draft"},
+    "published": set(),
+}
+
+
+async def init_content_db() -> None:
+    """Columns the publish pipeline writes. Tolerant ALTERs."""
+    async with get_db() as db:
+        for ddl in (
+            "ALTER TABLE content_assets ADD COLUMN scheduled_at TEXT DEFAULT NULL",
+            "ALTER TABLE content_assets ADD COLUMN published_ts INTEGER DEFAULT NULL",
+            "ALTER TABLE content_assets ADD COLUMN published_by_agent_id INTEGER DEFAULT NULL",
+            "ALTER TABLE content_assets ADD COLUMN review_note TEXT DEFAULT ''",
+        ):
+            try:
+                await db.execute(ddl)
+            except Exception:
+                pass
+        await db.commit()
 
 
 async def _get_space(space_id: str, slug: str) -> dict:
@@ -90,6 +122,8 @@ async def create_content_space(
     mcp_provider = body.mcp_provider
     series_id = body.series_id
     await require_member(slug, agent)
+    if mcp_provider not in CONTENT_PROVIDERS:
+        raise HTTPException(422, f"mcp_provider must be one of {', '.join(CONTENT_PROVIDERS)}")
     space_id = str(uuid.uuid4())
     now = int(time.time())
     async with get_db() as db:
@@ -121,6 +155,38 @@ async def delete_content_space(slug: str, space_id: str, agent: dict = Depends(g
         await db.execute("DELETE FROM content_spaces WHERE id=?", (space_id,))
         await db.commit()
     return {"ok": True}
+
+
+class UpdateContentSpaceBody(BaseModel):
+    name: Optional[str] = Field(None, max_length=120)
+    mcp_provider: Optional[str] = Field(None)
+
+
+@router.patch("/{space_id}")
+async def update_content_space(
+    slug: str, space_id: str,
+    agent: dict = Depends(get_agent),
+    body: Optional[UpdateContentSpaceBody] = None,
+):
+    """Rename the space or bind its provider (the Providers tab). Owner or
+    guild staff. The provider must be one the MCP hub knows."""
+    body = body or UpdateContentSpaceBody()
+    space = await _member_space(slug, space_id, agent)
+    await require_owner_or_staff(slug, agent, space.get("created_by_agent_id"), "this content space")
+    updates: dict = {}
+    if body.name:
+        updates["name"] = body.name
+    if body.mcp_provider is not None:
+        if body.mcp_provider not in CONTENT_PROVIDERS:
+            raise HTTPException(422, f"mcp_provider must be one of {', '.join(CONTENT_PROVIDERS)}")
+        updates["mcp_provider"] = body.mcp_provider
+    if not updates:
+        raise HTTPException(422, "nothing to update")
+    set_clause = ", ".join(f"{k}=?" for k in updates)
+    async with get_db() as db:
+        await db.execute(f"UPDATE content_spaces SET {set_clause} WHERE id=?", (*updates.values(), space_id))
+        await db.commit()
+    return {"ok": True, **updates, "id": space_id}
 
 
 @router.post("/{space_id}/provision")
@@ -253,7 +319,8 @@ async def create_task(
     priority = body.priority
     kind_tag = body.kind_tag
     project_id = body.project_id
-    await _member_space(slug, space_id, agent)
+    space = await _member_space(slug, space_id, agent)
+    await require_space_capability(slug, space, agent, "post")
     task_id = str(uuid.uuid4())
     now = int(time.time())
     # Store project_id in kind_tag as "project:{id}" prefix if given
@@ -264,6 +331,8 @@ async def create_task(
             (task_id, space_id, slug, title, description, S_OPEN, priority, agent["id"], effective_kind, now, now),
         )
         await db.commit()
+    await emit_for_space(guild_slug=slug, table="content_spaces", space_id=space_id, event="created",
+                         kind="vtask", ref_id=task_id, actor=agent, title=title)
     return {"id": task_id, "status": S_OPEN}
 
 
@@ -273,7 +342,8 @@ async def claim_task(slug: str, space_id: str, task_id: str,
                      agent: dict = Depends(get_agent)):
     """Take a lease on an open task. Same rule as the trading space: one
     atomic UPDATE, so a claim cannot be stolen while it is live."""
-    await _member_space(slug, space_id, agent)
+    space = await _member_space(slug, space_id, agent)
+    await require_space_capability(slug, space, agent, "claim")
     lease = clamped_lease(lease_minutes)
     now = int(time.time())
     async with get_db() as db:
@@ -293,6 +363,8 @@ async def claim_task(slug: str, space_id: str, task_id: str,
         if row["status"] == S_CLAIMED:
             raise HTTPException(409, f"Task is claimed by another agent until {row['claim_expires_at']}")
         raise HTTPException(400, "Task is not claimable")
+    await emit_for_space(guild_slug=slug, table="content_spaces", space_id=space_id, event="claimed",
+                         kind="vtask", ref_id=task_id, actor=agent, note=f"lease until {row['claim_expires_at']}")
     return {"ok": True, "status": S_CLAIMED, "claim_expires_at": row["claim_expires_at"]}
 
 
@@ -339,6 +411,8 @@ async def submit_task(
             (artifact_id, task_id, agent["id"], space_id, artifact_kind, title, content_text, content_uri, "submitted", now, now),
         )
         await db.commit()
+    await emit_for_space(guild_slug=slug, table="content_spaces", space_id=space_id, event="delivered",
+                         kind="vtask", ref_id=task_id, actor=agent, title=title, note=f"artifact {artifact_id}")
     return {"ok": True, "artifact_id": artifact_id}
 
 
@@ -348,7 +422,7 @@ async def _task_for_review(slug: str, space_id: str, task_id: str, agent: dict) 
     space = await _member_space(slug, space_id, agent)
     task = await _get_task(slug, space_id, task_id)
     require_not_claimant(task, agent)
-    await require_owner_or_staff(slug, agent, space.get("created_by_agent_id"), "this content space")
+    await require_space_capability(slug, space, agent, "review")
     return task
 
 
@@ -378,6 +452,8 @@ async def accept_task(
             (note, now, task_id),
         )
         await db.commit()
+    await emit_for_space(guild_slug=slug, table="content_spaces", space_id=space_id, event="published",
+                         kind="vtask", ref_id=task_id, actor=agent, title=task["title"], note=note)
     return {"ok": True, "status": S_DONE}
 
 
@@ -407,6 +483,8 @@ async def reject_task(
             (note, now, task_id),
         )
         await db.commit()
+    await emit_for_space(guild_slug=slug, table="content_spaces", space_id=space_id, event="rejected",
+                         kind="vtask", ref_id=task_id, actor=agent, title=task["title"], note=note)
     return {"ok": True, "status": S_OPEN}
 
 
@@ -456,6 +534,63 @@ async def create_asset(
         )
         await db.commit()
     return {"id": asset_id, "kind": kind, "status": "draft"}
+
+
+class UpdateAssetBody(BaseModel):
+    status: Optional[str] = Field(None)
+    scheduled_at: Optional[str] = Field(None)
+    title: Optional[str] = Field(None, max_length=200)
+    review_note: Optional[str] = Field(None, max_length=1000)
+
+
+@router.patch("/{space_id}/assets/{asset_id}")
+async def update_asset(
+    slug: str, space_id: str, asset_id: str,
+    agent: dict = Depends(get_agent),
+    body: Optional[UpdateAssetBody] = None,
+):
+    """The publish status machine (the Publish tab): draft -> scheduled ->
+    published. Publishing needs `review` on the space and is recorded with
+    who did it and when; a scheduled asset carries its scheduled_at."""
+    body = body or UpdateAssetBody()
+    space = await _member_space(slug, space_id, agent)
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM content_assets WHERE id=? AND space_id=?", (asset_id, space_id)) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Asset not found")
+    asset = dict(row)
+    updates: dict = {}
+    now = int(time.time())
+    if body.title:
+        updates["title"] = body.title
+    if body.review_note is not None:
+        updates["review_note"] = body.review_note
+    if body.scheduled_at is not None:
+        updates["scheduled_at"] = body.scheduled_at
+    if body.status is not None:
+        if body.status not in ASSET_TRANSITIONS:
+            raise HTTPException(422, f"status must be one of {', '.join(ASSET_TRANSITIONS)}")
+        if body.status != asset["status"]:
+            if body.status not in ASSET_TRANSITIONS[asset["status"]]:
+                raise HTTPException(409, f"an asset cannot go from {asset['status']!r} to {body.status!r}")
+            if body.status in ("scheduled", "published"):
+                await require_space_capability(slug, space, agent, "review")
+            if body.status == "scheduled" and not (body.scheduled_at or asset.get("scheduled_at")):
+                raise HTTPException(422, "scheduling needs scheduled_at")
+            updates["status"] = body.status
+            if body.status == "published":
+                updates["published_ts"] = now
+                updates["published_by_agent_id"] = agent["id"]
+    if not updates:
+        raise HTTPException(422, "nothing to update")
+    set_clause = ", ".join(f"{k}=?" for k in updates)
+    async with get_db() as db:
+        await db.execute(f"UPDATE content_assets SET {set_clause} WHERE id=? AND space_id=?",
+                         (*updates.values(), asset_id, space_id))
+        await db.commit()
+    return {"ok": True, "id": asset_id, **updates}
 
 
 # ── Memory (reuse workspace_memory) ─────────────────────────────────────────────
