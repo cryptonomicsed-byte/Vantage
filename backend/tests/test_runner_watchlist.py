@@ -101,3 +101,49 @@ async def test_rebuild_with_radar_separate_source(tmp_path, monkeypatch):
 async def test_endpoint(client):
     r = await client.get("/api/intel/runner-watchlist")
     assert r.status_code == 200 and "entities" in r.json() and "radar" in r.json()
+
+
+# ── single-runner candidates (live corpus is too small for 2-runner clusters) ──
+
+def test_compute_singles_keeps_only_single_runner_entities():
+    buys = [_buy("R1", "A", 1), _buy("R2", "A", 1), _buy("R3", "SOLO", 1, sol=5.0),
+            _buy("R4", "WEAK", 90, sol=0.01), _buy("R5", "BOT", 1)]
+    labels = {"BOT": ["bot"]}
+    singles = rw.compute_singles(buys, labels, NOW, EX)
+    ents = {e["entity"] for e in singles}
+    assert "wallet:A" not in ents          # 2 runners -> confirmed, not a candidate
+    assert "wallet:SOLO" in ents and "wallet:BOT" not in ents
+    assert singles[0]["runners"] == 1
+    # the confirmed list is unchanged by the new function
+    assert [e["entity"] for e in rw.compute(buys, labels, NOW, EX)] == ["wallet:A"]
+
+
+@pytest.mark.asyncio
+async def test_watchlist_for_precedence_runner_then_candidate_then_radar(tmp_path, monkeypatch):
+    monkeypatch.setattr(rw, "RADAR_PATH", str(tmp_path / "none.json"))
+    async with get_db() as db:
+        for d in rw.DDL:
+            await db.execute(d)
+        await db.execute("DELETE FROM runner_watchlist WHERE entity IN ('wallet:C','wallet:R')")
+        await db.execute("DELETE FROM runner_watchlist_candidates WHERE entity IN ('wallet:C','radar:CANDONLY')")
+        await db.execute("DELETE FROM runner_watchlist_wallets WHERE wallet IN ('C','R','CANDONLY','ORPH')")
+        await db.execute("DELETE FROM radar_wallets WHERE wallet IN ('RAD','CANDONLY')")
+        await db.executemany(
+            "INSERT INTO runner_watchlist (entity, wallets, score, runners, runner_mints, contributions, "
+            "labels, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            [("wallet:C", '["C"]', 1.4, 2, '["m1","m2"]', '[]', '[]', 1),
+             ("wallet:R", '["R"]', 0.9, 2, '["m1","m2"]', '[]', '[]', 1)])
+        await db.execute("INSERT INTO runner_watchlist_candidates (entity, wallets, score, runners, "
+                         "runner_mints, contributions, labels, updated_at, symbol) VALUES "
+                         "('wallet:C','[\"C\"]',0.7,1,'[\"m9\"]','[]','[]',1,'S')")
+        await db.execute("INSERT INTO radar_wallets (wallet, conviction, tier, evidence, generated_at, "
+                         "loaded_at) VALUES ('CANDONLY', 0.6, 'B', NULL, NULL, 1)")
+        await db.executemany("INSERT INTO runner_watchlist_wallets (wallet, entity) VALUES (?,?)",
+                             [("C", "wallet:C"), ("R", "wallet:R"), ("CANDONLY", "radar:CANDONLY"),
+                              ("ORPH", "wallet:NOPE")])
+        await db.commit()
+        got = await rw.watchlist_for(db, ["C", "R", "CANDONLY", "ORPH"])
+    assert got["C"]["source"] == "runner" and got["C"]["score"] == 1.4 and got["C"]["unconfirmed"] is False
+    assert got["R"]["source"] == "runner"
+    assert got["CANDONLY"]["source"] == "radar" and got["CANDONLY"]["unconfirmed"] is True
+    assert "ORPH" not in got
