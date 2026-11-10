@@ -1,0 +1,127 @@
+name: services
+
+# CI for the non-Python services. Each job only runs when its paths change
+# (dorny/paths-filter), so Python-only PRs skip them. Editing this file runs all.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      rpc_gate: ${{ steps.filter.outputs.rpc_gate }}
+      feed_supervisor: ${{ steps.filter.outputs.feed_supervisor }}
+      galaxy_layout: ${{ steps.filter.outputs.galaxy_layout }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rpc_gate:
+              - 'services/rpc_gate/**'
+              - '.github/workflows/services.yml'
+            feed_supervisor:
+              - 'services/feed_supervisor/**'
+              - '.github/workflows/services.yml'
+            galaxy_layout:
+              - 'services/galaxy_layout/**'
+              - 'frontend/src/components/galaxyLayout*.ts'
+              - 'frontend/public/wasm/**'
+              - 'frontend/scripts/galaxy-*'
+              - 'frontend/scripts/build-galaxy-wasm.sh'
+              - '.github/workflows/services.yml'
+
+  rpc-gate:
+    needs: changes
+    if: needs.changes.outputs.rpc_gate == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/rpc_gate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: services/rpc_gate/go.mod
+          cache: false
+      - name: go vet + go test -race
+        run: go vet ./... && go test -race -count=1 ./...
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Cross-language test (Python api_key_pool <-> Go gateway)
+        # Uses the vendored copy of /opt/ares/api_key_pool.py under tests/fixtures;
+        # the test re-points it at temp config/state files and fake loopback RPCs.
+        env:
+          ARES_KEY_POOL_PY: ${{ github.workspace }}/services/rpc_gate/tests/fixtures/api_key_pool.py
+        run: python3 tests/crosslang_test.py
+
+  feed-supervisor:
+    needs: changes
+    if: needs.changes.outputs.feed_supervisor == 'true'
+    # ubuntu-22.04: OTP 25 prebuilt images are available for it.
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: services/feed_supervisor
+    env:
+      MIX_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '25.3'
+          elixir-version: '1.14.5'
+      - name: mix deps.get && mix test
+        run: mix deps.get && mix test
+
+  galaxy-layout:
+    needs: changes
+    if: needs.changes.outputs.galaxy_layout == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: cargo test
+        run: cargo test --manifest-path services/galaxy_layout/Cargo.toml
+      - name: Rebuild wasm and compare with committed copy
+        id: rebuild
+        run: |
+          committed="$RUNNER_TEMP/galaxy_layout.committed.wasm"
+          rebuilt="$RUNNER_TEMP/galaxy_layout.rebuilt.wasm"
+          cp frontend/public/wasm/galaxy_layout.wasm "$committed"
+          frontend/scripts/build-galaxy-wasm.sh
+          cp frontend/public/wasm/galaxy_layout.wasm "$rebuilt"
+          cp "$committed" frontend/public/wasm/galaxy_layout.wasm
+          rustc --version
+          sha256sum "$committed" "$rebuilt"
+          if cmp -s "$committed" "$rebuilt"; then
+            echo "identical=true" >> "$GITHUB_OUTPUT"
+            echo "rebuilt wasm is byte-identical to the committed one"
+          else
+            echo "identical=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::rebuilt galaxy_layout.wasm differs from the committed copy (toolchain drift?); running parity against both"
+          fi
+          echo "rebuilt=$rebuilt" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Parity (committed wasm vs galaxyLayout.ts)
+        run: node --no-warnings frontend/scripts/galaxy-wasm-parity.mjs
+      - name: Parity (rebuilt wasm vs galaxyLayout.ts)
+        if: steps.rebuild.outputs.identical != 'true'
+        run: |
+          cp "${{ steps.rebuild.outputs.rebuilt }}" frontend/public/wasm/galaxy_layout.wasm
+          node --no-warnings frontend/scripts/galaxy-wasm-parity.mjs
+          git checkout -- frontend/public/wasm/galaxy_layout.wasm
