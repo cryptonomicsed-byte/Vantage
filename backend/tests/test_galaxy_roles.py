@@ -162,7 +162,11 @@ async def test_watchlist_for_keeps_radar_only_wallets():
 
 
 @pytest.mark.asyncio
-async def test_moneyflow_wallet_node_carries_watchlist(client, registered_agent):
+async def test_moneyflow_wallet_node_carries_watchlist(client, registered_agent, monkeypatch):
+    # money_flow reads the wallet blacklist from its own sqlite file (DB_PATH
+    # on the VPS), which doesn't exist on a CI runner -> stub it empty here.
+    from backend import wallet_blacklist as wb
+    monkeypatch.setattr(wb, "get_blacklisted_addresses", lambda *_a, **_k: set())
     async with get_db() as db:
         await db.execute(TWR)
         await _seed_watch(db)
