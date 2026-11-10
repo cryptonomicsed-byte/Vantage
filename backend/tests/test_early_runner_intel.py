@@ -99,3 +99,21 @@ async def test_watchlist_ignores_dust_and_unbacked_runners(tmp_path, monkeypatch
     assert "wallet:DUSTBOT" not in ents and ents.get("wallet:REALW") == 2   # fake runner not counted
     contrib = next(c for e, _, c in rows if e == "wallet:REALW")
     assert '"rank": 1' in contrib                                            # re-ranked among real buys
+
+
+
+@pytest.mark.asyncio
+async def test_slow_curve_coverage_falls_back_to_last_reading(monkeypatch):
+    """Live: the overview showed the listener 'off' when coverage() was slow."""
+    from backend import curve_listener as cl
+    good = {"enabled": True, "last_event_age_s": 1.0, "trades_1h": 5, "mints_24h": 2, "created_seen_24h": 1,
+            "db_bytes": 9, "state": {"gaps": [1, 2]}}
+    monkeypatch.setattr(cl, "coverage", lambda: good)
+    first = await eri._curve_summary()
+    assert first["enabled"] and first["gaps"] == 2 and first["reading_age_s"] == 0
+
+    def boom():
+        raise TimeoutError("slow")
+    monkeypatch.setattr(cl, "coverage", boom)
+    again = await eri._curve_summary()
+    assert again["enabled"] is True and again["trades_1h"] == 5 and again["reading_age_s"] >= 0

@@ -178,17 +178,37 @@ async def overview(limit: int = 50, include_unbacked: bool = False) -> Dict[str,
                                                  "label_mix", "first_row")}
         r["age_to_tier_s"] = (r["detected_at"] - r["first_seen"]) if r.get("first_seen") and r.get("detected_at") else None
     out["runners"] = runners
+    out["curve"] = await _curve_summary()
+    return out
+
+
+# Last good curve reading. coverage() scans a ~1 GB DB; right after a restart
+# or under write load it can exceed the wait, and the overview then reported
+# the listener "off" while it was live. A slow read returns the previous
+# reading with its age; null only if there has never been one.
+_CURVE_LAST: Dict[str, Any] = {}
+
+
+async def _curve_summary() -> Optional[Dict[str, Any]]:
+    import asyncio
     try:
-        import asyncio
         from . import curve_listener as cl
         cov = await asyncio.wait_for(asyncio.to_thread(cl.coverage), 20)
         if cov:
-            out["curve"] = {k: cov.get(k) for k in ("enabled", "last_event_age_s", "trades_1h", "mints_24h",
-                                                    "created_seen_24h", "db_bytes")}
-            out["curve"]["gaps"] = len((cov.get("state") or {}).get("gaps") or cov.get("gaps") or [])
+            v = {k: cov.get(k) for k in ("enabled", "last_event_age_s", "trades_1h", "mints_24h",
+                                         "created_seen_24h", "db_bytes")}
+            v["gaps"] = len((cov.get("state") or {}).get("gaps") or cov.get("gaps") or [])
+            _CURVE_LAST.update(at=time.time(), val=v)
+            return {**v, "reading_age_s": 0}
     except Exception:  # noqa: BLE001 -- the overview never fails on the listener
-        out["curve"] = None
-    return out
+        pass
+    if _CURVE_LAST:
+        age = time.time() - _CURVE_LAST["at"]
+        v = dict(_CURVE_LAST["val"])
+        if isinstance(v.get("last_event_age_s"), (int, float)):
+            v["last_event_age_s"] += age
+        return {**v, "reading_age_s": round(age)}
+    return None
 
 
 async def _has(db, table: str) -> bool:

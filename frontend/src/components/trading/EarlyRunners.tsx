@@ -32,7 +32,7 @@ type Overview = {
   watchlist_entities: number
   confluence_24h?: number
   buyer_rows: { total: number; buy?: number; dust?: number; liquidity?: number }
-  curve: { enabled: boolean; last_event_age_s: number | null; trades_1h: number; mints_24h: number; created_seen_24h: number; db_bytes: number; gaps: number } | null
+  curve: { enabled: boolean; last_event_age_s: number | null; trades_1h: number; mints_24h: number; created_seen_24h: number; db_bytes: number; gaps: number; reading_age_s?: number } | null
   runners: RunnerRow[]
 }
 type BuyerRow = {
@@ -101,7 +101,7 @@ function OverviewTab({ o, onOpen }: { o: Overview; onOpen: (m: string) => void }
         <Stat label="Watchlist" value={o.watchlist_entities} sub="entities (2+ real runners)" warn={o.watchlist_entities === 0} />
         <Stat label="Confluence 24h" value={o.confluence_24h ?? '—'} sub="pings posted (≤ 0.69 conviction)" />
         <Stat label="Curve feed" value={o.curve ? (feedStale ? 'stale' : 'live') : 'off'} warn={!!feedStale || !o.curve}
-          sub={o.curve ? `last event ${secs(o.curve.last_event_age_s)} ago · ${o.curve.trades_1h.toLocaleString()} trades/h · ${o.curve.gaps} gaps` : 'listener not reporting'} />
+          sub={o.curve ? `last event ${secs(o.curve.last_event_age_s)} ago · ${o.curve.trades_1h.toLocaleString()} trades/h · ${o.curve.gaps} gaps${o.curve.reading_age_s ? ` · reading ${secs(o.curve.reading_age_s)} old (coverage slow)` : ''}` : 'no coverage reading yet'} />
       </div>
 
       {unbacked > 0 && (
