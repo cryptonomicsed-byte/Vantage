@@ -112,21 +112,36 @@ async def test_top_wallets_endpoint_end_to_end(monkeypatch):
         return {"id": 1}
     monkeypatch.setattr(degen, "get_agent", ok)
     async with degen._db() as db:
-        await db.execute("CREATE TABLE IF NOT EXISTS wallet_reputation (wallet_address TEXT PRIMARY KEY, "
-                         "copy_trade_score REAL, deployer_count INT, tokens_tracked INT, updated_at TEXT)")
+        # the live schema (wallet_learner.py) -- a cut-down table here broke
+        # other suites that share the test DB and insert display_name etc.
+        await db.execute("""CREATE TABLE IF NOT EXISTS wallet_reputation (
+            wallet_address TEXT PRIMARY KEY, chain TEXT DEFAULT 'solana', display_name TEXT DEFAULT '',
+            name_source TEXT DEFAULT '', name_confidence REAL DEFAULT 0, copy_trade_score REAL DEFAULT 0,
+            first_buyer_count INTEGER DEFAULT 0, top_trader_count INTEGER DEFAULT 0,
+            top_holder_count INTEGER DEFAULT 0, deployer_count INTEGER DEFAULT 0,
+            tokens_tracked INTEGER DEFAULT 0, currently_hot_tokens INTEGER DEFAULT 0,
+            reasoning TEXT DEFAULT '', updated_at TEXT DEFAULT (datetime('now')),
+            verified_call_count INTEGER DEFAULT 0, verified_avg_return_pct REAL DEFAULT 0)""")
         # other suites create an older wallet_reputation; the live schema comes
         # from wallet_learner.py and has these columns
         cur = await db.execute("PRAGMA table_info(wallet_reputation)")
         have = {(r["name"] if isinstance(r, dict) else r[1]) for r in await cur.fetchall()}
-        for col, decl in (("deployer_count", "INT"), ("tokens_tracked", "INT"), ("updated_at", "TEXT")):
+        for col, decl in (("deployer_count", "INT"), ("tokens_tracked", "INT"), ("updated_at", "TEXT"),
+                          ("first_buyer_count", "INT"), ("top_trader_count", "INT")):
             if col not in have:
                 await db.execute(f"ALTER TABLE wallet_reputation ADD COLUMN {col} {decl}")
-        await db.execute("DELETE FROM wallet_reputation WHERE wallet_address IN ('T_BOT','T_TRADER')")
+        await db.execute("DELETE FROM wallet_reputation WHERE wallet_address IN "
+                         "('T_BOT','T_TRADER','T_SMALLDEV','T_HOLDER')")
         await db.execute("INSERT INTO wallet_reputation (wallet_address, copy_trade_score, deployer_count, "
-                         "tokens_tracked, updated_at) VALUES ('T_BOT', 99999, 2237, 2237, '2026-10-27T23:09:36Z'), "
-                         "('T_TRADER', 99998, 0, 40, '2026-10-27T23:09:36Z')")
+                         "tokens_tracked, updated_at, first_buyer_count, top_trader_count) VALUES "
+                         "('T_BOT', 99999, 2237, 2237, '2026-10-27T23:09:36Z', 0, 0), "
+                         "('T_TRADER', 99998, 0, 40, '2026-10-27T23:09:36Z', 3, 1), "
+                         "('T_SMALLDEV', 99997, 19, 19, '2026-10-27T23:09:36Z', 0, 0), "
+                         "('T_HOLDER', 99996, 0, 12, '2026-10-27T23:09:36Z', 0, 0)")
         await db.commit()
     out = await degen.top_wallets_to_copy(limit=50, x_agent_key="k")
     addrs = [w["wallet_address"] for w in out["wallets"]]
-    assert "T_TRADER" in addrs and "T_BOT" not in addrs
+    assert "T_TRADER" in addrs
+    assert not {"T_BOT", "T_SMALLDEV", "T_HOLDER"} & set(addrs)   # never traded -> not copyable
+    assert out["eligible_traders"] >= 1 and out["scored_wallets"] >= 4
     assert out["excluded_mass_deployers"] >= 1 and out["scores_updated_at"]

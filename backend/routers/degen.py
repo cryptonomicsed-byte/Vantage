@@ -624,6 +624,12 @@ MASS_DEPLOYER_MIN = 20
 _MASS_DEPLOYER_SQL = (f"(COALESCE(deployer_count,0) >= {MASS_DEPLOYER_MIN} "
                       "AND COALESCE(deployer_count,0) * 2 >= COALESCE(tokens_tracked,0))")
 
+# A wallet to copy has to have traded: been an early buyer or a top trader on
+# at least one token. Live, 188k of 202k scored wallets earn their score
+# almost entirely from deploying (or holding what they deployed); 62 have
+# any trading role. Without this the list is launch bots ranked by output.
+_HAS_TRADED_SQL = "(COALESCE(first_buyer_count,0) + COALESCE(top_trader_count,0) > 0)"
+
 # Short response caches for the two Top 5 endpoints that took ~20 s each
 # (per-token conviction joins / multi-platform fetches on every request).
 # Auth is checked before the cache, so a cached body never skips it.
@@ -659,18 +665,22 @@ async def top_wallets_to_copy(limit: int=20, x_agent_key: str=Header(...)):
     async with _db() as db:
         cur = await db.execute(f"""
             SELECT * FROM wallet_reputation
-            WHERE copy_trade_score > 0 AND NOT {_MASS_DEPLOYER_SQL}
+            WHERE copy_trade_score > 0 AND NOT {_MASS_DEPLOYER_SQL} AND {_HAS_TRADED_SQL}
             ORDER BY copy_trade_score DESC LIMIT ?
         """, (limit,))
         rows = await cur.fetchall()
         meta = await (await db.execute(f"""
-            SELECT MAX(updated_at) AS upd, SUM(CASE WHEN {_MASS_DEPLOYER_SQL} THEN 1 ELSE 0 END) AS excl
+            SELECT MAX(updated_at) AS upd, SUM(CASE WHEN {_MASS_DEPLOYER_SQL} THEN 1 ELSE 0 END) AS excl,
+                   SUM(CASE WHEN {_HAS_TRADED_SQL} AND NOT {_MASS_DEPLOYER_SQL} THEN 1 ELSE 0 END) AS traders,
+                   COUNT(*) AS scored
             FROM wallet_reputation WHERE copy_trade_score > 0""")).fetchone()
     # _db() rows are dicts; read by name, never by position
     meta = dict(meta) if meta is not None and not isinstance(meta, (tuple, list)) \
-        else {"upd": meta[0] if meta else None, "excl": meta[1] if meta else 0}
+        else {"upd": meta[0] if meta else None, "excl": meta[1] if meta else 0,
+              "traders": meta[2] if meta else 0, "scored": meta[3] if meta else 0}
     return {"wallets": rows, "count": len(rows), "scores_updated_at": meta.get("upd"),
-            "excluded_mass_deployers": meta.get("excl") or 0}
+            "excluded_mass_deployers": meta.get("excl") or 0,
+            "eligible_traders": meta.get("traders") or 0, "scored_wallets": meta.get("scored") or 0}
 
 # ════════════════════════════════════════════════════════════════
 # CONVICTION SCORE — "% of this token held/traded by known-good wallets."
