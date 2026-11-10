@@ -39,6 +39,9 @@ FIRST_N = 100
 CURVE_MIN_BUYERS = int(os.environ.get("RUNNER_TRACE_CURVE_MIN_BUYERS", "20"))
 MAX_SIGS = int(os.environ.get("RUNNER_TRACE_MAX_SIGS", "100000"))
 PACE_S = float(os.environ.get("RUNNER_TRACE_PACE_S", "1.0"))
+# how many of the oldest txs a trace may read to find FIRST_N real buys
+SCAN_SIGS = int(os.environ.get("RUNNER_TRACE_SCAN_SIGS", "600"))
+REAL_MIN = 20  # a finished RPC trace with fewer real buys is re-walked once
 # Free public RPC by default: the Helius key here has run out of quota, and a
 # paced (~1 rps) walk is well within the public endpoint's limits.
 TRACE_RPC = os.environ.get("RUNNER_TRACE_RPC", "https://api.mainnet-beta.solana.com")
@@ -78,11 +81,27 @@ async def _ensure(db) -> None:
             "WHERE status='done' AND source='curve' AND buyers < ?", (CURVE_MIN_BUYERS,))
     except Exception:  # noqa: BLE001 -- columns not there yet on a fresh table
         pass
-    for col, decl in (("resume_before", "TEXT"), ("resumes", "INTEGER NOT NULL DEFAULT 0")):
+    for col, decl in (("resume_before", "TEXT"), ("resumes", "INTEGER NOT NULL DEFAULT 0"),
+                      ("dust_rescanned", "INTEGER NOT NULL DEFAULT 0")):
         try:  # a queue table from an earlier build lacks these
             await db.execute(f"ALTER TABLE runner_trace_queue ADD COLUMN {col} {decl}")
+            if col == "dust_rescanned":
+                await requeue_dust_traces(db)   # one-time, when this build first runs
         except Exception:  # noqa: BLE001 -- already there
             pass
+
+
+async def requeue_dust_traces(db) -> int:
+    """One-time migration: RPC traces that finished before real buys counted
+    toward FIRST_N, with fewer than REAL_MIN real buys, are re-walked (now
+    reading up to SCAN_SIGS txs). Never re-applies to traces finished later."""
+    from .early_runner_intel import DUST_SOL
+    cur = await db.execute(
+        "UPDATE runner_trace_queue SET status='pending', attempts=0, resume_before=NULL, dust_rescanned=1 "
+        "WHERE status='done' AND source='rpc' AND dust_rescanned=0 AND "
+        "(SELECT COUNT(*) FROM runner_early_buyers b WHERE b.mint=runner_trace_queue.mint AND b.sol >= ?) < ?",
+        (DUST_SOL, REAL_MIN))
+    return cur.rowcount or 0
 
 
 async def enqueue_new_runners(db) -> int:
@@ -142,7 +161,8 @@ async def rpc_first_buyers(mint: str, resume_before: Optional[str] = None,
     out = await backtrack_early_buyers(mint, max_buyers=FIRST_N, max_total=MAX_SIGS,
                                        oldest_first=True, use_cache=False, pace_s=PACE_S,
                                        rpc_url=TRACE_RPC or None,
-                                       resume_before=resume_before, resume_count=resume_count)
+                                       resume_before=resume_before, resume_count=resume_count,
+                                       scan_sigs=SCAN_SIGS)
     if out.get("error"):
         raise RuntimeError(out["error"])
     buyers = [{"wallet": b["wallet_address"], "rank": b["entry_rank"], "entry_ts": b.get("entry_ts"),

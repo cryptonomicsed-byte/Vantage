@@ -143,10 +143,13 @@ async def test_walk_resumes_from_cursor(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_enqueue_and_endpoints(client, registered_agent):
     async with get_db() as db:
-        from backend.runner_detect import DDL
-        await db.execute(DDL)
-        await db.execute("INSERT OR IGNORE INTO runner_tokens (mint, tier_usd, tier_weight, peak_mcap_usd, peak_at, "
-                         "detected_at) VALUES ('QQ', 1e6, 1.0, 1e6, 1, 1)")
+        from backend.runner_detect import ensure_table
+        await ensure_table(db)
+        await rt._ensure(db)
+        await db.execute("DELETE FROM runner_trace_queue WHERE mint='QQ'")
+        # only liquidity-backed runners are queued (#134)
+        await db.execute("INSERT OR REPLACE INTO runner_tokens (mint, tier_usd, tier_weight, peak_mcap_usd, peak_at, "
+                         "detected_at, backed, liq_usd) VALUES ('QQ', 1e6, 1.0, 1e6, 1, 1, 1, 90000)")
         await db.commit()
         assert await rt.enqueue_new_runners(db) >= 1
     assert (await client.post("/api/intel/runners/QQ/trace")).status_code == 401
@@ -256,3 +259,57 @@ async def test_thin_curve_traces_are_requeued():
         st = dict(await (await db.execute(
             "SELECT mint, status FROM runner_trace_queue WHERE mint IN ('OLDTHIN','FULL')")).fetchall())
     assert st == {"OLDTHIN": "pending", "FULL": "done"}
+
+
+
+@pytest.mark.asyncio
+async def test_dust_does_not_use_up_the_first_n(monkeypatch):
+    """Live: GTA6's oldest 100 txs were 51 sub-0.01 SOL bot trades and one
+    real buy, and the walk stopped there. Real buys alone now fill FIRST_N,
+    reading up to scan_sigs txs; majors/funders are chosen from real buys."""
+    monkeypatch.setattr(eb, "_helius_key", lambda: "k")
+    base = _fake_rpc(3000, lambda i: f"w{i}")
+
+    async def fake(client, key, method, params):
+        out = await base(client, key, method, params)
+        if method == "getTransaction" and int(params[0][1:]) >= 2940:     # the oldest 60: dust
+            out["meta"]["postBalances"] = [3_000_000_000 - 1_500_000]       # 0.0015 SOL
+        return out
+    monkeypatch.setattr(eb, "_rpc", fake)
+    looked_up = []
+
+    async def funder(client, key, wallet, retries=0):
+        looked_up.append(wallet)
+        return None
+    monkeypatch.setattr(eb, "_find_funder", funder)
+    out = await eb.backtrack_early_buyers("MINT", max_buyers=5, oldest_first=True, use_cache=False,
+                                          max_total=100_000, scan_sigs=200)
+    from backend.early_runner_intel import classify
+    real = [b for b in out["buyers"] if classify({"sol": b["sol_spent"], "tokens": b["token_amount"]}) == "buy"]
+    assert len(real) == 5 and [b["wallet_address"] for b in real][0] == "w2939"
+    assert sum(1 for b in out["buyers"] if b["sol_spent"] < 0.01) == 60          # dust kept, classified
+    assert looked_up and all(int(w[1:]) < 2940 for w in looked_up)               # no funder calls on dust
+
+
+@pytest.mark.asyncio
+async def test_mostly_dust_rpc_trace_is_rewalked_once():
+    async with get_db() as db:
+        await rt._ensure(db)
+        await db.execute("DELETE FROM runner_trace_queue WHERE mint='DUSTY'")
+        await db.execute("DELETE FROM runner_early_buyers WHERE mint='DUSTY'")
+        await db.execute("INSERT INTO runner_trace_queue (mint, enqueued_at, status, attempts, source, buyers) "
+                         "VALUES ('DUSTY', 1, 'done', 1, 'rpc', 52)")
+        for i in range(52):
+            await db.execute("INSERT INTO runner_early_buyers (mint, wallet, rank, sol, source) "
+                             "VALUES ('DUSTY', ?, ?, ?, 'rpc')", (f"x{i}", i + 1, 0.105 if i == 0 else 0.0015))
+        await db.execute("UPDATE runner_trace_queue SET dust_rescanned=0 WHERE mint='DUSTY'")
+        await db.commit()
+        assert await rt.requeue_dust_traces(db) >= 1
+        q = await (await db.execute("SELECT status, dust_rescanned FROM runner_trace_queue WHERE mint='DUSTY'")).fetchone()
+        assert tuple(q) == ("pending", 1)
+        await db.execute("UPDATE runner_trace_queue SET status='done' WHERE mint='DUSTY'")
+        await db.commit()
+        await rt.requeue_dust_traces(db)                                            # only once
+        await rt._ensure(db)                                                        # reads never requeue
+        q = await (await db.execute("SELECT status FROM runner_trace_queue WHERE mint='DUSTY'")).fetchone()
+        assert q[0] == "done"
