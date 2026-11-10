@@ -1,0 +1,21 @@
+{
+  "workers": [
+    {
+      "name": "curve_listener",
+      "cmd": "/opt/ares/venv/bin/python",
+      "args": ["-m", "backend.curve_listener"],
+      "cwd": "/opt/ares/Vantage",
+      "env": {
+        "CURVE_LISTENER_ENABLED": "1",
+        "CURVE_USE_PUMPPORTAL": "0",
+        "VANTAGE_DATA_DIR": "/opt/ares/Vantage/data",
+        "PYTHONUNBUFFERED": "1"
+      },
+      "start_delay_ms": 5000,
+      "max_restarts": 20,
+      "restart_window_s": 600,
+      "kill_timeout_ms": 10000,
+      "backoff": {"initial_ms": 1000, "max_ms": 60000, "factor": 2, "reset_after_s": 120}
+    }
+  ]
+}
