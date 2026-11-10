@@ -82,7 +82,8 @@ async def test_backtest_on(monkeypatch):
     assert "unexpected" not in r["metrics"]
     assert r["params"] == {"hma_len": 200, "sl_mult": 2.5}  # clamped, unknown keys dropped
     assert str(calls[0].url) == "http://quant.test:9999/backtest"
-    assert json.loads(calls[0].content)["params"] == {"hma_len": 200, "sl_mult": 2.5}
+    # clamped user params + bars_per_year for the default 1d interval (365-day year)
+    assert json.loads(calls[0].content)["params"] == {"hma_len": 200, "sl_mult": 2.5, "bars_per_year": 365.0}
     r2 = await qc.backtest("btc", _candles(), {"hma_len": 9999, "sl_mult": "2.5", "evil": 1})
     assert r2["cached"] is True and len(calls) == 1
 
