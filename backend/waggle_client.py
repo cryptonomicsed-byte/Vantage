@@ -4,7 +4,7 @@ Waggle is a zero-dependency pheromone field: agents deposit decaying signals on
 resources so the swarm can discover hot tasks without a central scheduler.
 
 Environment:
-    WAGGLE_URL  Base URL of the waggle server (default "http://localhost:7778").
+    WAGGLE_URL  Base URL of the waggle server (default "http://127.0.0.1:7779").
                 Set in .env.example; leave empty to silently skip waggle calls.
 
 Typical call sites (fire-and-forget):
@@ -22,7 +22,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-WAGGLE_URL: str = os.environ.get("WAGGLE_URL", "http://localhost:7778").rstrip("/")
+WAGGLE_URL: str = os.environ.get("WAGGLE_URL", "http://127.0.0.1:7779").rstrip("/")
 
 
 def _enabled() -> bool:
