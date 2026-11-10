@@ -13,9 +13,16 @@ Two layers:
      any wallet you want excluded for a different reason (a known bot,
      a provider/router contract, etc.), addable via the API below.
 """
+import os
 import sqlite3
 
-DB_PATH = "/opt/ares/Vantage/data/vantage.db"
+from .config import settings
+
+# Derived from the same DATA_DIR the rest of the backend uses (VANTAGE_DATA_DIR),
+# instead of a literal server path: a hard-coded /opt/ares/... made every caller
+# outside production -- tests, CI -- open the LIVE database (or crash when it
+# isn't there, which is how the moneyflow test failed on a runner).
+DB_PATH = str(settings.DATA_DIR / "vantage.db")
 
 KNOWN_EXCHANGE_LABEL_PATTERNS = [
     "Binance", "Coinbase", "Kraken", "OKX", "Bybit", "FTX", "Alameda", "Huobi",
@@ -55,6 +62,8 @@ def get_blacklisted_addresses(chain: str = None) -> set:
     optionally filtered to one chain. Cheap — call per-request, not cached,
     since the list is small and correctness matters more than shaving a
     query here."""
+    if not os.path.exists(DB_PATH):
+        return set()   # no database here: there is no explicit list to honour
     conn = sqlite3.connect(DB_PATH, timeout=30)
     try:
         conn.execute(_BLACKLIST_DDL)
