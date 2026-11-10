@@ -38,6 +38,12 @@ Backup: CURVE_USE_PUMPPORTAL=1 reads PumpPortal's free data websocket instead
 (new tokens + their trades; no slot numbers, source 'pumpportal').
 
 Flag: CURVE_LISTENER_ENABLED (default off), read each loop.
+
+Out-of-process: with CURVE_LISTENER_EXTERNAL=1 the API process does not start
+listener_loop; run it standalone instead (`python -m backend.curve_listener`,
+normally under services/feed_supervisor). The standalone process writes its
+live STATE to CURVE_STATE_FILE (default: curve_state.json next to the db), and
+coverage() in the API process reads that file while the flag is on.
 """
 from __future__ import annotations
 
@@ -86,6 +92,12 @@ def enabled() -> bool:
 
 def use_pumpportal() -> bool:
     return os.environ.get("CURVE_USE_PUMPPORTAL", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def external() -> bool:
+    """CURVE_LISTENER_EXTERNAL: the listener runs in its own process, so the
+    API process must not start it (default off = in-process, as before)."""
+    return os.environ.get("CURVE_LISTENER_EXTERNAL", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 def db_path() -> Path:
@@ -540,16 +552,45 @@ async def _price_refresher() -> None:
         STATE["sol_usd"] = await _sol_usd() or STATE["sol_usd"]
 
 
+def state_file() -> Path:
+    p = os.environ.get("CURVE_STATE_FILE")
+    return Path(p) if p else db_path().with_name("curve_state.json")
+
+
+def _write_state_file() -> None:
+    p = state_file()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps({**STATE, "pid": os.getpid(), "written_at": time.time()}))
+    os.replace(tmp, p)
+
+
+def _read_state_file() -> Optional[Dict[str, Any]]:
+    try:
+        return json.loads(state_file().read_text())
+    except (OSError, ValueError):
+        return None
+
+
 def coverage() -> Dict[str, Any]:
     """What the feed has actually covered -- read-only, no network."""
     now = time.time()
+    state = {k: v for k, v in STATE.items()}
+    ext = external()
+    if ext:
+        # the listener lives in another process; this process's STATE is idle
+        state = _read_state_file() or {**state, "running": None, "connected": None}
     out: Dict[str, Any] = {
         "enabled": enabled(), "source_pref": "pumpportal" if use_pumpportal() else "rpc",
-        "state": {k: v for k, v in STATE.items()},
+        "state": state,
         "keep_first": KEEP_FIRST, "recent_hours": RECENT_HOURS,
     }
-    if STATE["last_event_at"]:
-        out["last_event_age_s"] = round(now - STATE["last_event_at"], 1)
+    if ext:
+        out["external"] = True
+        if state.get("written_at"):
+            out["state_age_s"] = round(now - state["written_at"], 1)
+    if state.get("last_event_at"):
+        out["last_event_age_s"] = round(now - state["last_event_at"], 1)
     p = db_path()
     if not p.exists():
         out.update(db=False, trades=0, mints=0, gaps=[])
@@ -579,3 +620,83 @@ def coverage() -> Dict[str, Any]:
     finally:
         c.close()
     return out
+
+
+# ── standalone entrypoint (python -m backend.curve_listener) ─────────────────
+
+EXIT_OK, EXIT_FATAL, EXIT_DISABLED = 0, 1, 2
+
+
+async def _state_writer(every_s: float = 5.0) -> None:
+    while True:
+        try:
+            await asyncio.to_thread(_write_state_file)
+        except OSError as e:
+            log.warning("curve listener: state file not written: %s", e)
+        await asyncio.sleep(every_s)
+
+
+async def run_standalone() -> int:
+    """Run listener_loop until SIGTERM/SIGINT (exit 0) or a fatal error (1).
+    Disconnects are not fatal: listener_loop reconnects with its own backoff."""
+    import signal
+    loop = asyncio.get_running_loop()
+    main_task = asyncio.create_task(listener_loop(), name="curve_listener")
+    stop = {"sig": None}
+
+    def _on_signal(signum: int) -> None:
+        stop["sig"] = signum
+        main_task.cancel()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, _on_signal, sig)
+    state_task = asyncio.create_task(_state_writer(), name="curve_state_writer")
+    try:
+        await main_task
+        log.error("curve listener: loop returned unexpectedly")
+        return EXIT_FATAL
+    except asyncio.CancelledError:
+        log.info("curve listener: stopping on signal %s", stop["sig"])
+        return EXIT_OK
+    except Exception:  # noqa: BLE001
+        log.exception("curve listener: fatal error")
+        return EXIT_FATAL
+    finally:
+        state_task.cancel()
+        STATE.update(running=False, connected=False)
+        try:
+            _write_state_file()
+        except OSError:
+            pass
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.remove_signal_handler(sig)
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(prog="python -m backend.curve_listener",
+                                 description="Run the pump.fun curve listener as its own process.")
+    ap.add_argument("--check", action="store_true",
+                    help="open the db, print the resolved config as JSON and exit")
+    args = ap.parse_args(argv)
+    logging.basicConfig(level=os.environ.get("CURVE_LOG_LEVEL", "INFO").upper(),
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    cfg = {"enabled": enabled(), "source": "pumpportal" if use_pumpportal() else "rpc",
+           "db": str(db_path()), "state_file": str(state_file())}
+    try:
+        connect().close()  # a db we cannot open is fatal, not a reconnect
+    except (OSError, sqlite3.Error) as e:
+        log.error("curve listener: cannot open %s: %s", cfg["db"], e)
+        return EXIT_FATAL
+    if args.check:
+        print(json.dumps(cfg))
+        return EXIT_OK
+    if not enabled():
+        log.error("curve listener: CURVE_LISTENER_ENABLED is off; nothing to run")
+        return EXIT_DISABLED
+    log.info("curve listener: standalone start %s", cfg)
+    return asyncio.run(run_standalone())
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

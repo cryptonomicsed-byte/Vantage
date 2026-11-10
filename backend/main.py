@@ -520,6 +520,16 @@ async def _federation_gossip_loop():
 _SHUTDOWN_GRACE_S = float(os.environ.get("VANTAGE_SHUTDOWN_GRACE_S", "10"))
 
 
+def _start_curve_listener():
+    """P4-01 curve listener task, or None when CURVE_LISTENER_EXTERNAL is on
+    (then `python -m backend.curve_listener` runs it out-of-process)."""
+    from .curve_listener import external as _curve_external, listener_loop as _curve_loop
+    if _curve_external():
+        logger.info("curve listener: CURVE_LISTENER_EXTERNAL on; not started in-process")
+        return None
+    return asyncio.create_task(_curve_loop())
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global FFMPEG_AVAILABLE
@@ -742,8 +752,9 @@ async def lifespan(app: FastAPI):
 
     # P4-01: free Solana curve listener (CURVE_LISTENER_ENABLED, read each
     # loop; idle when off). Writes its own data/curve.db, not vantage.db.
-    from .curve_listener import listener_loop as _curve_loop
-    curve_listener_task = asyncio.create_task(_curve_loop())
+    # CURVE_LISTENER_EXTERNAL=1: it runs as its own process (feed supervisor),
+    # so it is not started here.
+    curve_listener_task = _start_curve_listener()
     # P4-02: runner detection every 5 min (RUNNER_DETECT_ENABLED).
     from .runner_detect import runner_loop as _runner_loop
     runner_detect_task = asyncio.create_task(_runner_loop())
@@ -787,6 +798,7 @@ async def lifespan(app: FastAPI):
                       tradingos_challenger_task]
     if execution_engine_task is not None:
         shutdown_tasks.append(execution_engine_task)
+    shutdown_tasks = [t for t in shutdown_tasks if t is not None]
     # Cancel all first, then wait a bounded time. Awaiting each cancelled task
     # with no limit meant one task parked in a database call (aiosqlite runs
     # statements on a worker thread; a busy wait lasts up to busy_timeout) or
