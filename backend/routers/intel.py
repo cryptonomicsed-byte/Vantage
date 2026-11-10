@@ -110,7 +110,9 @@ async def full_market(limit: int = Query(100, ge=1, le=500), agent: dict = Depen
     feed_items = []
     for fid, info in feeds.items():
         key = f"{info['asset_type']}.{info['symbol']}" if "Crypto." not in info['symbol'] else info['symbol']
-        priority = MAJORS.index(key) if key in MAJORS else 999
+        # MAJORS is a set (no .index -- this raised the moment a key matched);
+        # majors first, everything else after
+        priority = 0 if key in MAJORS or info["symbol"].split("/")[0] in MAJORS else 999
         feed_items.append((priority, fid, info))
 
     feed_items.sort(key=lambda x: (x[0], x[2]["symbol"]))
@@ -143,12 +145,31 @@ async def full_market(limit: int = Query(100, ge=1, le=500), agent: dict = Depen
                     "confidence": pdata.get("conf", 0),
                 })
 
+    price_source = "pyth"
+    if not tokens:
+        # Pyth prices unavailable (public Hermes now 401s without a key):
+        # use CoinPaprika's ranked top list (price, cap, 24h change, volume),
+        # CoinGecko as a second fallback. No Pyth confidence band then.
+        rows = await ms.coinpaprika_markets(min(250, max(limit, 100)))
+        price_source = "coinpaprika"
+        if not rows:
+            rows = await ms.coingecko_markets(min(250, max(limit, 100)))
+            price_source = "coingecko"
+        for r in rows or []:
+            if r.get("symbol") and isinstance(r.get("price"), (int, float)) and r["price"] > 0:
+                tokens.append({"symbol": r["symbol"], "price": r["price"], "confidence": None,
+                               "market_cap": r.get("market_cap"), "market_cap_rank": r.get("rank"),
+                               "change_24h": r.get("change_24h"), "volume_24h": r.get("volume_24h")})
+        if not tokens:
+            price_source = "none"
+
     # Merge real market cap/rank/24h-change from CoinGecko (Pyth gives price
     # only, no supply/cap data) -- sorting by raw unit price as a "market cap
     # proxy" was wrong: a $65k BTC would always outrank a legitimately larger
     # token trading at $0.001. Join by symbol on the already-cached, real
     # market-cap-ranked CoinGecko feed.
-    cg_by_symbol = {r["symbol"]: r for r in (await ms.coingecko_markets(250) or []) if r.get("symbol")}
+    cg_by_symbol = {r["symbol"]: r for r in (await ms.coingecko_markets(250) or []) if r.get("symbol")} \
+        if price_source == "pyth" else {}
     ranked, unranked = [], []
     for t in tokens:
         cg = cg_by_symbol.get(t["symbol"])
@@ -158,6 +179,8 @@ async def full_market(limit: int = Query(100, ge=1, le=500), agent: dict = Depen
             t["change_24h"] = cg.get("change_24h")
             t["volume_24h"] = cg.get("volume_24h")
             ranked.append(t)
+        elif t.get("market_cap"):
+            ranked.append(t)            # fallback rows already carry cap/rank
         else:
             unranked.append(t)
     ranked.sort(key=lambda x: -(x.get("market_cap") or 0))
@@ -177,7 +200,8 @@ async def full_market(limit: int = Query(100, ge=1, le=500), agent: dict = Depen
             "pyth_feeds": len(feeds),
             "gainers_24h": gainers_24h,
             "total_market_cap_top_ranked": total_mcap,
-            "data_source": "Pyth Network (price) + CoinGecko (market cap/rank)",
+            "data_source": {"pyth": "Pyth Network (price) + CoinGecko (market cap/rank)", "coinpaprika": "CoinPaprika (Pyth Hermes now requires a key)", "coingecko": "CoinGecko (Pyth Hermes now requires a key)"}.get(price_source, "unavailable"),
+            "price_source": price_source,
         },
         "tokens": tokens[:limit],
     }
@@ -199,6 +223,14 @@ async def _majors():
                     elif PYTH_IDS["ETH"] in pid: eth = actual
                     elif PYTH_IDS["SOL"] in pid: sol = actual
     except: pass
+    if not (btc and eth and sol):
+        # Pyth's public Hermes price endpoint now answers 401 without a key;
+        # fall back to CoinPaprika (no key, not rate-limited from datacenters),
+        # then CoinGecko.
+        mk = {m["symbol"]: m for m in (await ms.coinpaprika_markets(100) or await ms.coingecko_markets(100) or [])}
+        btc = btc or (mk.get("BTC") or {}).get("price") or 0
+        eth = eth or (mk.get("ETH") or {}).get("price") or 0
+        sol = sol or (mk.get("SOL") or {}).get("price") or 0
     return btc, eth, sol
 
 @router.get("")
@@ -237,12 +269,25 @@ async def get_intel(agent: dict = Depends(get_agent)):
                 "confidence_pct": round(conf / price * 100, 2),
                 "detail": f"Pyth confidence band is {round(conf / price * 100, 1)}% of price -- wider than usual",
             })
+    # Without Pyth confidence bands (fallback price source) the check above
+    # can't fire; flag outsized 24h moves among ranked tokens instead.
+    for t in market.get("tokens", []):
+        ch = t.get("change_24h")
+        if t.get("confidence") is None and isinstance(ch, (int, float)) and abs(ch) >= 15 \
+                and (t.get("market_cap_rank") or 999) <= 100:
+            anomalies.append({
+                "symbol": t.get("symbol"), "type": "outsized_24h_move", "price": t.get("price"),
+                "change_24h": round(ch, 2), "confidence_pct": round(abs(ch), 2),
+                "detail": f"{'+' if ch > 0 else ''}{round(ch, 1)}% in 24h for a top-100 token",
+            })
     anomalies.sort(key=lambda a: -a["confidence_pct"])
 
     return {
         "health": {"chains": chains},
         "arbitrage": {"opportunities": arb},
-        "anomalies": {"anomalies": anomalies[:10], "fusion": {"btc_consensus": btc, "eth": eth, "sol": sol, "sources": 3}},
+        "anomalies": {"anomalies": anomalies[:10], "fusion": {"btc_consensus": btc, "eth": eth, "sol": sol,
+                      "price_source": market.get("market_snapshot", {}).get("price_source"),
+                      "sources": 1 if btc else 0}},
         "sentiment": {
             "sentiment": breadth or {"overall": "neutral", "fear_greed": 50},
             "indicators": breadth.get("indicators", []) if breadth else [],

@@ -131,12 +131,12 @@ function AresOverview() {
       {/* BTC Consensus */}
       {fusion.btc_consensus && (
         <div style={{ background: 'rgba(12,12,22,0.9)', border: '1px solid var(--border)', borderRadius: 12, padding: 20, marginBottom: 16 }}>
-          <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>BTC Consensus Price</div>
+          <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>BTC Price</div>
           <div style={{ fontSize: 32, fontWeight: 700, color: '#39ff14', fontFamily: 'monospace' }}>${Number(fusion.btc_consensus).toLocaleString()}</div>
           <div style={{ display: 'flex', gap: 24, marginTop: 8, fontSize: 12, color: 'var(--muted)' }}>
             <span>ETH: ${Number(fusion.eth||0).toLocaleString()}</span>
             <span>SOL: ${Number(fusion.sol||0).toFixed(2)}</span>
-            <span>Sources: {fusion.sources}</span>
+            <span>Source: {fusion.price_source || '—'}</span>
           </div>
         </div>
       )}
@@ -146,7 +146,21 @@ function AresOverview() {
         <div className="ares-stat-tile"><div className="ares-stat-label">Chains</div><div className="ares-stat-value">{Object.keys(chains).length}</div></div>
         <div className="ares-stat-tile"><div className="ares-stat-label">Arbitrage</div><div className="ares-stat-value" style={{ color: 'var(--warning)' }}>{arbOpps.length}</div></div>
         <div className="ares-stat-tile"><div className="ares-stat-label">Anomalies</div><div className="ares-stat-value">{(i?.anomalies?.anomalies||[]).length}</div></div>
+        <div className="ares-stat-tile"><div className="ares-stat-label">Sentiment</div><div className="ares-stat-value" style={{ textTransform: 'capitalize', color: sentColor(i?.sentiment?.sentiment?.overall) }}>{i?.sentiment?.sentiment?.overall || '—'}</div></div>
+        <div className="ares-stat-tile"><div className="ares-stat-label">Fear &amp; Greed</div><div className="ares-stat-value">{i?.sentiment?.sentiment?.fear_greed ?? '—'}</div></div>
+        <div className="ares-stat-tile"><div className="ares-stat-label">Top-100 green</div><div className="ares-stat-value">{i?.market_snapshot?.tokens_tracked ? `${i?.market_snapshot?.gainers_24h}/${i?.market_snapshot?.tokens_tracked}` : '—'}</div></div>
       </div>
+
+      {(i?.anomalies?.anomalies || []).length > 0 && (
+        <>
+          <div className="ares-section-title">Anomalies</div>
+          {(i.anomalies.anomalies as any[]).slice(0, 6).map((a, k) => (
+            <div key={k} style={{ background: 'rgba(12,12,22,0.9)', border: '1px solid var(--border)', borderRadius: 8, padding: '8px 12px', marginBottom: 4, fontSize: 12 }}>
+              <b>{a.symbol}</b> <span style={{ color: 'var(--muted)' }}>{String(a.type || '').replace(/_/g, ' ')}</span> · {a.detail || `${a.confidence_pct}%`}
+            </div>
+          ))}
+        </>
+      )}
 
       {/* Chain health */}
       <div className="ares-section-title">Chain Health ({Object.keys(chains).length})</div>
@@ -244,29 +258,52 @@ function AresHealth() {
 function AresSentiment() {
   const { data, loading } = useAresApi('/api/intel', 60000)
   const sent = data?.sentiment?.sentiment || {}
-  const indicators = data?.sentiment?.indicators || []
+  const indicators: string[] = data?.sentiment?.indicators || []
   if (loading && !data) return <div style={{ color: 'var(--muted)', padding: 20 }}>Loading…</div>
+  const fg = typeof sent.fear_greed === 'number' ? sent.fear_greed : null
+  const tile = (label: string, value: React.ReactNode, color?: string, sub?: string) => (
+    <div className="ares-stat-tile">
+      <div className="ares-stat-label">{label}</div>
+      <div className="ares-stat-value" style={{ color, textTransform: 'capitalize' }}>{value}</div>
+      {sub && <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 2 }}>{sub}</div>}
+    </div>
+  )
   return (
     <div>
       <div className="ares-section-title">Market Sentiment</div>
       <div className="ares-stat-grid" style={{ marginBottom: 16 }}>
-        {Object.entries(sent).map(([k, v]) => (
-          <div key={k} className="ares-stat-tile">
-            <div className="ares-stat-label">{k.replace(/_/g, ' ')}</div>
-            <div className="ares-stat-value">{typeof v === 'object' ? JSON.stringify(v) : String(v)}</div>
-          </div>
-        ))}
+        {tile('Overall', sent.overall || '—', sentColor(sent.overall), sent.overall === 'mixed' ? 'price action and positioning disagree' : undefined)}
+        {tile('Price trend', sent.price_trend || '—', sentColor(sent.price_trend), 'avg 24h move ±1% / breadth 60–40 band')}
+        {tile('Positioning', sent.positioning || '—', sent.positioning === 'greed' ? 'var(--success)' : sent.positioning === 'fear' ? 'var(--danger)' : undefined, 'Fear & Greed index')}
+        {tile('Fear & Greed', fg ?? '—', undefined, sent.mood)}
+        {tile('Top-100 green', sent.gainers_pct != null ? `${sent.gainers_pct}%` : '—')}
+        {tile('Avg 24h move', sent.avg_change_24h != null ? `${sent.avg_change_24h > 0 ? '+' : ''}${sent.avg_change_24h}%` : '—', (sent.avg_change_24h || 0) >= 0 ? 'var(--success)' : 'var(--danger)')}
+        {tile('BTC dominance', sent.btc_dominance != null ? `${Number(sent.btc_dominance).toFixed(1)}%` : '—')}
       </div>
+      {fg !== null && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ position: 'relative', height: 10, borderRadius: 5, background: 'linear-gradient(90deg,#ef4444,#f59e0b 45%,#22c55e)' }}>
+            <div style={{ position: 'absolute', left: `calc(${fg}% - 6px)`, top: -3, width: 12, height: 16, borderRadius: 3, background: '#fff', boxShadow: '0 0 6px #000' }} />
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: 'var(--muted)', marginTop: 4 }}>
+            <span>extreme fear</span><span>neutral</span><span>extreme greed</span>
+          </div>
+        </div>
+      )}
       {indicators.length > 0 && (
         <>
           <div className="ares-section-title">Signals</div>
-          {indicators.map((i: string, idx: number) => (
-            <div key={idx} style={{ background: 'rgba(12,12,22,0.9)', border: '1px solid var(--border)', borderRadius: 8, padding: '8px 12px', marginBottom: 4, fontSize: 12, color: 'var(--warning)' }}>{i}</div>
+          {indicators.map((s, idx) => (
+            <div key={idx} style={{ background: 'rgba(12,12,22,0.9)', border: '1px solid var(--border)', borderRadius: 8, padding: '8px 12px', marginBottom: 4, fontSize: 12, color: 'var(--warning)' }}>{s}</div>
           ))}
         </>
       )}
     </div>
   )
+}
+
+function sentColor(s?: string): string | undefined {
+  return s === 'bullish' ? 'var(--success)' : s === 'bearish' ? 'var(--danger)' : s === 'mixed' ? 'var(--warning)' : undefined
 }
 
 function AresSources() {
@@ -503,19 +540,22 @@ function AresAllTokens() {
 function AresWhales() {
   const { data, loading } = useAresApi('/api/intel/whales', 30000)
   const txs = data?.transactions || []
+  const intel = useAresApi('/api/intel', 60000)
+  const btcPx = Number(intel.data?.anomalies?.fusion?.btc_consensus || 0)
   if (loading && !data) return <div style={{ color: 'var(--muted)', padding: 20 }}>Loading whale activity…</div>
   return (
     <div>
       <div className="ares-section-title">Largest Recent BTC Transactions <span style={{ fontSize: 11, color: 'var(--muted)' }}>(mempool.space)</span></div>
       <table className="ares-table">
-        <thead><tr><th>Tx</th><th>Value (BTC)</th><th>Fee (sat)</th><th>Size (vB)</th></tr></thead>
+        <thead><tr><th>Tx</th><th>Value (BTC)</th><th>≈ USD</th><th>Fee (sat/vB)</th><th>Size (vB)</th></tr></thead>
         <tbody>
-          {txs.length === 0 && <tr><td colSpan={4} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No mempool data.</td></tr>}
+          {txs.length === 0 && <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No mempool data.</td></tr>}
           {txs.map((t: any, i: number) => (
             <tr key={i} className={(t.value_btc || 0) > 10 ? 'threat-high' : ''}>
-              <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{t.txid}</td>
+              <td style={{ fontFamily: 'monospace', fontSize: 11 }}><a href={`https://mempool.space/tx/${t.txid}`} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>{String(t.txid || '').slice(0, 12)}…{String(t.txid || '').slice(-6)}</a></td>
               <td style={{ fontFamily: 'monospace', fontWeight: 700, color: (t.value_btc || 0) > 10 ? 'var(--warning)' : 'var(--text)' }}>{t.value_btc}</td>
-              <td style={{ fontFamily: 'monospace', color: 'var(--muted)' }}>{t.fee_sat?.toLocaleString()}</td>
+              <td style={{ fontFamily: 'monospace' }}>{btcPx && t.value_btc ? `$${Math.round(t.value_btc * btcPx).toLocaleString()}` : '—'}</td>
+              <td style={{ fontFamily: 'monospace', color: 'var(--muted)' }}>{t.fee_sat?.toLocaleString()}{t.fee_sat && t.size_vb ? ` (${(t.fee_sat / t.size_vb).toFixed(1)})` : ''}</td>
               <td style={{ fontFamily: 'monospace', color: 'var(--muted)' }}>{t.size_vb}</td>
             </tr>
           ))}
