@@ -239,8 +239,19 @@ async def next_job() -> Optional[str]:
 
 
 async def trace_loop(idle_s: int = 30) -> None:
+    backfilled = False
     while True:
         await asyncio.sleep(idle_s)
+        if enabled() and not backfilled:
+            # once per process: every finished trace into the Money Flow Galaxy
+            try:
+                from . import galaxy_wallets
+                from .db import get_db
+                async with get_db() as db:
+                    log.info("galaxy backfill %s", await galaxy_wallets.backfill(db))
+            except Exception as e:  # noqa: BLE001
+                log.warning("galaxy backfill failed: %s", e)
+            backfilled = True
         if not enabled():
             continue
         try:
@@ -248,12 +259,14 @@ async def trace_loop(idle_s: int = 30) -> None:
             if mint:
                 out = await trace_one(mint)
                 log.info("runner trace %s", out)
-                if out["status"] == "done":
-                    from . import wallet_labels
-                    if wallet_labels.enabled():
-                        from .db import get_db
-                        async with get_db() as db:
+                if out["status"] in ("done", "partial"):
+                    from . import wallet_labels, galaxy_wallets
+                    from .db import get_db
+                    async with get_db() as db:
+                        if out["status"] == "done" and wallet_labels.enabled():
                             await wallet_labels.label_runner(db, mint)
+                        # the traced buyers, ranked, into the Money Flow Galaxy
+                        await galaxy_wallets.sync_runner(db, mint)
         except Exception as e:  # noqa: BLE001
             log.warning("runner trace cycle failed: %s", e)
 
