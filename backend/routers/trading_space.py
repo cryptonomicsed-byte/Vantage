@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from ..db import get_db
 from ..deps import get_agent
+from ..space_provisioning import provision_space_channel
 from ..guild_access import require_member, require_not_claimant, require_owner_or_staff
 from ..space_tasks import (
     DEFAULT_LEASE_MINUTES, MAX_LEASE_MINUTES, claim_sql, clamped_lease, lease_expired_sql, submit_sql,
@@ -99,30 +100,13 @@ async def create_trading_space(
         )
         await db.commit()
 
-    # Create backing chat channel for this trading space
-    _chat_slug = f"ts-{space_id[:8]}"
-    try:
-        async with get_db() as _cdb:
-            _cdb.row_factory = aiosqlite.Row
-            async with _cdb.execute("SELECT id FROM guilds WHERE slug=?", (slug,)) as _cur:
-                _guild_row = await _cur.fetchone()
-            if _guild_row:
-                _guild_id = _guild_row["id"]
-                await _cdb.execute(
-                    """INSERT OR IGNORE INTO guild_channels
-                       (name, slug, guild_id, channel_kind, collab_type, topic)
-                       VALUES (?, ?, ?, 'forum', 'trading', ?)""",
-                    (name, _chat_slug, _guild_id, f"Trading space chat: {name}"),
-                )
-                await _cdb.execute(
-                    "UPDATE trading_spaces SET chat_channel_slug=? WHERE id=?",
-                    (_chat_slug, space_id),
-                )
-                await _cdb.commit()
-    except Exception as _exc:
-        logger.warning("Failed to create backing channel for trading space: %s", _exc)
+    # G4: the backing chat channel goes through the coordination layer so it
+    # exists on the relay too, and carries the space it belongs to.
+    prov = await provision_space_channel(slug=slug, kind="trading", space_id=space_id, name=name, agent=agent)
+    _chat_slug = prov["chat_channel_slug"]
 
-    return {"id": space_id, "name": name, "chain": chain, "chat_channel_slug": _chat_slug}
+    return {"id": space_id, "name": name, "chain": chain, "chat_channel_slug": _chat_slug,
+            "relay_provisioned": prov["relay_provisioned"], "note": prov["note"]}
 
 
 @router.get("/{space_id}")
@@ -138,6 +122,16 @@ async def delete_trading_space(slug: str, space_id: str, agent: dict = Depends(g
         await db.execute("DELETE FROM trading_spaces WHERE id=?", (space_id,))
         await db.commit()
     return {"ok": True}
+
+
+@router.post("/{space_id}/provision")
+async def provision_trading_space(slug: str, space_id: str, agent: dict = Depends(get_agent)):
+    """Retry channel and relay provisioning for this space. Idempotent;
+    owner or guild staff."""
+    space = await _member_space(slug, space_id, agent)
+    await require_owner_or_staff(slug, agent, space.get("created_by_agent_id"), "this trading space")
+    return await provision_space_channel(slug=slug, kind="trading", space_id=space_id,
+                                         name=space["name"], agent=agent)
 
 
 # ── Tasks (reuse vantage_tasks with space_id as workspace_id) ───────────────────
