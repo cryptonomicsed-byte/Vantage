@@ -85,7 +85,9 @@ async def update_vault_config(
 async def get_galaxy_data(
     agent_name: str,
     x_agent_key: Optional[str] = Header(None),
-    x_federation_peer: Optional[str] = Header(None), agent: dict = Depends(get_agent)):
+    x_federation_peer: Optional[str] = Header(None), agent: dict = Depends(get_agent),
+    compact: bool = Query(False, description="Omit `clusters` (a second copy of every star, grouped by "
+                                             "constellation) -- halves the payload; clients group `stars`")):
     target = await _resolve_agent(agent_name)
     vault = MemoryVault(target["id"], target["name"])
     accessor_id = await _resolve_accessor(x_agent_key)
@@ -93,6 +95,8 @@ async def get_galaxy_data(
         raise HTTPException(403, "Access denied to this memory vault")
     await vault.log_access(accessor_id, x_federation_peer or "", "galaxy", "read")
     data = vault.get_galaxy_data()
+    if compact:
+        data = {**data, "clusters": None}
     if hasattr(settings, 'JULIA_MEMORY_URL') and settings.JULIA_MEMORY_URL:
         intel = MemoryIntelligence(settings.JULIA_MEMORY_URL)
         data["predictions"] = await intel.predict_next_activity(agent_name)

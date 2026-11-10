@@ -123,6 +123,7 @@ export default function SwarmMap() {
   const navigate = useNavigate()
   const mountRef = useRef<HTMLDivElement>(null)
   const graphRef = useRef<any>(null)
+  const fitDoneRef = useRef(false)  // auto-fit once, when the layout first settles
   const [network, setNetwork] = useState<SwarmGraph | null>(null)
   const [loading, setLoading] = useState(true)
   const [agentCount, setAgentCount] = useState(0)
@@ -252,7 +253,7 @@ export default function SwarmMap() {
 
       if (!graphRef.current) {
         graphRef.current = new ForceGraph3D(mountRef.current!)
-          .backgroundColor('rgba(4,3,13,0)')
+          .backgroundColor('#000000')
           .showNavInfo(false)
           .nodeLabel((n: any) => {
             const nd: AgentNode = n.raw
@@ -300,6 +301,9 @@ export default function SwarmMap() {
         .width(mountRef.current!.clientWidth)
         .height(mountRef.current!.clientHeight)
         .graphData({ nodes, links })
+      graphRef.current.onEngineStop(() => {
+        if (!fitDoneRef.current && graphRef.current) { fitDoneRef.current = true; graphRef.current.zoomToFit(800, 60) }
+      })
     })()
     return () => { disposed = true }
   }, [network, taskLinks, navigate])
@@ -353,11 +357,14 @@ export default function SwarmMap() {
         position: 'relative',
         width: '100%',
         height: 'calc(100vh - 48px)',
-        background: 'radial-gradient(circle at 25% 15%, rgba(138,75,255,0.12), rgba(5,8,16,0.18) 55%, rgba(5,8,16,0) 100%)',
+        background: '#000',
         overflow: 'hidden',
       }}
     >
       <div ref={mountRef} style={{ position: 'absolute', inset: 0 }} />
+        <button type="button" aria-label="Fit all nodes in view" onClick={() => graphRef.current?.zoomToFit(600, 60)}
+          style={{ position: 'absolute', bottom: 16, left: '50%', transform: 'translateX(-50%)', zIndex: 12, background: 'rgba(0,0,0,0.8)', border: '1px solid rgba(0,245,255,0.3)',
+            borderRadius: 6, color: '#00f5ff', fontSize: 11, padding: '5px 10px', cursor: 'pointer' }}>⊙ FIT</button>
 
       {loading && !network && (
         <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#8a4bff', fontFamily: 'monospace', fontSize: 14, pointerEvents: 'none' }}>
@@ -452,7 +459,7 @@ export default function SwarmMap() {
           style={{
             position: 'absolute', top: 0, left: 0, bottom: 0,
             width: 300,
-            background: 'rgba(5,5,8,0.45)',
+            background: 'rgba(0,0,0,0.85)',
             borderRight: '1px solid rgba(0,245,255,0.2)',
             display: 'flex', flexDirection: 'column',
             zIndex: 10,
@@ -624,7 +631,7 @@ export default function SwarmMap() {
       <div style={{
         position: 'absolute', top: 0, right: 0, bottom: 0,
         width: taskPanelOpen ? 280 : 36, transition: 'width 0.2s',
-        background: 'rgba(5,5,8,0.45)', borderLeft: '1px solid rgba(138,75,255,0.25)',
+        background: 'rgba(0,0,0,0.85)', borderLeft: '1px solid rgba(138,75,255,0.25)',
         display: 'flex', flexDirection: 'column', zIndex: 10,
         backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)',
       }}>

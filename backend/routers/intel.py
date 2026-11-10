@@ -233,6 +233,13 @@ async def _majors():
         sol = sol or (mk.get("SOL") or {}).get("price") or 0
     return btc, eth, sol
 
+
+@router.get("/helius-pool")
+async def helius_pool_status(agent: dict = Depends(get_agent)):
+    """Masked health of the shared Helius key pool (counts + last 4 chars only)."""
+    from backend import helius_pool
+    return helius_pool.status()
+
 @router.get("")
 async def get_intel(agent: dict = Depends(get_agent)):
     """Aggregate overview — BTC/ETH/SOL + chain health + sentiment."""
@@ -494,12 +501,21 @@ except ImportError:  # pragma: no cover - depends on the deploy box, not the rep
     # tests. Degrade to the no-key path the endpoint below already handles
     # instead of failing at import time.
     class _AbsentKeyPool:
+        # /opt/ares isn't on the service's sys.path either, so this branch
+        # is what production ran too; with HELIUS_POOL_ENABLED it goes to
+        # the same pool by file path (backend/helius_pool.py).
         @staticmethod
-        def get_key(*_args, **_kwargs):
+        def get_key(provider="helius", task="vantage", *_args, **_kwargs):
+            from backend import helius_pool
+            if provider == "helius" and helius_pool.enabled():
+                return helius_pool.get_key(task) or None
             return None
 
         @staticmethod
-        def report_error(*_args, **_kwargs):
+        def report_error(provider="helius", key="", status_code=0, body="", *_args, **_kwargs):
+            from backend import helius_pool
+            if provider == "helius":
+                helius_pool.report(key, status_code, body)
             return None
 
     _akp = _AbsentKeyPool()
