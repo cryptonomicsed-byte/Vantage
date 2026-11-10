@@ -156,8 +156,10 @@ async def test_watchlist_for_keeps_radar_only_wallets():
     async with get_db() as db:
         await _seed_watch(db)
         got = await rw.watchlist_for(db, ["RADARW1", "ENTW1", "ORPHAN1", "radarw1", "NOBODY"])
-    assert got["RADARW1"] == {"entity": "radar:RADARW1", "score": 0.8, "source": "radar", "radar_conviction": 0.8}
-    assert got["ENTW1"] == {"entity": "wallet:ENTW1", "score": 1.5, "source": "runner", "radar_conviction": None}
+    assert got["RADARW1"] == {"entity": "radar:RADARW1", "score": 0.8, "source": "radar",
+                              "unconfirmed": True, "radar_conviction": 0.8}
+    assert got["ENTW1"] == {"entity": "wallet:ENTW1", "score": 1.5, "source": "runner",
+                            "unconfirmed": False, "radar_conviction": None}
     assert set(got) == {"RADARW1", "ENTW1"}   # orphan mapping dropped; base58 is case-sensitive
 
 
