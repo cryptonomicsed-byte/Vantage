@@ -1,0 +1,1 @@
+{"nodes":[{"id":"a","path":"a.md","x":10,"y":20,"z":30,"constellation":"note"}],"expected":{"wx":[0],"wy":[0],"cells":[{"name":"note","x":0,"y":0,"w":200,"h":200,"count":1}],"bounds":[0,-160,0,0]}}
