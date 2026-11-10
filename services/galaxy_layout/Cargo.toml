@@ -1,0 +1,30 @@
+[package]
+name = "galaxy_layout"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Memory-galaxy layout (port of frontend/src/components/galaxyLayout.ts) + GIX content-hash node ids and vault merkle root, compiled to wasm32 for the GalaxyViewer worker"
+
+# Standalone: not part of any parent workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Only sha2 — gix-types itself pulls uuid(v4)/getrandom, which does not build
+# for wasm32-unknown-unknown without JS glue. content_hash / odu_link /
+# gix1_merkle_root are re-implemented here and checked byte-for-byte against
+# gix-types in tests/gix_parity.rs (native only).
+sha2 = { version = "0.10", default-features = false }
+
+[dev-dependencies]
+serde_json = "1"
+gix-types = { git = "https://github.com/cryptonomicsed-byte/GIX", rev = "ee450327ad76e8f7c9fc16499be02ae1411757dc" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
