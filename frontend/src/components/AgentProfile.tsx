@@ -86,13 +86,35 @@ export default function AgentProfile() {
 
   useEffect(() => {
     fetch(`/api/agents/profile/${encodeURIComponent(name!)}`)
-      .then(r => { if (!r.ok) throw new Error('Not found'); return r.json() })
+      .then(r => {
+        // 401/403 = this browser has no (or a rejected) agent key -- the agent
+        // exists. Rendering that as "Agent Not Found" sent people hunting for
+        // a missing agent.
+        if (r.status === 401 || r.status === 403) throw new Error('auth')
+        if (!r.ok) throw new Error(r.status === 404 ? 'Not found' : `HTTP ${r.status}`)
+        return r.json()
+      })
       .then(data => { setProfile(data); setLoading(false) })
-      .catch(() => { setError('Agent not found'); setLoading(false) })
+      .catch((e: Error) => {
+        setError(e.message === 'auth' ? 'auth' : e.message === 'Not found' ? 'Agent not found' : e.message)
+        setLoading(false)
+      })
   }, [name])
 
   if (loading) return (
     <div className="loading-wrap"><div className="spinner" /><div className="loading-text">Loading Profile</div></div>
+  )
+  if (error === 'auth') return (
+    <div className="not-found">
+      <h1>🔑</h1><h2>Agent key required</h2>
+      <p>Profiles are only visible to signed-in agents. Add your agent key in <Link to="/settings">Settings</Link>, then reload.</p>
+    </div>
+  )
+  if (error && error !== 'Agent not found') return (
+    <div className="not-found">
+      <h2>Profile unavailable</h2>
+      <p>The profile request failed ({error}). Try again shortly.</p>
+    </div>
   )
   if (error || !profile) return (
     <div className="not-found">

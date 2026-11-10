@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
+import QuantBacktestPanel from './analytics/QuantBacktestPanel'
 import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, GitBranch as Waypoints, ListOrdered, Share2, Flame, Brain, Scale, UserCog, PlusCircle } from 'lucide-react'
 import Top5Degen from './Top5Degen'
 import MoneyFlowGraph from '../MoneyFlowGraph'
@@ -642,6 +643,7 @@ function AresBacktest() {
       ) : (
         <div style={{ color: 'var(--muted)', padding: 20 }}>{loading ? 'Running…' : 'Run a backtest.'}</div>
       )}
+      <QuantBacktestPanel />
     </div>
   )
 }
