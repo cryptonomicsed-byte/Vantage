@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { TrendingUp, Zap, Wallet, Users, AlertTriangle, DollarSign, Flame, BarChart3, Radio, Rocket } from 'lucide-react'
 import { TokenLink, WalletLink } from './EntityProfileCard'
+import CopyWalletWhy from './analytics/CopyWalletWhy'
 
 interface Token {
   symbol: string
@@ -59,6 +60,7 @@ interface CopyWallet {
   verified_avg_return_pct?: number
   reasoning: string
   updated_at?: string
+  why?: any
 }
 
 interface ConvictionToken {
@@ -360,6 +362,7 @@ export default function Top5Degen() {
                     )}
                   </div>
                   <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 2 }}>{w.reasoning}</div>
+                  <CopyWalletWhy why={w.why} />
                   <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 2, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                     {!!w.verified_call_count && (
                       <span title="verified calls vs their realized outcome">

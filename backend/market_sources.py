@@ -527,8 +527,212 @@ async def exchange_spreads(symbol: str = "BTC") -> dict:
 # mistake it for the raw spread.
 _TAKER_FEE_PCT = {
     "binance": 0.10, "okx": 0.10, "kucoin": 0.10,
-    "coinbase": 0.60, "gemini": 0.40,
+    "coinbase": 0.60, "gemini": 0.40, "kraken": 0.40,
 }
+
+# ── Executable quotes (bid/ask + venue timestamp) for the arbitrage view ─────
+# Last-trade prices are not executable: an arb buys at the ask on one venue
+# and sells at the bid on another. These read each venue's public top-of-book
+# ticker (no key) and keep the venue's own timestamp when it publishes one, so
+# the UI can show how old each leg's quote is. USDT-quoted venues are
+# converted to USD with the live USDT/USD book (Kraken) instead of treating
+# 1 USDT as 1 USD, which alone used to fake ~0.1% spreads.
+_VENUE_DOWN: dict[str, tuple[float, str]] = {}   # venue -> (until_epoch, reason)
+_VENUE_DOWN_TTL = 3600  # a geo-block (HTTP 451) does not clear in minutes
+
+
+async def _get_json_status(url: str, timeout: float = 5.0, client: Optional[httpx.AsyncClient] = None):
+    """GET -> (json|None, http_status|None, error|None). One attempt, no retry:
+    a slow venue must not stall the whole arbitrage scan. Reuses `client`
+    when given (one TLS pool for the whole scan instead of 40 handshakes)."""
+    try:
+        if client is not None:
+            r = await client.get(url, timeout=timeout)
+        else:
+            async with httpx.AsyncClient(timeout=timeout, headers=UA) as c:
+                r = await c.get(url)
+        if r.status_code == 200:
+            return r.json(), 200, None
+        return None, r.status_code, f"HTTP {r.status_code}"
+    except Exception as e:  # noqa: BLE001
+        return None, None, type(e).__name__
+
+
+def _f(x) -> Optional[float]:
+    try:
+        v = float(x)
+        return v if v > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _iso_epoch(s) -> Optional[float]:
+    if not s:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00")[:32]).timestamp()
+    except ValueError:
+        return None
+
+
+_KRAKEN_PAIR = {"BTC": "XBTUSD", "DOGE": "XDGUSD"}
+
+
+async def _venue_quote(venue: str, sym: str, client: Optional[httpx.AsyncClient] = None) -> tuple[Optional[dict], Optional[str]]:
+    """(quote, error). quote = {bid, ask, last, quote_ccy, exchange_ts}."""
+    down = _VENUE_DOWN.get(venue)
+    if down and down[0] > time.time():
+        return None, down[1]
+    s = sym.upper()
+    if venue == "binance":
+        d, st, err = await _get_json_status(f"https://api4.binance.com/api/v3/ticker/bookTicker?symbol={s}USDT", client=client)
+        q = d and {"bid": _f(d.get("bidPrice")), "ask": _f(d.get("askPrice")), "last": None,
+                   "quote_ccy": "USDT", "exchange_ts": None}
+    elif venue == "okx":
+        d, st, err = await _get_json_status(f"https://www.okx.com/api/v5/market/ticker?instId={s}-USDT", client=client)
+        row = ((d or {}).get("data") or [None])[0] or {}
+        q = row and {"bid": _f(row.get("bidPx")), "ask": _f(row.get("askPx")), "last": _f(row.get("last")),
+                     "quote_ccy": "USDT", "exchange_ts": (_f(row.get("ts")) or 0) / 1000 or None}
+    elif venue == "kucoin":
+        d, st, err = await _get_json_status(f"https://api.kucoin.com/api/v1/market/orderbook/level1?symbol={s}-USDT", client=client)
+        row = (d or {}).get("data") or {}
+        q = row and {"bid": _f(row.get("bestBid")), "ask": _f(row.get("bestAsk")), "last": _f(row.get("price")),
+                     "quote_ccy": "USDT", "exchange_ts": (_f(row.get("time")) or 0) / 1000 or None}
+    elif venue == "coinbase":
+        d, st, err = await _get_json_status(f"https://api.exchange.coinbase.com/products/{s}-USD/ticker", client=client)
+        q = d and {"bid": _f(d.get("bid")), "ask": _f(d.get("ask")), "last": _f(d.get("price")),
+                   "quote_ccy": "USD", "exchange_ts": _iso_epoch(d.get("time"))}
+    elif venue == "gemini":
+        d, st, err = await _get_json_status(f"https://api.gemini.com/v1/pubticker/{s.lower()}usd", client=client)
+        q = d and {"bid": _f(d.get("bid")), "ask": _f(d.get("ask")), "last": _f(d.get("last")),
+                   "quote_ccy": "USD",
+                   "exchange_ts": (_f((d.get("volume") or {}).get("timestamp")) or 0) / 1000 or None}
+    elif venue == "kraken":
+        pair = _KRAKEN_PAIR.get(s, f"{s}USD")
+        d, st, err = await _get_json_status(f"https://api.kraken.com/0/public/Ticker?pair={pair}", client=client)
+        res = (d or {}).get("result") or {}
+        row = next(iter(res.values()), None) if res and not (d or {}).get("error") else None
+        q = row and {"bid": _f((row.get("b") or [None])[0]), "ask": _f((row.get("a") or [None])[0]),
+                     "last": _f((row.get("c") or [None])[0]), "quote_ccy": "USD", "exchange_ts": None}
+        if d and d.get("error"):
+            err = "; ".join(map(str, d["error"]))[:80]
+    else:
+        return None, "unknown venue"
+    if st in (451, 403):
+        _VENUE_DOWN[venue] = (time.time() + _VENUE_DOWN_TTL, f"HTTP {st} (region-blocked from this host)")
+        return None, _VENUE_DOWN[venue][1]
+    if not q or not (q.get("bid") or q.get("last")):
+        return None, err or "no quote for this pair"
+    return q, None
+
+
+async def usdt_usd_rate(client: Optional[httpx.AsyncClient] = None) -> tuple[float, bool]:
+    """(USDT price in USD, measured?). Kraken USDT/USD mid, cached 60s; falls
+    back to 1.0 with measured=False so the caller can say so."""
+    cached = _cache_get("usdt_usd", 60)
+    if cached is not None:
+        return cached
+    q, _ = await _venue_quote("kraken", "USDT", client)
+    out = (round((q["bid"] + q["ask"]) / 2, 6), True) if q and q.get("bid") and q.get("ask") else (1.0, False)
+    if out[1]:
+        _cache_put("usdt_usd", out)
+    return out
+
+
+ARB_VENUES = ["binance", "okx", "kucoin", "coinbase", "gemini", "kraken"]
+
+
+async def exchange_quotes(symbol: str, client: Optional[httpx.AsyncClient] = None) -> dict:
+    """Top-of-book quotes for one asset across ARB_VENUES, in USD. Cached 20s.
+    Each quote keeps fetched_at (epoch) and the venue's own exchange_ts when
+    published, so callers compute age at serve time."""
+    symbol = symbol.upper()
+    key = f"quotes:{symbol}"
+    cached = _cache_get(key, 20)
+    if cached is not None:
+        return cached
+    (usdt, usdt_measured), results = await asyncio.gather(
+        usdt_usd_rate(client), asyncio.gather(*[_venue_quote(v, symbol, client) for v in ARB_VENUES]))
+    fetched_at = time.time()
+    quotes, missing = {}, {}
+    for v, (q, err) in zip(ARB_VENUES, results):
+        if not q:
+            missing[v] = err or "unavailable"
+            continue
+        k = usdt if q["quote_ccy"] == "USDT" else 1.0
+        quotes[v] = {
+            "bid": round(q["bid"] * k, 10) if q.get("bid") else None,
+            "ask": round(q["ask"] * k, 10) if q.get("ask") else None,
+            "last": round(q["last"] * k, 10) if q.get("last") else None,
+            "quote_ccy": q["quote_ccy"], "exchange_ts": q.get("exchange_ts"), "fetched_at": fetched_at,
+            "ts_source": "exchange" if q.get("exchange_ts") else "fetch_time",
+            "taker_fee_pct": _TAKER_FEE_PCT.get(v, 0.20),
+        }
+    out = {"symbol": symbol, "quotes": quotes, "missing": missing,
+           "usdt_usd": usdt, "usdt_usd_measured": usdt_measured}
+    if quotes:
+        _cache_put(key, out)
+    return out
+
+
+def _quote_age(q: dict, now: float) -> float:
+    return round(max(0.0, now - (q.get("exchange_ts") or q.get("fetched_at") or now)), 1)
+
+
+def arbitrage_from_quotes(xq: dict, now: Optional[float] = None) -> Optional[dict]:
+    """Best route for one asset: buy at the lowest ask, sell at the highest
+    bid on a different venue, net of both taker legs. Pure function (tested)."""
+    now = now or time.time()
+    qs = {v: q for v, q in (xq.get("quotes") or {}).items() if q}
+    if len(qs) < 2:
+        return None
+    book = {v: q for v, q in qs.items() if q.get("bid") and q.get("ask")}
+    basis = "bid_ask" if len(book) >= 2 else "last"
+    src = book if basis == "bid_ask" else qs
+    buy_px = {v: (q["ask"] if basis == "bid_ask" else (q.get("last") or q.get("bid"))) for v, q in src.items()}
+    sell_px = {v: (q["bid"] if basis == "bid_ask" else (q.get("last") or q.get("bid"))) for v, q in src.items()}
+    buy_px = {v: p for v, p in buy_px.items() if p}
+    sell_px = {v: p for v, p in sell_px.items() if p}
+    best = None
+    for b, bp in buy_px.items():
+        for s, sp in sell_px.items():
+            if b == s:
+                continue
+            gross = (sp - bp) / bp * 100
+            fees = src[b]["taker_fee_pct"] + src[s]["taker_fee_pct"]
+            cand = (gross - fees, gross, b, s, bp, sp, fees)
+            if best is None or cand[0] > best[0]:
+                best = cand
+    if best is None:
+        return None
+    net, gross, b, s, bp, sp, fees = best
+    lasts = [q["last"] for q in qs.values() if q.get("last")]
+    leg = lambda v, px: {"venue": v, "price": px, "taker_fee_pct": src[v]["taker_fee_pct"],
+                         "quote_age_s": _quote_age(src[v], now), "ts_source": src[v]["ts_source"],
+                         "quote_ccy": src[v]["quote_ccy"]}
+    venue_quotes = sorted(
+        [{"venue": v, "bid": q.get("bid"), "ask": q.get("ask"), "last": q.get("last"),
+          "quote_ccy": q["quote_ccy"], "taker_fee_pct": q["taker_fee_pct"],
+          "quote_age_s": _quote_age(q, now), "ts_source": q["ts_source"]} for v, q in qs.items()],
+        key=lambda r: r["ask"] or r["last"] or 0)
+    return {
+        "route": f"{b}→{s}",
+        "pair": f"{xq['symbol']}/USD",
+        "spread_pct": round(gross, 3),
+        "net_spread_pct": round(net, 3),
+        "est_fees_pct": round(fees, 2),
+        "buy_price": bp, "sell_price": sp,
+        "venues": len(qs),
+        "spread_basis": basis,
+        "last_spread_pct": round((max(lasts) - min(lasts)) / min(lasts) * 100, 3) if len(lasts) >= 2 else None,
+        "buy_leg": leg(b, bp), "sell_leg": leg(s, sp),
+        "max_quote_age_s": max(_quote_age(src[b], now), _quote_age(src[s], now)),
+        "venue_quotes": venue_quotes,
+        "missing_venues": xq.get("missing") or {},
+        "usdt_usd": xq.get("usdt_usd"), "usdt_usd_measured": xq.get("usdt_usd_measured"),
+        "profitable_after_fees": net > 0,
+    }
 
 
 async def real_arbitrage(symbols: Optional[list[str]] = None) -> list[dict]:
@@ -538,25 +742,17 @@ async def real_arbitrage(symbols: Optional[list[str]] = None) -> list[dict]:
     "5%" raw spread between two high-fee venues can be a fraction of that
     after fees, while a "0.3%" spread between two low-fee venues can be
     genuinely more actionable. net_spread_pct subtracts both legs' estimated
-    taker fees (see _TAKER_FEE_PCT) so ranking reflects real opportunity."""
+    taker fees (see _TAKER_FEE_PCT) so ranking reflects real opportunity.
+
+    Spreads are executable (buy at the ask, sell at the bid, USDT books
+    converted at the live USDT/USD rate) whenever two venues publish a book;
+    `spread_basis` says which. Read-only analytics: nothing here places
+    or routes an order."""
     symbols = symbols or ["BTC", "ETH", "SOL", "XRP", "DOGE", "AVAX", "LINK"]
-    spreads = await asyncio.gather(*[exchange_spreads(s) for s in symbols])
-    opps = []
-    for s in spreads:
-        if s.get("buy_venue") and s.get("spread_pct", 0) > 0:
-            buy_fee = _TAKER_FEE_PCT.get(s["buy_venue"], 0.20)
-            sell_fee = _TAKER_FEE_PCT.get(s["sell_venue"], 0.20)
-            net = round(s["spread_pct"] - buy_fee - sell_fee, 3)
-            opps.append({
-                "route": f"{s['buy_venue']}→{s['sell_venue']}",
-                "pair": f"{s['symbol']}/USD",
-                "spread_pct": s["spread_pct"],
-                "net_spread_pct": net,
-                "est_fees_pct": round(buy_fee + sell_fee, 2),
-                "buy_price": s.get("buy_price"),
-                "sell_price": s.get("sell_price"),
-                "venues": len(s.get("venues", {})),
-            })
+    async with httpx.AsyncClient(timeout=5, headers=UA) as client:
+        quotes = await asyncio.gather(*[exchange_quotes(s, client) for s in symbols])
+    now = time.time()
+    opps = [o for o in (arbitrage_from_quotes(x, now) for x in quotes) if o]
     opps.sort(key=lambda o: -o["net_spread_pct"])
     return opps
 
@@ -597,10 +793,19 @@ async def coinpaprika_markets(limit: int = 100) -> list[dict]:
                 "change_24h": q.get("percent_change_24h"),
                 "market_cap": q.get("market_cap"),
                 "volume_24h": q.get("volume_24h"),
+                # additive: unique id (tickers collide) + the upstream quote time
+                "id": c.get("id"),
+                "last_updated": c.get("last_updated"),
             })
     if rows:
         _cache_put(key, rows)
     return rows
+
+
+def cache_age_s(key: str) -> Optional[float]:
+    """Seconds since `key` was last written to the TTL cache, or None."""
+    e = _cache.get(key)
+    return round(time.time() - e[0], 1) if e else None
 
 
 async def coinpaprika_global() -> dict:
@@ -719,13 +924,45 @@ async def top_movers(limit: int = 8) -> list[dict]:
     before ever reaching the ranked list. Now ranks by magnitude so both
     directions surface, and callers get an explicit `direction` field
     instead of having to infer it from the sign of change_24h themselves."""
-    markets = await coinpaprika_markets(100) or await coingecko_markets(100)
+    markets = await coinpaprika_markets(100)
+    source, cache_key = "coinpaprika", "cp_markets:100"
+    if not markets:
+        markets = await coingecko_markets(100)
+        source, cache_key = "coingecko", "cg_markets:100"
+    fetched_age = cache_age_s(cache_key)
     ranked = [m for m in markets if isinstance(m.get("change_24h"), (int, float))]
     ranked.sort(key=lambda m: -abs(m["change_24h"] or 0))
     out = []
     for m in ranked[:limit]:
         change = m["change_24h"]
-        out.append({
+        # Additive transparency: the exact inputs the signal was computed
+        # from, where they came from and how old they are. Unchanged scoring.
+        quote_age = None
+        if m.get("last_updated"):
+            try:
+                from datetime import datetime
+                ts = datetime.fromisoformat(str(m["last_updated"]).replace("Z", "+00:00")).timestamp()
+                quote_age = round(max(0.0, time.time() - ts), 1)
+            except (TypeError, ValueError):
+                quote_age = None
+        extra = {
+            "name": m.get("name"), "rank": m.get("rank"), "market_cap": m.get("market_cap"),
+            "source": source, "source_id": m.get("id"),
+            "quote_updated_at": m.get("last_updated"),
+            "quote_age_s": quote_age, "fetched_age_s": fetched_age,
+            # plausibility: a top-100 cap trading <0.1% of it per day is a
+            # thin/possibly mis-reported market; the move is less meaningful
+            "flags": (["thin volume vs market cap"]
+                      if (m.get("market_cap") or 0) > 0 and (m.get("volume_24h") or 0) / m["market_cap"] < 0.001
+                      else []),
+            "inputs": {
+                "change_24h": change, "volume_24h": m.get("volume_24h"), "rank": m.get("rank"),
+                "conviction_formula": "min(5, |change_24h| / 5)",
+                "signal_rule": "|change_24h| > 10 -> breakout (up) / breakdown (down), else momentum",
+                "universe": f"top 100 by market cap ({source})",
+            },
+        }
+        out.append({**extra, **{
             "symbol": m["symbol"],
             "price": m["price"],
             "change_24h": round(change, 2),
@@ -734,7 +971,7 @@ async def top_movers(limit: int = 8) -> list[dict]:
             "direction": "up" if change >= 0 else "down",
             # a >10% drop is a breakdown, not a breakout
             "signal": ("breakout" if change >= 0 else "breakdown") if abs(change) > 10 else "momentum",
-        })
+        }})
     return out
 
 
@@ -827,7 +1064,9 @@ async def ohlc(symbol: str, interval: str = "1d", limit: int = 200) -> list[dict
 
 
 # ── DeFi yields (DefiLlama) ─────────────────────────────────────────────────────────
-async def defillama_yields(limit: int = 25, min_tvl: float = 1_000_000) -> list[dict]:
+async def defillama_yields(limit: int = 25, min_tvl: float = 1_000_000, chain: Optional[str] = None,
+                           stablecoin_only: bool = False, sort: str = "apy",
+                           min_apy_base: float = 0.0) -> list[dict]:
     """Top yield pools by APY with a TVL floor, from DefiLlama. Cached 300s.
 
     Sorting by raw APY with no other context surfaces junk: DefiLlama's own
@@ -841,33 +1080,60 @@ async def defillama_yields(limit: int = 25, min_tvl: float = 1_000_000) -> list[
     emissions and 5% real yield is a very different pool from one earning
     400% organically, and the current bare `apy` figure doesn't distinguish
     them at all."""
-    key = f"yields:{limit}:{int(min_tvl)}"
+    key = f"yields:{limit}:{int(min_tvl)}:{(chain or '').lower()}:{int(bool(stablecoin_only))}:{sort}:{int(min_apy_base or 0)}"
     cached = _cache_get(key, 300)
     if cached is not None:
         return cached
-    data = await _get_json("https://yields.llama.fi/pools", timeout=12)
-    pools = (data or {}).get("data") or []
+    pools = _cache_get("yields_raw", 300)
+    if pools is None:
+        data = await _get_json("https://yields.llama.fi/pools", timeout=12)
+        pools = (data or {}).get("data") or []
+        if pools:
+            _cache_put("yields_raw", pools)
     rows = []
     for p in pools:
         tvl = p.get("tvlUsd") or 0
         apy = p.get("apy")
         if p.get("outlier"):
             continue
+        if chain and (p.get("chain") or "").lower() != chain.lower():
+            continue
+        if stablecoin_only and not p.get("stablecoin"):
+            continue
         if tvl >= min_tvl and isinstance(apy, (int, float)):
             pred = p.get("predictions") or {}
+            base = round(p["apyBase"], 2) if isinstance(p.get("apyBase"), (int, float)) else None
+            if min_apy_base and (base or 0) < min_apy_base:
+                continue
+            pool_id = p.get("pool")
+            reward = round(p["apyReward"], 2) if isinstance(p.get("apyReward"), (int, float)) else None
             rows.append({
                 "pool": p.get("symbol"),
                 "project": p.get("project"),
                 "chain": p.get("chain"),
                 "apy": round(apy, 2),
-                "apy_base": round(p["apyBase"], 2) if isinstance(p.get("apyBase"), (int, float)) else None,
-                "apy_reward": round(p["apyReward"], 2) if isinstance(p.get("apyReward"), (int, float)) else None,
+                "apy_base": base,
+                "apy_reward": reward,
                 "tvl_usd": round(tvl, 0),
                 "stablecoin": bool(p.get("stablecoin")),
                 "il_risk": p.get("ilRisk"),
                 "predicted_direction": pred.get("predictedClass"),
+                # additive depth, all straight off the DefiLlama row
+                "pool_id": pool_id,
+                "url": f"https://defillama.com/yields/pool/{pool_id}" if pool_id else None,
+                "exposure": p.get("exposure"),
+                "pool_meta": p.get("poolMeta"),
+                "apy_mean_30d": round(p["apyMean30d"], 2) if isinstance(p.get("apyMean30d"), (int, float)) else None,
+                "apy_pct_7d": round(p["apyPct7D"], 2) if isinstance(p.get("apyPct7D"), (int, float)) else None,
+                "reward_share_pct": round(reward / apy * 100, 1) if reward and apy else (0.0 if apy else None),
+                "reward_tokens": len(p.get("rewardTokens") or []),
+                "prediction_confidence": pred.get("binnedConfidence"),
             })
-    rows.sort(key=lambda r: -(r["apy"] or 0))
+    sort_key = {
+        "tvl": lambda r: -(r["tvl_usd"] or 0),
+        "apy_base": lambda r: -(r["apy_base"] or 0),
+    }.get(sort, lambda r: -(r["apy"] or 0))
+    rows.sort(key=sort_key)
     rows = rows[:limit]
     if rows:
         _cache_put(key, rows)
@@ -946,6 +1212,20 @@ async def dexscreener_search(query: str, limit: int = 20) -> list[dict]:
             "liquidity_usd": (p.get("liquidity") or {}).get("usd"),
             "volume_24h": vol.get("h24"),
             "change_24h": (p.get("priceChange") or {}).get("h24"),
+            # additive: identify and re-price the row by its PAIR address
+            # (symbols collide across chains and forks), plus pair age and
+            # 24h order flow straight from DexScreener
+            "pair_address": p.get("pairAddress"),
+            "url": p.get("url"),
+            "quote_address": (p.get("quoteToken") or {}).get("address"),
+            "price_native": p.get("priceNative"),
+            "pair_created_at": p.get("pairCreatedAt"),
+            "buys_24h": ((p.get("txns") or {}).get("h24") or {}).get("buys"),
+            "sells_24h": ((p.get("txns") or {}).get("h24") or {}).get("sells"),
+            "change_1h": (p.get("priceChange") or {}).get("h1"),
+            "volume_1h": vol.get("h1"),
+            "fdv": p.get("fdv"),
+            "market_cap": p.get("marketCap"),
             "_recent_vol": max(vol.get("h24") or 0.0, vol.get("h6") or 0.0, vol.get("h1") or 0.0, vol.get("m5") or 0.0),
         })
     rows.sort(key=lambda r: (-(r["_recent_vol"]), -((r.get("liquidity_usd") or 0))))
@@ -955,6 +1235,46 @@ async def dexscreener_search(query: str, limit: int = 20) -> list[dict]:
     if rows:
         _cache_put(key, rows)
     return rows
+
+
+def _dexscreener_pair_row(p: dict) -> dict:
+    vol = p.get("volume") or {}
+    tx = (p.get("txns") or {}).get("h24") or {}
+    return {
+        "pair": f"{(p.get('baseToken') or {}).get('symbol','?')}/{(p.get('quoteToken') or {}).get('symbol','?')}",
+        "dex": p.get("dexId"), "chain": p.get("chainId"),
+        "pair_address": p.get("pairAddress"), "url": p.get("url"),
+        "base_address": (p.get("baseToken") or {}).get("address"),
+        "quote_address": (p.get("quoteToken") or {}).get("address"),
+        "price_usd": float(p["priceUsd"]) if p.get("priceUsd") else None,
+        "price_native": p.get("priceNative"),
+        "liquidity_usd": (p.get("liquidity") or {}).get("usd"),
+        "volume_24h": vol.get("h24"), "volume_1h": vol.get("h1"),
+        "change_24h": (p.get("priceChange") or {}).get("h24"),
+        "change_1h": (p.get("priceChange") or {}).get("h1"),
+        "buys_24h": tx.get("buys"), "sells_24h": tx.get("sells"),
+        "pair_created_at": p.get("pairCreatedAt"),
+        "fdv": p.get("fdv"), "market_cap": p.get("marketCap"),
+    }
+
+
+async def dexscreener_pair(chain: str, pair_address: str) -> Optional[dict]:
+    """One pair, priced by its pair address (never by ticker). Cached 15s.
+    Returns None when DexScreener does not know the pair."""
+    c, a = (chain or "").strip().lower(), (pair_address or "").strip()
+    if not c or not a or not re.fullmatch(r"[A-Za-z0-9]{20,66}", a) or not re.fullmatch(r"[a-z0-9-]{2,24}", c):
+        return None
+    key = f"dexpair:{c}:{a}"
+    cached = _cache_get(key, 15)
+    if cached is not None:
+        return cached or None
+    data = await _get_json(f"https://api.dexscreener.com/latest/dex/pairs/{c}/{a}", timeout=8)
+    pairs = (data or {}).get("pairs") or ([data["pair"]] if (data or {}).get("pair") else [])
+    row = next((_dexscreener_pair_row(p) for p in pairs if (p.get("pairAddress") or "") == a), None)
+    if row:
+        row["fetched_at"] = time.time()
+    _cache_put(key, row or {})
+    return row
 
 
 # ── DEX new/trending pools (GeckoTerminal) — broader token coverage ────────────────
@@ -971,12 +1291,20 @@ async def dex_new_pools(network: str = "solana", kind: str = "trending", limit: 
     if cached is not None:
         return cached
     endpoint = "new_pools" if kind == "new" else "trending_pools"
-    data = await _get_json(
-        f"https://api.geckoterminal.com/api/v2/networks/{network}/{endpoint}?page=1", timeout=10
-    )
-    pools = (data or {}).get("data") or []
+    # GeckoTerminal pages hold 20 pools; `limit` > 20 used to silently cap at
+    # 20 (the All Tokens tab asked for 50 and got 20). Walk pages until
+    # filled, stopping early on a short/failed page. Max 3 pages (60).
+    pools: list = []
+    for page in range(1, min(3, (limit + 19) // 20) + 1):
+        data = await _get_json(
+            f"https://api.geckoterminal.com/api/v2/networks/{network}/{endpoint}?page={page}", timeout=10
+        )
+        batch = (data or {}).get("data") or []
+        pools.extend(batch)
+        if len(batch) < 20 or len(pools) >= limit:
+            break
     rows = []
-    for p in pools[:limit]:
+    for rank, p in enumerate(pools[:limit], start=1):
         a = p.get("attributes") or {}
         name = a.get("name") or "? / ?"
         base_sym, _, quote_sym = name.partition(" / ")
@@ -1008,6 +1336,14 @@ async def dex_new_pools(network: str = "solana", kind: str = "trending", limit: 
             "buys_24h": txns.get("buys"),
             "sells_24h": txns.get("sells"),
             "created_at": a.get("pool_created_at"),
+            # additive: GeckoTerminal's own order, venue and size figures
+            "rank": rank,
+            "dex": ((p.get("relationships") or {}).get("dex") or {}).get("data", {}).get("id"),
+            "fdv_usd": _f(a.get("fdv_usd")),
+            "market_cap_usd": _f(a.get("market_cap_usd")),
+            "change_1h_pct": float(chg["h1"]) if chg.get("h1") else None,
+            "volume_1h": float(vol["h1"]) if vol.get("h1") else None,
+            "source": "geckoterminal",
         })
     if rows:
         _cache_put(key, rows)
@@ -1112,16 +1448,42 @@ async def _btc_address_lookup(address: str) -> Optional[dict]:
 
 
 _SOL_RPC_URL = "https://api.mainnet-beta.solana.com"
+# Ordered endpoints for the trace: the local caching gate first (it caches
+# immutable getTransaction reads, so repeat pivots don't burn the public RPC's
+# rate limit), the public RPC as fallback. Connection-refused is instant, so
+# a box without the gate just falls through. Override with
+# VANTAGE_TRACE_SOL_RPC_URLS="url1,url2".
+import os as _os
+_SOL_RPC_URLS = [u.strip() for u in _os.environ.get(
+    "VANTAGE_TRACE_SOL_RPC_URLS", "http://127.0.0.1:8092," + _SOL_RPC_URL).split(",") if u.strip()]
+_SOL_RPC_LAST_ERROR: dict[str, str] = {}
 
 
 async def _sol_rpc(method: str, params: list, timeout: float = 10) -> Optional[dict]:
-    try:
-        async with httpx.AsyncClient(timeout=timeout, headers=UA) as c:
-            r = await c.post(_SOL_RPC_URL, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
-            if r.status_code == 200:
-                return r.json().get("result")
-    except Exception as e:
-        logger.debug("solana RPC %s failed: %s", method, e)
+    last = None
+    for url in _SOL_RPC_URLS:
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=timeout, headers=UA) as c:
+                    r = await c.post(url, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+                if r.status_code == 200:
+                    body = r.json()
+                    if "error" in body and body.get("result") is None:
+                        last = f"{method}: {str((body.get('error') or {}).get('message', 'rpc error'))[:80]}"
+                        break                       # a JSON-RPC error won't change on retry
+                    _SOL_RPC_LAST_ERROR.pop(method, None)
+                    return body.get("result")
+                last = f"{method}: HTTP {r.status_code}"
+                if r.status_code == 429 and attempt == 0:
+                    await asyncio.sleep(0.6)
+                    continue
+                break
+            except Exception as e:  # noqa: BLE001
+                last = f"{method}: {type(e).__name__}"
+                logger.debug("solana RPC %s via %s failed: %s", method, url, e)
+                break
+    if last:
+        _SOL_RPC_LAST_ERROR[method] = last
     return None
 
 
@@ -1181,7 +1543,13 @@ async def _sol_address_lookup(address: str, limit: int = 15) -> Optional[dict]:
     bal = await _sol_rpc("getBalance", [address])
     if bal is None:
         return None
-    sigs = await _sol_rpc("getSignaturesForAddress", [address, {"limit": limit}]) or []
+    sigs = await _sol_rpc("getSignaturesForAddress", [address, {"limit": limit}])
+    sig_error = None
+    if sigs is None:
+        # used to collapse to [] -> "tx_count 0, no recent transactions" for
+        # one of the busiest wallets on Solana whenever the public RPC 429'd
+        sig_error = _SOL_RPC_LAST_ERROR.get("getSignaturesForAddress") or "getSignaturesForAddress failed"
+        sigs = []
     sem = asyncio.Semaphore(3)
 
     async def fetch(sig: str):
@@ -1223,11 +1591,19 @@ async def _sol_address_lookup(address: str, limit: int = 15) -> Optional[dict]:
             "counterparties": sorted(counterparties, key=lambda c: -c["amount"])[:10],
             "token_transfers": _sol_token_transfers(p, address),
         })
-    return {
+    failed = sum(1 for p in parsed if not p)
+    out = {
         "balance": {"amount": round(bal["value"] / 1e9, 9), "unit": "SOL"},
         "tx_count": len(sigs),
         "transactions": rows,
     }
+    if sig_error:
+        out.update({"tx_count": None, "rpc_error": sig_error,
+                    "reason": f"Recent transactions unavailable: {sig_error} (balance is live)."})
+    elif failed:
+        out.update({"partial": True, "tx_fetch_failed": failed,
+                    "rpc_error": _SOL_RPC_LAST_ERROR.get("getTransaction") or "getTransaction failed"})
+    return out
 
 
 _CHAIN_ALIASES = {"btc": "bitcoin", "bitcoin": "bitcoin", "sol": "solana", "solana": "solana"}
@@ -1258,6 +1634,8 @@ async def address_lookup(chain: str, address: str) -> dict:
             "reason": "Address lookup failed or address has no history.", "transactions": [],
         }
     out = {"chain": canon, "address": address, "supported": True, "source": source, **data}
+    if data.get("rpc_error") and not data.get("partial"):
+        return out          # don't pin a failed read for the cache TTL
     return _cache_put(key, out)
 
 
