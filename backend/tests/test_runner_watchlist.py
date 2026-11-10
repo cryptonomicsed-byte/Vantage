@@ -147,3 +147,11 @@ async def test_watchlist_for_precedence_runner_then_candidate_then_radar(tmp_pat
     assert got["R"]["source"] == "runner"
     assert got["CANDONLY"]["source"] == "radar" and got["CANDONLY"]["unconfirmed"] is True
     assert "ORPH" not in got
+
+
+@pytest.mark.asyncio
+async def test_endpoint_reports_candidates_beside_confirmed():
+    from backend import runner_watchlist as rwr
+    got = await rwr.get()
+    assert "candidates" in got and got["candidates"]["unconfirmed"] is True
+    assert isinstance(got["candidates"]["entities"], list)

@@ -312,10 +312,20 @@ async def get(limit: int = 50) -> Dict[str, Any]:
             "SELECT COUNT(*), MAX(generated_at), MAX(loaded_at) FROM radar_wallets")).fetchone()
         radar_top = [{"wallet": w, "conviction": c, "tier": t} for w, c, t in await (await db.execute(
             "SELECT wallet, conviction, tier FROM radar_wallets ORDER BY conviction DESC LIMIT 10")).fetchall()]
-    for r in rows:
+        # additive: unconfirmed single-runner candidates. `total` stays the
+        # confirmed count so existing callers keep their meaning, but a UI that
+        # only reads `total` showed 0 while 138 candidates were ranked.
+        ccols = ["entity", "wallets", "score", "runners", "runner_mints", "contributions", "labels",
+                 "updated_at", "symbol"]
+        crows = [dict(zip(ccols, r)) for r in await (await db.execute(
+            f"SELECT {', '.join(ccols)} FROM runner_watchlist_candidates ORDER BY score DESC LIMIT ?",
+            (limit,))).fetchall()]
+        ctotal = (await (await db.execute("SELECT COUNT(*) FROM runner_watchlist_candidates")).fetchone())[0]
+    for r in rows + crows:
         for k in ("wallets", "runner_mints", "contributions", "labels"):
             r[k] = json.loads(r[k])
     return {"enabled": enabled(), "total": total, "min_runners": MIN_RUNNERS,
             "half_life_days": HALF_LIFE_DAYS, "entities": rows,
+            "candidates": {"total": ctotal, "unconfirmed": True, "entities": crows},
             "radar": {"wallets": rad[0], "generated_at": rad[1], "loaded_at": rad[2],
                       "min_conviction": RADAR_MIN_CONVICTION, "top": radar_top}}
