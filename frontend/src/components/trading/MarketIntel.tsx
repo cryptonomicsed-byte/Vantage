@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react'
 import QuantBacktestPanel from './analytics/QuantBacktestPanel'
 import WhalesPanel from './analytics/WhalesPanel'
 import FxPanel from './analytics/FxPanel'
+import SourcesLivePanel from './analytics/SourcesLivePanel'
 import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, GitBranch as Waypoints, ListOrdered, Share2, Flame, Brain, Scale, UserCog, PlusCircle } from 'lucide-react'
 import Top5Degen from './Top5Degen'
 import MoneyFlowGraph from '../MoneyFlowGraph'
@@ -334,6 +335,7 @@ function AresSources() {
   })
   return (
     <div>
+      <SourcesLivePanel />
       <div className="ares-section-title" style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
         <span>{Object.keys(endpoints).length} Data Sources</span>
         {registry.length > 0 && (
