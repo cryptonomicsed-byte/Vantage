@@ -38,6 +38,16 @@ BATCH = 30
 CANDIDATE_MCAP_USD = float(os.environ.get("RUNNER_CANDIDATE_MCAP_USD", "25000"))
 CANDIDATE_DAYS = float(os.environ.get("RUNNER_CANDIDATE_DAYS", "14"))
 DEFAULT_TIERS = "100000:0.5,1000000:1.0,5000000:1.5,10000000:2.0"
+# A quoted market cap only counts when the pool's liquidity backs it. Found
+# live: 85 of 114 "runners" in a day were $10M+ on paper -- e.g. FOTF, peak
+# recorded $699M, actually ~$1.6k cap on $1.7k liquidity with 18k bot buys of
+# wash volume. Real $1M+ tokens sit on tens to hundreds of $k of liquidity.
+MIN_LIQ_USD = float(os.environ.get("RUNNER_MIN_LIQ_USD", "10000"))
+MIN_LIQ_FRAC = float(os.environ.get("RUNNER_MIN_LIQ_FRAC", "0.02"))
+
+
+def backed(mcap: float, liq: Optional[float]) -> bool:
+    return isinstance(liq, (int, float)) and liq >= max(MIN_LIQ_USD, mcap * MIN_LIQ_FRAC)
 
 DDL = """CREATE TABLE IF NOT EXISTS runner_tokens (
     mint TEXT PRIMARY KEY,
@@ -94,9 +104,14 @@ def best_by_mint(pairs: List[dict]) -> Dict[str, dict]:
         mc = p.get("marketCap") or p.get("fdv")
         if not mint or not isinstance(mc, (int, float)):
             continue
-        if mint not in out or mc > out[mint]["mcap"]:
+        liq = (p.get("liquidity") or {}).get("usd")
+        ok = backed(float(mc), liq)
+        cur = out.get(mint)
+        # a liquidity-backed quote always beats an unbacked one; within the
+        # same class the higher cap wins
+        if cur is None or (ok, mc) > (cur["backed"], cur["mcap"]):
             out[mint] = {"mcap": float(mc), "symbol": bt.get("symbol"), "name": bt.get("name"),
-                         "pair_created_at": p.get("pairCreatedAt")}
+                         "pair_created_at": p.get("pairCreatedAt"), "liq_usd": liq, "backed": ok}
     return out
 
 
@@ -134,12 +149,24 @@ async def apply_quotes(db, quotes: Dict[str, dict], meta: Dict[str, dict], now: 
     """Upsert runner_tokens from fresh quotes. Returns mints that became (or
     upgraded as) runners this cycle."""
     tl = tiers()
-    await db.execute(DDL)
+    await ensure_table(db)
     changed = []
     for mint, q in quotes.items():
         mc = q["mcap"]
+        ok = bool(q.get("backed", True))
         cur = await (await db.execute(
             "SELECT tier_usd, peak_mcap_usd, tiers_crossed FROM runner_tokens WHERE mint=?", (mint,))).fetchone()
+        if cur is not None:
+            # every re-quote records whether the cap is liquidity-backed;
+            # unbacked quotes never raise peak or tier
+            await db.execute("UPDATE runner_tokens SET backed=?, liq_usd=? WHERE mint=?",
+                             (1 if ok else 0, q.get("liq_usd"), mint))
+            if not ok:
+                await db.execute("UPDATE runner_tokens SET last_mcap_usd=?, last_checked=? WHERE mint=?",
+                                 (mc, int(now), mint))
+                continue
+        elif not ok:
+            continue  # never detect a runner on an unbacked quote
         if cur is None:
             t = tier_for(mc, tl)
             if not t:
@@ -153,6 +180,7 @@ async def apply_quotes(db, quotes: Dict[str, dict], meta: Dict[str, dict], now: 
                 (mint, q.get("symbol"), q.get("name"), t[0], t[1], mc, int(now), mc, int(now),
                  json.dumps(crossed), m.get("first_slot"), int(bool(m.get("created_seen"))),
                  m.get("first_seen"), q.get("pair_created_at"), int(now)))
+            await db.execute("UPDATE runner_tokens SET backed=1, liq_usd=? WHERE mint=?", (q.get("liq_usd"), mint))
             changed.append(mint)
             continue
         tier_usd, peak, crossed_s = cur
@@ -173,12 +201,22 @@ async def apply_quotes(db, quotes: Dict[str, dict], meta: Dict[str, dict], now: 
     return changed
 
 
+async def ensure_table(db) -> None:
+    await db.execute(DDL)
+    cols = {r[1] for r in await (await db.execute("PRAGMA table_info(runner_tokens)")).fetchall()}
+    # backed: 1 = last quote liquidity-backed, 0 = not, NULL = not re-quoted
+    # since this check existed (treated as unverified downstream)
+    for col, decl in (("backed", "INTEGER"), ("liq_usd", "REAL")):
+        if col not in cols:
+            await db.execute(f"ALTER TABLE runner_tokens ADD COLUMN {col} {decl}")
+
+
 async def detect_once() -> Dict[str, Any]:
     from . import curve_listener
     from .db import get_db
     now = time.time()
     async with get_db() as db:
-        await db.execute(DDL)
+        await ensure_table(db)
         known = [r[0] for r in await (await db.execute("SELECT mint FROM runner_tokens")).fetchall()]
     if not curve_listener.db_path().exists():
         return {"candidates": 0, "quoted": 0, "new_or_upgraded": 0, "note": "no curve.db yet"}
@@ -218,18 +256,24 @@ async def runner_loop(interval_s: int = 300) -> None:
             log.warning("runner detection failed: %s", e)
 
 
-async def list_runners(limit: int = 50) -> Dict[str, Any]:
+async def list_runners(limit: int = 50, include_unbacked: bool = False) -> Dict[str, Any]:
     from .db import get_db
     async with get_db() as db:
-        await db.execute(DDL)
+        await ensure_table(db)
         cols = ["mint", "symbol", "name", "tier_usd", "tier_weight", "peak_mcap_usd", "peak_at",
                 "last_mcap_usd", "last_checked", "tiers_crossed", "created_slot", "created_seen",
-                "first_seen", "pair_created_at", "detected_at", "trace_status"]
+                "first_seen", "pair_created_at", "detected_at", "trace_status", "backed", "liq_usd"]
+        where = "" if include_unbacked else "WHERE backed = 1 "
         rows = [dict(zip(cols, r)) for r in await (await db.execute(
-            f"SELECT {', '.join(cols)} FROM runner_tokens ORDER BY peak_mcap_usd DESC LIMIT ?", (limit,))).fetchall()]
+            f"SELECT {', '.join(cols)} FROM runner_tokens {where}ORDER BY peak_mcap_usd DESC LIMIT ?",
+            (limit,))).fetchall()]
+        unverified = (await (await db.execute(
+            "SELECT COUNT(*) FROM runner_tokens WHERE backed IS NOT 1")).fetchone())[0]
     for r in rows:
         r["tiers_crossed"] = json.loads(r["tiers_crossed"] or "{}")
-    return {"enabled": enabled(), "tiers": [{"usd": t, "weight": w} for t, w in tiers()], "runners": rows}
+    return {"enabled": enabled(), "tiers": [{"usd": t, "weight": w} for t, w in tiers()], "runners": rows,
+            "unbacked_or_unverified": unverified,
+            "liquidity_rule": {"min_usd": MIN_LIQ_USD, "min_frac_of_cap": MIN_LIQ_FRAC}}
 
 
 async def check_mints(mints: List[str]) -> Dict[str, Any]:

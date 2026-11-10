@@ -75,7 +75,7 @@ function notDeployed(status: number | null) {
   return status === 404 ? 'Not deployed on this server yet.' : status === 401 ? 'Connect your agent key.' : status === 0 ? 'Server unreachable.' : null
 }
 
-function CurveFeed() {
+export function CurveFeed() {
   const { data: c, status, loading, reload } = usePoll<Coverage>('/api/intel/curve/coverage', 20000)
   const err = !c ? notDeployed(status) : null
   const live = !!c?.state.connected && (c.last_event_age_s ?? 999) < 30
@@ -232,7 +232,7 @@ interface WatchData {
   radar: { wallets: number; generated_at: string | null; loaded_at: number | null; min_conviction: number }
 }
 
-function Watchlist() {
+export function Watchlist() {
   const { data, status } = usePoll<WatchData>('/api/intel/runner-watchlist?limit=25', 120000)
   const [open, setOpen] = useState<string | null>(null)
   const err = !data ? notDeployed(status) : null
@@ -293,7 +293,7 @@ interface ConfData { enabled: boolean; enricher: boolean; window_min: number; ma
 
 const RULE_TEXT: Record<string, string> = { 'watch>=3': '3+ watchlist wallets', 'kols>=2': '2+ KOLs posted the contract', 'watch+kol': 'watchlist wallet + KOL' }
 
-function Confluence() {
+export function Confluence() {
   const { data, status } = usePoll<ConfData>('/api/intel/confluence?limit=20', 30000)
   const [open, setOpen] = useState<number | null>(null)
   const err = !data ? notDeployed(status) : null
