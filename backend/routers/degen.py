@@ -655,8 +655,79 @@ def _ttl_cache(name: str, ttl: float):
     return deco
 
 
+def _age_h(ts) -> Optional[float]:
+    """Hours since a stored timestamp (epoch seconds or ISO / sqlite text)."""
+    if ts is None or ts == "":
+        return None
+    try:
+        if isinstance(ts, (int, float)):
+            t = float(ts)
+        else:
+            from datetime import datetime, timezone
+            d = datetime.fromisoformat(str(ts).replace("Z", "+00:00").replace(" ", "T"))
+            t = (d if d.tzinfo else d.replace(tzinfo=timezone.utc)).timestamp()
+        return round(max(0.0, time.time() - t) / 3600, 1)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _copy_wallet_why(db, wallets: list) -> dict:
+    """Why each copy-wallet ranks, from data Vantage already stores -- read
+    live, because wallet_reputation is only as fresh as wallet_learner's last
+    run: live role counts + last role seen (token_wallet_roles), win rate /
+    trade count (alpha_wallets) and last observed trade (wallet_trades).
+    Missing tables or rows come back as None with a reason, never a guess."""
+    out = {w: {"live_roles": {}, "roles_last_seen_at": None, "win_rate": None, "win_rate_source": None,
+               "trades_observed": None, "last_trade_at": None} for w in wallets}
+    if not wallets:
+        return out
+    qs = ",".join("?" * len(wallets))
+    try:
+        cur = await db.execute(f"SELECT wallet_address AS w, role, COUNT(*) AS n, MAX(discovered_at) AS last "
+                               f"FROM token_wallet_roles WHERE wallet_address IN ({qs}) GROUP BY 1, 2", wallets)
+        for r in await cur.fetchall():
+            o = out[r["w"]]
+            o["live_roles"][r["role"]] = r["n"]
+            if r["last"] and (o["roles_last_seen_at"] is None or str(r["last"]) > str(o["roles_last_seen_at"])):
+                o["roles_last_seen_at"] = r["last"]
+    except Exception as e:  # noqa: BLE001
+        logger.debug("copy-wallet roles: %s", e)
+    try:
+        cur = await db.execute(f"SELECT address AS w, win_rate, total_trades, pnl_7d, pnl_30d, source, last_updated "
+                               f"FROM alpha_wallets WHERE address IN ({qs})", wallets)
+        for r in await cur.fetchall():
+            o = out[r["w"]]
+            if r["win_rate"] is not None:
+                wr = float(r["win_rate"])
+                o["win_rate"] = round(wr * 100, 1) if wr <= 1 else round(wr, 1)
+                o["win_rate_source"] = f"alpha_wallets ({r['source'] or 'unknown source'})"
+                o["win_rate_updated_at"] = r["last_updated"]
+            o["trades_observed"] = r["total_trades"]
+            o["pnl_7d"], o["pnl_30d"] = r["pnl_7d"], r["pnl_30d"]
+    except Exception as e:  # noqa: BLE001
+        logger.debug("copy-wallet win rate: %s", e)
+    try:
+        cur = await db.execute(f"SELECT wallet AS w, MAX(timestamp) AS last, COUNT(*) AS n FROM wallet_trades "
+                               f"WHERE wallet IN ({qs}) GROUP BY wallet", wallets)
+        for r in await cur.fetchall():
+            o = out[r["w"]]
+            o["last_trade_at"] = r["last"]
+            o["trades_observed"] = o["trades_observed"] if o["trades_observed"] is not None else r["n"]
+    except Exception as e:  # noqa: BLE001
+        logger.debug("copy-wallet last trade: %s", e)
+    for o in out.values():
+        o["roles_last_seen_age_h"] = _age_h(o["roles_last_seen_at"])
+        o["last_trade_age_h"] = _age_h(o["last_trade_at"])
+        if o["win_rate"] is None:
+            o["win_rate_unavailable"] = "no closed-trade outcomes recorded for this wallet"
+    return out
+
+
 @router.get("/top-wallets-to-copy")
+@_ttl_cache("top-wallets-to-copy", 120)
 async def top_wallets_to_copy(limit: int=20, x_agent_key: str=Header(...)):
+    # 12 s live (full scan + aggregate over ~200k wallet_reputation rows on
+    # every poll); the list only changes when wallet_learner runs.
     if not await get_agent(x_agent_key): raise HTTPException(401)
     # Mass deployers are launch bots, not traders to copy: wallet_learner's
     # score rewards deploying "hot" tokens, so a wallet that launched 2,237
@@ -674,11 +745,22 @@ async def top_wallets_to_copy(limit: int=20, x_agent_key: str=Header(...)):
                    SUM(CASE WHEN {_HAS_TRADED_SQL} AND NOT {_MASS_DEPLOYER_SQL} THEN 1 ELSE 0 END) AS traders,
                    COUNT(*) AS scored
             FROM wallet_reputation WHERE copy_trade_score > 0""")).fetchone()
+        why = await _copy_wallet_why(db, [r["wallet_address"] for r in rows])
     # _db() rows are dicts; read by name, never by position
     meta = dict(meta) if meta is not None and not isinstance(meta, (tuple, list)) \
         else {"upd": meta[0] if meta else None, "excl": meta[1] if meta else 0,
               "traders": meta[2] if meta else 0, "scored": meta[3] if meta else 0}
+    for r in rows:
+        w = why.get(r["wallet_address"]) or {}
+        stored = {"first_buyer": r.get("first_buyer_count") or 0, "top_trader": r.get("top_trader_count") or 0,
+                  "top_holder": r.get("top_holder_count") or 0, "deployer": r.get("deployer_count") or 0}
+        live = w.get("live_roles") or {}
+        w["score_age_h"] = _age_h(r.get("updated_at"))
+        w["stored_roles"] = stored
+        w["roles_changed_since_scoring"] = bool(live) and any(live.get(k, 0) != v for k, v in stored.items())
+        r["why"] = w
     return {"wallets": rows, "count": len(rows), "scores_updated_at": meta.get("upd"),
+            "scores_age_h": _age_h(meta.get("upd")),
             "excluded_mass_deployers": meta.get("excl") or 0,
             "eligible_traders": meta.get("traders") or 0, "scored_wallets": meta.get("scored") or 0}
 
