@@ -193,7 +193,7 @@ function OrdersPanel({ slug, spaceId, authHeaders }: { slug: string; spaceId: st
 
   useEffect(() => {
     const h = authHeaders()
-    fetch('/api/trading/orders', { headers: h })
+    fetch('/api/guilds/' + slug + '/trading-spaces/' + spaceId + '/orders', { headers: h })
       .then(r => {
         if (!r.ok) throw new Error('not_available')
         return r.json()
@@ -305,14 +305,14 @@ function ResearchPanel({ slug, spaceId, authHeaders }: { slug: string; spaceId: 
   )
 }
 
-function StrategiesPanel({ authHeaders }: { authHeaders: () => Record<string, string> }) {
+function StrategiesPanel({ slug, spaceId, authHeaders }: { slug: string; spaceId: string; authHeaders: () => Record<string, string> }) {
   const [strategies, setStrategies] = useState<Strategy[]>([])
   const [loading, setLoading] = useState(true)
   const [actioning, setActioning] = useState<string | null>(null)
 
   function loadStrategies() {
     const h = authHeaders()
-    fetch('/api/trading/strategies', { headers: h })
+    fetch('/api/guilds/' + slug + '/trading-spaces/' + spaceId + '/strategies', { headers: h })
       .then(r => r.ok ? r.json() : null)
       .then(d => d && setStrategies(d.strategies || d || []))
       .catch(() => {})
@@ -664,7 +664,8 @@ export default function TradingSpaceShell({ slug, spaceId }: Props) {
   }, [slug, spaceId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const authHeadersObj = authHeaders()
-  const visibleTabs = TABS.filter(t => t.id !== 'memory' || !!apiKey)
+  // G12: no placeholder tab ships. Federation returns when cross-space federation is real.
+  const visibleTabs = TABS.filter(t => (t.id !== 'memory' || !!apiKey) && t.id !== 'federation')
   const liveCount = roster.filter(r => r.presence_state !== 'offline').length
 
   function renderTab(): React.ReactNode {
@@ -683,7 +684,7 @@ export default function TradingSpaceShell({ slug, spaceId }: Props) {
       case 'research':
         return <ResearchPanel slug={slug} spaceId={spaceId} authHeaders={authHeaders} />
       case 'strategies':
-        return <StrategiesPanel authHeaders={authHeaders} />
+        return <StrategiesPanel slug={slug} spaceId={spaceId} authHeaders={authHeaders} />
       case 'memory':
         return <InlineMemoryViewer slug={slug} spaceId={spaceId} authHeaders={authHeaders} />
       case 'agents':

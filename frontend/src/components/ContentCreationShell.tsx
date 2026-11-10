@@ -524,7 +524,8 @@ export default function ContentCreationShell({ slug, spaceId }: Props) {
   }, [slug, spaceId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const authHeadersObj = authHeaders()
-  const visibleTabs = TABS.filter(t => t.id !== 'memory' || !!apiKey)
+  // G12: no placeholder tab ships. Federation returns when cross-space federation is real.
+  const visibleTabs = TABS.filter(t => (t.id !== 'memory' || !!apiKey) && t.id !== 'federation')
   const liveCount = roster.filter(r => r.presence_state !== 'offline').length
 
   function handleProviderChange(provider: string) {

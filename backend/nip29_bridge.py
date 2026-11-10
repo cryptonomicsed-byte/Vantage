@@ -14,7 +14,9 @@ from .nostr_gateway import gateway as _nostr_gw
 
 logger = logging.getLogger(__name__)
 
-_RELAY = _nostr_gw.nipae_url
+# The guild groups ride the proven primary relay (G12); NIPAE's relay is for
+# encrypted engrams and was never where guild chat was.
+_RELAY = settings.NIP29_RELAY or _nostr_gw.primary_ws_url
 
 
 async def _get_platform_key():
