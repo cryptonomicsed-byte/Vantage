@@ -11,7 +11,8 @@ import uuid
 from typing import Optional
 
 import aiosqlite
-from fastapi import APIRouter, Depends, Form, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from ..db import get_db
 from ..deps import get_agent
@@ -71,14 +72,21 @@ async def list_content_spaces(slug: str, agent: dict = Depends(get_agent)):
     return [dict(r) for r in rows]
 
 
+class CreateContentSpaceBody(BaseModel):
+    name: str
+    mcp_provider: str = Field("vantage_anvil")
+    series_id: Optional[int] = Field(None)
+
+
 @router.post("")
 async def create_content_space(
+    body: CreateContentSpaceBody,
     slug: str,
-    name: str = Form(...),
-    mcp_provider: str = Form("vantage_anvil"),
-    series_id: Optional[int] = Form(None),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
+    name = body.name
+    mcp_provider = body.mcp_provider
+    series_id = body.series_id
     await require_member(slug, agent)
     space_id = str(uuid.uuid4())
     now = int(time.time())
@@ -144,14 +152,21 @@ async def list_projects(slug: str, space_id: str, agent: dict = Depends(get_agen
     return [dict(r) for r in rows]
 
 
+class CreateProjectBody(BaseModel):
+    title: str
+    brief: str = Field("")
+    provider: str = Field("")
+
+
 @router.post("/{space_id}/projects")
 async def create_project(
+    body: CreateProjectBody,
     slug: str, space_id: str,
-    title: str = Form(...),
-    brief: str = Form(""),
-    provider: str = Form(""),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
+    title = body.title
+    brief = body.brief
+    provider = body.provider
     await _member_space(slug, space_id, agent)
     project_id = str(uuid.uuid4())
     now = int(time.time())
@@ -164,14 +179,22 @@ async def create_project(
     return {"id": project_id, "status": "brief_submitted"}
 
 
+class UpdateProjectBody(BaseModel):
+    status: Optional[str] = Field(None)
+    title: Optional[str] = Field(None)
+    brief: Optional[str] = Field(None)
+
+
 @router.patch("/{space_id}/projects/{project_id}")
 async def update_project(
     slug: str, space_id: str, project_id: str,
-    status: Optional[str] = Form(None),
-    title: Optional[str] = Form(None),
-    brief: Optional[str] = Form(None),
     agent: dict = Depends(get_agent),
+    body: Optional[UpdateProjectBody] = None,
 ):
+    body = body or UpdateProjectBody()
+    status = body.status
+    title = body.title
+    brief = body.brief
     await _member_space(slug, space_id, agent)
     valid_statuses = ("brief_submitted", "in_production", "in_review", "published")
     if status and status not in valid_statuses:
@@ -218,16 +241,25 @@ async def list_tasks(
     return {"tasks": items, "total": len(items)}
 
 
+class CreateTaskBody(BaseModel):
+    title: str
+    description: str = Field("")
+    priority: int = Field(50)
+    kind_tag: str = Field("")
+    project_id: str = Field("")
+
+
 @router.post("/{space_id}/tasks")
 async def create_task(
+    body: CreateTaskBody,
     slug: str, space_id: str,
-    title: str = Form(...),
-    description: str = Form(""),
-    priority: int = Form(50),
-    kind_tag: str = Form(""),
-    project_id: str = Form(""),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
+    title = body.title
+    description = body.description
+    priority = body.priority
+    kind_tag = body.kind_tag
+    project_id = body.project_id
     await _member_space(slug, space_id, agent)
     task_id = str(uuid.uuid4())
     now = int(time.time())
@@ -271,15 +303,23 @@ async def claim_task(slug: str, space_id: str, task_id: str,
     return {"ok": True, "status": S_CLAIMED, "claim_expires_at": row["claim_expires_at"]}
 
 
+class SubmitTaskBody(BaseModel):
+    artifact_kind: str = Field("other")
+    title: str
+    content_text: str = Field("")
+    content_uri: str = Field("")
+
+
 @router.post("/{space_id}/tasks/{task_id}/submit")
 async def submit_task(
+    body: SubmitTaskBody,
     slug: str, space_id: str, task_id: str,
-    artifact_kind: str = Form("other"),
-    title: str = Form(...),
-    content_text: str = Form(""),
-    content_uri: str = Form(""),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
+    artifact_kind = body.artifact_kind
+    title = body.title
+    content_text = body.content_text
+    content_uri = body.content_uri
     await _member_space(slug, space_id, agent)
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
@@ -319,12 +359,18 @@ async def _task_for_review(slug: str, space_id: str, task_id: str, agent: dict) 
     return task
 
 
+class AcceptTaskBody(BaseModel):
+    note: str = Field("")
+
+
 @router.post("/{space_id}/tasks/{task_id}/accept")
 async def accept_task(
     slug: str, space_id: str, task_id: str,
-    note: str = Form(""),
     agent: dict = Depends(get_agent),
+    body: Optional[AcceptTaskBody] = None,
 ):
+    body = body or AcceptTaskBody()
+    note = body.note
     task = await _task_for_review(slug, space_id, task_id, agent)
     if task["status"] != S_REVIEW:
         raise HTTPException(409, f"Task is {task['status']!r}, not in review; nothing to accept")
@@ -342,12 +388,18 @@ async def accept_task(
     return {"ok": True, "status": S_DONE}
 
 
+class RejectTaskBody(BaseModel):
+    note: str = Field("")
+
+
 @router.post("/{space_id}/tasks/{task_id}/reject")
 async def reject_task(
     slug: str, space_id: str, task_id: str,
-    note: str = Form(""),
     agent: dict = Depends(get_agent),
+    body: Optional[RejectTaskBody] = None,
 ):
+    body = body or RejectTaskBody()
+    note = body.note
     task = await _task_for_review(slug, space_id, task_id, agent)
     if task["status"] not in (S_CLAIMED, S_REVIEW):
         raise HTTPException(409, f"Task is {task['status']!r}; only in-production or in-review work can be rejected")
@@ -380,17 +432,27 @@ async def list_assets(slug: str, space_id: str, agent: dict = Depends(get_agent)
     return [dict(r) for r in rows]
 
 
+class CreateAssetBody(BaseModel):
+    project_id: str
+    kind: str = Field("other")
+    title: str
+    content_uri: str = Field("")
+    content_hash: str = Field("")
+    provider: str = Field("")
+
+
 @router.post("/{space_id}/assets")
 async def create_asset(
+    body: CreateAssetBody,
     slug: str, space_id: str,
-    project_id: str = Form(...),
-    kind: str = Form("other"),
-    title: str = Form(...),
-    content_uri: str = Form(""),
-    content_hash: str = Form(""),
-    provider: str = Form(""),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
+    project_id = body.project_id
+    kind = body.kind
+    title = body.title
+    content_uri = body.content_uri
+    content_hash = body.content_hash
+    provider = body.provider
     await _member_space(slug, space_id, agent)
     asset_id = str(uuid.uuid4())
     now = int(time.time())
@@ -421,13 +483,19 @@ async def get_memory(slug: str, space_id: str, agent: dict = Depends(get_agent))
     return [dict(r) for r in rows]
 
 
+class UpsertMemoryBody(BaseModel):
+    value: str
+    visibility: str = Field("agent")
+
+
 @router.put("/{space_id}/memory/{key}")
 async def upsert_memory(
+    body: UpsertMemoryBody,
     slug: str, space_id: str, key: str,
-    value: str = Form(...),
-    visibility: str = Form("agent"),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
+    value = body.value
+    visibility = body.visibility
     await _member_space(slug, space_id, agent)
     if visibility not in ("agent", "workspace", "guild"):
         raise HTTPException(400, "visibility must be agent|workspace|guild")

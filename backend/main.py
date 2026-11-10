@@ -913,6 +913,13 @@ async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSON
 
 app.add_middleware(GZipMiddleware, minimum_size=500)  # Compress more aggressively for faster loads
 
+# G1: one body contract on the guild surface. The guild routers declare JSON
+# bodies (so MCP tools generated from OpenAPI carry their parameters); this
+# rewrites the form bodies the UI and agent-bridge still send into JSON before
+# routing, so one route serves both. Scoped to guild paths only.
+from .body_contract import FormToJSONMiddleware
+app.add_middleware(FormToJSONMiddleware)
+
 # Real request-count/latency/in-progress metrics at GET /metrics (Prometheus
 # text format) -- audit flagged zero operational monitoring on a single-VPS
 # deployment with 35 daemons and no health visibility. This covers the API

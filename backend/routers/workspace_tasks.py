@@ -4,7 +4,8 @@ import uuid
 from typing import Optional
 
 import aiosqlite
-from fastapi import APIRouter, Depends, Form, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from ..db import get_db
 from ..deps import get_agent
@@ -77,18 +78,27 @@ async def list_tasks(
     return [dict(r) for r in rows]
 
 
+class CreateTaskBody(BaseModel):
+    title: str
+    description: str = Field("")
+    priority: int = Field(50)
+    kind_tag: str = Field("")
+    due_ts: Optional[int] = Field(None)
+
+
 @router.post("")
 async def create_task(
+    body: CreateTaskBody,
     slug: str,
     ws_id: str,
-    title: str = Form(...),
-    description: str = Form(""),
-    priority: int = Form(50),
-    kind_tag: str = Form(""),
-    due_ts: Optional[int] = Form(None),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
     """Create a new task in the workspace."""
+    title = body.title
+    description = body.description
+    priority = body.priority
+    kind_tag = body.kind_tag
+    due_ts = body.due_ts
     task_id = str(uuid.uuid4())
     now = int(time.time())
     async with get_db() as db:
@@ -119,18 +129,27 @@ async def get_task(
     return await _get_task(task_id, ws_id)
 
 
+class UpdateTaskBody(BaseModel):
+    title: Optional[str] = Field(None)
+    description: Optional[str] = Field(None)
+    priority: Optional[int] = Field(None)
+    status: Optional[str] = Field(None)
+
+
 @router.patch("/{task_id}")
 async def update_task(
     slug: str,
     ws_id: str,
     task_id: str,
-    title: Optional[str] = Form(None),
-    description: Optional[str] = Form(None),
-    priority: Optional[int] = Form(None),
-    status: Optional[str] = Form(None),
     agent: dict = Depends(get_agent),
+    body: Optional[UpdateTaskBody] = None,
 ):
     """Update task fields. Status beyond 'proposed' requires founder/maintainer or task creator."""
+    body = body or UpdateTaskBody()
+    title = body.title
+    description = body.description
+    priority = body.priority
+    status = body.status
     task = await _get_task(task_id, ws_id)
     now = int(time.time())
 
@@ -219,15 +238,20 @@ async def release_task(
     return await _get_task(task_id, ws_id)
 
 
+class SubmitTaskBody(BaseModel):
+    artifact_id: str
+
+
 @router.post("/{task_id}/submit")
 async def submit_task(
+    body: SubmitTaskBody,
     slug: str,
     ws_id: str,
     task_id: str,
-    artifact_id: str = Form(...),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
     """Submit an artifact for review, setting task status to 'review'."""
+    artifact_id = body.artifact_id
     task = await _get_task(task_id, ws_id)
     now = int(time.time())
     async with get_db() as db:
@@ -265,15 +289,21 @@ async def accept_task(
     return await _get_task(task_id, ws_id)
 
 
+class RejectTaskBody(BaseModel):
+    note: str = Field("")
+
+
 @router.post("/{task_id}/reject")
 async def reject_task(
     slug: str,
     ws_id: str,
     task_id: str,
-    note: str = Form(""),
     agent: dict = Depends(get_agent),
+    body: Optional[RejectTaskBody] = None,
 ):
     """Reject a task in review. Only guild founder/maintainer."""
+    body = body or RejectTaskBody()
+    note = body.note
     guild_id = await _get_guild_id(slug)
     if not await _is_founder_or_maintainer(guild_id, agent["id"]):
         raise HTTPException(403, "Only guild founder or maintainer can reject tasks")

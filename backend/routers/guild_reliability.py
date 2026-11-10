@@ -12,7 +12,8 @@ Math: backend/guild_reliability.py (port of bondhive core/src/score.rs).
 """
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from .. import guild_reliability as gr
 from ..db import get_db
@@ -45,16 +46,24 @@ async def get_reliability(
     }
 
 
+class RecordReliabilityOutcomeBody(BaseModel):
+    agent_id: int
+    outcome: str
+    ref: str = Field("")
+    note: str = Field("")
+
+
 @router.post("/{space_id}/reliability/outcomes")
 async def record_reliability_outcome(
+    body: RecordReliabilityOutcomeBody,
     slug: str,
     space_id: str,
-    agent_id: int = Form(...),
-    outcome: str = Form(...),
-    ref: str = Form(""),
-    note: str = Form(""),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
+    agent_id = body.agent_id
+    outcome = body.outcome
+    ref = body.ref
+    note = body.note
     guild_id = await _assert_guild_member(slug, agent)
     space = await _get_space(space_id, slug)
     if agent["id"] != space.get("created_by_agent_id"):

@@ -3,7 +3,8 @@ import time
 import uuid
 
 import aiosqlite
-from fastapi import APIRouter, Depends, Form, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from ..db import get_db
 from ..deps import get_agent
@@ -31,16 +32,22 @@ async def get_memory(
     return [dict(r) for r in rows]
 
 
+class UpsertMemoryBody(BaseModel):
+    value: str
+    visibility: str = Field("agent")
+
+
 @router.put("/{key}")
 async def upsert_memory(
+    body: UpsertMemoryBody,
     slug: str,
     ws_id: str,
     key: str,
-    value: str = Form(...),
-    visibility: str = Form("agent"),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
     """Upsert a memory entry. visibility: agent|workspace|guild."""
+    value = body.value
+    visibility = body.visibility
     if visibility not in ("agent", "workspace", "guild"):
         raise HTTPException(400, "visibility must be one of: agent, workspace, guild")
     now = int(time.time())

@@ -11,7 +11,8 @@ from typing import Optional
 
 import aiosqlite
 import httpx
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 
 from ..db import get_db
 from ..deps import get_agent
@@ -73,14 +74,21 @@ async def list_trading_spaces(slug: str, agent: dict = Depends(get_agent)):
     return [dict(r) for r in rows]
 
 
+class CreateTradingSpaceBody(BaseModel):
+    name: str
+    chain: str = Field("solana")
+    wallet_id: Optional[int] = Field(None)
+
+
 @router.post("")
 async def create_trading_space(
+    body: CreateTradingSpaceBody,
     slug: str,
-    name: str = Form(...),
-    chain: str = Form("solana"),
-    wallet_id: Optional[int] = Form(None),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
+    name = body.name
+    chain = body.chain
+    wallet_id = body.wallet_id
     await require_member(slug, agent)
     space_id = str(uuid.uuid4())
     now = int(time.time())
@@ -161,15 +169,23 @@ async def list_tasks(
     return {"tasks": items, "total": len(items)}
 
 
+class CreateTaskBody(BaseModel):
+    title: str
+    description: str = Field("")
+    priority: int = Field(50)
+    kind_tag: str = Field("")
+
+
 @router.post("/{space_id}/tasks")
 async def create_task(
+    body: CreateTaskBody,
     slug: str, space_id: str,
-    title: str = Form(...),
-    description: str = Form(""),
-    priority: int = Form(50),
-    kind_tag: str = Form(""),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
+    title = body.title
+    description = body.description
+    priority = body.priority
+    kind_tag = body.kind_tag
     await _member_space(slug, space_id, agent)
     task_id = str(uuid.uuid4())
     now = int(time.time())
@@ -247,20 +263,28 @@ async def heartbeat_task(slug: str, space_id: str, task_id: str,
     return {"ok": True, "status": "claimed", "claim_expires_at": row["claim_expires_at"]}
 
 
+class SubmitTaskBody(BaseModel):
+    artifact_kind: str = Field("other")
+    title: str
+    content_text: str = Field("")
+    content_uri: str = Field("")
+
+
 @router.post("/{space_id}/tasks/{task_id}/submit")
 async def submit_task(
+    body: SubmitTaskBody,
     slug: str, space_id: str, task_id: str,
-    artifact_kind: str = Form("other"),
-    title: str = Form(...),
-    content_text: str = Form(""),
-    content_uri: str = Form(""),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
     # P1-13: membership first (a removed member's old claim no longer lets
     # them submit); the task must belong to this space AND this guild; it must
     # still be claimed, by the caller, under an unexpired lease. The status
     # move is one conditional UPDATE, so a lease that expires (and is taken by
     # someone else) between check and write cannot slip a submission through.
+    artifact_kind = body.artifact_kind
+    title = body.title
+    content_text = body.content_text
+    content_uri = body.content_uri
     await _assert_guild_member(slug, agent)
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
@@ -312,12 +336,18 @@ async def _task_for_review(slug: str, space_id: str, task_id: str, agent: dict) 
     return task
 
 
+class AcceptTaskBody(BaseModel):
+    note: str = Field("")
+
+
 @router.post("/{space_id}/tasks/{task_id}/accept")
 async def accept_task(
     slug: str, space_id: str, task_id: str,
-    note: str = Form(""),
     agent: dict = Depends(get_agent),
+    body: Optional[AcceptTaskBody] = None,
 ):
+    body = body or AcceptTaskBody()
+    note = body.note
     task = await _task_for_review(slug, space_id, task_id, agent)
     if task["status"] != "review":
         raise HTTPException(409, f"Task is {task['status']!r}, not in review; nothing to accept")
@@ -335,12 +365,18 @@ async def accept_task(
     return {"ok": True, "status": "accepted"}
 
 
+class RejectTaskBody(BaseModel):
+    note: str = Field("")
+
+
 @router.post("/{space_id}/tasks/{task_id}/reject")
 async def reject_task(
     slug: str, space_id: str, task_id: str,
-    note: str = Form(""),
     agent: dict = Depends(get_agent),
+    body: Optional[RejectTaskBody] = None,
 ):
+    body = body or RejectTaskBody()
+    note = body.note
     task = await _task_for_review(slug, space_id, task_id, agent)
     if task["status"] not in ("claimed", "review"):
         raise HTTPException(409, f"Task is {task['status']!r}; only claimed or in-review work can be rejected")
@@ -375,17 +411,27 @@ async def list_pools(slug: str, space_id: str, agent: dict = Depends(get_agent))
     return {"pools": items, "total": len(items)}
 
 
+class CreatePoolBody(BaseModel):
+    name: str
+    pool_type: str = Field("trade")
+    token: str = Field("")
+    symbol: str = Field("")
+    target_amount: float = Field(0.0)
+    quorum_pct: float = Field(0.51)
+
+
 @router.post("/{space_id}/pools")
 async def create_pool(
+    body: CreatePoolBody,
     slug: str, space_id: str,
-    name: str = Form(...),
-    pool_type: str = Form("trade"),
-    token: str = Form(""),
-    symbol: str = Form(""),
-    target_amount: float = Form(0.0),
-    quorum_pct: float = Form(0.51),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
+    name = body.name
+    pool_type = body.pool_type
+    token = body.token
+    symbol = body.symbol
+    target_amount = body.target_amount
+    quorum_pct = body.quorum_pct
     await _member_space(slug, space_id, agent)
     if quorum_pct <= 0.0 or quorum_pct > 1.0:
         raise HTTPException(422, "quorum_pct must be a fraction in (0, 1]")
@@ -400,13 +446,19 @@ async def create_pool(
     return {"id": pool_id, "name": name}
 
 
+class CommitToPoolBody(BaseModel):
+    amount: float
+    wallet_id: Optional[int] = Field(None)
+
+
 @router.post("/{space_id}/pools/{pool_id}/commit")
 async def commit_to_pool(
+    body: CommitToPoolBody,
     slug: str, space_id: str, pool_id: str,
-    amount: float = Form(...),
-    wallet_id: Optional[int] = Form(None),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
+    amount = body.amount
+    wallet_id = body.wallet_id
     await _member_space(slug, space_id, agent)
     if amount <= 0:
         raise HTTPException(422, "amount must be a positive value")
@@ -458,13 +510,19 @@ async def get_memory(slug: str, space_id: str, agent: dict = Depends(get_agent))
     return [dict(r) for r in rows]
 
 
+class UpsertMemoryBody(BaseModel):
+    value: str
+    visibility: str = Field("agent")
+
+
 @router.put("/{space_id}/memory/{key}")
 async def upsert_memory(
+    body: UpsertMemoryBody,
     slug: str, space_id: str, key: str,
-    value: str = Form(...),
-    visibility: str = Form("agent"),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
+    value = body.value
+    visibility = body.visibility
     await _member_space(slug, space_id, agent)
     if visibility not in ("agent", "workspace", "guild"):
         raise HTTPException(400, "visibility must be agent|workspace|guild")

@@ -4,7 +4,8 @@ import uuid
 from typing import Optional
 
 import aiosqlite
-from fastapi import APIRouter, Depends, Form, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from ..db import get_db
 from ..deps import get_agent
@@ -15,19 +16,29 @@ router = APIRouter(
 )
 
 
+class CreateArtifactBody(BaseModel):
+    task_id: str
+    kind: str = Field("other")
+    title: str
+    content_text: str = Field("")
+    content_uri: str = Field("")
+    content_hash: str = Field("")
+
+
 @router.post("")
 async def create_artifact(
+    body: CreateArtifactBody,
     slug: str,
     ws_id: str,
-    task_id: str = Form(...),
-    kind: str = Form("other"),
-    title: str = Form(...),
-    content_text: str = Form(""),
-    content_uri: str = Form(""),
-    content_hash: str = Form(""),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
     """Create an artifact for a task."""
+    task_id = body.task_id
+    kind = body.kind
+    title = body.title
+    content_text = body.content_text
+    content_uri = body.content_uri
+    content_hash = body.content_hash
     artifact_id = str(uuid.uuid4())
     now = int(time.time())
     async with get_db() as db:
@@ -67,17 +78,24 @@ async def get_artifact(
     return dict(row)
 
 
+class AttachReceiptBody(BaseModel):
+    receipt_body: str
+    omokoda_receipt_id: Optional[str] = Field(None)
+    kernel_pubkey: str = Field("")
+
+
 @router.post("/{artifact_id}/receipt")
 async def attach_receipt(
+    body: AttachReceiptBody,
     slug: str,
     ws_id: str,
     artifact_id: str,
-    receipt_body: str = Form(...),
-    omokoda_receipt_id: Optional[str] = Form(None),
-    kernel_pubkey: str = Form(""),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
     """Attach an execution receipt to an artifact. Insert-only."""
+    receipt_body = body.receipt_body
+    omokoda_receipt_id = body.omokoda_receipt_id
+    kernel_pubkey = body.kernel_pubkey
     # Verify artifact exists in this workspace
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
