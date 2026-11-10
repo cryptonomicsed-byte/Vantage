@@ -137,14 +137,28 @@ async def rebuild(db, now: Optional[float] = None) -> Dict[str, Any]:
     from . import wallet_labels
     now = now or time.time()
     await wallet_labels._ensure(db)  # creates runner/trace/label tables too
+    from .runner_detect import ensure_table as _ensure_runners
+    await _ensure_runners(db)
     for d in DDL:
         await db.execute(d)
     cols = ["mint", "wallet", "rank", "sol", "funded_by", "entry_ts", "tier_weight", "symbol"]
     rows = await (await db.execute(
         "SELECT b.mint, b.wallet, b.rank, b.sol, b.funded_by, COALESCE(b.entry_ts, r.detected_at), "
         "r.tier_weight, r.symbol FROM runner_early_buyers b JOIN runner_tokens r ON r.mint=b.mint "
-        "WHERE b.rank <= 100")).fetchall()
-    buys = [dict(zip(cols, r)) for r in rows]
+        "WHERE b.rank <= 100 AND r.backed = 1")).fetchall()  # liquidity-backed runners only
+    raw = [dict(zip(cols, r)) for r in rows]
+    # dust (side-pool bot trades) and liquidity rows are not entries: drop
+    # them and rank the remaining real buys per mint
+    from .early_runner_intel import classify
+    sol_tok = {(m, w): (s, t) for m, w, s, t in await (await db.execute(
+        "SELECT mint, wallet, sol, tokens FROM runner_early_buyers WHERE rank <= 100")).fetchall()}
+    buys, seen = [], {}
+    for b in sorted(raw, key=lambda x: (x["mint"], x["rank"])):
+        s, t = sol_tok.get((b["mint"], b["wallet"]), (b.get("sol"), 0))
+        if classify({"sol": s, "tokens": t}) != "buy":
+            continue
+        seen[b["mint"]] = seen.get(b["mint"], 0) + 1
+        buys.append({**b, "rank": seen[b["mint"]]})
     wallets = list({b["wallet"] for b in buys} | {b["funded_by"] for b in buys if b["funded_by"]})
     labels = await wallet_labels.labels_for(db, wallets)
     wl = compute(buys, labels, now, wallet_labels.EXCLUDED_FROM_WATCHLIST)

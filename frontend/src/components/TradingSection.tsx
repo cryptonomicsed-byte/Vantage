@@ -1,10 +1,11 @@
 import React, { useState } from 'react'
-import { LayoutDashboard, TrendingUp, Briefcase, Zap, Flame, Terminal, Rocket, Users, Target } from 'lucide-react'
+import { LayoutDashboard, TrendingUp, Briefcase, Zap, Flame, Terminal, Rocket, Users, Target, Crosshair } from 'lucide-react'
 import TradingDashboard from './trading/TradingDashboard'
 import TradingTerminal from './trading/TradingTerminal'
 import MarketIntel from './trading/MarketIntel'
 import DailyIntel from './trading/DailyIntel'
 import DegenTrenches from './trading/DegenTrenches'
+import EarlyRunners from './trading/EarlyRunners'
 import LaunchTokenPanel from './trading/LaunchTokenPanel'
 import Portfolio from './trading/Portfolio'
 import TradingViewChart from './trading/TradingViewChart'
@@ -19,13 +20,14 @@ const GROUPS = [
   { id: 'prediction', label: 'Prediction', icon: Target },
   { id: 'daily-intel', label: 'Daily Intel', icon: Zap },
   { id: 'degen-trenches', label: 'Degen Trenches', icon: Flame },
+  { id: 'early-runners', label: 'Early Runners', icon: Crosshair },
   { id: 'launch', label: 'Launch Token', icon: Rocket },
   { id: 'copy', label: 'My Leaders', icon: Users },
   { id: 'portfolio', label: 'Portfolio', icon: Briefcase },
   { id: 'terminal', label: 'Terminal', icon: Terminal },
 ]
 
-type Group = 'dashboard' | 'analytics' | 'prediction' | 'daily-intel' | 'degen-trenches' | 'launch' | 'copy' | 'portfolio' | 'terminal'
+type Group = 'dashboard' | 'analytics' | 'prediction' | 'daily-intel' | 'degen-trenches' | 'early-runners' | 'launch' | 'copy' | 'portfolio' | 'terminal'
 
 /** `?tab=<group>&market=<source>:<market_id>` — shareable links into the section. */
 function parseMarketParam(): { source: string; market_id: string } | null {
@@ -87,6 +89,7 @@ export default function TradingSection() {
         )}
         {group === 'daily-intel' && <DailyIntel />}
         {group === 'degen-trenches' && <DegenTrenches />}
+        {group === 'early-runners' && <EarlyRunners />}
         {group === 'launch' && <LaunchTokenPanel />}
         {group === 'copy' && <CopyTradingPanel />}
         {group === 'portfolio' && <Portfolio />}

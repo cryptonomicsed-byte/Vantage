@@ -76,10 +76,13 @@ async def test_rebuild_with_radar_separate_source(tmp_path, monkeypatch):
         await wallet_labels._ensure(db)
         for d in rw.DDL:
             await db.execute(d)
+        from backend.runner_detect import ensure_table
+        await ensure_table(db)
         await db.execute("DELETE FROM runner_early_buyers WHERE mint IN ('WR1','WR2')")
         for m in ("WR1", "WR2"):
             await db.execute("INSERT OR REPLACE INTO runner_tokens (mint, symbol, tier_usd, tier_weight, peak_mcap_usd, "
-                             "peak_at, detected_at) VALUES (?,?,1e6,1.0,1e6,1,?)", (m, m, int(time.time())))
+                             "peak_at, detected_at, backed, liq_usd) VALUES (?,?,1e6,1.0,1e6,1,?,1,90000)",
+                             (m, m, int(time.time())))
             await db.execute("INSERT INTO runner_early_buyers (mint, wallet, rank, entry_ts, sol, source) "
                              "VALUES (?, 'W1', 1, ?, 5.0, 'curve')", (m, int(time.time())))
         await wallet_labels.put(db, [("RBOT", "bot", {"x": 1})])
