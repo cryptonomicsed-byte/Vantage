@@ -699,7 +699,11 @@ async def list_guild_artifacts(
     return {"artifacts": [dict(r) for r in rows]}
 
 
-@router.get("/{slug}/receipts", summary="List all guild execution receipts")
+# G8: this used to be registered at /{slug}/receipts, where guild_forum's
+# route of the same path (included first) shadowed it: callers got the
+# {head, chain} receipt-chain shape instead of execution receipts. One path
+# per meaning.
+@router.get("/{slug}/execution-receipts", summary="List all guild execution receipts")
 async def list_guild_receipts(
     slug: str,
     limit: int = Query(50, ge=1, le=200),

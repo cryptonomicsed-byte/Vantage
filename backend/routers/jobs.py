@@ -233,6 +233,7 @@ async def submit_task(job_id: int, task_id: int, req: SubmitRequest, agent: dict
             osovm_proof_id = proof.get("proof_id") or proof.get("id")
 
     async with get_db() as db:
+        job = await _row(db, "SELECT guild_slug FROM jobs WHERE id=?", (job_id,)) or {}
         cur = await db.execute(
             """UPDATE job_tasks SET status='submitted', result_broadcast_id=?, result_description=?,
                osovm_sim_hash=?, osovm_proof_id=?
@@ -253,6 +254,7 @@ async def submit_task(job_id: int, task_id: int, req: SubmitRequest, agent: dict
             subject_type="job",
             subject_id=task_id,
             submitter_agent_id=agent["id"],
+            guild_slug=job.get("guild_slug") or None,
             artifact_url="",
             description=(
                 f"Work submitted for job #{job_id} task #{task_id}"
@@ -283,6 +285,29 @@ async def approve_task(job_id: int, task_id: int, agent: dict = Depends(get_agen
         if job["poster_id"] != agent["id"]:
             raise HTTPException(403, "Only the job poster can approve tasks")
 
+    # G8: when a witness round was opened for this submission, approval
+    # waits for it. The audit ran poster, claimant, submitter and approver
+    # as one agent and approval never looked at round 7. An expired round
+    # (no quorum in time) does not block the poster; a rejected one does.
+    try:
+        from ..witness_store import expire_stale_rounds, round_for_subject
+        await expire_stale_rounds()
+        rnd = await round_for_subject("job", task_id)
+    except Exception as exc:
+        logger.warning("jobs: witness lookup failed, approving without it: %s", exc)
+        rnd = None
+    # Only a guild-scoped round with witnesses actually assigned can block:
+    # a job outside any guild, or a round nobody was drawn for, has no quorum
+    # to wait on and approval proceeds as it always did.
+    if rnd and rnd.get("guild_slug") and rnd["status"] == "open":
+        async with get_db() as db:
+            assigned = await _row(db, "SELECT COUNT(*) AS n FROM witness_assignments WHERE round_id=?", (rnd["id"],))
+        if assigned and assigned["n"] > 0:
+            raise HTTPException(409, f"Awaiting witness quorum on round {rnd['id']} ({rnd['quorum']} votes needed)")
+    if rnd and rnd.get("guild_slug") and rnd["status"] == "rejected":
+        raise HTTPException(409, f"Witness round {rnd['id']} rejected this submission; it cannot be approved")
+
+    async with get_db() as db:
         cur = await db.execute(
             "UPDATE job_tasks SET status='approved' WHERE id=? AND job_id=? AND status='submitted'",
             (task_id, job_id),
