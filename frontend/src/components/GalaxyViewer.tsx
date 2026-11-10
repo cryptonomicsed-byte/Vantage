@@ -1,4 +1,7 @@
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react'
+import { buildLayout } from './galaxyLayout'
+import { computeWasmLayout, galaxyWasmEnabled, nodeGixId, warnGalaxyWasmOnce } from './galaxyLayoutClient'
+import type { WasmLayoutSwap } from './galaxyLayoutClient'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -84,80 +87,9 @@ function getNodeColor(node: NeuralNode): string {
   return TYPE_COLOR[node.content_type] || TYPE_COLOR[node.constellation] || '#00f5ff'
 }
 
-/* ─── Layout ─────────────────────────────────────────────────────────────────
-   The server places constellations side by side along x (a 16000 × 1000
-   strip for a large vault) and derives y/z from a hash of the title, so every
-   memory with the same title ("Intel Scan Complete" × hundreds) lands on the
-   same point. Here the isometric projection is applied once, constellations
-   are arranged on a grid, and coincident nodes fan out on a golden-angle
-   spiral so each one is visible and clickable. World units are the server's;
-   the view transform is screen = world * scale + offset. */
-interface Layout {
-  wx: Float32Array
-  wy: Float32Array
-  idx: Map<string, number>
-  cells: { name: string; x: number; y: number; w: number; h: number; count: number }[]
-  minX: number; minY: number; maxX: number; maxY: number
-  byCoord: Map<string, number>
-}
-
-const iso = (x: number, y: number, z: number): [number, number] => [x - z * 0.4, y + z * 0.2]
-
-function buildLayout(nodes: NeuralNode[]): Layout {
-  const n = nodes.length
-  const wx = new Float32Array(n), wy = new Float32Array(n)
-  const idx = new Map<string, number>()
-  const byCoord = new Map<string, number>()
-  const groups = new Map<string, number[]>()
-  nodes.forEach((nd, i) => {
-    const g = nd.constellation || 'other'
-    if (!groups.has(g)) groups.set(g, [])
-    groups.get(g)!.push(i)
-  })
-  const names = [...groups.keys()].sort((a, b) => groups.get(b)!.length - groups.get(a)!.length)
-  const local = names.map(name => {
-    const ids = groups.get(name)!
-    let mnx = Infinity, mny = Infinity, mxx = -Infinity, mxy = -Infinity
-    ids.forEach(i => {
-      const [px, py] = iso(nodes[i].x, nodes[i].y, nodes[i].z)
-      if (px < mnx) mnx = px; if (py < mny) mny = py
-      if (px > mxx) mxx = px; if (py > mxy) mxy = py
-    })
-    return { name, ids, mnx, mny, w: Math.max(200, mxx - mnx), h: Math.max(200, mxy - mny) }
-  })
-  const cellW = Math.max(200, ...local.map(l => l.w)) + 400
-  const cellH = Math.max(200, ...local.map(l => l.h)) + 500
-  const cols = Math.max(1, Math.ceil(Math.sqrt(local.length * (cellH / cellW) * 1.6)))
-  const cells: Layout['cells'] = []
-  local.forEach((l, k) => {
-    const cx = (k % cols) * cellW, cy = Math.floor(k / cols) * cellH
-    const seen = new Map<string, number>()
-    l.ids.forEach(i => {
-      const nd = nodes[i]
-      const [px, py] = iso(nd.x, nd.y, nd.z)
-      let x = cx + (px - l.mnx), y = cy + (py - l.mny)
-      const key = `${Math.round(px)}|${Math.round(py)}`
-      const dup = seen.get(key) || 0
-      seen.set(key, dup + 1)
-      if (dup > 0) {                       // fan coincident memories out
-        const a = dup * 2.39996, r = 14 * Math.sqrt(dup)
-        x += Math.cos(a) * r; y += Math.sin(a) * r
-      }
-      wx[i] = x; wy[i] = y
-      idx.set(nd.id, i)
-      const ck = `${nd.x}|${nd.y}|${nd.z}`
-      if (!byCoord.has(ck)) byCoord.set(ck, i)
-    })
-    cells.push({ name: l.name, x: cx, y: cy, w: l.w, h: l.h, count: l.ids.length })
-  })
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-  for (let i = 0; i < n; i++) {
-    if (wx[i] < minX) minX = wx[i]; if (wy[i] < minY) minY = wy[i]
-    if (wx[i] > maxX) maxX = wx[i]; if (wy[i] > maxY) maxY = wy[i]
-  }
-  if (n === 0) { minX = minY = 0; maxX = maxY = 1 }
-  return { wx, wy, idx, cells, minX, minY: minY - 160, maxX, maxY, byCoord }
-}
+/* Layout lives in ./galaxyLayout (pure, shared with the wasm parity script).
+   Optional wasm path (services/galaxy_layout in a Web Worker) is behind the
+   default-off flag localStorage['galaxy.wasm']==='1' / VITE_GALAXY_WASM=1. */
 
 const DETAIL_MAX = 600       // full glow + labels only when this few nodes are on screen
 const LIST_MAX = 300         // rows rendered in the node list (search narrows it)
@@ -212,7 +144,23 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
   const edges   = useMemo(() => data.edges || [], [data])
   const nebulae = data.nebulae || []
 
-  const layout = useMemo(() => buildLayout(nodes), [nodes])
+  // JS layout is always computed and rendered first; with the wasm flag on the
+  // worker's (parity-checked) layout is swapped in when it answers.
+  const jsLayout = useMemo(() => buildLayout(nodes), [nodes])
+  const wasmFlag = useMemo(() => galaxyWasmEnabled(), [])
+  const [wasmSwap, setWasmSwap] = useState<{ nodes: NeuralNode[]; swap: WasmLayoutSwap } | null>(null)
+  useEffect(() => {
+    if (!wasmFlag || nodes.length === 0) return
+    let live = true
+    try {
+      computeWasmLayout(nodes, jsLayout)
+        .then(swap => { if (live) setWasmSwap({ nodes, swap }) })
+        .catch(err => warnGalaxyWasmOnce(err))
+    } catch (err) { warnGalaxyWasmOnce(err) }
+    return () => { live = false }
+  }, [wasmFlag, nodes, jsLayout])
+  const wasmActive = !!wasmSwap && wasmSwap.nodes === nodes
+  const layout = wasmActive ? wasmSwap!.swap.layout : jsLayout
   const layoutRef = useRef(layout)
   layoutRef.current = layout
 
@@ -228,7 +176,8 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
     const a = layout.idx.get(e.subject) ?? layout.byCoord.get(`${e.source[0]}|${e.source[1]}|${e.source[2]}`)
     const b = layout.idx.get(e.object) ?? layout.byCoord.get(`${e.target[0]}|${e.target[1]}|${e.target[2]}`)
     return a == null || b == null ? null : [a, b] as [number, number]
-  }), [edges, layout])
+    // idx/byCoord are shared by the JS and wasm layouts, so a swap keeps the pulses
+  }), [edges, layout.idx, layout.byCoord])
 
   // minimap: pre-rendered once per layout
   const minimap = useMemo(() => {
@@ -318,11 +267,12 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
     return () => ro.disconnect()
   }, [fitAll])
 
-  // new data → fit again
+  // new data → fit again (keyed on the JS layout: the wasm swap has the same
+  // positions, so it must not reset the user's pan/zoom)
   useEffect(() => {
     fittedRef.current = false
     if (sizeRef.current.w && nodes.length) { fitAll(); fittedRef.current = true }
-  }, [layout, fitAll, nodes.length])
+  }, [jsLayout, fitAll, nodes.length])
 
   // ── Wheel: a real non-passive listener so it zooms instead of scrolling ──
   // (React's onWheel is passive; its preventDefault was ignored, so the page
@@ -676,6 +626,7 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
 
         <div className="galaxy-stats" style={{ fontFamily: 'Inter, sans-serif' }}>
           ⬡ {filteredCount.toLocaleString()} nodes · {edges.length} synapses · {layout.cells.length} constellations
+          {wasmFlag && <> · layout: {wasmActive ? 'wasm' : 'js'}{wasmActive && <span title={`GIX vault merkle root ${wasmSwap!.swap.merkleRoot}`}> · root {wasmSwap!.swap.merkleRoot.slice(0, 12)}</span>}</>}
         </div>
 
         {/* Zoom controls */}
@@ -721,6 +672,10 @@ export default function GalaxyViewer({ data, agentName: _agentName, onStarSelect
               <span style={{ fontSize: 10, background: 'rgba(138,75,255,0.1)', color: '#a855f7', borderRadius: 4, padding: '2px 6px' }}>{selectedNode.constellation}</span>
               <span style={{ fontSize: 10, color: 'rgba(107,114,128,0.7)' }}>strength: {selectedNode.size}</span>
               {selectedNode.created && <span style={{ fontSize: 10, color: 'rgba(107,114,128,0.7)' }}>{String(selectedNode.created).slice(0, 16)}</span>}
+              {wasmActive && layout.idx.get(selectedNode.id) != null && (
+                <span style={{ fontSize: 10, color: 'rgba(107,114,128,0.7)', fontFamily: 'monospace' }}
+                  title="GIX content_hash(path || id)">gix {nodeGixId(wasmSwap!.swap.nodeHashes, layout.idx.get(selectedNode.id)!)}</span>
+              )}
             </div>
             {selectedNode.tags.length > 0 && (
               <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>

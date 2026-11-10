@@ -75,3 +75,11 @@ def test_early_buyer_falls_back_to_public_rpc_when_all_capped(pool):
     for k in hp.keys():
         hp.report(k, 429, "max usage reached")
     assert eb._helius_key() == eb.PUBLIC_RPC
+
+
+def test_gate_url_wins_when_set(pool, monkeypatch):
+    from backend import early_buyer as eb
+    monkeypatch.setenv("HELIUS_GATE_URL", "http://127.0.0.1:8092")
+    assert eb._helius_key() == "http://127.0.0.1:8092"
+    monkeypatch.setenv("HELIUS_GATE_URL", "")
+    assert eb._helius_key() in hp.keys()
