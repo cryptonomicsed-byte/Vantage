@@ -29,6 +29,8 @@ interface FlowNode {
   address?: string; chain?: string; degen_score?: number
   trade_count?: number; unique_tokens?: number; address_type?: string
   is_migration_anchor?: boolean; balance_usd?: number; dormant_dim?: boolean
+  labels?: string[]; watchlist?: { entity: string; score: number }
+  cluster_tags?: string[]; cluster_label?: string | null
   // token-only
   ca?: string; market_cap?: number | null; tier?: string
   migration_distance?: number; dormant_void?: boolean
@@ -201,9 +203,49 @@ function buildGraph(data: MoneyFlowData, activeTiers: Set<string> | null, tracke
   return { nodes, links }
 }
 
+// Wallet labels (P4-05) as chips in the galaxy detail panel
+const LABEL_CHIP: Record<string, string> = {
+  dev: '#f59e0b', sniper: '#ef4444', bundler: '#a855f7', insider: '#ec4899', kol: '#22d3ee',
+  whale: '#3b82f6', bot: '#6b7280', funding_hub: '#eab308',
+}
+const ROLE_NAME: Record<string, string> = { first_buyer: 'Early buyer', top_trader: 'Top trader', top_holder: 'Top holder', deployer: 'Deployer' }
+
+/** The ranked roles stored for this node (token_wallet_roles): for a wallet,
+ *  which tokens it was an early buyer / top trader / holder / deployer of and
+ *  at what rank; for a token, its best-ranked wallets per role. */
+function RankedRoles({ edges, nodes, nodeId, side }: { edges: FlowEdge[]; nodes: FlowNode[]; nodeId: string; side: 'wallet' | 'token' }) {
+  const byId = new Map(nodes.map(n => [n.id, n]))
+  const rows = edges
+    .filter(e => e.type.startsWith('role:') && (side === 'wallet' ? e.source === nodeId : e.target === nodeId))
+    .sort((a, b) => (a.role || '').localeCompare(b.role || '') || (a.rank ?? 9e9) - (b.rank ?? 9e9))
+  if (!rows.length) return null
+  const shown = side === 'token' ? rows.filter(r => (r.rank ?? 99) <= 10) : rows.slice(0, 12)
+  return (
+    <div style={{ marginTop: 8, maxHeight: 180, overflowY: 'auto' }}>
+      <div style={{ fontSize: 10, letterSpacing: 1, color: 'rgba(255,255,255,.5)', marginBottom: 4 }}>
+        {side === 'wallet' ? 'RANKED ROLES' : 'TOP WALLETS BY ROLE'} ({rows.length})
+      </div>
+      {shown.map((r, i) => {
+        const other = byId.get(side === 'wallet' ? r.target : r.source)
+        return (
+          <div key={i} style={{ fontSize: 11, color: 'rgba(255,255,255,.8)', padding: '2px 0', display: 'flex', gap: 6 }}>
+            <span style={{ color: r.color || '#9ca3af', minWidth: 74 }}>{ROLE_NAME[r.role || ''] || r.role}{r.rank != null ? ` #${r.rank}` : ''}</span>
+            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {other?.label || (side === 'wallet' ? r.target : r.source).split(':').pop()}
+              {other?.labels?.length ? ` · ${other.labels.slice(0, 2).join(', ')}` : ''}
+            </span>
+            {r.metric_label && <span style={{ color: 'rgba(255,255,255,.45)', whiteSpace: 'nowrap' }}>{r.metric_label.replace(/^Entry #\d+ · /, '')}</span>}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 export default function MoneyFlowGraph() {
   const mountRef = useRef<HTMLDivElement>(null)
   const graphRef = useRef<any>(null)
+  const fitDoneRef = useRef(false)  // auto-fit once, when the layout first settles
   const [hours, setHours] = useState(24)
   const [network, setNetwork] = useState<MoneyFlowData | null>(null)
   const [loading, setLoading] = useState(true)
@@ -289,7 +331,7 @@ export default function MoneyFlowGraph() {
 
       if (!graphRef.current) {
         graphRef.current = new ForceGraph3D(mountRef.current!)
-          .backgroundColor('rgba(4,3,13,0)')
+          .backgroundColor('#000000')
           .showNavInfo(false)
           .nodeLabel((n: any) => `<div style="font-family:monospace;font-size:11px;color:#dfe6ff;background:rgba(5,5,16,.9);padding:4px 8px;border-radius:6px;border:1px solid rgba(255,255,255,.12)">${n.ntype.toUpperCase()} · ${n.name}</div>`)
           .nodeThreeObject((n: any) => {
@@ -327,6 +369,9 @@ export default function MoneyFlowGraph() {
         .width(mountRef.current!.clientWidth)
         .height(mountRef.current!.clientHeight)
         .graphData({ nodes, links })
+      graphRef.current.onEngineStop(() => {
+        if (!fitDoneRef.current && graphRef.current) { fitDoneRef.current = true; graphRef.current.zoomToFit(800, 60) }
+      })
 
       const linkForce = graphRef.current.d3Force('link')
       if (linkForce) {
@@ -411,7 +456,7 @@ export default function MoneyFlowGraph() {
         </div>
       )}
 
-      <div style={{ position: 'relative', height: 560, borderRadius: 12, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.08)', background: 'radial-gradient(circle at 25% 15%, rgba(138,75,255,0.12), rgba(5,8,16,0.18) 55%, rgba(5,8,16,0) 100%)' }}>
+      <div style={{ position: 'relative', height: 560, borderRadius: 12, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.08)', background: '#000' }}>
         <div style={{ position: 'absolute', top: 12, left: 14, zIndex: 10, pointerEvents: 'none' }}>
           <div style={{ fontFamily: 'monospace', fontSize: 12, color: '#b9a8ff', letterSpacing: 1, display: 'flex', alignItems: 'center', gap: 6 }}>
             <Share2 size={13} /> MONEY-FLOW GALAXY
@@ -431,6 +476,9 @@ export default function MoneyFlowGraph() {
         </div>
 
         <div ref={mountRef} style={{ position: 'absolute', inset: 0 }} />
+        <button type="button" aria-label="Fit all nodes in view" onClick={() => graphRef.current?.zoomToFit(600, 60)}
+          style={{ position: 'absolute', top: 12, right: 12, zIndex: 12, background: 'rgba(0,0,0,0.8)', border: '1px solid rgba(0,245,255,0.3)',
+            borderRadius: 6, color: '#00f5ff', fontSize: 11, padding: '5px 10px', cursor: 'pointer' }}>⊙ FIT</button>
 
         {!network && loading && (
           <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,.4)', fontFamily: 'monospace', fontSize: 12 }}>
@@ -470,10 +518,22 @@ export default function MoneyFlowGraph() {
                 <div style={{ fontSize: 12, color: 'rgba(255,255,255,.7)' }}>Trade count: <b>{selected.trade_count ?? selected.trades}</b></div>
                 <div style={{ fontSize: 12, color: 'rgba(255,255,255,.7)' }}>Unique tokens: <b>{selected.unique_tokens ?? 0}</b></div>
                 <div style={{ fontSize: 12, color: 'rgba(255,255,255,.7)' }}>Volume observed: <b>{selected.volume_sol.toLocaleString(undefined, { maximumFractionDigits: 4 })} SOL</b></div>
+                {(selected.labels?.length || 0) > 0 && (
+                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', margin: '6px 0' }}>
+                    {selected.labels!.map(l => (
+                      <span key={l} style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, border: `1px solid ${LABEL_CHIP[l] || '#6b7280'}66`, color: LABEL_CHIP[l] || '#9ca3af' }}>{l}</span>
+                    ))}
+                  </div>
+                )}
+                {selected.watchlist && (
+                  <div style={{ fontSize: 12, color: '#22c55e' }}>On the runner watchlist · score <b>{selected.watchlist.score.toFixed(3)}</b></div>
+                )}
+                <RankedRoles edges={network?.edges || []} nodeId={selected.id} side="wallet" nodes={network?.nodes || []} />
               </>
             )}
             {selected.type === 'token' && (
               <>
+                <RankedRoles edges={network?.edges || []} nodeId={selected.id} side="token" nodes={network?.nodes || []} />
                 {selected.dormant_void && (
                   <div style={{ fontSize: 11, color: '#ef4444', fontWeight: 700, marginBottom: 4 }}>⚠ Graduated then collapsed back under $7K — faded into the dormant void</div>
                 )}

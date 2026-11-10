@@ -110,6 +110,7 @@ function buildGraph(g: GalaxyData): { nodes: GNode[]; links: GLink[] } {
 export default function NeuralVault() {
   const mountRef = useRef<HTMLDivElement>(null)
   const graphRef = useRef<any>(null)
+  const fitDoneRef = useRef(false)  // auto-fit once, when the layout first settles
   const [agentName, setAgentName] = useState<string | null>(null)
   const [needsAgent, setNeedsAgent] = useState(false)
   const [galaxy, setGalaxy] = useState<GalaxyData | null>(null)
@@ -205,7 +206,7 @@ export default function NeuralVault() {
           // with alpha:true and honors this color's alpha channel, so the
           // mount container's own glass (rgba + backdrop-filter) CSS shows
           // through instead of a solid backdrop.
-          .backgroundColor('rgba(4,3,13,0)')
+          .backgroundColor('#000000')
           .showNavInfo(false)
           .nodeLabel((n: any) => `<div style="font-family:monospace;font-size:11px;color:#dfe6ff;background:rgba(5,5,16,.9);padding:4px 8px;border-radius:6px;border:1px solid rgba(255,255,255,.12)">${n.name}</div>`)
           .nodeThreeObject((n: any) => {
@@ -241,6 +242,9 @@ export default function NeuralVault() {
         .width(mountRef.current!.clientWidth)
         .height(mountRef.current!.clientHeight)
         .graphData({ nodes, links })
+      graphRef.current.onEngineStop(() => {
+        if (!fitDoneRef.current && graphRef.current) { fitDoneRef.current = true; graphRef.current.zoomToFit(800, 60) }
+      })
     })()
     return () => { disposed = true }
   }, [galaxy, openNote])
@@ -316,7 +320,7 @@ export default function NeuralVault() {
   )
 
   return (
-    <div style={{ position: 'relative', height: 'calc(100vh - 175px)', minHeight: 480, borderRadius: 12, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.08)', background: 'radial-gradient(circle at 25% 15%, rgba(138,75,255,0.12), rgba(5,8,16,0.18) 55%, rgba(5,8,16,0) 100%)' }}>
+    <div style={{ position: 'relative', height: 'calc(100vh - 175px)', minHeight: 480, borderRadius: 12, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.08)', background: '#000' }}>
       {/* HUD header */}
       <div style={{ position: 'absolute', top: 12, left: 14, zIndex: 10, pointerEvents: 'none' }}>
         <div style={{ fontFamily: 'monospace', fontSize: 12, color: '#b9a8ff', letterSpacing: 1 }}>
@@ -384,6 +388,9 @@ export default function NeuralVault() {
 
       {/* 3D mount */}
       <div ref={mountRef} style={{ position: 'absolute', inset: 0 }} />
+        <button type="button" aria-label="Fit all nodes in view" onClick={() => graphRef.current?.zoomToFit(600, 60)}
+          style={{ position: 'absolute', top: 12, right: 12, zIndex: 12, background: 'rgba(0,0,0,0.8)', border: '1px solid rgba(0,245,255,0.3)',
+            borderRadius: 6, color: '#00f5ff', fontSize: 11, padding: '5px 10px', cursor: 'pointer' }}>⊙ FIT</button>
 
       {!galaxy && !error && (
         <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,.4)', fontFamily: 'monospace', fontSize: 12 }}>

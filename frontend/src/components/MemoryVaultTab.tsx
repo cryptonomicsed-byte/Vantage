@@ -166,7 +166,7 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
       if (apiKey) headers['X-Agent-Key'] = apiKey
 
       const res = await fetch(
-        `/api/agents/${encodeURIComponent(agentName)}/vault/galaxy`,
+        `/api/agents/${encodeURIComponent(agentName)}/vault/galaxy?compact=1`,
         { headers }
       )
 
@@ -876,7 +876,7 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
 
           <div className="vault-file-tree">
             {galaxy ? (
-              Object.entries(galaxy.clusters).map(([constellation, items]) => (
+              Object.entries(galaxy.clusters || groupByConstellation(galaxy.stars || [])).map(([constellation, items]) => (
                 <div key={constellation} className="vault-folder-row">
                   <div>
                     <span style={{ marginRight: 8 }}>📁</span>
@@ -1288,4 +1288,15 @@ export default function MemoryVaultTab({ agentName, isOwner }: Props) {
       )}
     </div>
   )
+}
+
+// The galaxy endpoint used to send every star twice (stars + clusters); with
+// ?compact=1 it sends stars only and the list view groups them here.
+function groupByConstellation(stars: Array<{ constellation?: string }>): Record<string, Array<unknown>> {
+  const out: Record<string, Array<unknown>> = {}
+  for (const st of stars) {
+    const k = st.constellation || 'other'
+    ;(out[k] = out[k] || []).push(st)
+  }
+  return out
 }

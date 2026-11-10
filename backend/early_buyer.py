@@ -457,17 +457,21 @@ async def backtrack_early_buyers(
             except aiosqlite.Error:
                 pass
 
-        # Inject into token_wallet_roles so moneyflow picks them up
-        for b in ranked[:max_buyers + (len(ranked) - len(real))]:
+        # Inject into token_wallet_roles so moneyflow picks them up -- real buys
+        # only, ranked among themselves (dust bots were stored as first buyers
+        # with raw ranks; DO NOTHING meant a re-walk never corrected them)
+        for rr, b in enumerate(real[:max_buyers], 1):
             try:
                 await db.execute(
                     """INSERT INTO token_wallet_roles
                        (mint, symbol, wallet_address, role, rank, metric, metric_label,
                         discovered_at)
                        VALUES (?,?,?,'first_buyer',?,?,?,datetime('now'))
-                       ON CONFLICT DO NOTHING""",
-                    (mint, mint[:8], b["wallet_address"], b["entry_rank"],
-                     b["sol_spent"], f"Entry rank #{b['entry_rank']}"),
+                       ON CONFLICT(mint, wallet_address, role) DO UPDATE SET
+                         rank=excluded.rank, metric=excluded.metric,
+                         metric_label=excluded.metric_label, discovered_at=excluded.discovered_at""",
+                    (mint, f"{mint[:4]}…{mint[-4:]}", b["wallet_address"], rr,
+                     b["sol_spent"], f"Entry #{rr} · {b['sol_spent']:.3g} SOL"),
                 )
             except aiosqlite.Error:
                 pass

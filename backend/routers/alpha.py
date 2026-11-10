@@ -396,6 +396,11 @@ async def _dexscreener_mcap(mint: str) -> Optional[dict]:
         return None
 
 
+# Money Flow Galaxy: how many token_wallet_roles rows per role, best rank first.
+ROLE_QUOTAS = (("first_buyer", 300), ("top_trader", 150), ("top_holder", 150), ("deployer", 100))
+RANKED_ROLE_MAX_RANK = {"first_buyer": 20, "top_trader": 10, "top_holder": 10}
+
+
 @router.get("/moneyflow", operation_id="money_flow_graph")
 async def money_flow(
     _caller: dict = Depends(get_agent),
@@ -547,13 +552,18 @@ async def money_flow(
         # before any on-chain trade has been observed for it.
         role_rows: list[dict] = []
         try:
-            role_rows = [dict(r) for r in await (await db.execute(
-                """SELECT mint, symbol, wallet_address, role, rank, metric, metric_label
-                   FROM token_wallet_roles
-                   WHERE discovered_at >= datetime('now', ?)
-                   ORDER BY discovered_at DESC LIMIT 500""",
-                (f"-{int(hours)} hours",),
-            )).fetchall()]
+            # Per-role quotas, best rank first. Was the 500 newest rows of any
+            # role: deployer rows outnumber the rest ~50:1 (11.9k vs 0.5k in a
+            # day), so a 24 h galaxy got 463 deployers, 37 first buyers and no
+            # top holders/traders at all.
+            for _role, _quota in ROLE_QUOTAS:
+                role_rows += [dict(r) for r in await (await db.execute(
+                    """SELECT mint, symbol, wallet_address, role, rank, metric, metric_label
+                       FROM token_wallet_roles
+                       WHERE role = ? AND discovered_at >= datetime('now', ?)
+                       ORDER BY (rank IS NULL), rank, discovered_at DESC LIMIT ?""",
+                    (_role, f"-{int(hours)} hours", _quota),
+                )).fetchall()]
         except aiosqlite.Error:
             pass
 
@@ -930,7 +940,14 @@ async def money_flow(
     # here -- they're already small (~500 tokens) and are the actual subject
     # of the graph.
     MAX_WALLET_NODES = 1500
-    wallet_nodes = [n for n in node_list if n["type"] == "wallet"]
+    # Ranked role wallets (a token's early buyers / top traders / holders)
+    # have no trade volume, so a size-only cut dropped them first. They are
+    # kept ahead of size-ordered wallets.
+    _ranked = {e["source"] for e in edges.values()
+               if e.get("role") in RANKED_ROLE_MAX_RANK and isinstance(e.get("rank"), int)
+               and e["rank"] <= RANKED_ROLE_MAX_RANK[e["role"]]}
+    wallet_nodes = sorted((n for n in node_list if n["type"] == "wallet"),
+                          key=lambda n: (n["id"] not in _ranked, -n["size"]))
     if len(wallet_nodes) > MAX_WALLET_NODES:
         dropped_ids = {n["id"] for n in wallet_nodes[MAX_WALLET_NODES:]}
         node_list = [n for n in node_list if n["id"] not in dropped_ids]
@@ -942,6 +959,37 @@ async def money_flow(
         for e in edges.values()
         if e["source"] not in dropped_ids and e["target"] not in dropped_ids
     ]
+
+    # ── Wallet labels + runner watchlist (P4-05/P4-06) on wallet nodes ──
+    try:
+        _addrs = [n["id"].removeprefix("wallet:") for n in node_list if n["type"] == "wallet"]
+        if _addrs:
+            from .. import wallet_labels as _wl
+            from ..db import get_db as _gdb
+            _labels: dict = {}
+            _watch: dict = {}
+            async with _gdb() as _db2:
+                for _i in range(0, len(_addrs), 500):
+                    _chunk = _addrs[_i:_i + 500]
+                    _labels.update(await _wl.labels_for(_db2, _chunk))
+                    _ph = ",".join("?" * len(_chunk))
+                    try:
+                        for _w, _ent, _score in await (await _db2.execute(
+                                f"SELECT ww.wallet, ww.entity, w.score FROM runner_watchlist_wallets ww "
+                                f"JOIN runner_watchlist w ON w.entity = ww.entity WHERE ww.wallet IN ({_ph})",
+                                _chunk)).fetchall():
+                            _watch[_w] = {"entity": _ent, "score": _score}
+                    except Exception:  # noqa: BLE001 -- watchlist tables absent
+                        pass
+            for n in node_list:
+                if n["type"] == "wallet":
+                    _a = n["id"].removeprefix("wallet:")
+                    if _labels.get(_a):
+                        n["labels"] = _labels[_a]
+                    if _a in _watch:
+                        n["watchlist"] = _watch[_a]
+    except Exception as _e:  # noqa: BLE001 -- decoration only
+        logger.debug("wallet label decoration failed: %s", _e)
 
     # ── Cluster decoration + filtering ───────────────────────────
     if _cluster_map:
