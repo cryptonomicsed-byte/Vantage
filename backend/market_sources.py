@@ -675,7 +675,8 @@ async def top_movers(limit: int = 8) -> list[dict]:
             "volume_24h": m["volume_24h"],
             "conviction": round(min(5.0, abs(change) / 5), 2),
             "direction": "up" if change >= 0 else "down",
-            "signal": "breakout" if abs(change) > 10 else "momentum",
+            # a >10% drop is a breakdown, not a breakout
+            "signal": ("breakout" if change >= 0 else "breakdown") if abs(change) > 10 else "momentum",
         })
     return out
 
@@ -1563,12 +1564,22 @@ async def backtest(symbol: str, days: int = 90, fast: int = 10, slow: int = 30) 
     cached = _cache_get(key, 600)
     if cached is not None:
         return cached
-    cid = CG_IDS.get(symbol, symbol.lower())
-    data = await _get_json(
-        f"https://api.coingecko.com/api/v3/coins/{cid}/market_chart?vs_currency=usd&days={days}&interval=daily",
-        timeout=10,
-    )
-    prices = [p[1] for p in (data or {}).get("prices", []) if len(p) > 1]
+    # Daily closes from ohlc() (Kraken -> Binance -> CoinGecko). Was CoinGecko
+    # market_chart only: its free tier 429s, which surfaced as "insufficient
+    # data" for BTC/SOL on the default request.
+    prices, price_src = [], "ohlc"
+    try:
+        candles = await ohlc(symbol, "1d", min(500, days + 1))
+        prices = [c["close"] for c in candles if isinstance(c.get("close"), (int, float))][-(days + 1):]
+    except Exception:  # noqa: BLE001
+        prices = []
+    if len(prices) < slow + 2:
+        cid = CG_IDS.get(symbol, symbol.lower())
+        data = await _get_json(
+            f"https://api.coingecko.com/api/v3/coins/{cid}/market_chart?vs_currency=usd&days={days}&interval=daily",
+            timeout=10,
+        )
+        prices, price_src = [p[1] for p in (data or {}).get("prices", []) if len(p) > 1], "coingecko"
     if len(prices) < slow + 2:
         return None
 
@@ -1620,7 +1631,7 @@ async def backtest(symbol: str, days: int = 90, fast: int = 10, slow: int = 30) 
         "trades": len(rets),
         "win_rate_pct": round(wins / len(rets) * 100, 1) if rets else 0,
         "beat_buy_hold": strat_return > bh_return,
-        "data_points": len(prices),
+        "price_src": price_src, "data_points": len(prices),
         "max_drawdown_pct": round(max_dd * 100, 2),
     }
     return _cache_put(key, out)

@@ -58,6 +58,7 @@ interface CopyWallet {
   verified_call_count?: number
   verified_avg_return_pct?: number
   reasoning: string
+  updated_at?: string
 }
 
 interface ConvictionToken {
@@ -324,10 +325,20 @@ export default function Top5Degen() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
           <Users size={14} color="#22d3ee" />
           <span style={{ fontWeight: 700, fontSize: 13, color: '#22d3ee' }}>TOP WALLETS TO COPY</span>
-          <span style={{ fontSize: 9, color: 'var(--muted)' }}>learned from the money-flow graph</span>
+          <span style={{ fontSize: 9, color: 'var(--muted)' }}>learned from the money-flow graph · mass deployers excluded</span>
         </div>
+        {(() => {
+          // the learner's scores carry their own timestamp; say when they are old
+          const ts = copyWallets.items.map(w => Date.parse(w.updated_at || '')).filter(n => !isNaN(n))
+          if (!ts.length) return null
+          const h = (Date.now() - Math.max(...ts)) / 3600000
+          if (h < 2) return null
+          return <div style={{ fontSize: 10, color: '#f59e0b', marginBottom: 6 }}>
+            Scores last updated {h < 48 ? `${Math.round(h)}h` : `${Math.round(h / 24)}d`} ago — wallet_learner isn't refreshing them.
+          </div>
+        })()}
         {copyWallets.items.length === 0 ? (
-          <div style={{ fontSize: 10, color: 'var(--muted)' }}>No scored wallets yet — fills in as wallet_learner.py studies the graph (runs every 30 min).</div>
+          <div style={{ fontSize: 10, color: 'var(--muted)' }}>No scored wallets yet — fills in as wallet_learner.py studies the graph.</div>
         ) : (
           <div style={{ display: 'grid', gap: 4 }}>
             {copyWallets.items.map((w, i) => (

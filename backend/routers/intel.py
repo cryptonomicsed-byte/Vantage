@@ -5,6 +5,8 @@ import logging, asyncio, json, time, threading
 from typing import Optional
 import httpx
 import aiosqlite
+import time
+import asyncio
 from fastapi import APIRouter, Query, Request, Depends, HTTPException
 from pydantic import BaseModel
 from slowapi import Limiter
@@ -207,21 +209,9 @@ async def get_intel(agent: dict = Depends(get_agent)):
     # Also get token list for the overview
     market = await full_market(limit=20)
 
-    # Chain health
-    chains = {}
-    for chain in ["solana", "polygon", "base", "sui"]:
-        try:
-            async with httpx.AsyncClient(timeout=3) as c:
-                r = await c.post(f"{ARES}/api/rpc/{chain}",
-                    json={"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1})
-                if r.status_code == 200:
-                    data = r.json()
-                    block = data.get("result", "?")
-                    if isinstance(block, str) and block.startswith("0x"):
-                        block = int(block, 16)
-                    chains[chain] = {"health": "healthy", "block_height": block}
-        except:
-            chains[chain] = {"health": "offline", "block_height": "?"}
+    # Chain health (shared probe: each chain's own method, measured latency)
+    chains = {k: {"health": v["health"], "block_height": v["block_height"]}
+              for k, v in (await _chain_health()).items()}
 
     # Real cross-exchange arbitrage + real breadth sentiment (fail-soft).
     arb = await ms.real_arbitrage()
@@ -1017,31 +1007,61 @@ async def get_sources_registry(agent: dict = Depends(get_agent)):
         "sources": ms.SOURCES,
     }
 
+# Chain probes. Was: eth_blockNumber sent to every chain -- Solana and Sui
+# answer that with a JSON-RPC error, which was still recorded "healthy" with
+# block height "?", and tps/latency/peers were hard-coded 0. Now each chain
+# gets its own method, latency is measured, unmeasured fields are null, and
+# "healthy" needs a real height.
+_CHAIN_PROBES = {
+    "solana": {"method": "getSlot", "params": [], "evm": False},
+    "polygon": {"method": "eth_blockNumber", "params": [], "evm": True},
+    "base": {"method": "eth_blockNumber", "params": [], "evm": True},
+    "sui": {"method": "sui_getLatestCheckpointSequenceNumber", "params": [], "evm": False},
+}
+
+
+async def _probe_chain(c, chain: str) -> dict:
+    spec = _CHAIN_PROBES[chain]
+    out = {"health": "offline", "block_height": None, "latency_ms": None, "gas_gwei": None,
+           "tps": None, "peers": None, "error": None}
+    t0 = time.monotonic()
+    try:
+        r = await c.post(f"{ARES}/api/rpc/{chain}",
+                         json={"jsonrpc": "2.0", "method": spec["method"], "params": spec["params"], "id": 1})
+        out["latency_ms"] = round((time.monotonic() - t0) * 1000)
+        body = r.json() if r.status_code == 200 else {}
+        res = body.get("result")
+        if isinstance(res, str) and res.startswith("0x"):
+            res = int(res, 16)
+        elif isinstance(res, str) and res.isdigit():
+            res = int(res)
+        if isinstance(res, int) and res > 0:
+            out["block_height"] = res
+            out["health"] = "healthy" if out["latency_ms"] < 2000 else "degraded"
+        else:
+            out["health"] = "degraded"
+            out["error"] = (body.get("error") or {}).get("message") if isinstance(body.get("error"), dict) \
+                else f"http {r.status_code}"
+        if spec["evm"] and out["block_height"]:
+            r2 = await c.post(f"{ARES}/api/rpc/{chain}",
+                              json={"jsonrpc": "2.0", "method": "eth_gasPrice", "params": [], "id": 1})
+            gp = r2.json().get("result") if r2.status_code == 200 else None
+            if isinstance(gp, str) and gp.startswith("0x"):
+                out["gas_gwei"] = round(int(gp, 16) / 1e9, 2)
+    except Exception as e:  # noqa: BLE001
+        out["error"] = str(e)[:120]
+    return out
+
+
+async def _chain_health() -> dict:
+    async with httpx.AsyncClient(timeout=3) as c:
+        res = await asyncio.gather(*(_probe_chain(c, ch) for ch in _CHAIN_PROBES))
+    return dict(zip(_CHAIN_PROBES, res))
+
+
 @router.get("/health")
 async def get_health_detail(agent: dict = Depends(get_agent)):
-    chains = {}
-    for chain in ["solana", "polygon", "base", "sui"]:
-        try:
-            async with httpx.AsyncClient(timeout=3) as c:
-                r = await c.post(f"{ARES}/api/rpc/{chain}",
-                    json={"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1})
-                if r.status_code == 200:
-                    data = r.json()
-                    block = data.get("result", "?")
-                    if isinstance(block, str) and block.startswith("0x"):
-                        block = int(block, 16)
-                    chains[chain] = {"health":"healthy","block_height":block,"tps":0,"latency_ms":0,"peers":0,"gas_gwei":0}
-                    try:
-                        r2 = await c.post(f"{ARES}/api/rpc/{chain}",
-                            json={"jsonrpc":"2.0","method":"eth_gasPrice","params":[],"id":1})
-                        if r2.status_code == 200:
-                            gp = r2.json().get("result","0")
-                            if isinstance(gp, str) and gp.startswith("0x"):
-                                chains[chain]["gas_gwei"] = round(int(gp,16)/1e9,2)
-                    except: pass
-        except:
-            chains[chain] = {"health":"offline","block_height":"?","tps":0,"latency_ms":0,"peers":0,"gas_gwei":0}
-    return {"chains": chains}
+    return {"chains": await _chain_health()}
 
 @router.get("/sources")
 async def get_sources(agent: dict = Depends(get_agent)):
