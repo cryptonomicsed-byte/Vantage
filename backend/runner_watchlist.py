@@ -199,6 +199,43 @@ async def rebuild(db, now: Optional[float] = None) -> Dict[str, Any]:
             "radar_generated_at": radar.get("generated_at")}
 
 
+async def watchlist_for(db, wallets: List[str]) -> Dict[str, Dict[str, Any]]:
+    """wallet -> {entity, score, source, radar_conviction} for galaxy nodes.
+
+    runner_watchlist_wallets also holds radar-only wallets (entity
+    'radar:<address>') that have no runner_watchlist row, so an INNER JOIN on
+    runner_watchlist dropped every one of them -- and with zero computed
+    entities (live: runner_watchlist empty, 124 radar wallets) the galaxy
+    decoration matched nothing. LEFT JOINs keep them, with the radar
+    conviction as their score. Addresses are base58 (case-sensitive): exact
+    match, never lower()."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for i in range(0, len(wallets), 500):
+        chunk = wallets[i:i + 500]
+        ph = ",".join("?" * len(chunk))
+        base = ("FROM runner_watchlist_wallets ww LEFT JOIN runner_watchlist w ON w.entity = ww.entity ")
+        try:
+            rows = await (await db.execute(
+                f"SELECT ww.wallet, ww.entity, w.score, w.radar_conviction, r.conviction {base}"
+                f"LEFT JOIN radar_wallets r ON r.wallet = ww.wallet WHERE ww.wallet IN ({ph})",
+                chunk)).fetchall()
+        except Exception:  # noqa: BLE001 -- radar_wallets absent: computed entities only
+            try:
+                rows = await (await db.execute(
+                    f"SELECT ww.wallet, ww.entity, w.score, w.radar_conviction, NULL {base}"
+                    f"WHERE ww.wallet IN ({ph})", chunk)).fetchall()
+            except Exception:  # noqa: BLE001 -- watchlist tables absent
+                return out
+        for wallet, ent, score, ent_radar, radar in rows:
+            computed = score is not None
+            if not computed and radar is None:
+                continue   # orphan mapping: nothing to show
+            out[wallet] = {"entity": ent, "score": score if computed else radar,
+                           "source": "runner" if computed else "radar",
+                           "radar_conviction": radar if radar is not None else ent_radar}
+    return out
+
+
 async def watchlist_loop(interval_s: int = 900) -> None:
     from .db import get_db
     while True:
