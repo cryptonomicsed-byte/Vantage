@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import QuantBacktestPanel from './analytics/QuantBacktestPanel'
 import WhalesPanel from './analytics/WhalesPanel'
+import FxPanel from './analytics/FxPanel'
 import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, GitBranch as Waypoints, ListOrdered, Share2, Flame, Brain, Scale, UserCog, PlusCircle } from 'lucide-react'
 import Top5Degen from './Top5Degen'
 import MoneyFlowGraph from '../MoneyFlowGraph'
@@ -545,33 +546,8 @@ function AresWhales() {
 }
 
 function AresFx() {
-  const [base, setBase] = useState('USD')
-  const { data, loading, refresh } = useAresApi(`/api/intel/fx?base=${base}`, 300000)
-  const rates = data?.rates || {}
-  const majors = ['EUR', 'GBP', 'JPY', 'CNY', 'CAD', 'AUD', 'CHF', 'INR', 'BRL', 'MXN', 'KRW', 'SGD']
-  if (loading && !data) return <div style={{ color: 'var(--muted)', padding: 20 }}>Loading FX rates…</div>
-  return (
-    <div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
-        <input className="ares-input" placeholder="Base (e.g. USD)" value={base} onChange={e => setBase(e.target.value.toUpperCase())} onKeyDown={e => e.key === 'Enter' && refresh()} style={{ maxWidth: 120 }} />
-        <button className="btn btn-primary btn-sm" onClick={refresh}>Refresh</button>
-      </div>
-      <div className="ares-section-title">{base} Exchange Rates <span style={{ fontSize: 11, color: 'var(--muted)' }}>(ExchangeRate-API)</span></div>
-      {Object.keys(rates).length === 0 ? (
-        <div style={{ color: 'var(--muted)', padding: 20 }}>No rates loaded — check the base currency code.</div>
-      ) : (
-        <div className="ares-stat-grid">
-          {majors.filter(c => rates[c] != null).map(c => (
-            <div key={c} className="ares-stat-tile">
-              <div className="ares-stat-label">{c}</div>
-              <div className="ares-stat-value">{Number(rates[c]).toFixed(4)}</div>
-            </div>
-          ))}
-        </div>
-      )}
-      {data?.updated && <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 12 }}>Updated: {data.updated}</div>}
-    </div>
-  )
+  // converter, local-currency crypto prices, full table (analytics/FxPanel.tsx)
+  return <FxPanel />
 }
 
 function AresBacktest() {
