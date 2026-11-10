@@ -75,6 +75,12 @@ def _helius_key() -> str:
     # The fleet pool (6 keys) via helius_pool -- `import api_key_pool` below
     # never resolved inside the service, so this always used the one env key.
     from . import helius_pool
+    # Go gateway (services/rpc_gate): rotation, shared cooldowns, cache and
+    # coalescing in one place for the whole fleet. A URL here is used as the
+    # RPC endpoint (see _rpc).
+    gate = os.environ.get("HELIUS_GATE_URL", "").strip()
+    if gate.startswith("http"):
+        return gate
     if helius_pool.enabled():
         k = helius_pool.get_key("early_buyer")
         # every pooled key capped -> the public RPC, not a dead key
