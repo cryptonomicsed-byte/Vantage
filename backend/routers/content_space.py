@@ -1,4 +1,10 @@
-"""Content Creation Space — dedicated media production collaboration."""
+"""Content Creation Space — dedicated media production collaboration.
+
+Every route, reads included, requires membership of the guild that owns the
+space (G0). Deleting a space takes its owner or guild staff. A claim is a
+lease, a submit needs the live claim, and accept or reject takes a reviewer,
+never the claimant.
+"""
 import logging
 import time
 import uuid
@@ -9,10 +15,16 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Query
 
 from ..db import get_db
 from ..deps import get_agent
+from ..guild_access import require_member, require_not_claimant, require_owner_or_staff
+from ..space_tasks import DEFAULT_LEASE_MINUTES, claim_sql, clamped_lease, submit_sql
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/guilds/{slug}/content-spaces", tags=["content-space"])
+
+# Content keeps its own status words for now; G3 maps them onto the shared
+# vocabulary. open -> claimed -> review -> accepted / back to open.
+S_OPEN, S_CLAIMED, S_REVIEW, S_DONE = "brief_submitted", "in_production", "in_review", "published"
 
 
 async def _get_space(space_id: str, slug: str) -> dict:
@@ -27,10 +39,29 @@ async def _get_space(space_id: str, slug: str) -> dict:
     return dict(row)
 
 
+async def _member_space(slug: str, space_id: str, agent: dict) -> dict:
+    await require_member(slug, agent)
+    return await _get_space(space_id, slug)
+
+
+async def _get_task(slug: str, space_id: str, task_id: str) -> dict:
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM vantage_tasks WHERE id=? AND workspace_id=? AND guild_slug=?",
+            (task_id, space_id, slug),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Task not found")
+    return dict(row)
+
+
 # ── Space CRUD ──────────────────────────────────────────────────────────────────
 
 @router.get("")
 async def list_content_spaces(slug: str, agent: dict = Depends(get_agent)):
+    await require_member(slug, agent)
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -48,6 +79,7 @@ async def create_content_space(
     series_id: Optional[int] = Form(None),
     agent: dict = Depends(get_agent),
 ):
+    await require_member(slug, agent)
     space_id = str(uuid.uuid4())
     now = int(time.time())
     async with get_db() as db:
@@ -85,12 +117,13 @@ async def create_content_space(
 
 @router.get("/{space_id}")
 async def get_content_space(slug: str, space_id: str, agent: dict = Depends(get_agent)):
-    return await _get_space(space_id, slug)
+    return await _member_space(slug, space_id, agent)
 
 
 @router.delete("/{space_id}")
 async def delete_content_space(slug: str, space_id: str, agent: dict = Depends(get_agent)):
-    await _get_space(space_id, slug)
+    space = await _member_space(slug, space_id, agent)
+    await require_owner_or_staff(slug, agent, space.get("created_by_agent_id"), "this content space")
     async with get_db() as db:
         await db.execute("DELETE FROM content_spaces WHERE id=?", (space_id,))
         await db.commit()
@@ -101,7 +134,7 @@ async def delete_content_space(slug: str, space_id: str, agent: dict = Depends(g
 
 @router.get("/{space_id}/projects")
 async def list_projects(slug: str, space_id: str, agent: dict = Depends(get_agent)):
-    await _get_space(space_id, slug)
+    await _member_space(slug, space_id, agent)
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -119,7 +152,7 @@ async def create_project(
     provider: str = Form(""),
     agent: dict = Depends(get_agent),
 ):
-    await _get_space(space_id, slug)
+    await _member_space(slug, space_id, agent)
     project_id = str(uuid.uuid4())
     now = int(time.time())
     async with get_db() as db:
@@ -139,6 +172,7 @@ async def update_project(
     brief: Optional[str] = Form(None),
     agent: dict = Depends(get_agent),
 ):
+    await _member_space(slug, space_id, agent)
     valid_statuses = ("brief_submitted", "in_production", "in_review", "published")
     if status and status not in valid_statuses:
         raise HTTPException(400, f"status must be one of: {', '.join(valid_statuses)}")
@@ -163,7 +197,7 @@ async def list_tasks(
     limit: int = Query(50, ge=1, le=200),
     agent: dict = Depends(get_agent),
 ):
-    await _get_space(space_id, slug)
+    await _member_space(slug, space_id, agent)
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         if status:
@@ -178,7 +212,10 @@ async def list_tasks(
                 (space_id, limit),
             ) as cur:
                 rows = await cur.fetchall()
-    return [dict(r) for r in rows]
+    items = [dict(r) for r in rows]
+    # Envelope: the board (ContentSpaceTasks.tsx) reads .tasks; the bare
+    # array it used to get rendered as an empty board forever.
+    return {"tasks": items, "total": len(items)}
 
 
 @router.post("/{space_id}/tasks")
@@ -191,7 +228,7 @@ async def create_task(
     project_id: str = Form(""),
     agent: dict = Depends(get_agent),
 ):
-    await _get_space(space_id, slug)
+    await _member_space(slug, space_id, agent)
     task_id = str(uuid.uuid4())
     now = int(time.time())
     # Store project_id in kind_tag as "project:{id}" prefix if given
@@ -199,27 +236,39 @@ async def create_task(
     async with get_db() as db:
         await db.execute(
             "INSERT INTO vantage_tasks (id, workspace_id, guild_slug, title, description, status, priority, created_by_agent_id, kind_tag, created_ts, updated_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (task_id, space_id, slug, title, description, "brief_submitted", priority, agent["id"], effective_kind, now, now),
+            (task_id, space_id, slug, title, description, S_OPEN, priority, agent["id"], effective_kind, now, now),
         )
         await db.commit()
-    return {"id": task_id, "status": "brief_submitted"}
+    return {"id": task_id, "status": S_OPEN}
 
 
 @router.post("/{space_id}/tasks/{task_id}/claim")
-async def claim_task(slug: str, space_id: str, task_id: str, agent: dict = Depends(get_agent)):
+async def claim_task(slug: str, space_id: str, task_id: str,
+                     lease_minutes: int = Query(DEFAULT_LEASE_MINUTES),
+                     agent: dict = Depends(get_agent)):
+    """Take a lease on an open task. Same rule as the trading space: one
+    atomic UPDATE, so a claim cannot be stolen while it is live."""
+    await _member_space(slug, space_id, agent)
+    lease = clamped_lease(lease_minutes)
+    now = int(time.time())
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM vantage_tasks WHERE id=? AND workspace_id=?", (task_id, space_id)) as cur:
-            row = await cur.fetchone()
-        if not row:
-            raise HTTPException(404, "Task not found")
-        now = int(time.time())
-        await db.execute(
-            "UPDATE vantage_tasks SET status='in_production', claimed_by_agent_id=?, updated_ts=? WHERE id=?",
-            (agent["id"], now, task_id),
+        cur = await db.execute(
+            claim_sql(open_status=S_OPEN, claimed_status=S_CLAIMED, lease_minutes=lease),
+            (S_CLAIMED, agent["id"], now, task_id, space_id, slug, agent["id"]),
         )
         await db.commit()
-    return {"ok": True, "status": "in_production"}
+        async with db.execute(
+            "SELECT status, claimed_by_agent_id, claim_expires_at FROM vantage_tasks "
+            "WHERE id=? AND workspace_id=? AND guild_slug=?", (task_id, space_id, slug)) as c:
+            row = await c.fetchone()
+    if not row:
+        raise HTTPException(404, "Task not found")
+    if cur.rowcount == 0:
+        if row["status"] == S_CLAIMED:
+            raise HTTPException(409, f"Task is claimed by another agent until {row['claim_expires_at']}")
+        raise HTTPException(400, "Task is not claimable")
+    return {"ok": True, "status": S_CLAIMED, "claim_expires_at": row["claim_expires_at"]}
 
 
 @router.post("/{space_id}/tasks/{task_id}/submit")
@@ -231,23 +280,43 @@ async def submit_task(
     content_uri: str = Form(""),
     agent: dict = Depends(get_agent),
 ):
+    await _member_space(slug, space_id, agent)
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM vantage_tasks WHERE id=? AND workspace_id=?", (task_id, space_id)) as cur:
+        async with db.execute("SELECT * FROM vantage_tasks WHERE id=? AND workspace_id=? AND guild_slug=?",
+                              (task_id, space_id, slug)) as cur:
             row = await cur.fetchone()
         if not row:
             raise HTTPException(404, "Task not found")
         if row["claimed_by_agent_id"] != agent["id"]:
             raise HTTPException(403, "Only the claimer can submit")
+        if row["status"] != S_CLAIMED:
+            raise HTTPException(409, f"Task is {row['status']!r}, not in production; nothing to submit against")
         artifact_id = str(uuid.uuid4())
         now = int(time.time())
+        cur = await db.execute(
+            submit_sql(claimed_status=S_CLAIMED, review_status=S_REVIEW),
+            (now, task_id, space_id, slug, agent["id"]),
+        )
+        if cur.rowcount == 0:
+            await db.rollback()
+            raise HTTPException(409, "Your claim's lease has expired; claim the task again before submitting")
         await db.execute(
             "INSERT INTO artifacts (id, task_id, agent_id, workspace_id, kind, title, content_text, content_uri, status, created_ts, updated_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (artifact_id, task_id, agent["id"], space_id, artifact_kind, title, content_text, content_uri, "submitted", now, now),
         )
-        await db.execute("UPDATE vantage_tasks SET status='in_review', updated_ts=? WHERE id=?", (now, task_id))
         await db.commit()
     return {"ok": True, "artifact_id": artifact_id}
+
+
+async def _task_for_review(slug: str, space_id: str, task_id: str, agent: dict) -> dict:
+    """The task, once the caller is confirmed as a reviewer: a member who is
+    the space owner or guild staff, and never the claimant."""
+    space = await _member_space(slug, space_id, agent)
+    task = await _get_task(slug, space_id, task_id)
+    require_not_claimant(task, agent)
+    await require_owner_or_staff(slug, agent, space.get("created_by_agent_id"), "this content space")
+    return task
 
 
 @router.post("/{space_id}/tasks/{task_id}/accept")
@@ -256,18 +325,21 @@ async def accept_task(
     note: str = Form(""),
     agent: dict = Depends(get_agent),
 ):
+    task = await _task_for_review(slug, space_id, task_id, agent)
+    if task["status"] != S_REVIEW:
+        raise HTTPException(409, f"Task is {task['status']!r}, not in review; nothing to accept")
     now = int(time.time())
     async with get_db() as db:
         await db.execute(
-            "UPDATE vantage_tasks SET status='published', updated_ts=? WHERE id=? AND workspace_id=?",
-            (now, task_id, space_id),
+            "UPDATE vantage_tasks SET status=?, updated_ts=? WHERE id=? AND workspace_id=?",
+            (S_DONE, now, task_id, space_id),
         )
         await db.execute(
             "UPDATE artifacts SET status='accepted', review_note=?, updated_ts=? WHERE task_id=?",
             (note, now, task_id),
         )
         await db.commit()
-    return {"ok": True, "status": "published"}
+    return {"ok": True, "status": S_DONE}
 
 
 @router.post("/{space_id}/tasks/{task_id}/reject")
@@ -276,25 +348,28 @@ async def reject_task(
     note: str = Form(""),
     agent: dict = Depends(get_agent),
 ):
+    task = await _task_for_review(slug, space_id, task_id, agent)
+    if task["status"] not in (S_CLAIMED, S_REVIEW):
+        raise HTTPException(409, f"Task is {task['status']!r}; only in-production or in-review work can be rejected")
     now = int(time.time())
     async with get_db() as db:
         await db.execute(
-            "UPDATE vantage_tasks SET status='brief_submitted', claimed_by_agent_id=NULL, updated_ts=? WHERE id=? AND workspace_id=?",
-            (now, task_id, space_id),
+            "UPDATE vantage_tasks SET status=?, claimed_by_agent_id=NULL, claim_expires_at=NULL, updated_ts=? WHERE id=? AND workspace_id=?",
+            (S_OPEN, now, task_id, space_id),
         )
         await db.execute(
             "UPDATE artifacts SET status='rejected', review_note=?, updated_ts=? WHERE task_id=? AND status='submitted'",
             (note, now, task_id),
         )
         await db.commit()
-    return {"ok": True, "status": "brief_submitted"}
+    return {"ok": True, "status": S_OPEN}
 
 
 # ── Assets ──────────────────────────────────────────────────────────────────────
 
 @router.get("/{space_id}/assets")
 async def list_assets(slug: str, space_id: str, agent: dict = Depends(get_agent)):
-    await _get_space(space_id, slug)
+    await _member_space(slug, space_id, agent)
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -316,7 +391,7 @@ async def create_asset(
     provider: str = Form(""),
     agent: dict = Depends(get_agent),
 ):
-    await _get_space(space_id, slug)
+    await _member_space(slug, space_id, agent)
     asset_id = str(uuid.uuid4())
     now = int(time.time())
     async with get_db() as db:
@@ -332,10 +407,14 @@ async def create_asset(
 
 @router.get("/{space_id}/memory")
 async def get_memory(slug: str, space_id: str, agent: dict = Depends(get_agent)):
+    """Your own rows, plus rows other members shared with the space or guild."""
+    await _member_space(slug, space_id, agent)
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM workspace_memory WHERE workspace_id=? AND agent_id=? ORDER BY key",
+            """SELECT * FROM workspace_memory
+                WHERE workspace_id=? AND (agent_id=? OR visibility IN ('workspace', 'guild'))
+                ORDER BY key""",
             (space_id, agent["id"]),
         ) as cur:
             rows = await cur.fetchall()
@@ -349,6 +428,7 @@ async def upsert_memory(
     visibility: str = Form("agent"),
     agent: dict = Depends(get_agent),
 ):
+    await _member_space(slug, space_id, agent)
     if visibility not in ("agent", "workspace", "guild"):
         raise HTTPException(400, "visibility must be agent|workspace|guild")
     now = int(time.time())
@@ -364,6 +444,7 @@ async def upsert_memory(
 
 @router.delete("/{space_id}/memory/{key}")
 async def delete_memory(slug: str, space_id: str, key: str, agent: dict = Depends(get_agent)):
+    await _member_space(slug, space_id, agent)
     async with get_db() as db:
         await db.execute(
             "DELETE FROM workspace_memory WHERE workspace_id=? AND agent_id=? AND key=?",
@@ -377,6 +458,7 @@ async def delete_memory(slug: str, space_id: str, key: str, agent: dict = Depend
 
 @router.get("/{space_id}/artifacts")
 async def list_artifacts(slug: str, space_id: str, agent: dict = Depends(get_agent)):
+    await _member_space(slug, space_id, agent)
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -389,6 +471,7 @@ async def list_artifacts(slug: str, space_id: str, agent: dict = Depends(get_age
 
 @router.get("/{space_id}/receipts")
 async def list_receipts(slug: str, space_id: str, agent: dict = Depends(get_agent)):
+    await _member_space(slug, space_id, agent)
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -416,31 +499,39 @@ class _StatusPub(_BaseModel):
 
 @router.post("/{space_id}/publish/claim")
 async def publish_claim(slug: str, space_id: str, body: _ClaimPub, agent: dict = Depends(get_agent)):
-    """Publish a task claim event to NIP-29 (best-effort)."""
+    """Publish a task claim event to NIP-29. The task must exist here and
+    be held by the caller; the relay publish itself is best-effort."""
+    space = await _member_space(slug, space_id, agent)
+    task = await _get_task(slug, space_id, body.task_id)
+    if task["claimed_by_agent_id"] != agent["id"]:
+        raise HTTPException(403, "You do not hold a claim on this task")
+    published = False
     try:
         from ..nostr import workspace as ws_module
         from ..buzz_registration import RELAY_WS_URL
         from ..buzz_identity import derive_buzz_keypair
-        space = await _get_space(space_id, slug)
         pk = await derive_buzz_keypair(agent["id"])
-        group_id = space.get("name", space_id)
+        group_id = space.get("chat_channel_slug") or space_id
         await ws_module.publish_task_claim(RELAY_WS_URL, pk, group_id, body.task_id, body.task_desc)
+        published = True
     except Exception as exc:
         logger.warning("NIP-29 claim publish failed (non-fatal): %s", exc)
-    return {"ok": True}
+    return {"ok": True, "published": published}
 
 
 @router.post("/{space_id}/publish/status")
 async def publish_status(slug: str, space_id: str, body: _StatusPub, agent: dict = Depends(get_agent)):
     """Publish agent status to NIP-29 (best-effort)."""
+    space = await _member_space(slug, space_id, agent)
+    published = False
     try:
         from ..nostr import workspace as ws_module
         from ..buzz_registration import RELAY_WS_URL
         from ..buzz_identity import derive_buzz_keypair
-        space = await _get_space(space_id, slug)
         pk = await derive_buzz_keypair(agent["id"])
-        group_id = space.get("name", space_id)
+        group_id = space.get("chat_channel_slug") or space_id
         await ws_module.publish_status(RELAY_WS_URL, pk, group_id, body.status, body.detail)
+        published = True
     except Exception as exc:
         logger.warning("NIP-29 status publish failed (non-fatal): %s", exc)
-    return {"ok": True}
+    return {"ok": True, "published": published}

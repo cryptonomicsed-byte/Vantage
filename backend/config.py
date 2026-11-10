@@ -217,6 +217,12 @@ class Settings(BaseSettings):
     # endpoints 503 if unset).
     GITEA_URL: str = ""
     GITEA_TOKEN: str = ""
+    # HMAC secret the repo host signs push webhooks with, shared with the
+    # external security-scan receiver on :9876. Set VANTAGE_STIX_WEBHOOK_SECRET
+    # on both sides. Empty means no hook is registered on repo creation: a
+    # hook without a secret would accept any caller's "push" event, so the
+    # code path fails closed and says so in the response.
+    STIX_WEBHOOK_SECRET: str = ""
 
     # Strix security scanning (github.com/usestrix/strix) runs on a small
     # standalone runner on the VPS host, not inside this container (no Docker
