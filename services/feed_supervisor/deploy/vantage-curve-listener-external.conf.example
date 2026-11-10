@@ -1,0 +1,5 @@
+# /etc/systemd/system/vantage.service.d/98-curve-listener-external.conf
+# Vantage stops starting the pump.fun curve listener in-process; the feed
+# supervisor (ares-feed-supervisor.service) runs it instead. Install together.
+[Service]
+Environment=CURVE_LISTENER_EXTERNAL=1

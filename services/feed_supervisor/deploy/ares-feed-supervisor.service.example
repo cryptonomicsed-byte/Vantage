@@ -1,0 +1,29 @@
+# /etc/systemd/system/ares-feed-supervisor.service
+# Runs Vantage's long-lived feed workers (feeds.json) as supervised OS processes.
+# Not enabled by default -- see services/feed_supervisor/README.md for rollout.
+[Unit]
+Description=Ares feed supervisor (Vantage feed workers, Elixir/OTP)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/ares/Vantage/services/feed_supervisor
+Environment=HOME=/root
+Environment=MIX_ENV=prod
+Environment=FEED_SUPERVISOR_PORT=8094
+Environment=FEED_SUPERVISOR_CONFIG=/opt/ares/Vantage/services/feed_supervisor/feeds.json
+# deps + compile happen once at install time (README), never on start
+ExecStart=/usr/bin/mix run --no-halt --no-compile --no-deps-check
+# SIGTERM goes to the BEAM only; it stops each worker (SIGTERM, then SIGKILL
+# after the worker's kill_timeout_ms). Anything still alive after
+# TimeoutStopSec is SIGKILLed by systemd across the whole cgroup.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
