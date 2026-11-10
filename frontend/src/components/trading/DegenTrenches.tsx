@@ -1,7 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { Flame, TrendingUp, AlertTriangle, Zap, Shield, Rocket, GraduationCap, UserPlus } from 'lucide-react'
 import { TokenLink, WalletLink } from './EntityProfileCard'
-import EarlyRunnerIntel from './EarlyRunnerIntel'
 
 interface Token {
   symbol: string
@@ -110,7 +109,7 @@ export default function DegenTrenches() {
         <span style={{ fontSize: 11, color: 'var(--muted)' }}>Pump.fun Alpha</span>
       </div>
 
-      <EarlyRunnerIntel />
+      {/* Early-runner intel moved to its own section: Trading → Early Runners */}
 
       {/* Trending -- was labeled "(CoinGecko)" but backend/routers/pumpfun.py's
           /trending endpoint is real GeckoTerminal Solana trending_pools data

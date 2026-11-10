@@ -1957,11 +1957,11 @@ async def curve_coverage():
 
 
 @router.get("/runners")
-async def runners(limit: int = Query(50, ge=1, le=200)):
+async def runners(limit: int = Query(50, ge=1, le=200), include_unbacked: bool = Query(False)):
     """P4-02: detected runners (tier, weight, peak observed, tiers crossed,
     trace status). Public token data only."""
     from .. import runner_detect
-    return await runner_detect.list_runners(limit)
+    return await runner_detect.list_runners(limit, include_unbacked)
 
 
 class _RunnerCheck(BaseModel):
@@ -2078,3 +2078,23 @@ async def quant_whales(
     """P4-14: newest whale_watcher alerts (WHALE_WATCHER_ENABLED, fail-open)."""
     from .. import quant_client as qc
     return qc.whale_alerts(limit, chain, min_usd)
+
+
+
+# ── Early Runner section ─────────────────────────────────────────────────────
+
+@router.get("/early-runners/overview")
+async def early_runners_overview(limit: int = Query(50, ge=1, le=200), include_unbacked: bool = Query(False)):
+    """Pipeline health (curve feed, trace queue, labels, watchlist, confluence)
+    plus each recent runner's entry profile: real buyers vs dust vs liquidity,
+    first real buy's delay after create, bundling, label mix. Read-only."""
+    from .. import early_runner_intel
+    return await early_runner_intel.overview(limit, include_unbacked)
+
+
+@router.get("/early-runners/{mint}/profile")
+async def early_runner_profile(mint: str):
+    """One runner: trace status, entry profile, and every buyer row with its
+    kind (buy/dust/liquidity), real rank, delay after create, labels, funder."""
+    from .. import early_runner_intel
+    return await early_runner_intel.runner_profile(mint)

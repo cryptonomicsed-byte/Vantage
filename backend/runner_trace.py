@@ -88,11 +88,13 @@ async def _ensure(db) -> None:
 async def enqueue_new_runners(db) -> int:
     """Every runner without a queue row gets one."""
     await _ensure(db)
-    from .runner_detect import DDL as RDDL
-    await db.execute(RDDL)
+    from .runner_detect import ensure_table
+    await ensure_table(db)
+    # only liquidity-backed runners spend the free-RPC trace budget
     cur = await db.execute(
         "INSERT OR IGNORE INTO runner_trace_queue (mint, enqueued_at) "
-        "SELECT mint, ? FROM runner_tokens WHERE mint NOT IN (SELECT mint FROM runner_trace_queue)",
+        "SELECT mint, ? FROM runner_tokens WHERE backed = 1 "
+        "AND mint NOT IN (SELECT mint FROM runner_trace_queue)",
         (int(time.time()),))
     await db.commit()
     return cur.rowcount or 0
@@ -209,7 +211,9 @@ async def next_job() -> Optional[str]:
         await enqueue_new_runners(db)
         row = await (await db.execute(
             "SELECT mint FROM runner_trace_queue WHERE status IN ('pending','failed','tracing','walking') "
-            "AND attempts < ? AND resumes < ? ORDER BY attempts, enqueued_at LIMIT 1",
+            "AND attempts < ? AND resumes < ? "
+            "AND mint NOT IN (SELECT mint FROM runner_tokens WHERE backed = 0) "  # fake runners skipped
+            "ORDER BY attempts, enqueued_at LIMIT 1",
             (MAX_ATTEMPTS, MAX_RESUMES))).fetchone()
     return row[0] if row else None
 
@@ -251,6 +255,8 @@ async def early_buyers(mint: str) -> Dict[str, Any]:
     for r in rows:
         r["labels"] = labels.get(r["wallet"], [])
         r["funder_labels"] = labels.get(r["funded_by"], []) if r["funded_by"] else []
+    from .early_runner_intel import annotate
+    annotate(rows, q[7] if q else None)  # kind (buy/dust/liquidity), real_rank, delay_s
     qcols = ["status", "attempts", "last_error", "source", "reached_origin", "origin_slot",
              "origin_signature", "origin_time", "signatures_scanned", "buyers", "finished_at"]
     return {"mint": mint, "trace": dict(zip(qcols, q)) if q else None, "buyers": rows}
