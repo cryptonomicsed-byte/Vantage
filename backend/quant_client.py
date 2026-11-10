@@ -140,6 +140,19 @@ def candles_to_body(symbol: str, candles: List[dict], params: Dict[str, Any]) ->
     }
 
 
+# Bars per year for annualising Sharpe/Sortino. Crypto trades 24/7, so a
+# 365-day year. The engine defaulted to hourly bars (252*24) for every
+# request, so daily candles came back ~4.9x too high (sqrt(6048/365)).
+_INTERVAL_MINUTES = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "2h": 120,
+                     "4h": 240, "6h": 360, "8h": 480, "12h": 720, "1d": 1440, "3d": 4320,
+                     "1w": 10080}
+
+
+def bars_per_year(interval: str) -> Optional[float]:
+    m = _INTERVAL_MINUTES.get((interval or "").strip().lower())
+    return None if m is None else 365 * 24 * 60 / m
+
+
 async def backtest(symbol: str, candles: List[dict], params: Optional[Dict[str, Any]] = None,
                    interval: str = "1d") -> Dict[str, Any]:
     """Run the Julia engine over the given candles. Cached CACHE_TTL_S."""
@@ -155,13 +168,21 @@ async def backtest(symbol: str, candles: List[dict], params: Optional[Dict[str, 
     if body is None:
         return {"enabled": True, "ok": False, "symbol": symbol.upper(),
                 "error": f"insufficient candles (need >= {MIN_BARS})", "bars": len(candles)}
+    bpy = bars_per_year(interval)
+    if bpy:
+        body["params"] = {**(body.get("params") or {}), "bars_per_year": bpy}
     r = await _http("POST", "/backtest", body)
     if not r["ok"]:
         return {"enabled": True, "ok": False, "symbol": symbol.upper(), "error": r["error"]}
     metrics = {k: r["data"].get(k) for k in _RESULT_KEYS}
     out = {"enabled": True, "ok": True, "symbol": symbol.upper(), "interval": interval,
            "bars": len(body["close"]), "params": p, "engine": "TradingOSQuant (Julia)",
-           "metrics": metrics, "cached": False, "ts": int(time.time())}
+           "metrics": metrics, "cached": False, "ts": int(time.time()),
+           "bars_per_year": bpy,
+           # additive: the engine's curve + fills for the Backtest tab
+           "total_return_pct": r["data"].get("total_return_pct"),
+           "equity_curve": (r["data"].get("equity_curve") or [])[-1000:],
+           "trades": (r["data"].get("trades") or [])[-200:]}
     _cache[key] = (time.time(), out)
     return out
 
