@@ -1021,6 +1021,10 @@ app.include_router(guild_forum_router)
 app.include_router(guild_chat_router)
 from .routers.guilds import router as guilds_router
 app.include_router(guilds_router)
+from .routers.guild_control_center import router as guild_control_center_router
+app.include_router(guild_control_center_router)
+from .routers.guild_work import router as guild_work_router
+app.include_router(guild_work_router)
 # Service-to-service bridge for the Elixir Conductor (ops/conductor).
 from .routers.conductor import router as conductor_router
 app.include_router(conductor_router)
