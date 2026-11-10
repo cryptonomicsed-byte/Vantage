@@ -68,7 +68,17 @@ async def _ensure_tables(db: aiosqlite.Connection) -> None:
     await db.commit()
 
 
+PUBLIC_RPC = os.environ.get("SOLANA_PUBLIC_RPC", "https://api.mainnet-beta.solana.com")
+
+
 def _helius_key() -> str:
+    # The fleet pool (6 keys) via helius_pool -- `import api_key_pool` below
+    # never resolved inside the service, so this always used the one env key.
+    from . import helius_pool
+    if helius_pool.enabled():
+        k = helius_pool.get_key("early_buyer")
+        # every pooled key capped -> the public RPC, not a dead key
+        return k or (PUBLIC_RPC if helius_pool.keys() else os.environ.get("HELIUS_API_KEY", ""))
     try:
         import api_key_pool
         k = api_key_pool.get_key("helius", "early_buyer")
@@ -92,6 +102,9 @@ async def _rpc(client: httpx.AsyncClient, key: str, method: str, params: list) -
         )
         if r.status_code == 200:
             return r.json().get("result")
+        if not key.startswith("http"):
+            from . import helius_pool
+            helius_pool.report(key, r.status_code, r.text[:300])
     except Exception as e:
         logger.debug("Helius RPC %s failed: %s", method, e)
     return None
