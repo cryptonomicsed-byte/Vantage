@@ -679,6 +679,9 @@ async def lifespan(app: FastAPI):
 
     last30days_task = asyncio.create_task(_last30days_watch_loop())
 
+    from . import btc_whales as _btc_whales
+    btc_whales_task = _btc_whales.maybe_start()   # WHALE_BLOCK_SCAN_ENABLED, default off
+
     # trade_outcome_learner: was referenced by name in routers/trading.py's
     # GET /source-performance docstring since that endpoint was written, but
     # never actually existed anywhere (found 2026-08-29 while wiring Pine
@@ -782,6 +785,12 @@ async def lifespan(app: FastAPI):
     # P4-15: TradingOS challenger in shadow (TRADINGOS_CHALLENGER_ENABLED, off).
     from .tradingos_challenger import challenger_loop as _challenger_loop
     tradingos_challenger_task = asyncio.create_task(_challenger_loop())
+    # Galaxy roles: top_trader rows from curve.db (GALAXY_TOP_TRADERS_ENABLED)
+    # + one-time first_buyer relabel (GALAXY_RELABEL_FIRST_BUYERS); both off,
+    # loop only started when one is on.
+    from . import galaxy_roles as _galaxy_roles
+    galaxy_roles_task = (asyncio.create_task(_galaxy_roles.galaxy_roles_loop())
+                         if _galaxy_roles.any_enabled() else None)
 
     yield
     shutdown_tasks = [task, gossip_task, watch_task, weather_task, rate_limit_prune_task, wallet_pruning_task, buzz_inbound_task, coordination_indexer_task, mention_poller_task, scoring_task, last30days_task, outcome_learner_task, event_bus_task, tier_recompute_task, reconciler_task,
@@ -795,9 +804,11 @@ async def lifespan(app: FastAPI):
                       runner_watchlist_task, confluence_task,
                       crucible_adapter_task, crucible_calibration_task,
                       guild_schedule_task,
-                      tradingos_challenger_task]
+                      tradingos_challenger_task, *([btc_whales_task] if btc_whales_task else [])]
     if execution_engine_task is not None:
         shutdown_tasks.append(execution_engine_task)
+    if galaxy_roles_task is not None:
+        shutdown_tasks.append(galaxy_roles_task)
     shutdown_tasks = [t for t in shutdown_tasks if t is not None]
     # Cancel all first, then wait a bounded time. Awaiting each cancelled task
     # with no limit meant one task parked in a database call (aiosqlite runs

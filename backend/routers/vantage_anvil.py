@@ -79,7 +79,7 @@ PRIME_STAR_ID = "prime_vantage"
 
 # ── Kernel bridge config ────────────────────────────────────────────────
 KERNEL_SSH_HOST = os.environ.get("OMOKODA_KERNEL_SSH_HOST", "89.117.74.224")
-KERNEL_LOCAL_URL = os.environ.get("OMOKODA_KERNEL_LOCAL_URL", "http://localhost:7777")
+KERNEL_LOCAL_URL = os.environ.get("OMOKODA_KERNEL_LOCAL_URL", "http://127.0.0.1:7778")
 KERNEL_DIRECT_URL = os.environ.get("OMOKODA_KERNEL_URL", "http://10.88.0.2:7777")
 
 

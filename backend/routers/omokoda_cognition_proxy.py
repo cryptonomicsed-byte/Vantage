@@ -6,7 +6,7 @@ omokoda-workflow-webhook-e2e-findings-2026-07-29.md): Buzz's workflow
 engine has a real, hardcoded, non-configurable SSRF guard
 (buzz_core::network::is_private_ip) that unconditionally rejects
 loopback/private/reserved IPs -- correct, working security behavior, not
-a bug to work around by weakening it. `http://localhost:7777/v1/cognition`
+a bug to work around by weakening it. `http://localhost:7778/v1/cognition`
 can never pass that check from Buzz's side.
 
 The fix has to live here instead: Vantage's backend already has a real

@@ -58,13 +58,55 @@ async def _post_json(url: str, body: dict, timeout: float = 8.0) -> Optional[dic
     """POST JSON → parsed JSON, or None on any failure. Fail-soft."""
     try:
         async with httpx.AsyncClient(timeout=timeout, headers=UA) as c:
+            _t = time.monotonic()
             r = await c.post(url, json=body)
+            _record(url, r.status_code, (time.monotonic() - _t) * 1000,
+                    None if r.status_code == 200 else r.text[:120])
             if r.status_code == 200:
                 return r.json()
             logger.debug("market POST %s failed: %d %s", url, r.status_code, r.text[:100])
     except Exception as e:
+        _record(url, None, 0.0, f"{type(e).__name__}: {e}")
         logger.debug("market POST %s failed: %s", url, e)
     return None
+
+
+# ── Per-host observed health (Sources tab) ────────────────────────────────────
+SOURCE_STATS_SINCE = int(time.time())
+_source_stats: dict[str, dict] = {}
+
+
+def _record(url: str, status: Optional[int], ms_: float, error: Optional[str] = None) -> None:
+    try:
+        host = httpx.URL(url).host or url[:60]
+    except Exception:  # noqa: BLE001
+        host = url[:60]
+    s = _source_stats.setdefault(host, {"host": host, "calls": 0, "ok": 0, "errors": 0, "rate_limited": 0,
+                                        "last_status": None, "last_error": None, "last_ok_at": None,
+                                        "last_call_at": None, "_ms_total": 0.0})
+    now = int(time.time())
+    s["calls"] += 1
+    s["last_call_at"] = now
+    s["last_status"] = status
+    s["_ms_total"] += ms_
+    if status == 200:
+        s["ok"] += 1
+        s["last_ok_at"] = now
+    else:
+        s["errors"] += 1
+        if status == 429:
+            s["rate_limited"] += 1
+        s["last_error"] = (error or (f"HTTP {status}" if status else "no response"))[:160]
+
+
+def source_stats() -> list[dict]:
+    out = []
+    for s in _source_stats.values():
+        d = {k: v for k, v in s.items() if not k.startswith("_")}
+        d["avg_ms"] = round(s["_ms_total"] / s["calls"]) if s["calls"] else None
+        d["ok_rate"] = round(s["ok"] / s["calls"], 3) if s["calls"] else None
+        out.append(d)
+    return sorted(out, key=lambda d: (-(d["errors"] or 0), d["host"]))
 
 
 async def _get_json(url: str, timeout: float = 8.0, retries: int = 2):
@@ -77,7 +119,10 @@ async def _get_json(url: str, timeout: float = 8.0, retries: int = 2):
         async with httpx.AsyncClient(timeout=timeout, headers=UA) as c:
             for attempt in range(retries):
                 try:
+                    _t = time.monotonic()
                     r = await c.get(url)
+                    _record(url, r.status_code, (time.monotonic() - _t) * 1000,
+                            None if r.status_code == 200 else r.text[:120])
                     if r.status_code == 200:
                         return r.json()
                     elif r.status_code == 429:
@@ -93,6 +138,7 @@ async def _get_json(url: str, timeout: float = 8.0, retries: int = 2):
                         logger.debug("market GET %s failed: %d %s", url, r.status_code, r.text[:100])
                         return None
                 except httpx.RequestError as e:
+                    _record(url, None, 0.0, f"{type(e).__name__}: {e}")
                     if attempt == retries - 1:
                         logger.debug("market GET %s failed: %s", url, e)
                         return None
@@ -1337,6 +1383,8 @@ async def whale_txs(limit: int = 10, min_value_btc: Optional[float] = None) -> l
             sats = t.get("value") or 0
             rows.append({
                 "txid": (t.get("txid") or "")[:16] + "…",
+                # additive: the truncated txid can't be linked or looked up
+                "txid_full": t.get("txid"),
                 "value_btc": round(sats / 1e8, 4),
                 "fee_sat": t.get("fee"),
                 "size_vb": t.get("vsize"),
