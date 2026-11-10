@@ -303,6 +303,7 @@ async def backtrack_early_buyers(
     rpc_url: Optional[str] = None,
     resume_before: Optional[str] = None,
     resume_count: int = 0,
+    scan_sigs: int = 100,
 ) -> dict:
     """
     Walk the earliest transactions for `mint` and identify first buyers.
@@ -365,8 +366,11 @@ async def backtrack_early_buyers(
         if not all_sigs:
             return {"mint": mint, "error": "no_signatures", "buyers": [], "new": 0, "total": 0}
 
-        # Oldest N signatures (these are at the tail since Helius returns newest-first)
-        oldest_sigs = all_sigs[-(min(100, len(all_sigs))):]  # up to 100 oldest
+        # Oldest N signatures (these are at the tail since Helius returns newest-first).
+        # scan_sigs > 100 lets the runner tracer read past launch-bot dust:
+        # live, GTA6's oldest 100 txs held 51 sub-0.01 SOL bot trades and one
+        # real buy.
+        oldest_sigs = all_sigs[-(min(max(1, scan_sigs), len(all_sigs))):]
         if oldest_first:
             # walk truly oldest-first, so the max_buyers cut-off keeps the
             # earliest buyers rather than the newest of the oldest 100
@@ -375,6 +379,8 @@ async def backtrack_early_buyers(
         # Parse buyer from each sig concurrently (batched to avoid hammering)
         BATCH = 1 if pace_s else 10
         raw_buyers: list[dict] = []
+        from .early_runner_intel import classify as _kind
+        real_n = 0  # only real buys count toward max_buyers; dust/liquidity don't
         for i in range(0, len(oldest_sigs), BATCH):
             batch_sigs = oldest_sigs[i:i + BATCH]
             results = await asyncio.gather(*[
@@ -384,9 +390,11 @@ async def backtrack_early_buyers(
             for r in results:
                 if isinstance(r, dict):
                     raw_buyers.append(r)
+                    if _kind({"sol": r.get("sol_spent"), "tokens": r.get("token_amount")}) == "buy":
+                        real_n += 1
             if pace_s:
                 await asyncio.sleep(pace_s)
-            if len(raw_buyers) >= max_buyers:
+            if real_n >= max_buyers:
                 break
 
         # Deduplicate wallets, keep earliest entry per wallet
@@ -401,10 +409,13 @@ async def backtrack_early_buyers(
         for i, b in enumerate(ranked, 1):
             b["entry_rank"] = i
 
-        # Mark major early buyers: top 10 by SOL spent OR first 5 by rank
-        top_by_sol = sorted(ranked, key=lambda b: -b["sol_spent"])[:10]
+        # Mark major early buyers: top 10 by SOL spent OR first 5 real buys.
+        # Was the first 5 rows of any kind -- dust bots -- so the funder
+        # lookups (the paced RPC calls) were spent on them.
+        real = [b for b in ranked if _kind({"sol": b.get("sol_spent"), "tokens": b.get("token_amount")}) == "buy"]
+        top_by_sol = sorted(real, key=lambda b: -b["sol_spent"])[:10]
         major_set = {b["wallet_address"] for b in top_by_sol[:10]} | \
-                    {b["wallet_address"] for b in ranked[:5]}
+                    {b["wallet_address"] for b in real[:5]}
         for b in ranked:
             b["is_major"] = 1 if b["wallet_address"] in major_set else 0
 
@@ -430,7 +441,7 @@ async def backtrack_early_buyers(
     async with get_db() as db:
         await _ensure_tables(db)
 
-        for b in ranked[:max_buyers]:
+        for b in ranked[:max_buyers + (len(ranked) - len(real))]:
             try:
                 await db.execute(
                     """INSERT INTO token_early_buyers
@@ -447,7 +458,7 @@ async def backtrack_early_buyers(
                 pass
 
         # Inject into token_wallet_roles so moneyflow picks them up
-        for b in ranked[:max_buyers]:
+        for b in ranked[:max_buyers + (len(ranked) - len(real))]:
             try:
                 await db.execute(
                     """INSERT INTO token_wallet_roles
@@ -462,7 +473,7 @@ async def backtrack_early_buyers(
                 pass
 
         # Inject funder→buyer wallet_edges
-        for b in ranked[:max_buyers]:
+        for b in ranked[:max_buyers + (len(ranked) - len(real))]:
             funder = b.get("funded_by")
             if not funder:
                 continue
@@ -483,7 +494,7 @@ async def backtrack_early_buyers(
 
     out = {
         "mint": mint,
-        "buyers": ranked[:max_buyers],
+        "buyers": ranked[:max_buyers + (len(ranked) - len(real))],
         "new": new_count,
         "total": len(ranked),
         "cached": False,
