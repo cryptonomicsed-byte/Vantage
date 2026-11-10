@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import QuantBacktestPanel from './analytics/QuantBacktestPanel'
+import WhalesPanel from './analytics/WhalesPanel'
+import FxPanel from './analytics/FxPanel'
+import SourcesLivePanel from './analytics/SourcesLivePanel'
 import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, GitBranch as Waypoints, ListOrdered, Share2, Flame, Brain, Scale, UserCog, PlusCircle } from 'lucide-react'
 import Top5Degen from './Top5Degen'
 import MoneyFlowGraph from '../MoneyFlowGraph'
@@ -332,6 +335,7 @@ function AresSources() {
   })
   return (
     <div>
+      <SourcesLivePanel />
       <div className="ares-section-title" style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
         <span>{Object.keys(endpoints).length} Data Sources</span>
         {registry.length > 0 && (
@@ -539,61 +543,13 @@ function AresAllTokens() {
 }
 
 function AresWhales() {
-  const { data, loading } = useAresApi('/api/intel/whales', 30000)
-  const txs = data?.transactions || []
-  const intel = useAresApi('/api/intel', 60000)
-  const btcPx = Number(intel.data?.anomalies?.fusion?.btc_consensus || 0)
-  if (loading && !data) return <div style={{ color: 'var(--muted)', padding: 20 }}>Loading whale activity…</div>
-  return (
-    <div>
-      <div className="ares-section-title">Largest Recent BTC Transactions <span style={{ fontSize: 11, color: 'var(--muted)' }}>(mempool.space)</span></div>
-      <table className="ares-table">
-        <thead><tr><th>Tx</th><th>Value (BTC)</th><th>≈ USD</th><th>Fee (sat/vB)</th><th>Size (vB)</th></tr></thead>
-        <tbody>
-          {txs.length === 0 && <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No mempool data.</td></tr>}
-          {txs.map((t: any, i: number) => (
-            <tr key={i} className={(t.value_btc || 0) > 10 ? 'threat-high' : ''}>
-              <td style={{ fontFamily: 'monospace', fontSize: 11 }}><a href={`https://mempool.space/tx/${t.txid}`} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>{String(t.txid || '').slice(0, 12)}…{String(t.txid || '').slice(-6)}</a></td>
-              <td style={{ fontFamily: 'monospace', fontWeight: 700, color: (t.value_btc || 0) > 10 ? 'var(--warning)' : 'var(--text)' }}>{t.value_btc}</td>
-              <td style={{ fontFamily: 'monospace' }}>{btcPx && t.value_btc ? `$${Math.round(t.value_btc * btcPx).toLocaleString()}` : '—'}</td>
-              <td style={{ fontFamily: 'monospace', color: 'var(--muted)' }}>{t.fee_sat?.toLocaleString()}{t.fee_sat && t.size_vb ? ` (${(t.fee_sat / t.size_vb).toFixed(1)})` : ''}</td>
-              <td style={{ fontFamily: 'monospace', color: 'var(--muted)' }}>{t.size_vb}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )
+  // confirmed block whales + mempool (analytics/WhalesPanel.tsx)
+  return <WhalesPanel />
 }
 
 function AresFx() {
-  const [base, setBase] = useState('USD')
-  const { data, loading, refresh } = useAresApi(`/api/intel/fx?base=${base}`, 300000)
-  const rates = data?.rates || {}
-  const majors = ['EUR', 'GBP', 'JPY', 'CNY', 'CAD', 'AUD', 'CHF', 'INR', 'BRL', 'MXN', 'KRW', 'SGD']
-  if (loading && !data) return <div style={{ color: 'var(--muted)', padding: 20 }}>Loading FX rates…</div>
-  return (
-    <div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
-        <input className="ares-input" placeholder="Base (e.g. USD)" value={base} onChange={e => setBase(e.target.value.toUpperCase())} onKeyDown={e => e.key === 'Enter' && refresh()} style={{ maxWidth: 120 }} />
-        <button className="btn btn-primary btn-sm" onClick={refresh}>Refresh</button>
-      </div>
-      <div className="ares-section-title">{base} Exchange Rates <span style={{ fontSize: 11, color: 'var(--muted)' }}>(ExchangeRate-API)</span></div>
-      {Object.keys(rates).length === 0 ? (
-        <div style={{ color: 'var(--muted)', padding: 20 }}>No rates loaded — check the base currency code.</div>
-      ) : (
-        <div className="ares-stat-grid">
-          {majors.filter(c => rates[c] != null).map(c => (
-            <div key={c} className="ares-stat-tile">
-              <div className="ares-stat-label">{c}</div>
-              <div className="ares-stat-value">{Number(rates[c]).toFixed(4)}</div>
-            </div>
-          ))}
-        </div>
-      )}
-      {data?.updated && <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 12 }}>Updated: {data.updated}</div>}
-    </div>
-  )
+  // converter, local-currency crypto prices, full table (analytics/FxPanel.tsx)
+  return <FxPanel />
 }
 
 function AresBacktest() {
