@@ -71,6 +71,8 @@ class RefKind:
     close_sql: Optional[str] = None
     #: External objects: recorded, attributed, never verified.
     external: bool = False
+    #: The table is keyed on a text id (a uuid), not an integer.
+    text_id: bool = False
 
     @property
     def claimable(self) -> bool:
@@ -121,6 +123,46 @@ KINDS: dict[str, RefKind] = {
         close_sql="""UPDATE creation_jobs
                         SET status='completed', updated_at=datetime('now')
                       WHERE id=?3 AND status NOT IN ('completed','failed')""",
+    ),
+    # Space and workspace tasks (trading space, content space, workspace
+    # boards). A claim from chat takes a 30-minute lease, the same rule the
+    # routes apply; an artifact from chat moves the task into review, not
+    # closed -- a reviewer still has to accept it.
+    "vtask": RefKind(
+        name="vtask", table="vantage_tasks", title_column="title",
+        owner_column="created_by_agent_id", claimant_column="claimed_by_agent_id",
+        text_id=True,
+        claim_sql="""UPDATE vantage_tasks
+                        SET claimed_by_agent_id=?1, status='claimed', updated_ts=unixepoch(),
+                            claim_expires_at=datetime('now', '+30 minutes')
+                      WHERE id=?3 AND status IN ('proposed','brief_submitted')""",
+        close_sql="""UPDATE vantage_tasks
+                        SET status='review', updated_ts=unixepoch()
+                      WHERE id=?3 AND status IN ('claimed','in_production') AND claimed_by_agent_id=?1""",
+    ),
+    # Guild task board (routers/tasks.py).
+    "gtask": RefKind(
+        name="gtask", table="guild_tasks", title_column="title",
+        owner_column="created_by_name", claimant_column="claimed_by_name",
+        text_id=True,
+        claim_sql="""UPDATE guild_tasks
+                        SET claimed_by_id=?1, claimed_by_name=?2, status='claimed', updated_at=datetime('now')
+                      WHERE id=?3 AND status='proposed'""",
+        close_sql="""UPDATE guild_tasks
+                        SET status='review', updated_at=datetime('now')
+                      WHERE id=?3 AND status='claimed' AND claimed_by_id=?1""",
+    ),
+    # Lounge tasks (routers/lounge.py).
+    "ltask": RefKind(
+        name="ltask", table="lounge_tasks", title_column="title",
+        owner_column="created_by_agent_id", claimant_column="assigned_agent_id",
+        text_id=True,
+        claim_sql="""UPDATE lounge_tasks
+                        SET assigned_agent_id=?1, status='in_progress', updated_ts=unixepoch()
+                      WHERE id=?3 AND status='pending'""",
+        close_sql="""UPDATE lounge_tasks
+                        SET status='completed', completed_ts=unixepoch(), updated_ts=unixepoch()
+                      WHERE id=?3 AND status IN ('pending','in_progress') AND assigned_agent_id=?1""",
     ),
     # Git objects. Attributable to a channel's bound repository, verifiable
     # nowhere in this process.
@@ -209,8 +251,9 @@ async def resolve(raw: Optional[str]) -> Optional[ResolvedRef]:
         # than in a comment nobody reads at query time.
         return ResolvedRef(kind=kind_name, ref_id=ref_id, verified=False)
 
-    if not ref_id.isdigit():
-        return None  # every local kind is keyed on an integer id
+    if not spec.text_id and not ref_id.isdigit():
+        return None  # integer-keyed kinds take integer ids only
+    key = ref_id if spec.text_id else int(ref_id)
 
     cols = ["id", f"{spec.title_column} AS _title", f"{spec.status_column} AS _status"]
     if spec.owner_column:
@@ -222,7 +265,7 @@ async def resolve(raw: Optional[str]) -> Optional[ResolvedRef]:
         db.row_factory = aiosqlite.Row
         try:
             cur = await db.execute(
-                f"SELECT {', '.join(cols)} FROM {spec.table} WHERE id=?", (int(ref_id),)
+                f"SELECT {', '.join(cols)} FROM {spec.table} WHERE id=?", (key,)
             )
             row = await cur.fetchone()
         except Exception as exc:
@@ -329,7 +372,7 @@ async def _apply_transition(
             # which is a schema limit, not a permission decision, and saying
             # so is better than silently doing nothing.
             return False, "this task system stores an agent id; this principal has none"
-        return await _run(spec.claim_sql, agent_id, actor_name, resolved.ref_id,
+        return await _run(spec.claim_sql, agent_id, actor_name, _key(spec, resolved.ref_id),
                           f"already {resolved.status}")
 
     # artifact -> close
@@ -339,7 +382,7 @@ async def _apply_transition(
     if holder is not None and holder != principal.get("id"):
         # The invariant that makes claims worth making.
         return False, "this reference is claimed by another principal"
-    return await _run(spec.close_sql, agent_id, actor_name, resolved.ref_id,
+    return await _run(spec.close_sql, agent_id, actor_name, _key(spec, resolved.ref_id),
                       f"not closeable from status {resolved.status!r}")
 
 
@@ -360,8 +403,12 @@ def _bind(sql: str, values: tuple) -> tuple[str, tuple]:
     return _PLACEHOLDER_RE.sub("?", sql), tuple(values[i - 1] for i in order)
 
 
-async def _run(sql: str, agent_id, actor_name: str, ref_id: str, on_noop: str) -> tuple[bool, str]:
-    statement, args = _bind(sql, (agent_id, actor_name, int(ref_id)))
+def _key(spec: RefKind, ref_id: str):
+    return ref_id if spec.text_id else int(ref_id)
+
+
+async def _run(sql: str, agent_id, actor_name: str, key, on_noop: str) -> tuple[bool, str]:
+    statement, args = _bind(sql, (agent_id, actor_name, key))
     async with get_db() as db:
         try:
             cur = await db.execute(statement, args)

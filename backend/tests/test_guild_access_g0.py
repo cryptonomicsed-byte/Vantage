@@ -184,7 +184,7 @@ async def test_content_task_loop_has_leases_and_separation_of_duties(client, gui
 
     # The board gets an envelope, not a bare array.
     body = (await client.get(base, headers=guild["a"]["headers"])).json()
-    assert set(body) == {"tasks", "total"} and body["total"] == 1
+    assert {"tasks", "total"} <= set(body) and body["total"] == 1
 
     # b claims; a cannot steal it while the lease is live.
     r = await client.post(f"{base}/{tid}/claim", headers=guild["b"]["headers"])

@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from ..db import get_db
 from ..deps import get_agent
+from ..work_states import envelope
 from ..waggle_client import emit_signal
 
 logger = logging.getLogger(__name__)
@@ -67,7 +68,7 @@ async def list_tasks(
         db.row_factory = aiosqlite.Row
         async with db.execute(query, params) as cur:
             rows = await cur.fetchall()
-    return {"tasks": [dict(r) for r in rows]}
+    return envelope("gtask", [dict(r) for r in rows], legacy_key="tasks")
 
 
 class CreateTaskBody(BaseModel):

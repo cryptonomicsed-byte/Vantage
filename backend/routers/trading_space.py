@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from ..db import get_db
 from ..deps import get_agent
 from ..space_provisioning import provision_space_channel
+from ..work_states import envelope
 from ..guild_access import require_member, require_not_claimant, require_owner_or_staff
 from ..space_tasks import (
     DEFAULT_LEASE_MINUTES, MAX_LEASE_MINUTES, claim_sql, clamped_lease, lease_expired_sql, submit_sql,
@@ -158,9 +159,8 @@ async def list_tasks(
                 (space_id, limit),
             ) as cur:
                 rows = await cur.fetchall()
-    items = [dict(r) for r in rows]
-    # Wrap in envelope: frontend expects {tasks: [...], total: N}
-    return {"tasks": items, "total": len(items)}
+    # One envelope (G3): {items, total}; "tasks" stays for the current UI.
+    return envelope("vtask", [dict(r) for r in rows], legacy_key="tasks")
 
 
 class CreateTaskBody(BaseModel):
@@ -401,8 +401,7 @@ async def list_pools(slug: str, space_id: str, agent: dict = Depends(get_agent))
         ) as cur:
             rows = await cur.fetchall()
     items = [dict(r) for r in rows]
-    # Wrap in envelope: frontend expects {pools: [...], total: N}
-    return {"pools": items, "total": len(items)}
+    return {"items": items, "pools": items, "total": len(items)}
 
 
 class CreatePoolBody(BaseModel):

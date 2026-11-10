@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from ..db import get_db
 from ..deps import get_agent
 from ..space_provisioning import provision_space_channel
+from ..work_states import envelope
 from ..guild_access import require_member, require_not_claimant, require_owner_or_staff
 from ..space_tasks import DEFAULT_LEASE_MINUTES, claim_sql, clamped_lease, submit_sql
 
@@ -229,10 +230,8 @@ async def list_tasks(
                 (space_id, limit),
             ) as cur:
                 rows = await cur.fetchall()
-    items = [dict(r) for r in rows]
-    # Envelope: the board (ContentSpaceTasks.tsx) reads .tasks; the bare
-    # array it used to get rendered as an empty board forever.
-    return {"tasks": items, "total": len(items)}
+    # One envelope (G3): {items, total}; "tasks" is what the board reads.
+    return envelope("vtask", [dict(r) for r in rows], legacy_key="tasks")
 
 
 class CreateTaskBody(BaseModel):

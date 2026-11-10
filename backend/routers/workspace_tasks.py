@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from ..db import get_db
 from ..deps import get_agent
+from ..work_states import envelope
 
 router = APIRouter(
     prefix="/api/guilds/{slug}/workspaces/{ws_id}/tasks",
@@ -75,7 +76,7 @@ async def list_tasks(
                 (ws_id, limit),
             ) as cur:
                 rows = await cur.fetchall()
-    return [dict(r) for r in rows]
+    return envelope("vtask", [dict(r) for r in rows], legacy_key="tasks")
 
 
 class CreateTaskBody(BaseModel):
