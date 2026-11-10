@@ -9,6 +9,7 @@ translation layer over the SDK and is not exercised here.
 import asyncio
 import base64
 import json
+import os
 
 import pytest
 from fastapi.testclient import TestClient
@@ -486,11 +487,17 @@ async def test_audio_keeps_flowing_while_a_tool_call_is_in_flight(
         # write latency on a loaded runner, not pump blocking. The tool is
         # held open forever, so a serialised pump would still never deliver
         # the audio frame -- the test's detection power is unchanged.
-        first = json.loads(_receive_within(ws, 10.0))
-        second = json.loads(_receive_within(ws, 10.0))
+        # Bound is generous on purpose. The tool is held open forever, so a
+        # SERIALISED pump would never deliver the audio frame at any bound --
+        # detection power doesn't depend on tightness. What a tight bound did
+        # measure was SQLite audit-write latency on a loaded CI runner: 10 s
+        # failed intermittently under the full 2000-test suite.
+        bound = float(os.environ.get("VOICE_RELAY_TEST_BOUND", "45"))
+        first = json.loads(_receive_within(ws, bound))
+        second = json.loads(_receive_within(ws, bound))
         assert {first["type"], second["type"]} == {"tool_call", "audio"}
         audio_msg = first if first["type"] == "audio" else second
         assert audio_msg["audio"] == base64.b64encode(b"\x01\x02\x03").decode()
 
         tool_release.set()
-        assert json.loads(_receive_within(ws, 3.0))["type"] == "tool_result"
+        assert json.loads(_receive_within(ws, bound))["type"] == "tool_result"
