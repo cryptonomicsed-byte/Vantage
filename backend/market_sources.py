@@ -1001,6 +1001,8 @@ async def whale_txs(limit: int = 10, min_value_btc: Optional[float] = None) -> l
             sats = t.get("value") or 0
             rows.append({
                 "txid": (t.get("txid") or "")[:16] + "…",
+                # additive: the truncated txid can't be linked or looked up
+                "txid_full": t.get("txid"),
                 "value_btc": round(sats / 1e8, 4),
                 "fee_sat": t.get("fee"),
                 "size_vb": t.get("vsize"),

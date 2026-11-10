@@ -679,6 +679,9 @@ async def lifespan(app: FastAPI):
 
     last30days_task = asyncio.create_task(_last30days_watch_loop())
 
+    from . import btc_whales as _btc_whales
+    btc_whales_task = _btc_whales.maybe_start()   # WHALE_BLOCK_SCAN_ENABLED, default off
+
     # trade_outcome_learner: was referenced by name in routers/trading.py's
     # GET /source-performance docstring since that endpoint was written, but
     # never actually existed anywhere (found 2026-08-29 while wiring Pine
@@ -795,7 +798,7 @@ async def lifespan(app: FastAPI):
                       runner_watchlist_task, confluence_task,
                       crucible_adapter_task, crucible_calibration_task,
                       guild_schedule_task,
-                      tradingos_challenger_task]
+                      tradingos_challenger_task, *([btc_whales_task] if btc_whales_task else [])]
     if execution_engine_task is not None:
         shutdown_tasks.append(execution_engine_task)
     shutdown_tasks = [t for t in shutdown_tasks if t is not None]

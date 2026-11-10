@@ -430,7 +430,12 @@ async def get_whales(limit: int = Query(10, ge=1, le=25), min_value_btc: float =
     """Largest recent BTC mempool transactions (mempool.space), optionally
     filtered to only transactions at or above min_value_btc."""
     txs = await ms.whale_txs(limit, min_value_btc)
-    return {"transactions": txs, "count": len(txs), "chain": "bitcoin", "source": "mempool.space"}
+    from .. import btc_whales
+    return {"transactions": txs, "count": len(txs), "chain": "bitcoin", "source": "mempool.space",
+            # additive: `transactions` is the 10 newest mempool txs (small);
+            # `confirmed` is the largest transactions in recent blocks.
+            "transactions_scope": "newest 10 mempool transactions, largest first",
+            "confirmed": btc_whales.snapshot(limit=25, min_value_btc=min_value_btc)}
 
 # ── Wallet money-flow graph — accumulated from real observed counterparties,
 # not a fabricated data source. Every /trace lookup and /watchlist/refresh
