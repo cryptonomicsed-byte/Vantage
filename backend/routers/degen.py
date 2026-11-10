@@ -664,10 +664,13 @@ async def top_wallets_to_copy(limit: int=20, x_agent_key: str=Header(...)):
         """, (limit,))
         rows = await cur.fetchall()
         meta = await (await db.execute(f"""
-            SELECT MAX(updated_at), SUM(CASE WHEN {_MASS_DEPLOYER_SQL} THEN 1 ELSE 0 END)
+            SELECT MAX(updated_at) AS upd, SUM(CASE WHEN {_MASS_DEPLOYER_SQL} THEN 1 ELSE 0 END) AS excl
             FROM wallet_reputation WHERE copy_trade_score > 0""")).fetchone()
-    return {"wallets": rows, "count": len(rows), "scores_updated_at": meta[0],
-            "excluded_mass_deployers": meta[1] or 0}
+    # _db() rows are dicts; read by name, never by position
+    meta = dict(meta) if meta is not None and not isinstance(meta, (tuple, list)) \
+        else {"upd": meta[0] if meta else None, "excl": meta[1] if meta else 0}
+    return {"wallets": rows, "count": len(rows), "scores_updated_at": meta.get("upd"),
+            "excluded_mass_deployers": meta.get("excl") or 0}
 
 # ════════════════════════════════════════════════════════════════
 # CONVICTION SCORE — "% of this token held/traded by known-good wallets."

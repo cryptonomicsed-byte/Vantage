@@ -99,3 +99,27 @@ def test_mass_deployer_rule_sql():
     got = [r[0] for r in c.execute(f"SELECT wallet_address FROM wallet_reputation WHERE copy_trade_score > 0 "
                                     f"AND NOT {degen._MASS_DEPLOYER_SQL} ORDER BY copy_trade_score DESC")]
     assert got == ["TRADER", "BUILDER"]
+
+
+
+@pytest.mark.asyncio
+async def test_top_wallets_endpoint_end_to_end(monkeypatch):
+    """The handler itself (not just the SQL rule): _db() yields dict rows, and
+    the first version read the summary row by position -> KeyError: 0 live."""
+    from backend.routers import degen
+
+    async def ok(_):
+        return {"id": 1}
+    monkeypatch.setattr(degen, "get_agent", ok)
+    async with degen._db() as db:
+        await db.execute("CREATE TABLE IF NOT EXISTS wallet_reputation (wallet_address TEXT PRIMARY KEY, "
+                         "copy_trade_score REAL, deployer_count INT, tokens_tracked INT, updated_at TEXT)")
+        await db.execute("DELETE FROM wallet_reputation WHERE wallet_address IN ('T_BOT','T_TRADER')")
+        await db.execute("INSERT INTO wallet_reputation (wallet_address, copy_trade_score, deployer_count, "
+                         "tokens_tracked, updated_at) VALUES ('T_BOT', 99999, 2237, 2237, '2026-10-27T23:09:36Z'), "
+                         "('T_TRADER', 99998, 0, 40, '2026-10-27T23:09:36Z')")
+        await db.commit()
+    out = await degen.top_wallets_to_copy(limit=50, x_agent_key="k")
+    addrs = [w["wallet_address"] for w in out["wallets"]]
+    assert "T_TRADER" in addrs and "T_BOT" not in addrs
+    assert out["excluded_mass_deployers"] >= 1 and out["scores_updated_at"]
