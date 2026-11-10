@@ -1,6 +1,7 @@
 """Market Intel API v3 — FULL market coverage via Pyth Network (768 crypto feeds).
 All data geo-unrestricted, no API keys needed."""
 
+import os
 import logging, asyncio, json, time, threading
 from typing import Optional
 import httpx
@@ -69,6 +70,7 @@ async def _fetch_prices_batch(ids: list[str]) -> dict:
         async with httpx.AsyncClient(timeout=8) as c:
             r = await c.get(f"{PYTH_PRICE}?{params}",
                           headers={"User-Agent": "Vantage/1.0"})
+            ms._record(PYTH_PRICE, r.status_code, 0.0, None if r.status_code == 200 else r.text[:120])
             if r.status_code == 200:
                 result = {}
                 for item in r.json().get("parsed", []):
@@ -213,6 +215,7 @@ async def _majors():
         async with httpx.AsyncClient(timeout=5) as c:
             r = await c.get(f"{PYTH_PRICE}?ids[]={PYTH_IDS['BTC']}&ids[]={PYTH_IDS['ETH']}&ids[]={PYTH_IDS['SOL']}",
                           headers={"User-Agent": "Vantage/1.0"})
+            ms._record(PYTH_PRICE, r.status_code, 0.0, None if r.status_code == 200 else r.text[:120])
             if r.status_code == 200:
                 for item in r.json().get("parsed", []):
                     pid = item.get("id", "")
@@ -430,7 +433,12 @@ async def get_whales(limit: int = Query(10, ge=1, le=25), min_value_btc: float =
     """Largest recent BTC mempool transactions (mempool.space), optionally
     filtered to only transactions at or above min_value_btc."""
     txs = await ms.whale_txs(limit, min_value_btc)
-    return {"transactions": txs, "count": len(txs), "chain": "bitcoin", "source": "mempool.space"}
+    from .. import btc_whales
+    return {"transactions": txs, "count": len(txs), "chain": "bitcoin", "source": "mempool.space",
+            # additive: `transactions` is the 10 newest mempool txs (small);
+            # `confirmed` is the largest transactions in recent blocks.
+            "transactions_scope": "newest 10 mempool transactions, largest first",
+            "confirmed": btc_whales.snapshot(limit=25, min_value_btc=min_value_btc)}
 
 # ── Wallet money-flow graph — accumulated from real observed counterparties,
 # not a fabricated data source. Every /trace lookup and /watchlist/refresh
@@ -1077,8 +1085,18 @@ _CHAIN_PROBES = {
     "solana": {"method": "getSlot", "params": [], "evm": False},
     "polygon": {"method": "eth_blockNumber", "params": [], "evm": True},
     "base": {"method": "eth_blockNumber", "params": [], "evm": True},
-    "sui": {"method": "sui_getLatestCheckpointSequenceNumber", "params": [], "evm": False},
+    "sui": {"method": "sui_getLatestCheckpointSequenceNumber", "params": [], "evm": False,
+            # public fullnodes deprecated JSON-RPC ("Method not found ... migrate
+            # to gRPC or GraphQL"): fall back to the public GraphQL endpoint
+            "graphql": os.environ.get("SUI_GRAPHQL_URL", "https://graphql.mainnet.sui.io/graphql")},
 }
+
+
+async def _sui_graphql_height(c, url: str):
+    r = await c.post(url, json={"query": "{ checkpoint { sequenceNumber } }"})
+    seq = (((r.json() or {}).get("data") or {}).get("checkpoint") or {}).get("sequenceNumber") \
+        if r.status_code == 200 else None
+    return int(seq) if isinstance(seq, (int, str)) and str(seq).isdigit() else None
 
 
 async def _probe_chain(c, chain: str) -> dict:
@@ -1096,6 +1114,12 @@ async def _probe_chain(c, chain: str) -> dict:
             res = int(res, 16)
         elif isinstance(res, str) and res.isdigit():
             res = int(res)
+        if not (isinstance(res, int) and res > 0) and spec.get("graphql"):
+            t1 = time.monotonic()
+            res = await _sui_graphql_height(c, spec["graphql"])
+            if res:
+                out["latency_ms"] = round((time.monotonic() - t1) * 1000)
+                out["source"] = "graphql"
         if isinstance(res, int) and res > 0:
             out["block_height"] = res
             out["health"] = "healthy" if out["latency_ms"] < 2000 else "degraded"
@@ -1123,6 +1147,14 @@ async def _chain_health() -> dict:
 @router.get("/health")
 async def get_health_detail(agent: dict = Depends(get_agent)):
     return {"chains": await _chain_health()}
+
+@router.get("/sources-live")
+async def get_sources_live(agent: dict = Depends(get_agent)):
+    """Measured health of every external host this process has called through
+    market_sources' HTTP helpers since start: calls, ok, errors, rate-limited,
+    last status/error, average latency. Real observations, not a registry."""
+    return {"since": ms.SOURCE_STATS_SINCE, "hosts": ms.source_stats()}
+
 
 @router.get("/sources")
 async def get_sources(agent: dict = Depends(get_agent)):

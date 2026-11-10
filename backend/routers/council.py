@@ -72,6 +72,17 @@ async def council_overview(agent: dict = Depends(get_agent)):
     b = await q("SELECT COUNT(*) n FROM trace_buffer WHERE sent_at IS NULL")
     out["trace_buffer_pending"] = b.get("n") if isinstance(b, dict) else b[0]["n"]
     out["mycelium"] = await my_get(f"{MYCELIUM}/api/status")
+    # signal_pool was initialised to None and never filled: council signals
+    # currently in the in-memory pool (read under its lock, no copy kept).
+    try:
+        from backend.routers import intel as _intel
+        with _intel._signal_lock:
+            pool = list(_intel._signal_pool)
+        council = [p for p in pool if "council" in str(p.get("source", "")).lower()]
+        out["signal_pool"] = {"total": len(pool), "council": len(council),
+                              "latest_council": council[-1] if council else None}
+    except Exception as e:  # noqa: BLE001
+        out["signal_pool"] = {"error": str(e)[:120]}
     return out
 
 
