@@ -116,11 +116,11 @@ async def test_relabel_first_buyers_dust_rerank_unknown_and_idempotent():
              ("RLC", "C", "OK1", 1, 1.2, "Entry #1 · 1.2 SOL"),    # already converted: untouched
              ("RLC", "C", "L1", 1, 0.5, "Entry rank #1")])         # legacy on same mint: ranks after
         await db.commit()
-        out = await gr.relabel_first_buyers(db, batch_mints=1)
+        out = await gr.relabel_first_buyers(db, batch_mints=1, only_mints=["RLA", "RLB", "RLC"])
         got = {(m, w): (r, me, lbl) for m, w, r, me, lbl in await (await db.execute(
             "SELECT mint, wallet_address, rank, metric, metric_label FROM token_wallet_roles "
             "WHERE mint IN ('RLA','RLB','RLC') AND role='first_buyer'")).fetchall()}
-        again = await gr.relabel_first_buyers(db)
+        again = await gr.relabel_first_buyers(db, only_mints=["RLA", "RLB", "RLC"])
     assert out == {"mints": 3, "deleted": 2, "relabelled": 6}
     assert got == {("RLA", "R1"): (1, 2.5, "Entry #1 · 2.5 SOL"),
                    ("RLA", "R2"): (2, 0.8, "Entry #2 · 0.8 SOL"),

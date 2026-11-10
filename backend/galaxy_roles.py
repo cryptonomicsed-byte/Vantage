@@ -219,11 +219,19 @@ def _relabel_plan(rows: List[Dict[str, Any]], start_rank: int = 0):
     return delete, update
 
 
-async def relabel_first_buyers(db, batch_mints: int = RELABEL_BATCH_MINTS) -> Dict[str, int]:
+async def relabel_first_buyers(db, batch_mints: int = RELABEL_BATCH_MINTS,
+                              only_mints: Optional[List[str]] = None) -> Dict[str, int]:
+    """Convert legacy first_buyer rows to 'Entry #n · x SOL'. Idempotent.
+
+    only_mints: restrict to these mints (tests / targeted reruns); None = all.
+    """
     out = {"mints": 0, "deleted": 0, "relabelled": 0}
     legacy = "role='first_buyer' AND (metric_label IS NULL OR metric_label NOT LIKE 'Entry #%')"
     mints = [m for (m,) in await (await db.execute(
         f"SELECT DISTINCT mint FROM token_wallet_roles WHERE {legacy}")).fetchall()]
+    if only_mints is not None:
+        keep = set(only_mints)
+        mints = [m for m in mints if m in keep]
     for i in range(0, len(mints), batch_mints):
         for mint in mints[i:i + batch_mints]:
             cols = ["id", "rank", "metric", "metric_label"]
