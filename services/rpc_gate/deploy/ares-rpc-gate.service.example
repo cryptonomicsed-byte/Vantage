@@ -1,0 +1,31 @@
+# ares-rpc-gate: fleet Solana JSON-RPC gateway (Helius key rotation + public fallback).
+# Shipped in the repo, NOT installed. Install is the operator's call:
+#   cd /opt/ares/Vantage/services/rpc_gate && go build -o /opt/ares/bin/ares-rpc-gate .
+#   cp deploy/ares-rpc-gate.service.example /etc/systemd/system/ares-rpc-gate.service
+#   systemctl daemon-reload && systemctl enable --now ares-rpc-gate
+# Binds loopback only. A non-loopback RPC_GATE_ADDR is refused unless RPC_GATE_TOKEN is set.
+[Unit]
+Description=Ares RPC Gate (Solana JSON-RPC, shared Helius key pool, public fallback)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=-/etc/ares-env/ares-rpc-gate.env
+Environment=RPC_GATE_ADDR=127.0.0.1:8092
+Environment=RPC_GATE_POOL_CONFIG=/opt/ares/.api_key_pools.json
+Environment=RPC_GATE_POOL_STATE=/opt/ares/.api_key_pool_state.json
+Environment=SOLANA_PUBLIC_RPC=https://api.mainnet-beta.solana.com
+Environment=PUBLIC_RPS=4
+ExecStart=/opt/ares/bin/ares-rpc-gate
+Nice=5
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

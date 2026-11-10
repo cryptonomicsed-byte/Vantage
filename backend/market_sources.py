@@ -632,14 +632,25 @@ async def market_breadth() -> dict:
     if dom:
         indicators.append(f"BTC dominance: {round(dom, 1)}%")
 
-    if avg is not None:
-        # Exact 0.0 avg (perfectly flat breadth) previously fell through to
-        # "bearish" -- `(avg or 0) > 0` treats 0 the same as missing data.
-        overall = "bullish" if avg > 0 else "bearish" if avg < 0 else "neutral"
+    # Price trend with a dead band: a +0.26% average move is noise, not
+    # "bullish" (live: 'bullish' printed next to Fear & Greed 32 'fear').
+    if avg is not None or breadth_pct is not None:
+        a, b = (avg or 0), (breadth_pct if breadth_pct is not None else 50)
+        price_trend = "bullish" if (a >= 1 or b >= 60) else "bearish" if (a <= -1 or b <= 40) else "neutral"
     else:
-        overall = "bullish" if "greed" in mood else "bearish"
+        price_trend = None
+    positioning = "greed" if "greed" in mood else "fear" if "fear" in mood else "neutral"
+    if price_trend is None:
+        overall = {"greed": "bullish", "fear": "bearish"}.get(positioning, "neutral")
+    elif price_trend != "neutral" and positioning != "neutral" and \
+            {"bullish": "greed", "bearish": "fear"}[price_trend] != positioning:
+        overall = "mixed"            # price action and positioning disagree
+    else:
+        overall = price_trend
     out = {
         "overall": overall,
+        "price_trend": price_trend,
+        "positioning": positioning,
         "fear_greed": score,
         "mood": mood,
         "gainers_pct": breadth_pct if breadth_pct is not None else 0,
