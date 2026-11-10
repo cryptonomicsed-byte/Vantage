@@ -114,6 +114,13 @@ async def test_top_wallets_endpoint_end_to_end(monkeypatch):
     async with degen._db() as db:
         await db.execute("CREATE TABLE IF NOT EXISTS wallet_reputation (wallet_address TEXT PRIMARY KEY, "
                          "copy_trade_score REAL, deployer_count INT, tokens_tracked INT, updated_at TEXT)")
+        # other suites create an older wallet_reputation; the live schema comes
+        # from wallet_learner.py and has these columns
+        cur = await db.execute("PRAGMA table_info(wallet_reputation)")
+        have = {(r["name"] if isinstance(r, dict) else r[1]) for r in await cur.fetchall()}
+        for col, decl in (("deployer_count", "INT"), ("tokens_tracked", "INT"), ("updated_at", "TEXT")):
+            if col not in have:
+                await db.execute(f"ALTER TABLE wallet_reputation ADD COLUMN {col} {decl}")
         await db.execute("DELETE FROM wallet_reputation WHERE wallet_address IN ('T_BOT','T_TRADER')")
         await db.execute("INSERT INTO wallet_reputation (wallet_address, copy_trade_score, deployer_count, "
                          "tokens_tracked, updated_at) VALUES ('T_BOT', 99999, 2237, 2237, '2026-10-27T23:09:36Z'), "
