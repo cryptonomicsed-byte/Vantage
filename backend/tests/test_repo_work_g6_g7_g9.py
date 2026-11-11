@@ -69,7 +69,7 @@ class FakeHost:
                                        "html_url": "https://github.com/acme/widgets",
                                        "clone_url": "https://github.com/acme/widgets.git",
                                        "permissions": {"push": True}}}
-        self.prs = 0
+        self.opened = {}   # PRs the agent opened itself: number -> (head, base)
 
     async def __call__(self, method, path, json):
         self.calls.append((method, path, json))
@@ -84,9 +84,13 @@ class FakeHost:
                 return 200, {"object": {"sha": "abc123"}}
             if parts[3] == "git" and parts[4] == "refs":
                 return 201, {"ref": json["ref"]}
-            if parts[3] == "pulls" and method == "POST":
-                self.prs += 1
-                return 201, {"number": self.prs, "html_url": f"https://github.com/{full}/pull/{self.prs}", "state": "open"}
+            if parts[3] == "pulls" and method == "GET" and len(parts) == 5:
+                n = int(parts[4])
+                if n not in self.opened:
+                    return 404, {"message": "Not Found"}
+                head, base = self.opened[n]
+                return 200, {"number": n, "html_url": f"https://github.com/{full}/pull/{n}", "state": "open",
+                             "head": {"ref": head}, "base": {"ref": base}}
         return 404, None
 
 
@@ -161,12 +165,19 @@ async def test_branch_and_pr_belong_to_the_claim_holder(client, guild, host):
     r = await client.post(f"{work}/branch", headers=guild["a"]["headers"])
     assert r.status_code == 200, r.text
     assert r.json()["branch"] == f"guild/{slug}/{tid}" and r.json()["from"] == "main"
-    assert any(p.endswith("/git/refs") for _, p, _ in host.calls)
-    # Someone else cannot open the PR; the holder can, and the task goes to review.
-    assert (await client.post(f"{work}/pr", headers=guild["b"]["headers"])).status_code == 403
-    r = await client.post(f"{work}/pr", json={"title": "Add widget"}, headers=guild["a"]["headers"])
+    assert r.json()["created_by_vantage"] is False
+    # Read-only toward the host: nothing but GETs, ever.
+    assert host.calls and all(m == "GET" for m, _, _ in host.calls)
+    # The agent opens the PR itself; a PR from the wrong branch is refused.
+    host.opened[1] = (f"guild/{slug}/{tid}", "main")
+    host.opened[2] = ("someone-else", "main")
+    assert (await client.post(f"{work}/pr", json={"number": 1}, headers=guild["b"]["headers"])).status_code == 403
+    assert (await client.post(f"{work}/pr", json={"number": 2}, headers=guild["a"]["headers"])).status_code == 422
+    assert (await client.post(f"{work}/pr", json={"number": 9}, headers=guild["a"]["headers"])).status_code == 404
+    r = await client.post(f"{work}/pr", json={"number": 1}, headers=guild["a"]["headers"])
     assert r.status_code == 200, r.text
     assert r.json()["pr"] == "pr:acme/widgets#1" and r.json()["head"] == f"guild/{slug}/{tid}"
+    assert all(m == "GET" for m, _, _ in host.calls)
     async with aiosqlite.connect(DB_PATH) as db:
         st = (await (await db.execute("SELECT status FROM vantage_tasks WHERE id=?", (tid,))).fetchone())[0]
     assert st == "review"
@@ -194,11 +205,11 @@ async def test_signed_merge_webhook_closes_the_task_and_unsigned_does_not(client
     assert st == "closed" and art == "accepted"
 
 
-async def test_gitea_provisioning_is_503_until_configured(client, guild, monkeypatch):
+async def test_gitea_provisioning_is_retired(client, guild, monkeypatch):
     from backend import gitea_accounts
-    monkeypatch.setattr(gitea_accounts, "ADMIN_TOKEN", "")
+    monkeypatch.setattr(gitea_accounts, "ADMIN_TOKEN", "configured")   # even when configured
     r = await client.post("/api/agents/me/gitea", headers=guild["a"]["headers"])
-    assert r.status_code == 503
+    assert r.status_code == 410
 
 
 # ── G7 ────────────────────────────────────────────────────────────────────────

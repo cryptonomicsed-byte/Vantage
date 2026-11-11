@@ -4,8 +4,13 @@ plus per-agent Gitea provisioning and webhook ingest (G6, G7).
 A unit of work is addressed by its work reference (``vtask:<id>``). Its
 repository is the one bound to the workspace channel the task lives in;
 its branch is ``guild/<slug>/<task-id>``; its artifact is the diff and
-the commit it was taken from; its pull request is opened on that branch
-under the acting agent's own identity where the provider has one.
+the commit it was taken from.
+
+READ-ONLY toward the repo host. Vantage never writes to a repository: no
+branch creation, no PR creation, no per-agent accounts on the host. Gitea is
+a read-only mirror and GitHub is the source of truth. The agent pushes its
+branch and opens its PR with its own credentials; Vantage names the branch,
+verifies the PR by reading it, and learns about merges from signed webhooks.
 
 Only the agent holding the task's claim may create the branch, take the
 worktree, record the artifact or open the PR. Merge closes the task, and
@@ -79,49 +84,36 @@ def _require_claim_holder(task: dict, agent: dict) -> None:
 
 
 async def _provider_for(agent: dict, binding: dict):
-    """The provider, using the agent's own Gitea token where it has one."""
-    token = None
-    if binding["provider"] == "gitea":
-        try:
-            from .. import gitea_accounts
-            token = await gitea_accounts.token_for(agent) or None
-        except Exception as exc:
-            logger.debug("guild_work: no per-agent gitea token: %s", exc)
-    return repo_providers.get_provider(binding["provider"], token=token)
+    """A provider for READS only (repo lookup, PR status). Never per-agent
+    tokens, and nothing here calls a write method on it."""
+    return repo_providers.get_provider(binding["provider"])
 
 
-# ── per-agent Gitea account ──────────────────────────────────────────────────
+# ── per-agent Gitea account (retired) ────────────────────────────────────────
 
-@router.post("/api/agents/me/gitea", summary="Provision this agent's own Gitea account")
+@router.post("/api/agents/me/gitea", summary="Retired: Vantage does not create repo-host accounts")
 async def provision_gitea(agent: dict = Depends(get_agent)):
-    from .. import gitea_accounts
-    if not gitea_accounts.ADMIN_TOKEN:
-        raise HTTPException(503, "Per-agent Gitea accounts are not configured (VANTAGE_GITEA_ADMIN_TOKEN)")
-    try:
-        await gitea_accounts.ensure_tables()
-        result = await gitea_accounts.provision(agent)
-    except Exception as exc:
-        raise HTTPException(502, f"gitea provisioning failed: {exc}")
-    return {"ok": True, **result}
+    raise HTTPException(410, "Retired: Gitea is a read-only mirror and Vantage never creates accounts or "
+                             "writes to a repo host. Push with your own credentials to the canonical repo.")
 
 
 # ── branch ───────────────────────────────────────────────────────────────────
 
-@router.post("/api/guilds/{slug}/work/{kind}/{ref_id}/branch", summary="Create the task's branch on the bound repo")
+@router.post("/api/guilds/{slug}/work/{kind}/{ref_id}/branch", summary="Name the task's branch (no write to the repo host)")
 async def create_task_branch(slug: str, kind: str, ref_id: str, agent: dict = Depends(get_agent)):
+    """Tell the claim holder which branch to push. Vantage does not create it:
+    the agent pushes with its own credentials, and the push is observed
+    through the signed webhook."""
     task, ws, binding = await _task_and_workspace(slug, kind, ref_id, agent)
     _require_claim_holder(task, agent)
     await require_space_capability(slug, ws, agent, "push_branch")
-    provider = await _provider_for(agent, binding)
     branch = branch_for(slug, ref_id)
-    try:
-        result = await provider.create_branch(binding["owner"], binding["name"], branch, binding["branch"])
-    except repo_providers.ProviderError as exc:
-        raise HTTPException(502, str(exc))
     await emit(guild_slug=slug, channel_slug=ws["chat_channel_slug"], event="branched", kind=kind,
-               ref_id=ref_id, actor=agent, title=task["title"], note=f"{binding['full_name']}@{branch}")
+               ref_id=ref_id, actor=agent, title=task["title"], note=f"{binding['full_name']}@{branch} (to push)")
     return {"work_ref": f"{kind}:{ref_id}", "repo": binding["full_name"], "provider": binding["provider"],
-            "branch": branch, "from": binding["branch"], **result}
+            "branch": branch, "from": binding["branch"], "created_by_vantage": False,
+            "push": f"git switch -c {branch} origin/{binding['branch']} && git push -u origin {branch}",
+            "commit_trailer": f"Opon-Task: {ref_id}"}
 
 
 # ── worktree (G7) ────────────────────────────────────────────────────────────
@@ -192,28 +184,31 @@ async def task_artifact(slug: str, kind: str, ref_id: str, agent: dict = Depends
 
 # ── pull request ─────────────────────────────────────────────────────────────
 
-class OpenPRBody(BaseModel):
-    title: str = Field("", max_length=200)
-    body: str = Field("", max_length=20000)
+class LinkPRBody(BaseModel):
+    number: int = Field(..., ge=1, description="the PR you opened on the bound repo, from the task branch")
 
 
-@router.post("/api/guilds/{slug}/work/{kind}/{ref_id}/pr", summary="Open the task's pull request")
-async def open_task_pr(slug: str, kind: str, ref_id: str, agent: dict = Depends(get_agent),
-                       body: Optional[OpenPRBody] = None):
-    body = body or OpenPRBody()
+@router.post("/api/guilds/{slug}/work/{kind}/{ref_id}/pr", summary="Link the PR the agent opened (read-only check)")
+async def open_task_pr(slug: str, kind: str, ref_id: str, body: LinkPRBody, agent: dict = Depends(get_agent)):
+    """Vantage does not open PRs. The claim holder opens one from the task
+    branch with its own credentials, then links it here. Vantage reads the PR
+    from the host and refuses it unless its head is the task branch and its
+    base is the bound branch."""
     task, ws, binding = await _task_and_workspace(slug, kind, ref_id, agent)
     _require_claim_holder(task, agent)
     await require_space_capability(slug, ws, agent, "push_branch")
     provider = await _provider_for(agent, binding)
     branch = branch_for(slug, ref_id)
-    title = body.title or task["title"]
-    text = (body.body or "") + f"\n\nwork_ref: {kind}:{ref_id}\nguild: {slug}\nagent: {agent.get('name')}"
     try:
-        pr = await provider.open_pr(binding["owner"], binding["name"], head=branch, base=binding["branch"],
-                                    title=title, body=text.strip())
+        pr = await provider.pr_status(binding["owner"], binding["name"], body.number)
     except repo_providers.ProviderError as exc:
         raise HTTPException(502, str(exc))
+    if pr is None:
+        raise HTTPException(404, f"No PR #{body.number} on {binding['full_name']}")
+    if pr.head != branch or pr.base != binding["branch"]:
+        raise HTTPException(422, f"PR #{body.number} is {pr.head} -> {pr.base}; this task needs {branch} -> {binding['branch']}")
     pr_ref = f"pr:{binding['full_name']}#{pr.number}"
+    title = task["title"]
     now = int(time.time())
     async with get_db() as db:
         await db.execute(
@@ -228,7 +223,7 @@ async def open_task_pr(slug: str, kind: str, ref_id: str, agent: dict = Depends(
     await emit(guild_slug=slug, channel_slug=ws["chat_channel_slug"], event="delivered", kind=kind, ref_id=ref_id,
                actor=agent, title=title, note=pr.html_url)
     return {"work_ref": f"{kind}:{ref_id}", "pr": pr_ref, "number": pr.number, "url": pr.html_url,
-            "head": branch, "base": binding["branch"], "provider": binding["provider"]}
+            "head": branch, "base": binding["branch"], "provider": binding["provider"], "opened_by_vantage": False}
 
 
 # ── webhook ingest ───────────────────────────────────────────────────────────
