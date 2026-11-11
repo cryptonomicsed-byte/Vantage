@@ -191,15 +191,18 @@ async def _maybe_dispatch_mention(event: dict, content: str) -> None:
     from .routers.copilot import _dispatch_chat
 
     channel = await get_main_feed_channel()
+    typing_sess = None
     try:
         pk = await derive_agent_keypair_for_typing(agent_row["id"])
         typing_sess = BuzzSession(RELAY_WS_URL, pk)
         await typing_sess.connect()
         await typing_sess.authenticate()
         await typing_sess.publish(20002, "", tags=[["h", channel]])
-        await typing_sess.close()
     except Exception as e:
         logger.info("buzz_inbound: typing indicator skipped (%s)", e)  # cosmetic, never blocks the reply
+    finally:
+        if typing_sess is not None:
+            await typing_sess.close()
 
     try:
         logger.info("buzz_inbound: calling _dispatch_chat for agent_id=%s", agent_row["id"])
@@ -359,6 +362,7 @@ async def run_inbound_listener() -> None:
     first-ever run starts from "now" (no historical backfill), not the
     dawn of the channel."""
     backoff = RECONNECT_BACKOFF_SECONDS
+    listener_sess = None
     while True:
         try:
             # Was called once, outside this loop, unguarded -- a single
@@ -410,6 +414,7 @@ async def run_inbound_listener() -> None:
 
             since = await _get_last_ts()
             sess = BuzzSession(RELAY_WS_URL, pk)
+            listener_sess = sess
             await sess.connect()
             await sess.authenticate()
             sub_id = await sess.subscribe([{"kinds": [1, 7, 9], "#h": [channel], "since": since}])
@@ -420,6 +425,13 @@ async def run_inbound_listener() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.warning("buzz_inbound: listener disconnected (%s), reconnecting in %ss", e, backoff)
+            logger.warning("buzz_inbound: listener disconnected (%r), reconnecting in %ss", e, backoff)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, MAX_RECONNECT_BACKOFF_SECONDS)
+        finally:
+            # Every pass opens a fresh socket. Without this, an auth timeout
+            # or a dropped stream left the old socket open (kept alive by
+            # keepalive pings) and the process ran out of file descriptors.
+            if listener_sess is not None:
+                await listener_sess.close()
+                listener_sess = None

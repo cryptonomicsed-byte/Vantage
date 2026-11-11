@@ -355,11 +355,9 @@ async def _publish_event(agent_id: int, kind: int, tags: list, content: str = ""
         from ..nostr.client import NostrSession
 
         pk = await derive_buzz_keypair(agent_id)
-        sess = NostrSession(primary_relay(), pk)
-        await sess.connect()
-        await sess.authenticate()
-        result = await sess.publish(kind, content, tags=tags)
-        await sess.close()
+        async with NostrSession(primary_relay(), pk) as sess:
+            await sess.authenticate()
+            result = await sess.publish(kind, content, tags=tags)
 
         if not isinstance(result, dict):
             logger.warning("nostr publish: unexpected result for kind %s: %r", kind, result)
@@ -1267,11 +1265,9 @@ async def zap_verify(stream_id: int, invoice: str = Query(..., min_length=10),
         from ..buzz_identity import derive_buzz_keypair
 
         pk = await derive_buzz_keypair(int(agent["id"]))
-        sess = NostrSession(primary_relay(), pk)
-        await sess.connect()
-        sub = await sess.subscribe([{"kinds": [KIND_ZAP_RECEIPT], "#a": [address], "limit": 50}])
-        events = await sess.recv_until_eose(sub, max_events=50)
-        await sess.close()
+        async with NostrSession(primary_relay(), pk) as sess:
+            sub = await sess.subscribe([{"kinds": [KIND_ZAP_RECEIPT], "#a": [address], "limit": 50}])
+            events = await sess.recv_until_eose(sub, max_events=50)
         for ev in events:
             tags = {t[0]: t[1:] for t in ev.get("tags", []) if t}
             bolt11 = (tags.get("bolt11") or [""])[0]

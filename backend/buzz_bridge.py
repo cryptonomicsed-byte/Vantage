@@ -115,8 +115,12 @@ class BuzzBridge:
 
             pk = await derive_buzz_keypair(agent_id)
             session = BuzzSession(RELAY_WS_URL, pk)
-            await session.connect()
-            await session.authenticate()
+            try:
+                await session.connect()
+                await session.authenticate()
+            except BaseException:
+                await session.close()   # never pool or orphan a half-open socket
+                raise
             pooled = _PooledSession(agent_id, session)
             pooled.heartbeat_task = asyncio.ensure_future(self._heartbeat_loop(agent_id))
             self._sessions[agent_id] = pooled
