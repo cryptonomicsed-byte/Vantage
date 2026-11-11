@@ -10,6 +10,7 @@ import time
 import uuid
 from typing import Any, Optional
 
+import aiosqlite
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -155,9 +156,10 @@ async def create_lounge(
 ):
     """Create a new persistent lounge room in the guild."""
     async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         # agent must be guild member
         mem = await (await db.execute(
-            "SELECT 1 FROM guild_members WHERE guild_slug=? AND agent_id=?",
+            "SELECT 1 FROM guild_members m JOIN guilds g ON g.id=m.guild_id WHERE g.slug=? AND m.agent_id=?",
             (guild_slug, agent["id"])
         )).fetchone()
         if not mem:
@@ -191,6 +193,7 @@ async def create_lounge(
 @router.get("")
 async def list_lounges(guild_slug: str, agent=Depends(get_current_agent)):
     async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         rows = await (await db.execute(
             """SELECT gl.*, COUNT(glm.agent_id) as member_count
                FROM guild_lounges gl
@@ -205,6 +208,7 @@ async def list_lounges(guild_slug: str, agent=Depends(get_current_agent)):
 @router.get("/{lounge_id}")
 async def get_lounge(guild_slug: str, lounge_id: str, agent=Depends(get_current_agent)):
     async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         lounge = await _get_lounge(db, guild_slug, lounge_id)
         members = await (await db.execute(
             """SELECT glm.agent_id, glm.role, glm.joined_ts, a.name
@@ -227,6 +231,7 @@ async def get_lounge(guild_slug: str, lounge_id: str, agent=Depends(get_current_
 @router.post("/{lounge_id}/join")
 async def join_lounge(guild_slug: str, lounge_id: str, agent=Depends(get_current_agent)):
     async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         lounge = await _get_lounge(db, guild_slug, lounge_id)
         count = (await (await db.execute(
             "SELECT COUNT(*) FROM guild_lounge_members WHERE lounge_id=?", (lounge_id,)
@@ -244,6 +249,7 @@ async def join_lounge(guild_slug: str, lounge_id: str, agent=Depends(get_current
 @router.delete("/{lounge_id}/join")
 async def leave_lounge(guild_slug: str, lounge_id: str, agent=Depends(get_current_agent)):
     async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         await db.execute(
             "DELETE FROM guild_lounge_members WHERE lounge_id=? AND agent_id=?",
             (lounge_id, agent["id"])
@@ -257,8 +263,9 @@ async def leave_lounge(guild_slug: str, lounge_id: str, agent=Depends(get_curren
 async def mint_invite(guild_slug: str, body: InviteCreate, agent=Depends(get_current_agent)):
     """Mint a single-use (or multi-use) invite token for the guild (optionally a specific lounge)."""
     async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         mem = await (await db.execute(
-            "SELECT 1 FROM guild_members WHERE guild_slug=? AND agent_id=?",
+            "SELECT 1 FROM guild_members m JOIN guilds g ON g.id=m.guild_id WHERE g.slug=? AND m.agent_id=?",
             (guild_slug, agent["id"])
         )).fetchone()
         if not mem:
@@ -282,6 +289,7 @@ async def mint_invite(guild_slug: str, body: InviteCreate, agent=Depends(get_cur
 @router.post("/invite/accept")
 async def accept_invite(guild_slug: str, body: InviteAccept, agent=Depends(get_current_agent)):
     async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         row = await (await db.execute(
             "SELECT * FROM guild_invite_tokens WHERE token=? AND guild_slug=?",
             (body.token, guild_slug)
@@ -295,8 +303,9 @@ async def accept_invite(guild_slug: str, body: InviteAccept, agent=Depends(get_c
 
         # join guild if not already a member
         await db.execute(
-            "INSERT OR IGNORE INTO guild_members (guild_slug, agent_id) VALUES (?,?)",
-            (guild_slug, agent["id"])
+            """INSERT OR IGNORE INTO guild_members (guild_id, agent_id, agent_name, role)
+               SELECT id, ?, ?, 'member' FROM guilds WHERE slug=?""",
+            (agent["id"], agent.get("name", ""), guild_slug)
         )
         # join lounge if token is lounge-scoped
         if row["lounge_id"]:
@@ -323,6 +332,7 @@ async def set_mode(
     if body.mode not in VALID_MODES:
         raise HTTPException(400, f"mode must be one of {VALID_MODES}")
     async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         await _get_lounge(db, guild_slug, lounge_id)
         await _assert_member(db, lounge_id, agent["id"])
         await db.execute(
@@ -352,6 +362,7 @@ async def create_task(
     agent=Depends(get_current_agent),
 ):
     async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         await _get_lounge(db, guild_slug, lounge_id)
         await _assert_member(db, lounge_id, agent["id"])
         task_id = str(uuid.uuid4())
@@ -388,6 +399,7 @@ async def list_tasks(
     agent=Depends(get_current_agent),
 ):
     async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         await _get_lounge(db, guild_slug, lounge_id)
         q = "SELECT * FROM lounge_tasks WHERE lounge_id=?"
         params: list = [lounge_id]
@@ -412,6 +424,7 @@ async def update_task(
     if not updates:
         raise HTTPException(400, "No valid fields to update")
     async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         await _get_lounge(db, guild_slug, lounge_id)
         await _assert_member(db, lounge_id, agent["id"])
         sets = ", ".join(f"{k}=?" for k in updates)
@@ -473,6 +486,8 @@ async def handle_slash(
     arg = parts[1] if len(parts) > 1 else ""
 
     async with get_db() as db:
+
+        db.row_factory = aiosqlite.Row
         if cmd == "/help":
             return {"reply": SLASH_HELP}
 
@@ -581,6 +596,7 @@ async def slash_command(
 ):
     """Execute a slash command in the lounge context."""
     async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         await _get_lounge(db, guild_slug, lounge_id)
         await _assert_member(db, lounge_id, agent["id"])
     return await handle_slash(guild_slug, lounge_id, body.text, agent)
@@ -603,6 +619,7 @@ async def link_channel(
     Once set, messages starting with '/' posted to that channel are routed to
     the lounge slash handler instead of the Nostr relay."""
     async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         lounge = await _get_lounge(db, guild_slug, lounge_id)
         await _assert_member(db, lounge_id, agent["id"])
 
@@ -647,6 +664,7 @@ async def unlink_channel(
 ):
     """Remove the channel binding from this lounge."""
     async with get_db() as db:
+        db.row_factory = aiosqlite.Row
         await _get_lounge(db, guild_slug, lounge_id)
         await _assert_member(db, lounge_id, agent["id"])
         await db.execute(

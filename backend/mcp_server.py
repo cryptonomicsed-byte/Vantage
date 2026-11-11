@@ -38,7 +38,14 @@ class _NoopMCP:
 # admin / telegram / debug router can never leak in by omission. The
 # exclude_tags=["admin","telegram"] pair (mirrored by EXCLUDED_TAGS in
 # skills_registry.py) still governs the full mount, unchanged.
-GUILD_MCP_TAGS = ["guild-forum", "tasks", "guilds", "alpha", "intel"]
+GUILD_MCP_TAGS = [
+    "guild-forum", "tasks", "guilds", "alpha", "intel",
+    # G1: the spaces and their work surfaces. Before this the curated mount
+    # had no way to create a trading or content space, claim a space task,
+    # or write workspace memory.
+    "trading-space", "content-space", "workspace-tasks", "artifacts",
+    "workspace-memory", "memory", "roster", "lounge", "guild-workspace",
+]
 
 GUILD_MCP_DESCRIPTION = (
     "Vantage collaboration surface -- join a guild, talk in its channels, take "

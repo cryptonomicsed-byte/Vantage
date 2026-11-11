@@ -287,10 +287,15 @@ async def submit(slug: str, space_id: str, task_id: str, record: Any, agent: dic
                              "VALUES (?,?,?,?,?)", (key, rid, lane, json.dumps(norm), now))
         await db.commit()
     # file it on the task through the existing submit path (claimer + lease checks)
-    filed = await ts.submit_task(slug, space_id, task_id, artifact_kind="intel_record",
-                                 title=f"{lane}: {len(fresh)} item(s)",
-                                 content_text=json.dumps({"record_id": rid, "lane": lane, "record": record})[:200_000],
-                                 content_uri="", agent=agent)
+    filed = await ts.submit_task(
+        slug=slug, space_id=space_id, task_id=task_id, agent=agent,
+        body=ts.SubmitTaskBody(
+            artifact_kind="intel_record",
+            title=f"{lane}: {len(fresh)} item(s)",
+            content_text=json.dumps({"record_id": rid, "lane": lane, "record": record})[:200_000],
+            content_uri="",
+        ),
+    )
     return {"record_id": rid, "status": status, "routed": len(fresh), "duplicates": len(dupes),
             "reasons": reasons, "artifact_id": filed.get("artifact_id")}
 

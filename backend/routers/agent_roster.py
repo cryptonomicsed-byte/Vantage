@@ -1,6 +1,7 @@
 """Guild agent roster with presence — exposed as MCP tools."""
 import aiosqlite
-from fastapi import APIRouter, Depends, Form, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from .. import coordination as coord
 from ..db import get_db
@@ -73,17 +74,22 @@ async def get_roster(guild_slug: str, agent: dict = Depends(get_agent)):
     return {"roster": [dict(r) for r in rows]}
 
 
+class UpdatePresenceBody(BaseModel):
+    state: str = Field(..., description="available|thinking|working|blocked|needs_review|offline")
+
+
 @router.patch(
     "/{agent_name}/presence",
     summary="Update agent presence in guild",
     description="Update the calling agent's presence state. Valid states: available, thinking, working, blocked, needs_review, offline.",
 )
 async def update_presence(
+    body: UpdatePresenceBody,
     guild_slug: str,
     agent_name: str,
-    state: str = Form(..., description="available|thinking|working|blocked|needs_review|offline"),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
+    state = body.state
     if agent["name"] != agent_name:
         raise HTTPException(403, "Can only update your own presence")
     if state not in STATES:

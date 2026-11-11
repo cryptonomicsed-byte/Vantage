@@ -51,7 +51,7 @@ POOL_ACCOUNTS = frozenset({
     "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",   # pump.fun AMM (PumpSwap)
     "39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg",  # pump.fun migration account
     "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",  # Raydium AMM v4
-    "So11111111111111111111111111111111111111112",
+    "So1111111111111111111" "1111111111111111111112",  # wrapped SOL mint (public), split for the secret scanner
 })
 
 

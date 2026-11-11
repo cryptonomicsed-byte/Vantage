@@ -887,7 +887,8 @@ async def publish_message_local(
     return synthetic_event
 
 
-async def publish_system_message(*, channel: dict, guild_slug: str, text: str) -> dict:
+async def publish_system_message(*, channel: dict, guild_slug: str, text: str,
+                                 work_ref: Optional[str] = None) -> dict:
     """Publish a `vt=system` event signed with the deployment's instance key.
 
     Separate from publish_message because the rules are inverted: `system` is
@@ -908,7 +909,7 @@ async def publish_system_message(*, channel: dict, guild_slug: str, text: str) -
     pk = await derive_instance_keypair()
     tags = build_message_tags(
         buzz_channel_id=channel["buzz_channel_id"], guild_slug=guild_slug,
-        channel_slug=channel["slug"], msg_type="system",
+        channel_slug=channel["slug"], msg_type="system", work_ref=work_ref or None,
     )
 
     sess = None

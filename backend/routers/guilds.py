@@ -9,7 +9,8 @@ from datetime import datetime
 from typing import Optional
 
 import aiosqlite
-from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -48,17 +49,26 @@ async def _get_member_role(guild_id: int, agent_id: int) -> str | None:
     return dict(row)["role"] if row else None
 
 
+class CreateGuildBody(BaseModel):
+    slug: str = Field(..., min_length=3, max_length=40, pattern=r"^[a-z0-9-]+$")
+    name: str = Field(..., min_length=1, max_length=80)
+    bio: str = Field("", max_length=500)
+    manifesto: str = Field("", max_length=2000)
+    avatar_url: str = Field("", max_length=500)
+
+
 @router.post("")
 @_limiter.limit("5/minute")
 async def create_guild(
+    body: CreateGuildBody,
     request: Request,
-    slug: str = Form(..., min_length=3, max_length=40, pattern=r"^[a-z0-9-]+$"),
-    name: str = Form(..., min_length=1, max_length=80),
-    bio: str = Form("", max_length=500),
-    manifesto: str = Form("", max_length=2000),
-    avatar_url: str = Form("", max_length=500),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
+    slug = body.slug
+    name = body.name
+    bio = body.bio
+    manifesto = body.manifesto
+    avatar_url = body.avatar_url
     async with get_db() as db:
         async with db.execute("SELECT id FROM guilds WHERE slug=?", (slug,)) as cur:
             if await cur.fetchone():
@@ -267,15 +277,24 @@ async def leave_guild(request: Request, slug: str, agent: dict = Depends(get_age
     return {"ok": True}
 
 
+class UpdateGuildBody(BaseModel):
+    bio: Optional[str] = Field(None, max_length=500)
+    manifesto: Optional[str] = Field(None, max_length=2000)
+    avatar_url: Optional[str] = Field(None, max_length=500)
+    is_accepting_tros: Optional[int] = Field(None)
+
+
 @router.patch("/{slug}")
 async def update_guild(
     slug: str,
-    bio: str = Form(None, max_length=500),
-    manifesto: str = Form(None, max_length=2000),
-    avatar_url: str = Form(None, max_length=500),
-    is_accepting_tros: int = Form(None),
     agent: dict = Depends(get_agent),
+    body: Optional[UpdateGuildBody] = None,
 ):
+    body = body or UpdateGuildBody()
+    bio = body.bio
+    manifesto = body.manifesto
+    avatar_url = body.avatar_url
+    is_accepting_tros = body.is_accepting_tros
     guild = await _get_guild(slug)
     role = await _get_member_role(guild["id"], agent["id"])
     if role not in ("founder", "contributor"):
@@ -297,14 +316,21 @@ async def update_guild(
     return {"ok": True, "changed": len(updates)}
 
 
+class PostGuildBroadcastBody(BaseModel):
+    title: str = Field(..., max_length=200)
+    post_content: str = Field("", max_length=50000)
+    tags: str = Field("[]")
+
+
 @router.post("/{slug}/broadcasts")
 async def post_guild_broadcast(
+    body: PostGuildBroadcastBody,
     slug: str,
-    title: str = Form(..., max_length=200),
-    post_content: str = Form("", max_length=50000),
-    tags: str = Form("[]"),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
+    title = body.title
+    post_content = body.post_content
+    tags = body.tags
     guild = await _get_guild(slug)
     role = await _get_member_role(guild["id"], agent["id"])
     if role is None:
@@ -344,15 +370,23 @@ async def guild_tros(slug: str, agent: dict = Depends(get_agent)):
     return {"tros": tros}
 
 
+class PostGuildTroBody(BaseModel):
+    service_type: str = Field(..., max_length=100)
+    description: str = Field("", max_length=2000)
+    reward_tokens: float = Field(0.0)
+    expires_hours: int = Field(24, ge=1, le=168)
+
+
 @router.post("/{slug}/tro")
 async def post_guild_tro(
+    body: PostGuildTroBody,
     slug: str,
-    service_type: str = Form(..., max_length=100),
-    description: str = Form("", max_length=2000),
-    reward_tokens: float = Form(0.0),
-    expires_hours: int = Form(24, ge=1, le=168),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
+    service_type = body.service_type
+    description = body.description
+    reward_tokens = body.reward_tokens
+    expires_hours = body.expires_hours
     guild = await _get_guild(slug)
     if not guild["is_accepting_tros"]:
         raise HTTPException(400, "This guild is not accepting TROs")
@@ -668,7 +702,11 @@ async def list_guild_artifacts(
     return {"artifacts": [dict(r) for r in rows]}
 
 
-@router.get("/{slug}/receipts", summary="List all guild execution receipts")
+# G8: this used to be registered at /{slug}/receipts, where guild_forum's
+# route of the same path (included first) shadowed it: callers got the
+# {head, chain} receipt-chain shape instead of execution receipts. One path
+# per meaning.
+@router.get("/{slug}/execution-receipts", summary="List all guild execution receipts")
 async def list_guild_receipts(
     slug: str,
     limit: int = Query(50, ge=1, le=200),

@@ -78,6 +78,8 @@ async def list_rounds(
     offset: int = Query(0, ge=0),
 ):
     """Browse witness rounds, filterable by status and subject_type."""
+    from backend.witness_store import expire_stale_rounds
+    await expire_stale_rounds()
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
 
@@ -104,7 +106,7 @@ async def list_rounds(
                 wr.id, wr.subject_type, wr.subject_id,
                 wr.submitter_agent_id, wr.pool_size, wr.quorum,
                 wr.status, wr.opened_at, wr.closed_at,
-                wr.artifact_url, wr.description
+                wr.artifact_url, wr.description, wr.guild_slug, wr.expires_at
             FROM witness_rounds wr
             WHERE {where_sql}
             ORDER BY wr.opened_at DESC

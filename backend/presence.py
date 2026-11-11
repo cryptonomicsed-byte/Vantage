@@ -59,6 +59,26 @@ BLOCKING_STATES = {"blocked", "needs_review"}
 
 DEFAULT_STATE = "available"
 
+#: A declared state is only evidence for so long. After this, a principal
+#: that has not refreshed its presence reads as offline and is not routable.
+#: Before this existed the guild presence list showed members last seen in
+#: September as available.
+STALE_AFTER_SECONDS = 24 * 3600
+
+
+def is_stale(updated_at: Optional[str]) -> bool:
+    """True when a presence row's updated_at is older than STALE_AFTER_SECONDS."""
+    if not updated_at:
+        return False
+    from datetime import datetime, timezone
+    try:
+        ts = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return (datetime.now(timezone.utc) - ts).total_seconds() > STALE_AFTER_SECONDS
+
 # Where a state came from -- distinct from what the state *is*, because a
 # scheduler that only sees "blocked" cannot tell an agent that said so itself
 # from one the Conductor gave up waiting on. See the module docstring.
@@ -267,9 +287,11 @@ async def get_state(principal_id: int, channel_id: Optional[int] = None) -> dict
         return {"principal_id": principal_id, "state": DEFAULT_STATE, "detail": "",
                 "work_ref": "", "routable": True, "declared": False, "source": None}
     row = dict(row)
-    return {"principal_id": principal_id, "state": row["state"], "detail": row["detail"] or "",
-            "work_ref": row["work_ref"] or "", "routable": row["state"] in ROUTABLE,
-            "declared": True, "updated_at": row["updated_at"],
+    stale = is_stale(row.get("updated_at"))
+    state = "offline" if stale else row["state"]
+    return {"principal_id": principal_id, "state": state, "detail": row["detail"] or "",
+            "work_ref": row["work_ref"] or "", "routable": state in ROUTABLE,
+            "declared": True, "updated_at": row["updated_at"], "stale": stale,
             "source": row["source"] or DEFAULT_SOURCE}
 
 
@@ -287,6 +309,9 @@ async def channel_presence(channel_id: int) -> list[dict]:
         )
         rows = [dict(r) for r in await cur.fetchall()]
     for row in rows:
+        row["stale"] = is_stale(row.get("updated_at"))
+        if row["stale"]:
+            row["state"] = "offline"
         row["routable"] = row["state"] in ROUTABLE
     return rows
 
@@ -303,7 +328,7 @@ async def routable_in_guild(guild_id: int) -> list[dict]:
         cur = await db.execute(
             """SELECT p.id AS principal_id, p.display_name, p.kind AS principal_kind,
                       p.framework, p.key_custody,
-                      COALESCE(pp.state, ?) AS state
+                      COALESCE(pp.state, ?) AS state, pp.updated_at AS updated_at
                  FROM guild_memberships m
                  JOIN principals p ON p.id = m.principal_id
                  LEFT JOIN principal_presence pp
@@ -313,4 +338,8 @@ async def routable_in_guild(guild_id: int) -> list[dict]:
             (DEFAULT_STATE, guild_id),
         )
         rows = [dict(r) for r in await cur.fetchall()]
+    for r in rows:
+        r["stale"] = is_stale(r.get("updated_at"))
+        if r["stale"]:
+            r["state"] = "offline"
     return [r for r in rows if r["state"] in ROUTABLE]

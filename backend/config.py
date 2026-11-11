@@ -238,6 +238,15 @@ class Settings(BaseSettings):
     # endpoints 503 if unset).
     GITEA_URL: str = ""
     GITEA_TOKEN: str = ""
+    # HMAC secret the repo host signs push webhooks with, shared with the
+    # external security-scan receiver on :9876. Set VANTAGE_STIX_WEBHOOK_SECRET
+    # on both sides. Empty means no hook is registered on repo creation: a
+    # hook without a secret would accept any caller's "push" event, so the
+    # code path fails closed and says so in the response.
+    STIX_WEBHOOK_SECRET: str = ""
+    # G6: HMAC secret the repo host (GitHub or Gitea) signs its webhooks
+    # with; POST /api/hooks/{provider} refuses anything it cannot verify.
+    REPO_WEBHOOK_SECRET: str = ""
 
     # Strix security scanning (github.com/usestrix/strix) runs on a small
     # standalone runner on the VPS host, not inside this container (no Docker
@@ -346,6 +355,11 @@ class Settings(BaseSettings):
     NIPAE_NSEC: str = ""
     NIPAE_OWNER: str = ""
     NIPAE_RELAY: str = "wss://relay.damus.io"
+    # G12: the NIP-29 guild groups (metadata, kind-9 bridge, the naddr pointer
+    # /api/guilds/{slug}/nostr) live on the relay the coordination layer has
+    # actually proven -- the primary relay -- not on the NIPAE engram relay.
+    # Empty means "the primary relay"; set VANTAGE_NIP29_RELAY to pin another.
+    NIP29_RELAY: str = ""
     # JSON list of relay entries consumed by nostr_gateway.NostrGateway.
     # Each entry: {"url": str, "role": "primary"|"backup"|"nipae"|"publish-only", "nips": [...]}
     # Leave empty to use built-in defaults (omokoda primary + damus nipae).

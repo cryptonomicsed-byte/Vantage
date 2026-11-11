@@ -397,15 +397,20 @@ async def create_repo(req: CreateRepoRequest, agent: dict = Depends(get_agent)):
             if r.status_code in (200, 201):
                 data = r.json()
                 _log_activity("repo_created", f"ares-bot/{req.name}", req.description or "", agent=agent["name"])
-                # Auto-register the security-scan webhook (secret is a shared value
-                # with the external :9876 receiver — do not change without updating
-                # that receiver too).
-                webhook_payload = {
-                    "type": "gitea",
-                    "config": {"url": "http://localhost:9876/", "content_type": "json", "secret": "vantage-stix-webhook-2026"},
-                    "events": ["push"], "active": True,
-                }
-                await repo_host.post(f"repos/ares-bot/{req.name}/hooks", json=webhook_payload, headers=_headers)
+                # Auto-register the security-scan webhook. The secret is shared
+                # with the external :9876 receiver and comes from config
+                # (VANTAGE_STIX_WEBHOOK_SECRET), never from source. No secret,
+                # no hook: an unsigned hook would trust any caller.
+                strix_hook = "not-registered (VANTAGE_STIX_WEBHOOK_SECRET unset)"
+                if settings.STIX_WEBHOOK_SECRET:
+                    webhook_payload = {
+                        "type": "gitea",
+                        "config": {"url": "http://localhost:9876/", "content_type": "json",
+                                   "secret": settings.STIX_WEBHOOK_SECRET},
+                        "events": ["push"], "active": True,
+                    }
+                    await repo_host.post(f"repos/ares-bot/{req.name}/hooks", json=webhook_payload, headers=_headers)
+                    strix_hook = "auto-registered"
 
                 import asyncio as _asyncio
                 from ..buzz_git import announce_repo
@@ -417,7 +422,7 @@ async def create_repo(req: CreateRepoRequest, agent: dict = Depends(get_agent)):
 
                 return {"status": "created", "repo": data.get("full_name", req.name),
                         "html_url": f"{GITEA_URL}/ares-bot/{req.name}",
-                        "strix_hook": "auto-registered"}
+                        "strix_hook": strix_hook}
         except Exception as e:
             raise HTTPException(500, str(e))
     raise HTTPException(500, "Gitea unavailable")
