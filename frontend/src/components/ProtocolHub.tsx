@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
+import { useInstanceRelay } from '../utils/instanceRelay'
 import {
   Radio, Wifi, Globe, Plus, Trash2, RefreshCw, Send, Copy, Check,
   AlertCircle, CheckCircle2, Circle, Server, Key, Users, Zap,
@@ -36,13 +37,19 @@ function NostrCenter({ apiKey }: { apiKey: string }) {
   const [tab, setTab] = useState<'identity' | 'relays' | 'feed' | 'publish' | 'zaps' | 'nips'>('identity')
   const [status, setStatus] = useState<any>(null)
   const [relays, setRelays] = useState<NostrRelay[]>([
-    { url: 'wss://omokoda.duckdns.org:3443/relay', status: 'disconnected', latency: null, read: true, write: true },
     { url: 'wss://relay.damus.io', status: 'disconnected', latency: null, read: true, write: false },
     { url: 'wss://nos.lol', status: 'disconnected', latency: null, read: true, write: false },
     { url: 'wss://relay.nostr.band', status: 'disconnected', latency: null, read: true, write: false },
     { url: 'wss://nostr.wine', status: 'disconnected', latency: null, read: false, write: false },
   ])
   const [newRelay, setNewRelay] = useState('')
+  // This instance's own relay comes from its registry, never a hardcoded host.
+  const ownRelay = useInstanceRelay()
+  useEffect(() => {
+    if (!ownRelay) return
+    setRelays(rs => rs.some(r => r.url === ownRelay) ? rs
+      : [{ url: ownRelay, status: 'disconnected', latency: null, read: true, write: true }, ...rs])
+  }, [ownRelay])
   const [events, setEvents] = useState<NostrEvent[]>([])
   const [noteContent, setNoteContent] = useState('')
   const [publishing, setPublishing] = useState(false)
@@ -83,7 +90,7 @@ function NostrCenter({ apiKey }: { apiKey: string }) {
   function pingRelay(url: string) {
     // For the own relay (ends in /relay) we require NIP-11 + a NIP-42 AUTH frame
     // within 5 s; a raw socket-open is not sufficient proof the relay is healthy.
-    const isOwn = url.includes('omokoda.duckdns.org')
+    const isOwn = !!ownRelay && url === ownRelay
     if (isOwn) {
       const httpUrl = url.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
       const nip11Check = fetch(httpUrl, {

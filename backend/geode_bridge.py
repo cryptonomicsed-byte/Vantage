@@ -22,7 +22,8 @@ from backend.nostr.client import NostrSession, build_event
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [geode-bridge] %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-BUZZ_WS = os.environ.get("RELAY_WS_URL", "wss://omokoda.duckdns.org:3443/relay")
+from .nostr_gateway import gateway as _gw
+BUZZ_WS = os.environ.get("RELAY_WS_URL", _gw.primary_ws_url)
 GEODE_HTTP = os.environ.get("GEODE_HTTP_URL", "http://127.0.0.1:3444")
 RECONNECT_DELAY = 30
 

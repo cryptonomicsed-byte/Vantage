@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { useInstanceRelay } from '../utils/instanceRelay'
 import { Rss, MessageSquare, Users, Radio, Server, Loader } from 'lucide-react'
 import { FeedView, DmsView, PersonasView } from './BuzzSocial'
 import BuzzTab from './BuzzTab'
@@ -13,6 +14,7 @@ interface BuzzStatus {
 }
 
 function RelayView({ apiKey }: { apiKey: string }) {
+  const relayUrl = useInstanceRelay()
   const [status, setStatus] = useState<BuzzStatus | null>(null)
   const [loading, setLoading] = useState(true)
 
@@ -30,10 +32,10 @@ function RelayView({ apiKey }: { apiKey: string }) {
     <div style={{ maxWidth: 560 }}>
       <div className="glass" style={{ padding: 16, borderRadius: 12, marginBottom: 16 }}>
         <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 4 }}>Relay</div>
-        <div style={{ fontSize: 14, fontWeight: 600, fontFamily: 'monospace' }}>wss://omokoda.duckdns.org:3443</div>
+        <div style={{ fontSize: 14, fontWeight: 600, fontFamily: 'monospace' }}>{relayUrl || '…'}</div>
         <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 8 }}>
           Vantage's self-hosted Buzz (Nostr) relay. Every agent registered here shares this relay by
-          default -- there's no per-agent relay picker yet since Vantage only operates the one instance.
+          default -- the operator of this instance chooses it (NOSTR_RELAY_REGISTRY).
         </div>
       </div>
 
@@ -51,7 +53,7 @@ function RelayView({ apiKey }: { apiKey: string }) {
       <div className="glass" style={{ padding: 16, borderRadius: 12 }}>
         <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 8 }}>Standards this integration speaks</div>
         <div style={{ fontSize: 12, lineHeight: 1.8 }}>
-          NIP-01 (events) &middot; NIP-05 (agentname@omokoda.duckdns.org identity) &middot; NIP-29 (groups/channels)
+          NIP-01 (events) &middot; NIP-05 (agentname@{window.location.hostname} identity) &middot; NIP-29 (groups/channels)
           &middot; NIP-42 (relay auth) &middot; NIP-44 (encryption) &middot; NIP-65 (relay list) &middot; NIP-AB (device pairing)
           &middot; NIP-71/73 (video events, kind:21/22) &middot; NIP-46 (remote signing / bunker)
         </div>

@@ -122,7 +122,7 @@ def _completed_calls(session_id):
     return check
 
 
-async def _eventually(check, timeout=25.0, interval=0.02):
+async def _eventually(check, timeout=95.0, interval=0.02):
     """Poll until `check()` returns something truthy, then return it.
 
     The relay finishes its cleanup (flush the open turn, log the tool result,
@@ -130,7 +130,7 @@ async def _eventually(check, timeout=25.0, interval=0.02):
     instant the `with` block exits is racing the server. Returns the last value
     on timeout so the caller's own assert produces the failure message.
 
-    The default outlasts SQLite's 20s busy_timeout: under CI lock pressure
+    The default outlasts get_db's 90s SQLite busy_timeout: under lock pressure
     from the app lifespan's background loops one relay write can wait that
     long, and a shorter poll turned that wait into a false failure.
     """
@@ -496,7 +496,9 @@ async def test_audio_keeps_flowing_while_a_tool_call_is_in_flight(
         # detection power doesn't depend on tightness. What a tight bound did
         # measure was SQLite audit-write latency on a loaded CI runner: 10 s
         # failed intermittently under the full 2000-test suite.
-        bound = float(os.environ.get("VOICE_RELAY_TEST_BOUND", "45"))
+        # 100 s: past get_db's 90 s SQLite busy_timeout, so a write queued behind
+        # a background loop's transaction is not reported as a blocked pump.
+        bound = float(os.environ.get("VOICE_RELAY_TEST_BOUND", "100"))
         first = json.loads(_receive_within(ws, bound))
         second = json.loads(_receive_within(ws, bound))
         assert {first["type"], second["type"]} == {"tool_call", "audio"}

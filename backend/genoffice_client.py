@@ -121,6 +121,12 @@ def _load_de_deliver_client_artifact():
     return _deliver_module_cache
 
 
+
+def _nipae_default() -> str:
+    """The instance relay registry's nipae relay (never a built-in host)."""
+    from .nostr_gateway import gateway
+    return gateway.nipae_url
+
 async def generate_document(
     template_path: str, output_path: str, paragraphs: List[str]
 ) -> Optional[dict]:
@@ -194,7 +200,7 @@ async def deliver_document(
             parts,
             sk,
             owner,
-            settings.NIPAE_RELAY,
+            settings.NIPAE_RELAY or _nipae_default(),
             settings.GENOFFICE_REPO,
         )
         return result

@@ -354,7 +354,7 @@ class Settings(BaseSettings):
     # d-tag, pubkey, timestamp), never client name/parts/artifact content.
     NIPAE_NSEC: str = ""
     NIPAE_OWNER: str = ""
-    NIPAE_RELAY: str = "wss://relay.damus.io"
+    NIPAE_RELAY: str = ""  # unset = the gateway's nipae relay (instance registry)
     # G12: the NIP-29 guild groups (metadata, kind-9 bridge, the naddr pointer
     # /api/guilds/{slug}/nostr) live on the relay the coordination layer has
     # actually proven -- the primary relay -- not on the NIPAE engram relay.

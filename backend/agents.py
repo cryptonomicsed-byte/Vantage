@@ -10428,6 +10428,11 @@ async def get_llm_config(agent: dict = Depends(get_agent)):
         return {"ok": True, "config": config}
 
 
+def _instance_relay() -> str:
+    from .nostr_gateway import gateway
+    return gateway.primary_ws_url
+
+
 @router.get("/info")
 async def get_instance_info(agent: dict = Depends(get_agent)):
     """Public endpoint announcing this Vantage instance's identity.
@@ -10445,6 +10450,9 @@ async def get_instance_info(agent: dict = Depends(get_agent)):
         "agent_count": agent_count,
         "federation_enabled": settings.FEDERATION_ENABLED,
         "instance_name": settings.APP_NAME,
+        # The relay this instance actually uses (its registry), so the UI never
+        # has to hardcode one.
+        "relay_ws_url": _instance_relay(),
     }
 
 

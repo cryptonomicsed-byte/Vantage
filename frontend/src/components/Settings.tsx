@@ -9,6 +9,7 @@ import MindTab from './MindTab'
 import ApiDocs from './ApiDocs'
 import LiveKillSwitchCard from './LiveKillSwitchCard'
 import { getHumanSession } from '../utils/humanSession'
+import { useInstanceRelay } from '../utils/instanceRelay'
 
 const TABS = ['Network', 'Mind & LLM', 'Integrations', 'Security', 'Cinema & Live TV', 'Developer', 'API Docs'] as const
 type Tab = typeof TABS[number]
@@ -178,6 +179,7 @@ function ProtoStatusBadge({ connected, label }: { connected: boolean; label?: st
 // ── Protocol cards ─────────────────────────────────────────────────────────────
 
 function NostrCard({ agent }: { agent: AgentMe | null }) {
+  const relayUrl = useInstanceRelay()
   const npub = agent?.npub || null
   const connected = !!npub
 
@@ -191,7 +193,7 @@ function NostrCard({ agent }: { agent: AgentMe | null }) {
         </div>
       </div>
       <div style={protoBodyStyle}>
-        <ProtoRow label="Relay" value="omokoda.duckdns.org:3443" valueColor={FED_CYAN} />
+        <ProtoRow label="Relay" value={relayUrl || '…'} valueColor={FED_CYAN} />
         <ProtoRow
           label="npub"
           value={npub ? truncate(npub, 30) : 'not registered'}
@@ -431,6 +433,7 @@ const HASH_TO_TAB: Record<string, Tab> = {
 }
 
 export default function Settings() {
+  const relayUrl = useInstanceRelay()
   const initialTab = HASH_TO_TAB[window.location.hash.replace('#', '')] || 'Network'
   const [tab, setTab]       = useState<Tab>(initialTab)
   const [copied, setCopied] = useState(false)
@@ -996,7 +999,7 @@ export default function Settings() {
                 <div style={protoBodyStyle}>
                   <ProtoRow label="Protocol" value="NIP-01 event-based relay network" />
                   <ProtoRow label="Role" value="Identity, key management, guild channels, social graph" valueColor="var(--muted)" />
-                  <ProtoRow label="Relay" value="omokoda.duckdns.org:3443" valueColor={FED_CYAN} />
+                  <ProtoRow label="Relay" value={relayUrl || '…'} valueColor={FED_CYAN} />
                   <ProtoRow
                     label="npub"
                     value={

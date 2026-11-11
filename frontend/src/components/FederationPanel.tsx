@@ -5,6 +5,7 @@
  * federation layer stack: Nostr · Freenet · Gitea · Ọmọ Kọ́dà2 · Sui · Arweave · Mesh
  */
 import React, { useEffect, useRef, useState } from 'react'
+import { useInstanceRelay } from '../utils/instanceRelay'
 
 // ── types ──────────────────────────────────────────────────────────────────────
 
@@ -135,6 +136,7 @@ function StatusBadge({ connected, label }: { connected: boolean; label?: string 
 // ── Layer cards ────────────────────────────────────────────────────────────────
 
 function NostrCard({ agent }: { agent: AgentMe | null }) {
+  const relayUrl = useInstanceRelay()
   const npub = agent?.npub || null
   const connected = !!npub
 
@@ -148,7 +150,7 @@ function NostrCard({ agent }: { agent: AgentMe | null }) {
         </div>
       </div>
       <div style={bodyStyle}>
-        <Row label="Relay" value="omokoda.duckdns.org:3443" valueColor={CYAN} />
+        <Row label="Relay" value={relayUrl || '…'} valueColor={CYAN} />
         <Row
           label="npub"
           value={npub ? truncate(npub, 30) : 'not registered'}

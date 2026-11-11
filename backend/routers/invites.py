@@ -39,7 +39,7 @@ router = APIRouter(tags=["invites"])
 PC_BASE       = os.environ.get("PAPERCLIP_API_BASE",       "http://127.0.0.1:3100")
 PC_KEY        = os.environ.get("PAPERCLIP_CLAUDE_CODE_KEY", "")
 PC_COMPANY_ID = os.environ.get("PAPERCLIP_COMPANY_ID",      "")
-VPS_HOST      = os.environ.get("VANTAGE_PUBLIC_HOST",       "omokoda.duckdns.org")
+VPS_HOST      = os.environ.get("VANTAGE_PUBLIC_HOST",       "localhost")  # instance config
 INVITE_TTL    = int(os.environ.get("INVITE_TTL_DAYS",        "7")) * 86400
 
 TOKEN_PREFIX = "pcp_invite_"
