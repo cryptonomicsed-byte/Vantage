@@ -59,11 +59,27 @@ class NostrSession:
         self.authed = False
 
     async def connect(self):
+        # Reconnecting on the same session must not orphan the old socket.
+        await self.close()
         self.ws = await websockets.connect(self.relay_ws_url, open_timeout=10)
 
     async def close(self):
-        if self.ws:
-            await self.ws.close()
+        """Close the socket. Safe to call more than once and on a session
+        whose connect/auth failed part-way: a socket that is merely dropped
+        is kept alive by websockets' keepalive pings and never released."""
+        ws, self.ws, self.authed = self.ws, None, False
+        if ws is not None:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
+    async def __aenter__(self):
+        await self.connect()
+        return self
+
+    async def __aexit__(self, *exc):
+        await self.close()
 
     async def _recv_json(self, timeout=10):
         raw = await asyncio.wait_for(self.ws.recv(), timeout=timeout)
