@@ -122,7 +122,7 @@ def _completed_calls(session_id):
     return check
 
 
-async def _eventually(check, timeout=5.0, interval=0.02):
+async def _eventually(check, timeout=25.0, interval=0.02):
     """Poll until `check()` returns something truthy, then return it.
 
     The relay finishes its cleanup (flush the open turn, log the tool result,
@@ -130,6 +130,9 @@ async def _eventually(check, timeout=5.0, interval=0.02):
     instant the `with` block exits is racing the server. Returns the last value
     on timeout so the caller's own assert produces the failure message.
     """
+    The default outlasts SQLite's 20s busy_timeout: under CI lock pressure
+    from the app lifespan's background loops one relay write can wait that
+    long, and a shorter poll turned that wait into a false failure.
     import time
     deadline = time.monotonic() + timeout
     while True:

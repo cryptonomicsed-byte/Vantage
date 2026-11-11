@@ -1214,9 +1214,25 @@ class TestBroadcastCertification:
 # Federation
 # ---------------------------------------------------------------------------
 
+@pytest.fixture
+def federation_on(monkeypatch):
+    """Federation is off by default; these tests turn it on explicitly."""
+    from backend.config import settings
+    monkeypatch.setattr(settings, "FEDERATION_ENABLED", True, raising=False)
+
+
 class TestFederation:
-    def test_get_peers_empty(self, client):
-        r = client.get("/api/agents/federation/peers")
+    def test_get_peers_is_404_when_federation_is_off(self, client):
+        key = _reg(client, "FedOffAgent")
+        r = client.get("/api/agents/federation/peers", headers=_headers(key))
+        assert r.status_code == 404
+
+    def test_get_peers_needs_auth(self, client, federation_on):
+        assert client.get("/api/agents/federation/peers").status_code == 401
+
+    def test_get_peers_empty(self, client, federation_on):
+        key = _reg(client, "FedPeersAgent")
+        r = client.get("/api/agents/federation/peers", headers=_headers(key))
         assert r.status_code == 200
         data = r.json()
         assert "peers" in data
@@ -1226,15 +1242,15 @@ class TestFederation:
         r = client.post("/api/agents/federation/peers", json={"url": "http://example.com"})
         assert r.status_code == 401
 
-    def test_add_and_remove_peer(self, client):
+    def test_an_agent_key_cannot_add_a_peer(self, client, federation_on):
         key = _reg(client, "FedAgent1")
         r = client.post(
             "/api/agents/federation/peers",
             json={"url": "http://peer1.example.com", "name": "Peer1"},
             headers=_headers(key),
         )
-        # Returns ok:False if FEDERATION_ENABLED=False (default in tests), ok:True if enabled
-        assert r.status_code == 200
+        # Adding (admitting) a peer is a Sentinel operator action now.
+        assert r.status_code == 401
 
     def test_federation_feed(self, client):
         r = client.get("/api/agents/federation/feed")
@@ -1462,8 +1478,12 @@ class TestPipelineOutsource:
 # ---------------------------------------------------------------------------
 
 class TestFederatedReasoning:
-    def test_federation_ask_returns_structure(self, client):
-        r = client.get("/api/agents/federation/ask", params={"query": "neural networks"})
+    def test_federation_ask_needs_auth(self, client, federation_on):
+        assert client.get("/api/agents/federation/ask", params={"query": "x"}).status_code == 401
+
+    def test_federation_ask_returns_structure(self, client, federation_on):
+        key = _reg(client, "FedAskAgent0")
+        r = client.get("/api/agents/federation/ask", params={"query": "neural networks"}, headers=_headers(key))
         assert r.status_code == 200
         data = r.json()
         assert "query" in data
@@ -1471,7 +1491,7 @@ class TestFederatedReasoning:
         assert "result_count" in data
         assert data["query"] == "neural networks"
 
-    def test_federation_ask_finds_local_knowledge(self, client):
+    def test_federation_ask_finds_local_knowledge(self, client, federation_on):
         key = _reg(client, "FedAskAgent1")
         # Publish a knowledge snippet
         client.post(
@@ -1479,24 +1499,26 @@ class TestFederatedReasoning:
             json={"subject": "FedAskTopic", "predicate": "is_about", "object": "quantum"},
             headers=_headers(key),
         )
-        r = client.get("/api/agents/federation/ask", params={"query": "FedAskTopic"})
+        r = client.get("/api/agents/federation/ask", params={"query": "FedAskTopic"}, headers=_headers(key))
         assert r.status_code == 200
         subjects = [item.get("subject", "") for item in r.json()["results"]
                     if item.get("source") == "local"]
         assert any("FedAskTopic" in s for s in subjects)
 
-    def test_federation_ask_with_capability_filter(self, client):
+    def test_federation_ask_with_capability_filter(self, client, federation_on):
         key = _reg(client, "FedAskAgent2", bio="Finance expert #trading #quant")
         r = client.get(
             "/api/agents/federation/ask",
             params={"query": "market analysis", "capability": "trading"},
+            headers=_headers(key),
         )
         assert r.status_code == 200
         sources = [item.get("source") for item in r.json()["results"]]
         assert "local_agent" in sources
 
-    def test_federation_ask_requires_query(self, client):
-        r = client.get("/api/agents/federation/ask")
+    def test_federation_ask_requires_query(self, client, federation_on):
+        key = _reg(client, "FedAskAgent3")
+        r = client.get("/api/agents/federation/ask", headers=_headers(key))
         assert r.status_code == 422
 
 
