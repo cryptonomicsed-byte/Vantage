@@ -139,8 +139,29 @@ class Settings(BaseSettings):
     PUMPFUN_MIN_VOLUME_USD: float = 5000.0
     PUMPFUN_MAX_TOP5_HOLDER_PCT: float = 40.0
 
-    # Cross-instance federation (optional)
-    FEDERATION_ENABLED: bool = True
+    # Cross-instance federation. Off by default: an operator turns it on, and
+    # every peer must be admitted through Sentinel before it is polled or read.
+    FEDERATION_ENABLED: bool = False
+
+    # Èṣù gate (omokoda-agent). Unset = the deny-by-default stub: nothing that
+    # needs the gate (turning live on, arming a signer) can be applied.
+    # When true, the shared admin key only bootstraps Sentinel operators;
+    # every other admin route needs a named owner/security operator session.
+    ADMIN_KEY_BOOTSTRAP_ONLY: bool = False
+    # Demo deployment: live path testable, real settlement hard-refused.
+    DEMO_MODE: bool = False
+    ESU_GATE_URL: str = ""
+    ESU_GATE_TIMEOUT_S: float = 5.0
+    # Comma-separated *_trading_enabled key stems (e.g. "freqtrade") that can
+    # never be armed on this instance, and systemd units that can never be
+    # started through the API. Instance config, never product defaults.
+    TRADING_DENYLIST: str = ""
+    DAEMON_DENYLIST: str = ""
+    # systemd units the Sentinel daemon panel may manage, by name prefix
+    # (e.g. "myorg-"). Unset = daemon control is off. Never a product default.
+    DAEMON_UNIT_PREFIX: str = ""
+    # How long an unanswered sign-off card stays open. Expiry means deny.
+    SIGNOFF_TTL_HOURS: int = 24
 
     # Creation pipeline: Vantage only tracks job state — agents drive generation
     # using their own LLM, TTS, and image/video tools, then publish via standard endpoints.
@@ -333,7 +354,7 @@ class Settings(BaseSettings):
     # d-tag, pubkey, timestamp), never client name/parts/artifact content.
     NIPAE_NSEC: str = ""
     NIPAE_OWNER: str = ""
-    NIPAE_RELAY: str = "wss://relay.damus.io"
+    NIPAE_RELAY: str = ""  # unset = the gateway's nipae relay (instance registry)
     # G12: the NIP-29 guild groups (metadata, kind-9 bridge, the naddr pointer
     # /api/guilds/{slug}/nostr) live on the relay the coordination layer has
     # actually proven -- the primary relay -- not on the NIPAE engram relay.

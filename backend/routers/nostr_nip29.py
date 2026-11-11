@@ -62,7 +62,8 @@ async def sync_guild_to_nostr(
 ):
     guild = await _get_guild(guild_slug)
     group_id = await get_nip29_group_id(guild_slug)
-    relay = settings.NIPAE_RELAY
+    from ..nostr_gateway import gateway as _gw
+    relay = settings.NIPAE_RELAY or _gw.nipae_url
 
     # Best-effort publish — relay may be unavailable.
     success = await publish_guild_as_nip29_group(

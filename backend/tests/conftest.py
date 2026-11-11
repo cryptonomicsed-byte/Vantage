@@ -2,6 +2,8 @@
 import asyncio
 import hashlib
 import os
+# Tests never reach a real relay: a refused loopback port fails fast.
+os.environ["NOSTR_RELAY_REGISTRY"] = '[{"url": "ws://127.0.0.1:9", "role": "primary", "nips": [1, 9, 42, 44]}, {"url": "ws://127.0.0.1:9", "role": "nipae", "nips": [1, 9, 42]}]'
 import secrets
 import shutil
 import sys

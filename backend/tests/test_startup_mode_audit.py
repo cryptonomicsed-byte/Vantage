@@ -34,6 +34,7 @@ async def test_record_boot_mode_writes_paper_only_row(client, monkeypatch):
 @pytest.mark.asyncio
 async def test_record_boot_mode_writes_live_row_when_enabled(client, monkeypatch):
     monkeypatch.setenv(tm.GLOBAL_LIVE_ENV, "1")
+    monkeypatch.setattr("backend.trading_mode._db_live_flag", lambda: True)  # Layer 0 ceiling + switch
     async with get_db() as db:
         await db.execute("DELETE FROM trading_mode_audit")
         await db.commit()

@@ -7,8 +7,11 @@ import {
 } from 'lucide-react'
 import MindTab from './MindTab'
 import ApiDocs from './ApiDocs'
+import LiveKillSwitchCard from './LiveKillSwitchCard'
+import { getHumanSession } from '../utils/humanSession'
+import { useInstanceRelay } from '../utils/instanceRelay'
 
-const TABS = ['Network', 'Mind & LLM', 'Integrations', 'Cinema & Live TV', 'Developer', 'API Docs'] as const
+const TABS = ['Network', 'Mind & LLM', 'Integrations', 'Security', 'Cinema & Live TV', 'Developer', 'API Docs'] as const
 type Tab = typeof TABS[number]
 
 // ── Shared types ───────────────────────────────────────────────────────────────
@@ -176,6 +179,7 @@ function ProtoStatusBadge({ connected, label }: { connected: boolean; label?: st
 // ── Protocol cards ─────────────────────────────────────────────────────────────
 
 function NostrCard({ agent }: { agent: AgentMe | null }) {
+  const relayUrl = useInstanceRelay()
   const npub = agent?.npub || null
   const connected = !!npub
 
@@ -189,7 +193,7 @@ function NostrCard({ agent }: { agent: AgentMe | null }) {
         </div>
       </div>
       <div style={protoBodyStyle}>
-        <ProtoRow label="Relay" value="omokoda.duckdns.org:3443" valueColor={FED_CYAN} />
+        <ProtoRow label="Relay" value={relayUrl || '…'} valueColor={FED_CYAN} />
         <ProtoRow
           label="npub"
           value={npub ? truncate(npub, 30) : 'not registered'}
@@ -429,6 +433,7 @@ const HASH_TO_TAB: Record<string, Tab> = {
 }
 
 export default function Settings() {
+  const relayUrl = useInstanceRelay()
   const initialTab = HASH_TO_TAB[window.location.hash.replace('#', '')] || 'Network'
   const [tab, setTab]       = useState<Tab>(initialTab)
   const [copied, setCopied] = useState(false)
@@ -556,7 +561,7 @@ export default function Settings() {
   const loadPeers = useCallback(async () => {
     setLoadingPeers(true)
     try {
-      const r = await fetch('/api/agents/federation/peers')
+      const r = await fetch('/api/agents/federation/peers', { headers: apiKey ? { 'X-Agent-Key': apiKey } : {} })
       if (r.ok) {
         const d = await r.json()
         setPeers(d.peers || [])
@@ -578,9 +583,10 @@ export default function Settings() {
     try {
       const r = await fetch('/api/agents/federation/peers', {
         method: 'POST',
+        // Adding (admitting) a peer is a Sentinel operator action.
         headers: {
           'Content-Type': 'application/json',
-          ...(apiKey ? { 'X-Agent-Key': apiKey } : {}),
+          ...(getHumanSession() ? { 'X-Human-Session': getHumanSession() as string } : {}),
         },
         body: JSON.stringify({ url: addUrl.trim(), name: addName.trim() }),
       })
@@ -810,6 +816,17 @@ export default function Settings() {
       )}
 
       {/* ── Cinema & Live TV ── */}
+      {tab === 'Security' && (
+        <div className="settings-section">
+          <h3 className="settings-section-title" style={{ marginBottom: 4 }}>Live trading</h3>
+          <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>
+            Paper trading always runs. Live is an extra execution path that needs the instance to allow it,
+            a per-strategy opt-in with a bound wallet, and this switch released.
+          </p>
+          <LiveKillSwitchCard apiKey={apiKey} />
+        </div>
+      )}
+
       {tab === 'Cinema & Live TV' && (
         <div className="settings-section">
           <h3 className="settings-section-title" style={{ marginBottom: 4 }}>Live TV</h3>
@@ -982,7 +999,7 @@ export default function Settings() {
                 <div style={protoBodyStyle}>
                   <ProtoRow label="Protocol" value="NIP-01 event-based relay network" />
                   <ProtoRow label="Role" value="Identity, key management, guild channels, social graph" valueColor="var(--muted)" />
-                  <ProtoRow label="Relay" value="omokoda.duckdns.org:3443" valueColor={FED_CYAN} />
+                  <ProtoRow label="Relay" value={relayUrl || '…'} valueColor={FED_CYAN} />
                   <ProtoRow
                     label="npub"
                     value={

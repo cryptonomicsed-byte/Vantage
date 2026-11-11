@@ -12,6 +12,8 @@ from backend import trading_mode as tm
 from backend.config import settings
 from backend.db import get_db
 
+from .sentinel_helpers import operator, switch_on_via_signoff
+
 DAEMON_KEY = "jupiter_signer_trading_enabled"
 
 
@@ -50,21 +52,16 @@ async def test_defaults_to_paper_only(client, registered_agent, monkeypatch):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["enabled"] is False
-    assert body["source"] == "db"
+    assert body["source"] == "env_brake"   # Layer 0: unset is the brake, no install ships armed
     assert body["db_enabled"] is False
 
 
 @pytest.mark.asyncio
-async def test_enabling_is_recorded_and_takes_effect(client, registered_agent, monkeypatch):
-    monkeypatch.delenv(tm.GLOBAL_LIVE_ENV, raising=False)
+async def test_enabling_is_recorded_and_takes_effect(client, monkeypatch):
     async with get_db() as db:
         await db.execute("DELETE FROM trading_mode_audit")
         await db.commit()
-
-    r = await client.put("/api/trading/live-mode", headers=_h(registered_agent),
-                         json={"enabled": True, "note": "test"})
-    assert r.status_code == 200, r.text
-    assert r.json()["enabled"] is True
+    await switch_on_via_signoff(client, monkeypatch)
 
     # the predicate the order path uses must agree immediately
     assert tm.global_live_enabled() is True
@@ -77,29 +74,26 @@ async def test_enabling_is_recorded_and_takes_effect(client, registered_agent, m
 
 
 @pytest.mark.asyncio
-async def test_switch_governs_the_daemon_read(client, registered_agent, monkeypatch):
+async def test_an_agent_key_cannot_flip_the_switch(client, registered_agent):
+    r = await client.put("/api/trading/live-mode", headers=_h(registered_agent), json={"enabled": True})
+    assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_switch_governs_the_daemon_read(client, monkeypatch):
     """On -> the daemon read mirrors storage; off -> it reports "0"."""
-    monkeypatch.delenv(tm.GLOBAL_LIVE_ENV, raising=False)
-
-    # cannot arm while paper-only
-    r = await client.put(f"/api/trading/daemon-settings/{DAEMON_KEY}",
-                         headers=_h(registered_agent), json={"value": "1"})
-    assert r.status_code == 409
-
-    await client.put("/api/trading/live-mode", headers=_h(registered_agent),
-                     json={"enabled": True})
-
-    r = await client.put(f"/api/trading/daemon-settings/{DAEMON_KEY}",
-                         headers=_h(registered_agent), json={"value": "1"})
-    assert r.status_code == 200, r.text
+    async with get_db() as db:
+        await db.execute("INSERT INTO daemon_settings (key, value) VALUES (?, '1') "
+                         "ON CONFLICT(key) DO UPDATE SET value='1'", (DAEMON_KEY,))
+        await db.commit()
+    req, _ = await switch_on_via_signoff(client, monkeypatch)
 
     r = await client.get(f"/api/trading/daemon-settings/{DAEMON_KEY}", headers=_tool_h())
     assert r.json()["value"] == "1"
     assert "global_override" not in r.json()
 
-    # back to paper: stored stays "1", reported value must be "0"
-    await client.put("/api/trading/live-mode", headers=_h(registered_agent),
-                     json={"enabled": False})
+    # back to paper (immediate for any operator): stored stays "1", reported must be "0"
+    await client.put("/api/trading/live-mode", headers=req["h"], json={"enabled": False})
 
     r = await client.get(f"/api/trading/daemon-settings/{DAEMON_KEY}", headers=_tool_h())
     body = r.json()
@@ -126,19 +120,19 @@ async def test_env_brake_beats_the_switch(client, registered_agent, monkeypatch)
     assert r.json()["enabled"] is False
     assert r.json()["source"] == "env_brake"
 
-    r = await client.put("/api/trading/live-mode", headers=_h(registered_agent),
-                         json={"enabled": True})
+    op = await operator(client)
+    r = await client.put("/api/trading/live-mode", headers=op["h"], json={"enabled": True})
     assert r.status_code == 409, r.text
     assert tm.GLOBAL_LIVE_ENV in r.text
 
 
 @pytest.mark.asyncio
-async def test_env_override_beats_the_switch(client, registered_agent, monkeypatch):
+async def test_env_is_a_ceiling_not_a_force_on(client, registered_agent, monkeypatch):
     monkeypatch.setenv(tm.GLOBAL_LIVE_ENV, "1")
     tm.invalidate_cache()
 
     r = await client.get("/api/trading/live-mode", headers=_h(registered_agent))
     body = r.json()
-    assert body["enabled"] is True
-    assert body["source"] == "env_override"
-    assert body["db_enabled"] is False      # stored intent unchanged, override wins
+    assert body["enabled"] is False          # ceiling open, operator switch still off
+    assert body["source"] == "db"
+    assert body["env_ceiling_open"] is True and body["env_override_active"] is False

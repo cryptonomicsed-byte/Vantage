@@ -54,17 +54,35 @@ async def init_device_registry_db() -> None:
         await db.commit()
 
 
+_ENDPOINT_PREFIX = "v2:"
+
+
+def _endpoint_key() -> bytes:
+    """AES-256 key for device endpoints, HKDF-derived from SEED_MASTER_KEY.
+    Fails closed: no master key, no encryption, never a built-in fallback."""
+    from .buzz_identity import _SEED_ENC_SALT, _hkdf_sha256
+    from .config import settings
+
+    if not settings.SEED_MASTER_KEY:
+        raise RuntimeError("VANTAGE_SEED_MASTER_KEY is not set -- cannot encrypt device endpoints")
+    return _hkdf_sha256(settings.SEED_MASTER_KEY.encode("utf-8"), _SEED_ENC_SALT, b"device-endpoint", 32)
+
+
 def _encrypt_endpoint(url: str) -> str:
-    """Simple XOR+base64 obfuscation. Replace with AES-GCM if VANTAGE_SEED_MASTER_KEY available."""
-    key = os.environ.get("VANTAGE_SEED_MASTER_KEY", "vantage-device-key")
-    key_bytes = key.encode()
-    url_bytes = url.encode()
-    xored = bytes(b ^ key_bytes[i % len(key_bytes)] for i, b in enumerate(url_bytes))
-    return base64.b64encode(xored).decode()
+    """AES-GCM with a random 96-bit nonce: "v2:" + base64(nonce || ciphertext)."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    nonce = os.urandom(12)
+    ct = AESGCM(_endpoint_key()).encrypt(nonce, url.encode("utf-8"), b"device-endpoint")
+    return _ENDPOINT_PREFIX + base64.b64encode(nonce + ct).decode()
 
 
 def _decrypt_endpoint(enc: str) -> str:
-    key = os.environ.get("VANTAGE_SEED_MASTER_KEY", "vantage-device-key")
-    key_bytes = key.encode()
-    xored = base64.b64decode(enc.encode())
-    return bytes(b ^ key_bytes[i % len(key_bytes)] for i, b in enumerate(xored)).decode()
+    """Only v2 (AES-GCM) values decrypt. The old XOR format with a built-in
+    key is not accepted: it was obfuscation, not encryption."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    if not enc.startswith(_ENDPOINT_PREFIX):
+        raise ValueError("legacy device endpoint format; re-register the device endpoint")
+    raw = base64.b64decode(enc[len(_ENDPOINT_PREFIX):].encode())
+    return AESGCM(_endpoint_key()).decrypt(raw[:12], raw[12:], b"device-endpoint").decode("utf-8")

@@ -66,6 +66,9 @@ from .utils import (
 logger = logging.getLogger(__name__)
 logging.getLogger().addHandler(_BufferHandler())
 
+from .federation_auth import require_federation_reader, signed_headers
+from .sentinel.operators import require_operator
+
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
 
@@ -4263,7 +4266,7 @@ async def trigger_social_intro(request: Request, x_admin_key: Optional[str] = He
 
 
 @router.get("/federation/peers")
-async def get_federation_peers():
+async def get_federation_peers(caller: dict = Depends(require_federation_reader)):
     """List known Vantage federation peers. Response body is BIP340
     schnorr-signed with this instance's Nostr identity (X-Peer-Signature
     header, hex) -- peers that have already pinned our pubkey via
@@ -4273,7 +4276,11 @@ async def get_federation_peers():
 
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM federation_peers ORDER BY last_seen DESC") as cur:
+        # Only admitted peers are shared, and only the fields a peer needs.
+        async with db.execute(
+            "SELECT url, name, status, last_seen, nostr_pubkey, api_base, relay_ws_url, capabilities "
+            "FROM federation_peers WHERE COALESCE(admitted,0)=1 AND COALESCE(flagged,0)=0 ORDER BY last_seen DESC"
+        ) as cur:
             peers = [dict(r) for r in await cur.fetchall()]
     payload = {"peers": peers, "federation_enabled": settings.FEDERATION_ENABLED}
     # Sign the EXACT bytes that go over the wire, not a re-derived
@@ -4291,29 +4298,10 @@ async def get_federation_peers():
 @router.post("/federation/peers")
 async def add_federation_peer(
     request: Request,
-    x_agent_key: Optional[str] = Header(None),
-    x_admin_key: Optional[str] = Header(None),
+    op: dict = Depends(require_operator),
 ):
-    """Register a peer Vantage instance for cross-instance discovery.
-    
-    Accepts either a valid agent API key or admin key.
-    Auto-verifies the peer by pinging its /api/agents/federation/peers endpoint.
-    """
-    # Authenticate before revealing feature state — an unauthenticated caller
-    # gets 401 regardless of whether federation is enabled.
-    # Accept either agent key or admin key.
-    authed = False
-    if x_agent_key:
-        hashed = _hashlib.sha256(x_agent_key.encode()).hexdigest()
-        async with get_db() as db:
-            row = await (await db.execute("SELECT id FROM agents WHERE api_key=?", (hashed,))).fetchone()
-        if row:
-            authed = True
-    if not authed and x_admin_key:
-        if settings.ADMIN_KEY and x_admin_key == settings.ADMIN_KEY:
-            authed = True
-    if not authed:
-        raise HTTPException(status_code=401, detail="Valid X-Agent-Key or X-Admin-Key required")
+    """Register and ADMIT a peer instance. Sentinel operators only: an agent
+    key can no longer add peers. Auto-verifies reachability by pinging it."""
     if not settings.FEDERATION_ENABLED:
         return {"ok": False, "reason": "Federation is not enabled on this instance."}
     body = await _parse_body(request)
@@ -4335,7 +4323,8 @@ async def add_federation_peer(
                 status = "active"
             else:
                 # Try the federation peers endpoint as fallback
-                peer_resp = await hc.get(f"{url}/api/agents/federation/peers")
+                peer_resp = await hc.get(f"{url}/api/agents/federation/peers",
+                                         headers=await signed_headers("GET", "/api/agents/federation/peers"))
                 if peer_resp.status_code == 200:
                     status = "active"
     except Exception:
@@ -4343,9 +4332,12 @@ async def add_federation_peer(
     try:
         async with get_db() as db:
             await db.execute(
-                """INSERT OR REPLACE INTO federation_peers (url, name, last_seen, status)
-                   VALUES (?,?,datetime('now'),?)""",
-                (url, name or url, status),
+                """INSERT INTO federation_peers (url, name, last_seen, status, admitted, admitted_by, admitted_at)
+                   VALUES (?,?,datetime('now'),?,1,?,datetime('now'))
+                   ON CONFLICT(url) DO UPDATE SET name=excluded.name, last_seen=excluded.last_seen,
+                       status=excluded.status, admitted=1, admitted_by=excluded.admitted_by,
+                       admitted_at=excluded.admitted_at""",
+                (url, name or url, status, f"operator:{op['id']}:{op['operator_role']}"),
             )
             await db.commit()
     except Exception as e:
@@ -4464,7 +4456,7 @@ async def get_federation_feed(limit: int = Query(50, ge=1, le=200)):
     if settings.FEDERATION_ENABLED:
         async with get_db() as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT id, url, name FROM federation_peers WHERE status='active' AND flagged=0") as cur:
+            async with db.execute("SELECT id, url, name FROM federation_peers WHERE status='active' AND flagged=0 AND COALESCE(admitted,0)=1") as cur:
                 peers = [dict(r) for r in await cur.fetchall()]
 
         async with httpx.AsyncClient(timeout=10) as hc:
@@ -4499,6 +4491,7 @@ async def get_federation_feed(limit: int = Query(50, ge=1, le=200)):
 
 @router.get("/federation/ask", tags=["federation"])
 async def federated_ask(
+    caller: dict = Depends(require_federation_reader),
     query: str = Query(..., description="Natural language or keyword query"),
     capability: str = Query("", description="Filter peers by required capability"),
     limit: int = Query(10, ge=1, le=50),
@@ -4552,7 +4545,7 @@ async def federated_ask(
         async with get_db() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT id, url, name FROM federation_peers WHERE status='active' AND flagged=0"
+                "SELECT id, url, name FROM federation_peers WHERE status='active' AND flagged=0 AND COALESCE(admitted,0)=1"
             ) as cur:
                 peers = [dict(r) for r in await cur.fetchall()]
 
@@ -9743,8 +9736,13 @@ async def approve_admin_proposal(
             raise HTTPException(404, "Proposal not found or not pending")
         prop = dict(prop)
         approvals = _json.loads(prop["approvals"] or "[]")
-        if approver not in approvals:
-            approvals.append(approver)
+        # Two approvals must mean two people: the proposer can never approve,
+        # and the shared admin key is one identity however often it is used.
+        if approver == prop["proposed_by"]:
+            raise HTTPException(403, "No self-approval: the proposer cannot approve their own proposal")
+        if approver in approvals:
+            raise HTTPException(409, "This identity has already approved")
+        approvals.append(approver)
         approved = len(approvals) >= prop["required_approvals"]
         new_status = "approved" if approved else "pending"
         await db.execute(
@@ -10430,6 +10428,11 @@ async def get_llm_config(agent: dict = Depends(get_agent)):
         return {"ok": True, "config": config}
 
 
+def _instance_relay() -> str:
+    from .nostr_gateway import gateway
+    return gateway.primary_ws_url
+
+
 @router.get("/info")
 async def get_instance_info(agent: dict = Depends(get_agent)):
     """Public endpoint announcing this Vantage instance's identity.
@@ -10447,6 +10450,9 @@ async def get_instance_info(agent: dict = Depends(get_agent)):
         "agent_count": agent_count,
         "federation_enabled": settings.FEDERATION_ENABLED,
         "instance_name": settings.APP_NAME,
+        # The relay this instance actually uses (its registry), so the UI never
+        # has to hardcode one.
+        "relay_ws_url": _instance_relay(),
     }
 
 

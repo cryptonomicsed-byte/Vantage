@@ -257,7 +257,7 @@ async def _platform_subscription_loop():
                             threshold = float(cond.get("threshold", 500))
                             if metric == "federation_latency_ms":
                                 async with db.execute(
-                                    "SELECT url FROM federation_peers WHERE status='active' LIMIT 1"
+                                    "SELECT url FROM federation_peers WHERE status='active' AND COALESCE(admitted,0)=1 LIMIT 1"
                                 ) as cur:
                                     peer = await cur.fetchone()
                                 if peer:
@@ -330,7 +330,7 @@ async def _federation_gossip_loop():
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
                     "SELECT id, url, name, reputation, failure_count, circuit_open_until, nostr_pubkey "
-                    "FROM federation_peers WHERE flagged=0"
+                    "FROM federation_peers WHERE flagged=0 AND COALESCE(admitted,0)=1"
                 ) as cur:
                     peers = [dict(r) for r in await cur.fetchall()]
 
@@ -360,7 +360,9 @@ async def _federation_gossip_loop():
                         continue
 
                     try:
-                        resp = await hc.get(f"{peer['url']}/api/agents/federation/peers")
+                        from .federation_auth import signed_headers as _fed_signed
+                        resp = await hc.get(f"{peer['url']}/api/agents/federation/peers",
+                                            headers=await _fed_signed("GET", "/api/agents/federation/peers"))
                         if resp.status_code != 200:
                             raise Exception(f"HTTP {resp.status_code}")
 
@@ -1073,6 +1075,8 @@ from .routers.federation import router as federation_galaxy_router
 app.include_router(federation_galaxy_router)
 from .routers.trading import router as trading_router
 app.include_router(trading_router)
+from .routers.sentinel import router as sentinel_router
+app.include_router(sentinel_router)
 # Prediction markets: read-only telemetry for the Trading → Prediction tab
 # (signals, decisions incl. abstentions, calibration gate, settlements).
 from .routers.prediction_api import router as prediction_api_router

@@ -3,6 +3,7 @@ import { Wallet, TrendingUp, TrendingDown, Shield, BookOpen, PieChart, Activity,
 import { useTradingStore } from './tradingStore'
 import GenerateWalletModal from './GenerateWalletModal'
 import OnrampModal from './OnrampModal'
+import { getHumanSession } from '../../utils/humanSession'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ExecutionPanel — right panel. Risk slider always visible. Quick trade,
@@ -119,23 +120,38 @@ export default function ExecutionPanel() {
   }, [tradingApi])
   useEffect(() => { loadDaemonSettings() }, [loadDaemonSettings])
 
+  // Instance controls (master switch, signer arms) are Sentinel operator
+  // actions: they authenticate as a human operator, never with an agent key.
+  // Turning anything toward live files a sign-off card (HTTP 202) that a
+  // different owner/security operator approves; braking is immediate.
+  const operatorPut = useCallback(async (path: string, body: unknown) => {
+    const session = getHumanSession()
+    return fetch(`/api/trading${path}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...(session ? { 'X-Human-Session': session } : {}) },
+      body: JSON.stringify(body),
+    })
+  }, [])
+  const [daemonMsg, setDaemonMsg] = useState('')
+
   const toggleDaemonTrading = useCallback(async (key: string, currentlyOn: boolean) => {
-    setDaemonBusy(b => ({ ...b, [key]: true }))
+    setDaemonBusy(b => ({ ...b, [key]: true })); setDaemonMsg('')
     try {
-      const r = await tradingApi(`/daemon-settings/${key}`, {
-        method: 'PUT',
-        body: JSON.stringify({ value: currentlyOn ? '0' : '1' }),
-      })
-      if (r.ok) await loadDaemonSettings()
-    } catch { /* best-effort */ }
+      const r = await operatorPut(`/daemon-settings/${key}`, { value: currentlyOn ? '0' : '1' })
+      const d = await r.json().catch(() => ({}))
+      if (r.status === 202) setDaemonMsg('Sign-off requested: another operator must approve it in Sentinel.')
+      else if (!r.ok) setDaemonMsg(typeof d.detail === 'string' ? d.detail : 'Operator sign-in required')
+      await loadDaemonSettings()
+    } catch { setDaemonMsg('Network error') }
     setDaemonBusy(b => ({ ...b, [key]: false }))
-  }, [tradingApi, loadDaemonSettings])
+  }, [operatorPut, loadDaemonSettings])
 
   // Master paper/live switch. Declared after loadDaemonSettings because the
   // setter refreshes the daemon list (their `effective` value depends on it).
   const [liveMode, setLiveMode] = useState<{
     enabled: boolean; source: string; db_enabled: boolean;
     env_brake_active: boolean; env_override_active: boolean; env?: string | null
+    env_ceiling_open?: boolean; demo_mode?: boolean; settlement_allowed?: boolean
   } | null>(null)
   const [liveBusy, setLiveBusy] = useState(false)
   const [liveMsg, setLiveMsg] = useState('')
@@ -150,24 +166,22 @@ export default function ExecutionPanel() {
 
   const setMasterLive = useCallback(async (next: boolean) => {
     if (next && !window.confirm(
-      'Enable LIVE trading? Real orders can then be signed once a strategy or daemon is armed. ' +
-      'This is recorded against your agent.')) return
+      'Request LIVE trading for this instance? A different owner or security operator must approve ' +
+      'the sign-off before anything can sign.')) return
     setLiveBusy(true); setLiveMsg('')
     try {
-      const r = await tradingApi('/live-mode', {
-        method: 'PUT',
-        body: JSON.stringify({
-          enabled: next,
-          note: next ? 'enabled from Execution panel' : 'disabled from Execution panel',
-        }),
+      const r = await operatorPut('/live-mode', {
+        enabled: next,
+        note: next ? 'requested from Execution panel' : 'disabled from Execution panel',
       })
       const d = await r.json().catch(() => ({}))
-      if (r.ok) setLiveMode(d)
-      else setLiveMsg(typeof d.detail === 'string' ? d.detail : 'Could not change the master switch')
+      if (r.status === 202) { setLiveMsg('Sign-off requested: another operator must approve it in Sentinel.'); await loadLiveMode() }
+      else if (r.ok) setLiveMode(d)
+      else setLiveMsg(typeof d.detail === 'string' ? d.detail : 'Operator sign-in required')
       await loadDaemonSettings()
     } catch { setLiveMsg('Network error') }
     setLiveBusy(false)
-  }, [tradingApi, loadDaemonSettings])
+  }, [operatorPut, loadLiveMode, loadDaemonSettings])
 
   // P4-11: per-account trade recording. live_mode above is global; this is yours.
   const [recording, setRecording] = useState<{ record_live: boolean; leaderboard_opt_in: boolean; notice: string } | null>(null)
@@ -469,6 +483,11 @@ export default function ExecutionPanel() {
             </span>
           </div>
         </div>
+        {liveMode?.demo_mode && (
+          <div style={{ fontSize: 10, color: '#f59e0b', marginBottom: 6 }}>
+            DEMO instance: the live path can be exercised, but real settlement is always refused.
+          </div>
+        )}
         {liveMsg && (
           <div style={{ fontSize: 10, color: '#ff2d4a', marginBottom: 6 }}>{liveMsg}</div>
         )}
@@ -495,6 +514,7 @@ export default function ExecutionPanel() {
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {daemonMsg && <div style={{ fontSize: 10, color: '#f59e0b', marginBottom: 6 }}>{daemonMsg}</div>}
           {AUTO_TRADE_DAEMONS.map(d => {
             const stored = daemonSettings[d.key]?.value === '1'
             const effective = (daemonSettings[d.key]?.effective ?? daemonSettings[d.key]?.value) === '1'

@@ -2,7 +2,10 @@ import React, { useState, useEffect, useCallback } from 'react'
 import {
   Shield, AlertTriangle, Activity, FileText, Terminal, CheckCircle, XCircle, RefreshCw, Lock,
   ShieldAlert, Users, ListChecks, ToggleLeft, ToggleRight, Award, Link2, Archive, Plus, Trash2, PlayCircle,
+  Server, Inbox, Globe,
 } from 'lucide-react'
+import { SocDaemons, SocSignoffs, SocPeers } from './SentinelOperatorTabs'
+import { getHumanSession } from '../utils/humanSession'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ARES Sentinel Control — admin-only SOC (security operations) console at /ares.
@@ -49,6 +52,10 @@ const SOC_TABS = [
   { id: 'soc-governance',   label: 'Governance & Audit', icon: FileText },
   { id: 'soc-diagnostics',  label: 'Diagnostics',     icon: Activity },
   { id: 'soc-logs',         label: 'Logs',            icon: Terminal },
+  // Operator tabs: named human sessions, not the shared admin key.
+  { id: 'soc-signoffs',     label: 'Sign-offs',       icon: Inbox },
+  { id: 'soc-daemons',      label: 'Daemons',         icon: Server },
+  { id: 'soc-peers',        label: 'Federation Peers', icon: Globe },
 ]
 
 type TabId = string
@@ -505,8 +512,19 @@ const SocLogs = ({ adminFetch }: { adminFetch: (path: string) => Promise<Respons
 // LOGIN SCREEN
 // ══════════════════════════════════════════════════════════════════════════════
 
-function LoginScreen({ onAuth }: { onAuth: (key: string) => void }) {
+function LoginScreen({ onAuth, onOperator }: { onAuth: (key: string) => void; onOperator: () => void }) {
   const [key, setKey] = useState(''); const [error, setError] = useState(''); const [loading, setLoading] = useState(false)
+  const asOperator = async () => {
+    const session = getHumanSession()
+    if (!session) { setError('Sign in to your human account first.'); return }
+    setLoading(true); setError('')
+    try {
+      const r = await fetch('/api/sentinel/me', { headers: { 'X-Human-Session': session } })
+      if (r.ok && (await r.json()).may_approve_trading) onOperator()
+      else setError('This account is not an owner or security operator on this instance.')
+    } catch { setError('Connection failed.') }
+    setLoading(false)
+  }
   const attempt = async () => {
     if (!key.trim()) return; setLoading(true); setError('')
     try {
@@ -523,6 +541,7 @@ function LoginScreen({ onAuth }: { onAuth: (key: string) => void }) {
           <input type="password" className="ares-input" placeholder="Enter admin key…" value={key} onChange={e => setKey(e.target.value)} onKeyDown={e => e.key === 'Enter' && attempt()} autoFocus /></div>
         {error && <div style={{ color: 'var(--danger)', fontSize: 12, textAlign: 'center' }}>{error}</div>}
         <button className="btn btn-danger" style={{ width: '100%' }} onClick={attempt} disabled={loading || !key.trim()}>{loading ? 'Authenticating…' : 'Enter Control Room'}</button>
+        <button className="btn" style={{ width: '100%' }} onClick={asOperator} disabled={loading}>Sign in as a named operator</button>
       </div>
     </div>
   )
@@ -534,12 +553,19 @@ function LoginScreen({ onAuth }: { onAuth: (key: string) => void }) {
 
 export default function AresSOC() {
   const [adminKey, setAdminKey] = useState(() => sessionStorage.getItem('ares_admin_key') || '')
+  const [operatorMode, setOperatorMode] = useState(false)
   const [activeTab, setActiveTab] = useState<TabId>('soc-overview')
   const [toast, setToast] = useState<Toast>(null)
   const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => { setToast({ message, type }); setTimeout(() => setToast(null), 3000) }, [])
-  const adminFetch = useCallback((path: string, opts: RequestInit = {}) => fetch(path, { ...opts, headers: { 'X-Admin-Key': adminKey, 'Content-Type': 'application/json', ...(opts.headers || {}) } }), [adminKey])
+  // A named operator session is preferred: actions are then audited to a
+  // person. The shared key remains only as a bootstrap/legacy path.
+  const adminFetch = useCallback((path: string, opts: RequestInit = {}) => {
+    const session = getHumanSession()
+    const auth: Record<string, string> = operatorMode && session ? { 'X-Human-Session': session } : { 'X-Admin-Key': adminKey }
+    return fetch(path, { ...opts, headers: { ...auth, 'Content-Type': 'application/json', ...(opts.headers || {}) } })
+  }, [adminKey, operatorMode])
 
-  if (!adminKey) return <LoginScreen onAuth={setAdminKey} />
+  if (!adminKey && !operatorMode) return <LoginScreen onAuth={setAdminKey} onOperator={() => setOperatorMode(true)} />
 
   return (
     <div className="ares-root">
@@ -569,6 +595,9 @@ export default function AresSOC() {
         {activeTab === 'soc-governance' && <SocGovernance adminFetch={adminFetch} showToast={showToast} />}
         {activeTab === 'soc-diagnostics' && <SocDiagnostics adminFetch={adminFetch} showToast={showToast} />}
         {activeTab === 'soc-logs' && <SocLogs adminFetch={adminFetch} />}
+        {activeTab === 'soc-signoffs' && <SocSignoffs showToast={showToast} />}
+        {activeTab === 'soc-daemons' && <SocDaemons showToast={showToast} />}
+        {activeTab === 'soc-peers' && <SocPeers showToast={showToast} />}
       </div>
 
       {/* Toast */}

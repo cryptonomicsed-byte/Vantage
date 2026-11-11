@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["lnurl"])
 
 LNCLI = os.environ.get("VANTAGE_LNCLI_B", "/usr/local/bin/lncli-b")
-PUBLIC_URL = (os.environ.get("VANTAGE_PUBLIC_URL") or "https://omokoda.duckdns.org").rstrip("/")
+PUBLIC_URL = (os.environ.get("VANTAGE_PUBLIC_URL") or "http://localhost").rstrip("/")  # instance config
 LNURL_USER = os.environ.get("VANTAGE_LNURL_USER", "vantage")
 
 MIN_SENDABLE_MSAT = 1_000          # 1 sat

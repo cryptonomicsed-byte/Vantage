@@ -72,6 +72,27 @@ def fake_engine(monkeypatch):
     return install
 
 
+@pytest.fixture(autouse=True)
+def _no_last_seen_write_on_the_test_loop(monkeypatch):
+    """Cross-loop deadlock, not a relay bug.
+
+    These are async tests on pytest's loop, but they wait on the websocket
+    SYNCHRONOUSLY (ws.receive_text / _receive_within), which blocks that loop's
+    thread. Opening the session over the httpx client queues
+    deps._update_last_seen on that same loop; if the batch writer flushes it
+    there, it takes SQLite's write lock and cannot commit until the loop runs
+    again. Meanwhile the relay, on the TestClient portal's loop, waits on that
+    lock for the busy timeout, so the test sees a "blocked pump" and teardown
+    hangs. The last-seen bookkeeping is not what this module tests, so it is a
+    no-op here.
+    """
+    from backend import deps
+
+    async def _noop(agent_id: int) -> None:
+        return None
+    monkeypatch.setattr(deps, "_update_last_seen", _noop)
+
+
 @pytest.fixture
 def sync_client(app, client, monkeypatch):
     """Starlette's TestClient — httpx's ASGI transport can't do websockets.

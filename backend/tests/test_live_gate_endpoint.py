@@ -101,6 +101,7 @@ async def test_execute_live_refused_when_global_switch_off(client, registered_ag
 @pytest.mark.asyncio
 async def test_execute_live_gets_past_the_switch_when_enabled(client, registered_agent, monkeypatch):
     monkeypatch.setenv(tm.GLOBAL_LIVE_ENV, "1")
+    monkeypatch.setattr("backend.trading_mode._db_live_flag", lambda: True)  # Layer 0 ceiling + switch
     wallet_id = await _wallet_with_bad_key(client, registered_agent)
     order_id = await _pending_order(client, registered_agent, wallet_id)
 

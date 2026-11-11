@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/agents", tags=["agents-public"])
 
 # Default Nostr relays — operator override via env var
-_DEFAULT_RELAYS = "wss://relay.damus.io,wss://nos.lol"
+from ..nostr_gateway import gateway as _gw
+_DEFAULT_RELAYS = ",".join(sorted({e.url for e in _gw.all_by_role("primary")}))  # instance registry
 _AGENT_NOSTR_RELAYS: list[str] = [
     r.strip()
     for r in os.getenv("AGENT_NOSTR_RELAYS", _DEFAULT_RELAYS).split(",")

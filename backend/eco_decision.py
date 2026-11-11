@@ -40,7 +40,9 @@ CONTRADICTION_CONFIDENCE = float(os.environ.get("ECO_CONTRADICTION_CONF", "0.7")
 # Stakes above this trigger an odu cast even when the caller did not ask.
 HIGH_STAKES_USD = float(os.environ.get("ECO_HIGH_STAKES_USD", "250"))
 
-ODU_AGENT_SEED = os.environ.get("ODU_AGENT_SEED", "vantage-eco")
+# Instance-specific cast seed. No built-in default: unset = no cast (the
+# gate below is already fail-open on a missing cast, so routing continues).
+ODU_AGENT_SEED = os.environ.get("ODU_AGENT_SEED", "").strip()
 
 MYCELIUM_PYSRC = "/opt/ares/mycelium-gateway/pysrc"
 
@@ -200,6 +202,9 @@ def _cast_and_gate(candidate: dict, stake_usd: float) -> Optional[dict]:
             or candidate.get("signal_id")
             or candidate.get("content", "")[:64]
         )
+        if not ODU_AGENT_SEED:
+            logger.info("eco_decide: ODU_AGENT_SEED unset -- no odu cast for this instance")
+            return None
         casting = odu_cast.cast(ODU_AGENT_SEED, nonce=nonce)
         verdict = odu_cast.gate(casting, stake_usd=stake_usd)
         return verdict.to_dict()

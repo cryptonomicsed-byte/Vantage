@@ -60,7 +60,7 @@ PROBE_FAILURES_BEFORE_OFFLINE = 3
 # attach the newest file as the stream's `recording` and publish a kind-21 video
 # event, so the replay survives the HLS window.
 RECORDINGS_DIR = os.environ.get("MEDIAMTX_RECORDINGS_DIR", "/var/lib/mediamtx/recordings")
-RECORDINGS_URL_BASE = os.environ.get("MEDIAMTX_RECORDINGS_URL", "https://omokoda.duckdns.org/recordings")
+RECORDINGS_URL_BASE = os.environ.get("MEDIAMTX_RECORDINGS_URL", "http://localhost/recordings")
 
 
 def _recording_for(stream_url: str) -> str:
@@ -81,8 +81,8 @@ def _recording_for(stream_url: str) -> str:
         return ""
 
 # mediamtx public endpoints (camera mode). Overridable via env.
-MEDIAMTX_HLS_BASE = os.environ.get("MEDIAMTX_HLS_BASE", "https://omokoda.duckdns.org:8888")
-MEDIAMTX_WHIP_BASE = os.environ.get("MEDIAMTX_WHIP_BASE", "https://omokoda.duckdns.org:8890")
+MEDIAMTX_HLS_BASE = os.environ.get("MEDIAMTX_HLS_BASE", "http://localhost:8888")
+MEDIAMTX_WHIP_BASE = os.environ.get("MEDIAMTX_WHIP_BASE", "http://localhost:8890")
 
 # ── TURN (coturn, use-auth-secret / TURN REST API) ────────────────────────
 # Camera publish (WHIP) fails behind symmetric NAT / strict firewalls unless the
@@ -91,7 +91,7 @@ MEDIAMTX_WHIP_BASE = os.environ.get("MEDIAMTX_WHIP_BASE", "https://omokoda.duckd
 #   username   = "<unix_expiry>:<identity>"
 #   credential = base64(HMAC-SHA1(static-auth-secret, username))
 # Same derivation the coturn docs specify; the secret never reaches the browser.
-TURN_HOST = os.environ.get("TURN_HOST", "13.140.226.178")
+TURN_HOST = os.environ.get("TURN_HOST", "localhost")  # instance config; never a built-in public IP
 TURN_PORT = int(os.environ.get("TURN_PORT", "3478"))
 TURN_TTL = int(os.environ.get("TURN_TTL", "3600"))
 TURN_STATIC_SECRET = os.environ.get("TURN_STATIC_SECRET", "")

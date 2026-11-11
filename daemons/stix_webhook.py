@@ -30,7 +30,11 @@ VANTAGE_KEY = open(os.path.expanduser("~/.vantage_key")).read().strip()
 GITEA_URL = os.environ.get("GITEA_URL", "https://github.com/cryptonomicsed-byte")
 GITEA_API = f"{GITEA_URL}/api/v1"
 GITEA_TOKEN = os.environ.get("GITEA_TOKEN", "")
-WEBHOOK_SECRET = os.environ.get("STIX_WEBHOOK_SECRET", "vantage-stix-webhook-2026")
+# No built-in default: an unset secret refuses to start rather than accept
+# webhooks signed with a value anyone can read in the source.
+WEBHOOK_SECRET = os.environ.get("STIX_WEBHOOK_SECRET", "").strip()
+if not WEBHOOK_SECRET:
+    raise SystemExit("STIX_WEBHOOK_SECRET is not set -- refusing to start the webhook listener")
 SCAN_DIR = "/tmp/vantage_stix_scan"
 
 logging.basicConfig(

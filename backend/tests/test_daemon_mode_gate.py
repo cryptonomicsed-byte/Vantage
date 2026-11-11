@@ -20,6 +20,8 @@ from backend import trading_mode as tm
 from backend.config import settings
 from backend.db import get_db
 
+from .sentinel_helpers import operator
+
 KEY = "jupiter_signer_trading_enabled"
 
 
@@ -66,6 +68,7 @@ async def test_stored_arm_reads_as_disabled_while_paper_only(client, monkeypatch
 @pytest.mark.asyncio
 async def test_stored_arm_is_honoured_when_switch_on(client, monkeypatch):
     monkeypatch.setenv(tm.GLOBAL_LIVE_ENV, "1")
+    monkeypatch.setattr("backend.trading_mode._db_live_flag", lambda: True)  # Layer 0 ceiling + switch
     await _store(KEY, "1")
 
     r = await client.get(f"/api/trading/daemon-settings/{KEY}", headers=_tool_h())
@@ -74,39 +77,42 @@ async def test_stored_arm_is_honoured_when_switch_on(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_arming_refused_while_paper_only(client, registered_agent, monkeypatch):
+async def test_arming_refused_while_paper_only(client, monkeypatch):
     monkeypatch.delenv(tm.GLOBAL_LIVE_ENV, raising=False)
-
-    r = await client.put(f"/api/trading/daemon-settings/{KEY}",
-                         headers=_agent_h(registered_agent), json={"value": "1"})
+    op = await operator(client)
+    r = await client.put(f"/api/trading/daemon-settings/{KEY}", headers=op["h"], json={"value": "1"})
     assert r.status_code == 409, r.text
-    assert "master switch" in r.text.lower()
+    assert "paper only" in r.text.lower()
 
 
 @pytest.mark.asyncio
-async def test_disarming_always_allowed(client, registered_agent, monkeypatch):
+async def test_disarming_always_allowed(client, monkeypatch):
     monkeypatch.delenv(tm.GLOBAL_LIVE_ENV, raising=False)
-
-    r = await client.put(f"/api/trading/daemon-settings/{KEY}",
-                         headers=_agent_h(registered_agent), json={"value": "0"})
+    op = await operator(client)
+    r = await client.put(f"/api/trading/daemon-settings/{KEY}", headers=op["h"], json={"value": "0"})
     assert r.status_code == 200, r.text
 
 
 @pytest.mark.asyncio
-async def test_arm_and_disarm_are_audited(client, registered_agent, monkeypatch):
-    monkeypatch.setenv(tm.GLOBAL_LIVE_ENV, "1")
+async def test_agent_key_cannot_arm(client, registered_agent):
+    r = await client.put(f"/api/trading/daemon-settings/{KEY}", headers=_agent_h(registered_agent), json={"value": "1"})
+    assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_disarm_is_audited(client, monkeypatch):
     async with get_db() as db:
         await db.execute("DELETE FROM trading_mode_audit")
         await db.commit()
-
-    r = await client.put(f"/api/trading/daemon-settings/{KEY}",
-                         headers=_agent_h(registered_agent), json={"value": "1"})
+    op = await operator(client)
+    r = await client.put(f"/api/trading/daemon-settings/{KEY}", headers=op["h"], json={"value": "0"})
     assert r.status_code == 200, r.text
 
     async with get_db() as db:
         rows = await tm.recent_mode_changes(db, limit=5)
 
-    assert rows, "arming a standalone signer left no audit row"
+    assert rows, "disarming a standalone signer left no audit row"
     assert rows[0]["scope"] == "daemon"
-    assert rows[0]["action"] == "daemon_arm"
+    assert rows[0]["action"] == "daemon_disarm"
     assert rows[0]["note"] == KEY
+    assert rows[0]["actor"].startswith(f"operator:{op['id']}")

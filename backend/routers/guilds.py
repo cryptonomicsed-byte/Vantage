@@ -2,6 +2,7 @@
 import asyncio
 import json as _json
 import re as _re
+import hashlib
 import secrets
 import logging
 from datetime import datetime
@@ -78,7 +79,9 @@ async def create_guild(
         cur = await db.execute(
             """INSERT INTO guilds (slug, name, bio, manifesto, avatar_url, founder_id, founder_name, guild_api_key)
                VALUES (?,?,?,?,?,?,?,?)""",
-            (slug, name, bio, manifesto, avatar_url, agent["id"], agent["name"], guild_api_key),
+            # Only the hash is stored; the raw key is shown once, below.
+            (slug, name, bio, manifesto, avatar_url, agent["id"], agent["name"],
+             hashlib.sha256(guild_api_key.encode()).hexdigest()),
         )
         guild_id = cur.lastrowid
         await db.execute(

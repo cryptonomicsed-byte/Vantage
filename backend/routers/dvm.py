@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/dvm", tags=["dvm"])
 
-RELAY_URL = os.environ.get("NOSTR_RELAY_URL", "wss://omokoda.duckdns.org:3443/relay")
+from ..nostr_gateway import gateway as _gw
+RELAY_URL = os.environ.get("NOSTR_RELAY_URL", _gw.primary_ws_url)
 
 
 # ── Models ────────────────────────────────────────────────────────────────────

@@ -77,7 +77,8 @@ def _nostr_enabled() -> bool:
     return bool(os.environ.get("NIPAE_NSEC"))
 
 def _relay_url() -> str:
-    return os.environ.get("NIPAE_RELAY", "wss://relay.damus.io")
+    from ..nostr_gateway import gateway as _gw
+    return os.environ.get("NIPAE_RELAY") or _gw.nipae_url
 
 async def _publish_engram(intent_kind: str, payload: dict, agent_id: str) -> Optional[str]:
     """Publish a kind:30174 engram for this broadcast intent.

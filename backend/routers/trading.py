@@ -7,6 +7,7 @@ from datetime import datetime, timezone, date
 import aiosqlite
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from backend.db import DB_PATH
@@ -17,6 +18,8 @@ from ..db import get_db
 from ..action_receipt import from_trade_order
 from ..justice_layer import anchor_receipt as _anchor_receipt
 from .. import trading_mode
+from ..sentinel import live_controls, signoffs
+from ..sentinel.operators import require_operator
 
 # P0-1: endpoint-level gate for high-conviction auto-execution.
 # Daemon-level gates (daemon_settings DB) prevent daemons from calling this
@@ -498,9 +501,21 @@ async def create_onramp_session(
 async def delete_wallet(wallet_id: int, agent: dict = Depends(get_agent)):
     async with get_db() as db:
         await db.execute("DELETE FROM trading_balances WHERE wallet_id=?", (wallet_id,))
-        await db.execute("DELETE FROM trading_wallets WHERE id=? AND agent_id=?", (wallet_id, agent["id"]))
+        cur = await db.execute("DELETE FROM trading_wallets WHERE id=? AND agent_id=?", (wallet_id, agent["id"]))
+        dropped = 0
+        if cur.rowcount:
+            # Layer 1: the wallet binding is the second key. Losing it drops
+            # every strategy bound to it back to paper, and unbinds it.
+            c2 = await db.execute(
+                "UPDATE trading_strategies SET live=0, wallet_id=NULL, updated_at=datetime('now') "
+                "WHERE wallet_id=? AND agent_id=?", (wallet_id, agent["id"]))
+            dropped = c2.rowcount
         await db.commit()
-        return {"status": "deleted"}
+        if dropped:
+            await trading_mode.record_mode_change(
+                db, agent_id=agent["id"], scope="strategy", action="wallet_lost_to_paper",
+                prev_state=None, new_state="paper", note=f"wallet {wallet_id} deleted; {dropped} strategies unbound")
+        return {"status": "deleted", "strategies_dropped_to_paper": dropped}
 
 @router.post("/wallets/{wallet_id}/sync")
 async def sync_wallet(wallet_id: int, agent: dict = Depends(get_agent)):
@@ -1560,12 +1575,26 @@ async def update_strategy(strategy_id: int, data: StrategyUpdate, agent: dict = 
             )).fetchone()
             if not wallet:
                 raise HTTPException(422, "wallet_id does not belong to this agent")
+        rebound = False
+        if "wallet_id" in fields:
+            cur_w = await (await db.execute(
+                "SELECT wallet_id, live FROM trading_strategies WHERE id=?", (strategy_id,))).fetchone()
+            if cur_w and cur_w["wallet_id"] != fields["wallet_id"] and cur_w["live"]:
+                # Layer 1: a new or missing wallet is a new second key. The
+                # strategy goes back to paper until it is opted in again.
+                fields["live"] = 0
+                rebound = True
         set_clause = ", ".join(f"{k}=?" for k in fields)
         await db.execute(
             f"UPDATE trading_strategies SET {set_clause}, updated_at=datetime('now') WHERE id=?",
             (*fields.values(), strategy_id)
         )
         await db.commit()
+        if rebound:
+            await trading_mode.record_mode_change(
+                db, agent_id=agent["id"], scope="strategy", strategy_id=strategy_id,
+                action="wallet_rebound_to_paper", prev_state="live", new_state="paper",
+                note=f"wallet_id -> {fields['wallet_id']}")
         row = await (await db.execute("SELECT * FROM trading_strategies WHERE id=?", (strategy_id,))).fetchone()
         return dict(row)
 
@@ -1691,6 +1720,9 @@ async def enable_live_strategy(strategy_id: int, agent: dict = Depends(get_agent
         if not row["keylen"]:
             raise HTTPException(422, "Linked wallet has no private key on file — nothing to sign with. "
                                       "Generate or import a key for this wallet first.")
+    if trading_mode.kill_switch_engaged(agent["id"]):
+        raise HTTPException(409, "Live is revoked for this account (Settings > Security). "
+                                 "Release the account kill switch first; paper keeps running.")
 
     # Gate 3: Brier calibration check.  Live execution is only unlocked when
     # the prediction pipeline has accumulated scored evidence and the rolling
@@ -1717,12 +1749,11 @@ async def enable_live_strategy(strategy_id: int, agent: dict = Depends(get_agent
             )
     except HTTPException:
         raise
-    except Exception:
-        # Fail-open for environments where brier_calibration_gate is not
-        # available — log and proceed.  The gate is a safeguard, not the
-        # only one, and a missing calibration module must not silently
-        # prevent legitimate use in non-prediction deployments.
-        logger.warning("Brier gate check skipped (import or query error) — proceeding without gate")
+    except Exception as exc:
+        # Fail CLOSED: a calibration gate that cannot be read is not evidence.
+        logger.warning("Brier gate unavailable (%s) — refusing live", exc)
+        raise HTTPException(503, "Brier calibration gate unavailable — live execution stays off "
+                                 "until it can be read. Paper keeps running.")
 
     async with get_db() as db:
         await db.execute("UPDATE trading_strategies SET live=1, updated_at=datetime('now') WHERE id=?", (strategy_id,))
@@ -1892,6 +1923,11 @@ async def execute_live_order(order_id: int, agent: dict = Depends(get_agent), x_
             f"Live trading is disabled globally ({trading_mode.GLOBAL_LIVE_ENV} not enabled). "
             "Paper trading is unaffected. Set it deliberately to allow signing.",
         )
+    if not trading_mode.settlement_allowed():
+        raise HTTPException(423, "Demo instance: real settlement is refused. The order reached the live "
+                                 "path and stops here; nothing is signed or broadcast.")
+    if trading_mode.kill_switch_engaged(agent["id"]):
+        raise HTTPException(409, "Live is revoked for this account (Settings > Security).")
 
     try:
         # F1 fix: raw header, not agent["api_key"] (the DB-stored hash) -- see generate_wallet's comment.
@@ -2326,38 +2362,59 @@ class LiveModeUpdate(BaseModel):
 
 
 @router.put("/live-mode")
-async def set_live_mode(data: LiveModeUpdate, agent: dict = Depends(get_agent)):
-    """Flip the master switch. Paper is always available; this only ever
-    decides whether anything *may* sign.
+async def set_live_mode(data: LiveModeUpdate, op: dict = Depends(require_operator)):
+    """The instance switch. Operators only (Sentinel), never an agent key.
 
-    Refused while the environment brake is on: storing an intent the process
-    will ignore is the dead-control problem this whole change exists to remove.
+    Off is immediate: a brake never waits. On files a sign-off card for a
+    different owner/security operator, is cleared with Èṣù on approval, and is
+    refused outright while the instance ceiling is closed.
     """
-    status = trading_mode.live_mode_status()
-    if data.enabled and status["env_brake_active"]:
+    actor = f"operator:{op['id']}:{op['operator_role']}"
+    if not data.enabled:
+        return await live_controls.set_live_mode(enabled=False, actor=actor, note=data.note)
+    if not trading_mode.env_ceiling_open():
         raise HTTPException(
             409,
-            f"Cannot enable live trading: {trading_mode.GLOBAL_LIVE_ENV} is set to "
-            f"'{status['env']}' in the service environment, which overrides this switch. "
-            "Unset it in the unit and restart, or turn the switch off instead.",
+            f"Cannot enable live trading: the instance ceiling {trading_mode.GLOBAL_LIVE_ENV} is closed "
+            "(unset or false). Paper keeps running; open the ceiling in the service environment first.",
         )
+    card = await signoffs.file(kind="trading.live_mode_on", payload={"note": data.note[:500]},
+                               requester_human_id=op["id"], summary="Turn instance live trading ON")
+    return JSONResponse(status_code=202, content={"signoff": card, **trading_mode.live_mode_status()})
+
+
+# ── Layer 2: the account kill switch (Settings > Security) ─────────────────
+
+class KillSwitchUpdate(BaseModel):
+    engaged: bool
+    note: str = ""
+
+
+@router.get("/live-killswitch")
+async def get_live_killswitch(agent: dict = Depends(get_agent)):
+    return {"agent_id": agent["id"], "engaged": trading_mode.kill_switch_engaged(agent["id"])}
+
+
+@router.put("/live-killswitch")
+async def set_live_killswitch(data: KillSwitchUpdate, agent: dict = Depends(get_agent)):
+    """One account-level control that revokes live for ALL of this account's
+    strategies at once, overriding per-strategy toggles. Engaging is instant.
+    Releasing it re-enables nothing by itself: each strategy still needs its
+    own Layer 1 opt-in. Paper never stops."""
     async with get_db() as db:
-        row = await (await db.execute(
-            "SELECT enabled FROM live_mode WHERE id=1")).fetchone()
-        prev_state = "live" if (row and row[0]) else "paper"
-        new_state = "live" if data.enabled else "paper"
         await db.execute(
-            "UPDATE live_mode SET enabled=?, changed_by=?, changed_at=datetime('now'), note=? WHERE id=1",
-            (1 if data.enabled else 0, agent["id"], (data.note or "")[:500]),
-        )
-        await trading_mode.record_mode_change(
-            db, agent_id=agent["id"], scope="global",
-            action="live_mode_on" if data.enabled else "live_mode_off",
-            prev_state=prev_state, new_state=new_state, note=data.note or "",
-        )
+            "INSERT INTO live_killswitch (agent_id, engaged, changed_at, note) VALUES (?,?,datetime('now'),?) "
+            "ON CONFLICT(agent_id) DO UPDATE SET engaged=excluded.engaged, changed_at=excluded.changed_at, note=excluded.note",
+            (agent["id"], 1 if data.engaged else 0, data.note[:500]))
+        if data.engaged:
+            await db.execute("UPDATE trading_strategies SET live=0, updated_at=datetime('now') WHERE agent_id=? AND live=1",
+                             (agent["id"],))
         await db.commit()
-    trading_mode.invalidate_cache()
-    return trading_mode.live_mode_status()
+        await trading_mode.record_mode_change(
+            db, agent_id=agent["id"], scope="account",
+            action="account_live_revoked" if data.engaged else "account_live_released",
+            prev_state=None, new_state="paper" if data.engaged else "opt_in_allowed", note=data.note)
+    return {"agent_id": agent["id"], "engaged": data.engaged}
 
 
 @router.get("/daemon-settings")
@@ -2384,51 +2441,39 @@ class DaemonSettingUpdate(BaseModel):
     value: str
 
 @router.put("/daemon-settings/{key}")
-async def set_daemon_setting(key: str, data: DaemonSettingUpdate, agent: dict = Depends(get_agent)):
+async def set_daemon_setting(key: str, data: DaemonSettingUpdate, op: dict = Depends(require_operator)):
+    """Arm a standalone signer or pick its wallet. Operators only (Sentinel).
+
+    Disarming is immediate. Arming and wallet changes move money, so they file
+    a sign-off card (requester can never approve it) and are applied only after
+    Èṣù clears them. Deny-listed signers can never be armed.
+    """
     if key not in DAEMON_SETTING_KEYS:
         raise HTTPException(422, f"Unknown daemon setting '{key}'")
-    async with get_db() as db:
-        if key.endswith("_trading_enabled"):
-            # Fail-closed arm switch for a standalone daemon, not a wallet
-            # reference -- only "0"/"1" are meaningful, and there is no
-            # wallet-ownership check to make here (see is_trading_enabled()
-            # in each daemon: this just gates whether it's allowed to run
-            # its own already-configured wallet at all).
-            if data.value not in ("0", "1"):
-                raise HTTPException(422, "value must be '0' or '1' for a *_trading_enabled setting")
-            # Disarming is always allowed; arming while the process is paper-only
-            # would create a toggle that looks live and does nothing. Refuse it
-            # and say why, rather than storing an intent the daemon will ignore.
-            if data.value == "1" and not trading_mode.global_live_enabled():
-                raise HTTPException(
-                    409,
-                    f"Cannot arm '{key}': the master switch is OFF (paper only). "
-                    "Turn live trading on in the Execution panel first — that action is audited. "
-                    "Disarming is always allowed.",
-                )
-        else:
-            # Sanity-check it's actually a wallet the agent owns before
-            # letting a standalone root daemon spend from it.
-            wallet = await (await db.execute(
-                "SELECT id FROM trading_wallets WHERE id=? AND agent_id=?", (data.value, agent["id"])
-            )).fetchone()
-            if not wallet:
-                raise HTTPException(422, "value must be a wallet_id belonging to this agent")
-        await db.execute(
-            "INSERT INTO daemon_settings (key, value, updated_at) VALUES (?,?,datetime('now')) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-            (key, data.value)
-        )
-        if key.endswith("_trading_enabled"):
-            # Arming a standalone signer is a money-moving action; it needs the
-            # same "who, when, what" record the per-strategy gates get.
-            await trading_mode.record_mode_change(
-                db, agent_id=agent["id"], scope="daemon", action="daemon_arm" if data.value == "1" else "daemon_disarm",
-                prev_state=None, new_state="armed" if data.value == "1" else "disarmed",
-                note=key,
+    actor = f"operator:{op['id']}:{op['operator_role']}"
+    if key.endswith("_trading_enabled"):
+        if data.value not in ("0", "1"):
+            raise HTTPException(422, "value must be '0' or '1' for a *_trading_enabled setting")
+        if data.value == "0":
+            return await live_controls.set_daemon_setting(key=key, value="0", actor=actor)
+        stem = key[: -len("_trading_enabled")]
+        if trading_mode.denylisted(stem):
+            raise HTTPException(403, f"'{key}' is on this instance's trading deny-list and cannot be armed")
+        if not trading_mode.global_live_enabled():
+            raise HTTPException(
+                409,
+                f"Cannot arm '{key}': live is off for this instance (paper only). Disarming is always allowed.",
             )
-        await db.commit()
-        return {"key": key, "value": data.value}
+        kind, summary = "trading.daemon_arm", f"Arm signer {stem}"
+    else:
+        async with get_db() as db:
+            wallet = await (await db.execute("SELECT id FROM trading_wallets WHERE id=?", (data.value,))).fetchone()
+        if not wallet:
+            raise HTTPException(422, "value must be an existing wallet_id")
+        kind, summary = "trading.daemon_wallet", f"Set {key} = wallet {data.value}"
+    card = await signoffs.file(kind=kind, payload={"key": key, "value": data.value},
+                               requester_human_id=op["id"], summary=summary)
+    return JSONResponse(status_code=202, content={"key": key, "signoff": card})
 
 @router.get("/daemon-settings/{key}", operation_id="get_daemon_setting_for_daemon")
 async def get_daemon_setting(key: str, tool: dict = Depends(get_system_tool)):
@@ -2447,6 +2492,14 @@ async def get_daemon_setting(key: str, tool: dict = Depends(get_system_tool)):
     async with get_db() as db:
         row = await (await db.execute("SELECT value FROM daemon_settings WHERE key=?", (key,))).fetchone()
         stored = row[0] if row else None
+    if key.endswith("_trading_enabled") and not trading_mode.settlement_allowed():
+        # Standalone signers settle directly on-chain, so in demo they are
+        # never armed, whatever is stored.
+        return {"key": key, "value": "0", "stored": stored, "global_override": "VANTAGE_DEMO_MODE=on",
+                "note": "demo instance — real settlement refused"}
+    if key.endswith("_trading_enabled") and trading_mode.denylisted(key[: -len("_trading_enabled")]):
+        return {"key": key, "value": "0", "stored": stored, "global_override": "instance deny-list",
+                "note": "this signer is deny-listed on this instance"}
     if key.endswith("_trading_enabled") and not trading_mode.global_live_enabled():
         return {
             "key": key,

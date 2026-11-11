@@ -396,15 +396,60 @@ async def get_system_tool(
     return connector
 
 
-async def get_admin(x_admin_key: Optional[str] = Header(None)) -> str:
+async def _operator_identity(x_human_session: Optional[str]) -> Optional[str]:
+    """`operator:<human_id>` for a logged-in owner/security operator, else None."""
+    if not x_human_session:
+        return None
+    token_hash = _hlib.sha256(x_human_session.encode()).hexdigest()
+    async with get_db() as db:
+        try:
+            row = await (await db.execute(
+                """SELECT o.human_id FROM human_sessions s
+                   JOIN instance_operators o ON o.human_id = s.human_id AND o.revoked_at IS NULL
+                   WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > datetime('now')
+                     AND o.role IN ('owner','security')""", (token_hash,))).fetchone()
+        except Exception:
+            return None
+    return f"operator:{row[0]}" if row else None
+
+
+async def get_admin(x_admin_key: Optional[str] = Header(None),
+                    x_human_session: Optional[str] = Header(None)) -> str:
+    """Admin access. Returns the caller's identity string:
+
+    * a named owner/security operator (X-Human-Session) -> "operator:<human_id>"
+    * the instance admin key (X-Admin-Key) -> the key itself (legacy callers
+      hash it for audit). With VANTAGE_ADMIN_KEY_BOOTSTRAP_ONLY=true the key
+      only bootstraps operators and is refused everywhere else.
+
+    Callers that need "who" (proposals, audit) hash this value, so two
+    different operators are two different identities and the shared key is
+    one identity, never two.
+    """
+    ident = await _operator_identity(x_human_session)
+    if ident:
+        return ident
     key_hash = settings.ADMIN_KEY_HASH
     if not key_hash:
         raise HTTPException(503, "Admin API not configured — set VANTAGE_ADMIN_KEY env var")
     if not x_admin_key:
-        raise HTTPException(403, "X-Admin-Key header required")
+        raise HTTPException(403, "X-Admin-Key header or an operator session required")
     provided_hash = _hlib.sha256(x_admin_key.encode()).hexdigest()
     if not hmac.compare_digest(provided_hash, key_hash):
         raise HTTPException(403, "Invalid admin key")
+    if settings.ADMIN_KEY_BOOTSTRAP_ONLY:
+        raise HTTPException(403, "The admin key only bootstraps operators on this instance; sign in as an operator")
+    return x_admin_key
+
+
+async def get_admin_bootstrap(x_admin_key: Optional[str] = Header(None)) -> str:
+    """The admin key, accepted even in bootstrap-only mode: it is how the
+    first operators are created."""
+    key_hash = settings.ADMIN_KEY_HASH
+    if not key_hash:
+        raise HTTPException(503, "Admin API not configured — set VANTAGE_ADMIN_KEY env var")
+    if not x_admin_key or not hmac.compare_digest(_hlib.sha256(x_admin_key.encode()).hexdigest(), key_hash):
+        raise HTTPException(403, "Valid X-Admin-Key required")
     return x_admin_key
 
 

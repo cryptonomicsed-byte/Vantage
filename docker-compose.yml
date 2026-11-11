@@ -93,7 +93,8 @@ services:
     container_name: ares-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_PASSWORD: ares_pass
+      # Required, no default: compose refuses to start without it.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ares
     ports: ['127.0.0.1:5432:5432']
     volumes: [postgres_data:/var/lib/postgresql/data]
@@ -116,14 +117,15 @@ services:
       - GITEA__database__HOST=postgres
       - GITEA__database__NAME=gitea
       - GITEA__database__USER=gitea
-      - GITEA__database__PASSWD=gitea_pass
-      - GITEA__server__DOMAIN=2.25.70.156
+      - GITEA__database__PASSWD=${GITEA_DB_PASSWORD:?set GITEA_DB_PASSWORD in .env}
+      - GITEA__server__DOMAIN=${GITEA_DOMAIN:-localhost}
       - GITEA__server__HTTP_PORT=3001
-      - GITEA__server__ROOT_URL=http://2.25.70.156:3001
+      - GITEA__server__ROOT_URL=${GITEA_ROOT_URL:-http://localhost:3001}
       - GITEA__server__SSH_PORT=2222
+    # Loopback only: put a reverse proxy in front if it must be reachable.
     ports:
-      - '3001:3001'
-      - '2222:22'
+      - '127.0.0.1:3001:3001'
+      - '127.0.0.1:2222:22'
     volumes:
       - gitea_data:/data
     restart: unless-stopped

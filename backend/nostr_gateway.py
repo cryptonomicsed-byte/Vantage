@@ -27,20 +27,15 @@ logger = logging.getLogger(__name__)
 
 RelayRole = Literal["primary", "backup", "nipae", "publish-only"]
 
+# No operator's relay is a product default. A fresh instance talks only to its
+# OWN relay on loopback until the operator lists real relays in
+# NOSTR_RELAY_REGISTRY (JSON list of {url, role, nips}). Publishing to someone
+# else's infrastructure by default is how one instance leaks into another.
+_LOCAL_RELAY = os.environ.get("VANTAGE_LOCAL_RELAY_URL", "ws://127.0.0.1:7777")
 _DEFAULT_REGISTRY: list[dict] = [
-    {
-        "url": "wss://omokoda.duckdns.org:3443",
-        "http_url": "https://omokoda.duckdns.org:3443",
-        "role": "primary",
-        "nips": [1, 9, 42, 44],
-    },
-    {
-        "url": "wss://relay.damus.io",
-        "role": "nipae",
-        "nips": [1, 9, 42],
-    },
+    {"url": _LOCAL_RELAY, "role": "primary", "nips": [1, 9, 42, 44]},
+    {"url": _LOCAL_RELAY, "role": "nipae", "nips": [1, 9, 42]},
 ]
-
 
 @dataclass
 class RelayEntry:

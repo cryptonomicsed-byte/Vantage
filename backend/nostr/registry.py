@@ -11,7 +11,8 @@ import os
 from typing import List
 
 # Default from buzz_pairing (imported lazily to avoid circular import at top level)
-_FALLBACK = "wss://omokoda.duckdns.org:3443/relay"
+from ..nostr_gateway import gateway as _gw
+_FALLBACK = _gw.primary_ws_url  # the instance's own relay registry, never a built-in host
 
 
 def get_relay_urls() -> List[str]:

@@ -78,7 +78,8 @@ ANVIL_AGENT_NAME = "vantage-anvil"
 PRIME_STAR_ID = "prime_vantage"
 
 # ── Kernel bridge config ────────────────────────────────────────────────
-KERNEL_SSH_HOST = os.environ.get("OMOKODA_KERNEL_SSH_HOST", "89.117.74.224")
+# Instance config only. Unset = no SSH fallback (never a built-in host).
+KERNEL_SSH_HOST = os.environ.get("OMOKODA_KERNEL_SSH_HOST", "").strip()
 KERNEL_LOCAL_URL = os.environ.get("OMOKODA_KERNEL_LOCAL_URL", "http://127.0.0.1:7778")
 KERNEL_DIRECT_URL = os.environ.get("OMOKODA_KERNEL_URL", "http://10.88.0.2:7777")
 
@@ -160,8 +161,12 @@ async def _call_skillforge(url: str, approve: bool = False, store: bool = True) 
     except Exception as direct_err:
         logger.info(f"vantage-anvil: direct kernel call failed ({direct_err}), falling back to SSH bridge")
 
+    if not KERNEL_SSH_HOST:
+        raise HTTPException(503, "Kernel unreachable directly and no SSH fallback is configured "
+                                 "(OMOKODA_KERNEL_SSH_HOST)")
+    # Host keys are verified (known_hosts); a changed key is a stop, not a prompt.
     cmd = [
-        "ssh", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=no",
+        "ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes",
         f"root@{KERNEL_SSH_HOST}",
         f"curl -s -m 2000 -X POST {KERNEL_LOCAL_URL}/v1/act "
         f"-H 'Content-Type: application/json' --data-binary @-",
