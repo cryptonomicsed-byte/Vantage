@@ -181,9 +181,18 @@ class DaemonActionResult(BaseModel):
     detail: str = ""
 
 
+def _refuse_denylisted(unit: str) -> None:
+    """Instance deny-list (VANTAGE_DAEMON_DENYLIST). Stopping is always allowed."""
+    from ..config import settings
+    deny = {u.strip() for u in (settings.DAEMON_DENYLIST or "").split(",") if u.strip()}
+    if unit in deny or unit.removesuffix(".service") in deny:
+        raise HTTPException(403, f"{unit} is on this instance's daemon deny-list and cannot be started")
+
+
 @router.post("/{unit}/start", response_model=DaemonActionResult)
 async def start_daemon(unit: str, admin_key: str = Depends(get_admin)):
     unit = _validate_unit(unit)
+    _refuse_denylisted(unit)
     code, out, err = await _systemctl("start", unit)
     await _log_action(unit, "start", admin_key)
     if code != 0:
@@ -204,6 +213,7 @@ async def stop_daemon(unit: str, admin_key: str = Depends(get_admin)):
 @router.post("/{unit}/restart", response_model=DaemonActionResult)
 async def restart_daemon(unit: str, admin_key: str = Depends(get_admin)):
     unit = _validate_unit(unit)
+    _refuse_denylisted(unit)
     code, out, err = await _systemctl("restart", unit)
     await _log_action(unit, "restart", admin_key)
     if code != 0:

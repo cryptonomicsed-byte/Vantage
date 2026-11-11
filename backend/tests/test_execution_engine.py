@@ -28,6 +28,7 @@ def _engine_reaches_execution(monkeypatch):
     from backend import trading_mode
 
     monkeypatch.setattr(trading_mode, "global_live_enabled", lambda *a, **k: True)
+    monkeypatch.setattr(trading_mode, "kill_switch_engaged", lambda *a, **k: False)
 
 
 def _make_db(path):

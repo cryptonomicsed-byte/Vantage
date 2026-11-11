@@ -473,6 +473,12 @@ async def process_order(order: dict):
     if not trading_mode.global_live_enabled():
         logger.info(f"Order #{order_id}: paper mode (master switch off) -- not executing")
         return  # leave pending; paper fills happen on the paper path, not here
+    if not trading_mode.settlement_allowed():
+        logger.info(f"Order #{order_id}: demo instance -- real settlement refused, not executing")
+        return
+    if trading_mode.kill_switch_engaged(order.get("agent_id")):
+        logger.info(f"Order #{order_id}: account kill switch engaged -- not executing")
+        return
 
     if not wallet_id:
         await _update_order(order_id, "failed", error="No wallet assigned")

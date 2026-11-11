@@ -1752,6 +1752,27 @@ CREATE TABLE IF NOT EXISTS external_iranti_memories (
             )
         """)
         await db.execute("INSERT OR IGNORE INTO live_mode (id, enabled) VALUES (1, 0)")
+        try:  # a switch turned on in demo must not survive into a real launch
+            await db.execute("ALTER TABLE live_mode ADD COLUMN set_in_demo INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
+
+        # Layer 2: the account kill switch (Settings > Security). One row per
+        # agent that has ever touched it; engaged=1 forces every strategy of
+        # that account to paper.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS live_killswitch (
+                agent_id INTEGER PRIMARY KEY,
+                engaged INTEGER NOT NULL DEFAULT 0,
+                changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                note TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        # Sentinel: named operators and the sign-off inbox.
+        from .sentinel import operators as _sentinel_operators
+        from .sentinel import signoffs as _sentinel_signoffs
+        await _sentinel_operators.ensure_tables(db)
+        await _sentinel_signoffs.ensure_tables(db)
 
         # One row per hop through the trading pipeline. Without this, "is the
         # pipeline connected?" is answered by ports, and a quiet pipeline looks

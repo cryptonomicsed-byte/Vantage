@@ -1062,6 +1062,8 @@ from .routers.federation import router as federation_galaxy_router
 app.include_router(federation_galaxy_router)
 from .routers.trading import router as trading_router
 app.include_router(trading_router)
+from .routers.sentinel import router as sentinel_router
+app.include_router(sentinel_router)
 # Prediction markets: read-only telemetry for the Trading → Prediction tab
 # (signals, decisions incl. abstentions, calibration gate, settlements).
 from .routers.prediction_api import router as prediction_api_router

@@ -33,6 +33,9 @@ async def settle_receipt_sui(receipt_id: str, agent: dict = Depends(get_agent)):
     Returns an unsigned PTB intent that the caller's Sui wallet should sign
     and submit on-chain, then confirm via the /confirm endpoint.
     """
+    from .. import trading_mode as _tm
+    if not _tm.settlement_allowed():
+        raise HTTPException(423, "Demo instance: real settlement is refused.")
     agent_id: int = agent["id"]
     sui_address: Optional[str] = agent.get("sui_address") or ""
 
@@ -96,6 +99,10 @@ async def confirm_receipt_settlement(
       the PTB is upgraded, storing the digest proves identity and commitment but
       not that any specific obligation was discharged.
     """
+    from .. import trading_mode as _tm
+    if not _tm.settlement_allowed():
+        raise HTTPException(423, "Demo instance: real settlement is refused.")
+
     agent_id: int = agent["id"]
     sui_address: Optional[str] = agent.get("sui_address") or ""
     tx_digest = body.tx_digest.strip()

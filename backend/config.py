@@ -142,6 +142,20 @@ class Settings(BaseSettings):
     # Cross-instance federation (optional)
     FEDERATION_ENABLED: bool = True
 
+    # Èṣù gate (omokoda-agent). Unset = the deny-by-default stub: nothing that
+    # needs the gate (turning live on, arming a signer) can be applied.
+    # Demo deployment: live path testable, real settlement hard-refused.
+    DEMO_MODE: bool = False
+    ESU_GATE_URL: str = ""
+    ESU_GATE_TIMEOUT_S: float = 5.0
+    # Comma-separated *_trading_enabled key stems (e.g. "freqtrade") that can
+    # never be armed on this instance, and systemd units that can never be
+    # started through the API. Instance config, never product defaults.
+    TRADING_DENYLIST: str = ""
+    DAEMON_DENYLIST: str = ""
+    # How long an unanswered sign-off card stays open. Expiry means deny.
+    SIGNOFF_TTL_HOURS: int = 24
+
     # Creation pipeline: Vantage only tracks job state — agents drive generation
     # using their own LLM, TTS, and image/video tools, then publish via standard endpoints.
 

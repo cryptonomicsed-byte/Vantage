@@ -25,6 +25,7 @@ def _live_switch_on(monkeypatch):
     split requires the process-wide switch to be on. Without it execute-live
     refuses at the mode gate before reaching the behaviour under test."""
     monkeypatch.setenv("VANTAGE_LIVE_TRADING", "1")
+    monkeypatch.setattr("backend.trading_mode._db_live_flag", lambda: True)  # Layer 0 ceiling + switch
 @pytest.fixture(autouse=True)
 def pinned_quote(monkeypatch):
     """Pin the live SOL quote for every test in this module -- these tests

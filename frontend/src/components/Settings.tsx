@@ -7,8 +7,9 @@ import {
 } from 'lucide-react'
 import MindTab from './MindTab'
 import ApiDocs from './ApiDocs'
+import LiveKillSwitchCard from './LiveKillSwitchCard'
 
-const TABS = ['Network', 'Mind & LLM', 'Integrations', 'Cinema & Live TV', 'Developer', 'API Docs'] as const
+const TABS = ['Network', 'Mind & LLM', 'Integrations', 'Security', 'Cinema & Live TV', 'Developer', 'API Docs'] as const
 type Tab = typeof TABS[number]
 
 // ── Shared types ───────────────────────────────────────────────────────────────
@@ -810,6 +811,17 @@ export default function Settings() {
       )}
 
       {/* ── Cinema & Live TV ── */}
+      {tab === 'Security' && (
+        <div className="settings-section">
+          <h3 className="settings-section-title" style={{ marginBottom: 4 }}>Live trading</h3>
+          <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>
+            Paper trading always runs. Live is an extra execution path that needs the instance to allow it,
+            a per-strategy opt-in with a bound wallet, and this switch released.
+          </p>
+          <LiveKillSwitchCard apiKey={apiKey} />
+        </div>
+      )}
+
       {tab === 'Cinema & Live TV' && (
         <div className="settings-section">
           <h3 className="settings-section-title" style={{ marginBottom: 4 }}>Live TV</h3>

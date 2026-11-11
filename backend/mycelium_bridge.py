@@ -612,6 +612,15 @@ def _prediction_session() -> str:
 # explicit `mode`, and neither filters on it — a paper decision is as much
 # evidence as a live one; only order placement differs.
 
+def _instance_demo() -> bool:
+    """Demo runs are tagged so training never mistakes them for real fills."""
+    try:
+        from . import trading_mode
+        return trading_mode.demo_mode()
+    except Exception:
+        return False
+
+
 def emit_trade_decision(
     *,
     mode: str,
@@ -637,6 +646,8 @@ def emit_trade_decision(
             "outcome": "info",
             "payload": scrub_payload({
                 "mode": "live" if mode == "live" else "paper",
+                "execution_mode": "live" if mode == "live" else "paper",
+                "instance_demo": _instance_demo(),
                 "side": side,
                 "symbol": symbol,
                 "chain": chain,
@@ -685,6 +696,8 @@ def emit_trade_outcome(
             "outcome": "success" if status in ("filled", "success", "closed") else str(status),
             "payload": scrub_payload({
                 "mode": "live" if mode == "live" else "paper",
+                "execution_mode": "live" if mode == "live" else "paper",
+                "instance_demo": _instance_demo(),
                 "side": side,
                 "symbol": symbol,
                 "chain": chain,

@@ -29,7 +29,7 @@ from backend.db import get_db
 ])
 def test_live_order_allowed(armed, live, global_on, expected, reason):
     allowed, got_reason = tm.live_order_allowed(
-        armed=armed, live=live, global_enabled=global_on)
+        armed=armed, live=live, wallet_bound=True, kill_engaged=False, global_enabled=global_on)
     assert allowed is expected
     assert got_reason == reason
 
@@ -44,9 +44,17 @@ def test_global_switch_defaults_off(monkeypatch):
 
 
 def test_global_switch_on(monkeypatch):
+    # Layer 0 is a ceiling: an open env plus the operator switch = live.
+    monkeypatch.setattr(tm, "_db_live_flag", lambda: True)
     for value in ("1", "true", "YES", "on"):
         monkeypatch.setenv(tm.GLOBAL_LIVE_ENV, value)
         assert tm.global_live_enabled() is True
+
+
+def test_env_alone_never_forces_live(monkeypatch):
+    monkeypatch.setattr(tm, "_db_live_flag", lambda: False)
+    monkeypatch.setenv(tm.GLOBAL_LIVE_ENV, "1")
+    assert tm.global_live_enabled() is False
 
 
 # ── paper is unconditional ──────────────────────────────────────────────────
@@ -62,7 +70,8 @@ def test_rs2_never_applies_to_paper():
 
 
 def test_mode_for_strategy():
-    assert tm.mode_for_strategy(1, 1) == "live"
+    assert tm.mode_for_strategy(1, 1, wallet_bound=True, kill_engaged=False) == "live"
+    assert tm.mode_for_strategy(1, 1) == "paper"   # no wallet, unknown kill switch: paper
     assert tm.mode_for_strategy(1, 0) == "paper"
     assert tm.mode_for_strategy(0, 1) == "paper"   # armed is the outer gate
     assert tm.mode_for_strategy(None, None) == "paper"

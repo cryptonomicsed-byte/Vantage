@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { Zap, Wallet, ShieldCheck, ShieldOff, Trash2, Plus, X, Edit3 } from 'lucide-react'
+import { getHumanSession } from '../../utils/humanSession'
 
 type TradingApiFn = (path: string, opts?: RequestInit) => Promise<Response>
 
@@ -45,7 +46,14 @@ function DaemonSettingsPanel({ wallets, tradingApi }: { wallets: any[]; tradingA
     setValues(v => ({ ...v, [key]: value }))
     setSaved(s => ({ ...s, [key]: false }))
     if (!value) return
-    const r = await tradingApi(`/daemon-settings/${key}`, { method: 'PUT', body: JSON.stringify({ value }) })
+    // A signer's wallet is an instance control: a Sentinel operator files it
+    // and a different operator approves it (HTTP 202 = sign-off filed).
+    const session = getHumanSession()
+    const r = await fetch(`/api/trading/daemon-settings/${key}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...(session ? { 'X-Human-Session': session } : {}) },
+      body: JSON.stringify({ value }),
+    })
     setSaved(s => ({ ...s, [key]: r.ok }))
   }
 
