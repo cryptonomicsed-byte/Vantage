@@ -972,15 +972,10 @@ async def money_flow(
                 for _i in range(0, len(_addrs), 500):
                     _chunk = _addrs[_i:_i + 500]
                     _labels.update(await _wl.labels_for(_db2, _chunk))
-                    _ph = ",".join("?" * len(_chunk))
-                    try:
-                        for _w, _ent, _score in await (await _db2.execute(
-                                f"SELECT ww.wallet, ww.entity, w.score FROM runner_watchlist_wallets ww "
-                                f"JOIN runner_watchlist w ON w.entity = ww.entity WHERE ww.wallet IN ({_ph})",
-                                _chunk)).fetchall():
-                            _watch[_w] = {"entity": _ent, "score": _score}
-                    except Exception:  # noqa: BLE001 -- watchlist tables absent
-                        pass
+                # radar-only watchlist wallets have no runner_watchlist row;
+                # see runner_watchlist.watchlist_for (was an INNER JOIN -> 0)
+                from .. import runner_watchlist as _rwl
+                _watch.update(await _rwl.watchlist_for(_db2, _addrs))
             for n in node_list:
                 if n["type"] == "wallet":
                     _a = n["id"].removeprefix("wallet:")

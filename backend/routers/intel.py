@@ -1,6 +1,7 @@
 """Market Intel API v3 — FULL market coverage via Pyth Network (768 crypto feeds).
 All data geo-unrestricted, no API keys needed."""
 
+import os
 import logging, asyncio, json, time, threading
 from typing import Optional
 import httpx
@@ -62,13 +63,33 @@ async def _get_all_crypto_feeds():
         logger.warning(f"Feed list fetch failed: {e}")
     return _feed_cache.get("data") or {}
 
+# Pyth's public Hermes price endpoint answers 401 without a key. Every
+# /api/intel call used to pay that round trip twice (here and in _majors)
+# before falling back; remember the refusal for a while instead.
+_PYTH_REFUSED = {"until": 0.0, "status": None}
+_PYTH_REFUSED_TTL = 600
+
+
+def _pyth_refused() -> bool:
+    return time.time() < _PYTH_REFUSED["until"]
+
+
+def _note_pyth_status(code: int) -> None:
+    if code in (401, 403):
+        _PYTH_REFUSED.update(until=time.time() + _PYTH_REFUSED_TTL, status=code)
+
+
 async def _fetch_prices_batch(ids: list[str]) -> dict:
     """Batch fetch prices for a list of Pyth feed IDs."""
+    if _pyth_refused():
+        return {}
     try:
         params = "&".join(f"ids[]={i}" for i in ids)
         async with httpx.AsyncClient(timeout=8) as c:
             r = await c.get(f"{PYTH_PRICE}?{params}",
                           headers={"User-Agent": "Vantage/1.0"})
+            _note_pyth_status(r.status_code)
+            ms._record(PYTH_PRICE, r.status_code, 0.0, None if r.status_code == 200 else r.text[:120])
             if r.status_code == 200:
                 result = {}
                 for item in r.json().get("parsed", []):
@@ -210,9 +231,13 @@ async def _majors():
     """Direct Pyth fetch for BTC/ETH/SOL — always works regardless of sort order."""
     btc = eth = sol = 0
     try:
+        if _pyth_refused():
+            raise RuntimeError("pyth refused recently")
         async with httpx.AsyncClient(timeout=5) as c:
             r = await c.get(f"{PYTH_PRICE}?ids[]={PYTH_IDS['BTC']}&ids[]={PYTH_IDS['ETH']}&ids[]={PYTH_IDS['SOL']}",
                           headers={"User-Agent": "Vantage/1.0"})
+            _note_pyth_status(r.status_code)
+            ms._record(PYTH_PRICE, r.status_code, 0.0, None if r.status_code == 200 else r.text[:120])
             if r.status_code == 200:
                 for item in r.json().get("parsed", []):
                     pid = item.get("id", "")
@@ -243,18 +268,39 @@ async def helius_pool_status(agent: dict = Depends(get_agent)):
 @router.get("")
 async def get_intel(agent: dict = Depends(get_agent)):
     """Aggregate overview — BTC/ETH/SOL + chain health + sentiment."""
-    btc, eth, sol = await _majors()
+    # The five sections are independent; they ran one after another (~6-8 s
+    # live). Run them concurrently and record per-section latency/errors so
+    # the Overview can say which part is down instead of looking empty.
+    sections: dict = {}
 
-    # Also get token list for the overview
-    market = await full_market(limit=20)
+    async def _timed(name, coro, fallback):
+        t0 = time.monotonic()
+        try:
+            val = await coro
+            sections[name] = {"ok": True, "ms": round((time.monotonic() - t0) * 1000)}
+            return val
+        except Exception as e:  # noqa: BLE001
+            sections[name] = {"ok": False, "ms": round((time.monotonic() - t0) * 1000),
+                              "error": f"{type(e).__name__}: {str(e)[:120]}"}
+            return fallback
+
+    (btc, eth, sol), market, chain_raw, arb, breadth = await asyncio.gather(
+        _timed("majors", _majors(), (0, 0, 0)),
+        _timed("market", full_market(limit=20), {}),
+        _timed("chain_health", _chain_health(), {}),
+        _timed("arbitrage", ms.real_arbitrage(), []),
+        _timed("sentiment", ms.market_breadth(), {}),
+    )
+    market = market or {}
+    breadth = breadth or {}
 
     # Chain health (shared probe: each chain's own method, measured latency)
     chains = {k: {"health": v["health"], "block_height": v["block_height"]}
-              for k, v in (await _chain_health()).items()}
-
-    # Real cross-exchange arbitrage + real breadth sentiment (fail-soft).
-    arb = await ms.real_arbitrage()
-    breadth = await ms.market_breadth()
+              for k, v in (chain_raw or {}).items()}
+    for name, empty in (("market", not market.get("tokens")), ("sentiment", not breadth),
+                        ("majors", not btc)):
+        if empty and sections.get(name, {}).get("ok"):
+            sections[name].update(ok=False, error="source returned no data")
 
     # Real anomaly detection, not a hardcoded []: Pyth's own `conf` field is
     # its published uncertainty band on that price, in the same units as
@@ -301,13 +347,25 @@ async def get_intel(agent: dict = Depends(get_agent)):
         },
         "prices": market.get("tokens", []),
         "market_snapshot": market.get("market_snapshot", {}),
+        # additive: when this was assembled and how each section fared
+        "as_of": time.time(),
+        "sections": sections,
+        "chain_details": chain_raw or {},
+        "pyth_refused": _pyth_refused(),
     }
 
 @router.get("/arbitrage")
 async def get_arbitrage(agent: dict = Depends(get_agent)):
     """Real cross-exchange spreads (Binance/OKX/KuCoin/Coinbase/Gemini)."""
     opps = await ms.real_arbitrage()
-    return {"opportunities": opps, "source": "live_cex_spreads" if opps else "unavailable"}
+    missing = {}
+    for o in opps:
+        missing.update(o.get("missing_venues") or {})
+    return {"opportunities": opps, "source": "live_cex_spreads" if opps else "unavailable",
+            "as_of": time.time(), "venues": ms.ARB_VENUES, "missing_venues": missing,
+            "fees_note": "base-tier public taker fees, both legs; real fees vary by account tier",
+            "profitable_after_fees": sum(1 for o in opps if o.get("net_spread_pct", 0) > 0),
+            **({} if opps else {"reason": "fewer than two venues answered for every pair"})}
 
 @router.get("/alpha")
 async def get_alpha(agent: dict = Depends(get_agent)):
@@ -315,6 +373,9 @@ async def get_alpha(agent: dict = Depends(get_agent)):
     movers = await ms.top_movers(8)
     lead = movers[0]["symbol"] if movers else "—"
     return {
+        "as_of": time.time(),
+        "source": movers[0].get("source") if movers else "unavailable",
+        **({} if movers else {"reason": "CoinPaprika and CoinGecko both returned no market rows"}),
         "items": movers,
         "summary": f"{len(movers)} live momentum signals — {lead} leads by 24h move" if movers else "No live signals",
     }
@@ -326,10 +387,24 @@ async def get_sentiment(agent: dict = Depends(get_agent)):
     return {"sentiment": b, "indicators": b.get("indicators", [])}
 
 @router.get("/yields")
-async def get_yields(limit: int = Query(25, ge=1, le=100), agent: dict = Depends(get_agent)):
-    """Top DeFi yield pools by APY (DefiLlama, TVL ≥ $1M)."""
-    pools = await ms.defillama_yields(limit)
-    return {"pools": pools, "count": len(pools), "source": "DefiLlama"}
+async def get_yields(limit: int = Query(25, ge=1, le=100),
+                     chain: Optional[str] = Query(None, max_length=40),
+                     stablecoin: bool = Query(False),
+                     sort: str = Query("apy", pattern="^(apy|tvl|apy_base)$"),
+                     min_tvl: float = Query(1_000_000, ge=0),
+                     min_apy_base: float = Query(0, ge=0),
+                     agent: dict = Depends(get_agent)):
+    """Top DeFi yield pools by APY (DefiLlama, TVL ≥ $1M). Optional chain /
+    stablecoin-only / sort / TVL / organic-APY filters (defaults unchanged)."""
+    pools = await ms.defillama_yields(limit, min_tvl=min_tvl, chain=chain, stablecoin_only=stablecoin,
+                                      sort=sort, min_apy_base=min_apy_base)
+    age = ms.cache_age_s("yields_raw")
+    out = {"pools": pools, "count": len(pools), "source": "DefiLlama", "as_of": time.time(),
+           "upstream_age_s": age}
+    if not pools:
+        out["reason"] = ("no pools match these filters" if age is not None
+                         else "DefiLlama yields API returned no data")
+    return out
 
 def _pairs_sorted_by_liveness(pairs: list) -> list:
     """Sort raw DexScreener pairs by recent trading activity first.
@@ -360,7 +435,18 @@ async def get_dex(q: str = Query("SOL"), limit: int = Query(20, ge=1, le=50), ag
     pair for any consumer that reads pairs[0]."""
     pairs = await ms.dexscreener_search(q, limit)
     pairs = _pairs_sorted_by_liveness(pairs)
-    return {"query": q, "pairs": pairs, "count": len(pairs), "source": "DexScreener"}
+    return {"query": q, "pairs": pairs, "count": len(pairs), "source": "DexScreener", "as_of": time.time()}
+
+
+@router.get("/dex/pair/{chain}/{pair_address}")
+async def get_dex_pair(chain: str, pair_address: str, agent: dict = Depends(get_agent)):
+    """Live quote for ONE pair, keyed by its pair address (DexScreener) -- the
+    DEX tab re-prices rows this way so a ticker collision can never swap in
+    another token's price. 404 when DexScreener doesn't know the pair."""
+    row = await ms.dexscreener_pair(chain, pair_address)
+    if not row:
+        raise HTTPException(404, "pair not found on DexScreener")
+    return {"pair": row, "source": "DexScreener", "as_of": time.time()}
 
 @router.get("/dex/pools")
 async def get_dex_pools(
@@ -371,7 +457,11 @@ async def get_dex_pools(
     not just tokens ranked into a top-N market-cap listing. 'new' surfaces just-launched
     pools; 'trending' surfaces established-momentum ones."""
     pools = await ms.dex_new_pools(network, kind, limit)
-    return {"network": network, "kind": kind, "pools": pools, "count": len(pools), "source": "GeckoTerminal"}
+    out = {"network": network, "kind": kind, "pools": pools, "count": len(pools), "source": "GeckoTerminal",
+           "as_of": time.time()}
+    if not pools:
+        out["reason"] = "GeckoTerminal returned no pools (rate-limited or network unknown)"
+    return out
 
 @router.get("/fx")
 async def get_fx(base: str = Query("USD"), agent: dict = Depends(get_agent)):
@@ -430,7 +520,12 @@ async def get_whales(limit: int = Query(10, ge=1, le=25), min_value_btc: float =
     """Largest recent BTC mempool transactions (mempool.space), optionally
     filtered to only transactions at or above min_value_btc."""
     txs = await ms.whale_txs(limit, min_value_btc)
-    return {"transactions": txs, "count": len(txs), "chain": "bitcoin", "source": "mempool.space"}
+    from .. import btc_whales
+    return {"transactions": txs, "count": len(txs), "chain": "bitcoin", "source": "mempool.space",
+            # additive: `transactions` is the 10 newest mempool txs (small);
+            # `confirmed` is the largest transactions in recent blocks.
+            "transactions_scope": "newest 10 mempool transactions, largest first",
+            "confirmed": btc_whales.snapshot(limit=25, min_value_btc=min_value_btc)}
 
 # ── Wallet money-flow graph — accumulated from real observed counterparties,
 # not a fabricated data source. Every /trace lookup and /watchlist/refresh
@@ -480,7 +575,60 @@ async def get_wallet_trace(request: Request, chain: str, address: str, limit: in
     result = await ms.address_lookup(chain, address)
     if result.get("supported"):
         await _record_wallet_edges(result.get("chain"), address, result.get("transactions") or [])
+        # additive: who the counterparties are, from what Vantage already
+        # knows (wallet_labels + the tracked-wallet watchlist). Copy, so the
+        # cached lookup isn't mutated.
+        result = {**result, "counterparty_labels": await _counterparty_labels(
+            result.get("chain"), address, result.get("transactions") or [])}
     return result
+
+
+def _trace_counterparties(transactions: list) -> list:
+    seen: list = []
+    for t in transactions or []:
+        for c in (t.get("counterparties") or []):
+            if c.get("address") and c["address"] not in seen:
+                seen.append(c["address"])
+        for tt in t.get("token_transfers") or []:
+            for c in (tt.get("counterparties") or []):
+                if c.get("address") and c["address"] not in seen:
+                    seen.append(c["address"])
+    return seen
+
+
+async def _counterparty_labels(chain: str, address: str, transactions: list) -> dict:
+    """{address: [label, ...]} for the traced wallet and its counterparties.
+    Fail-soft: a labels-table problem never breaks the trace."""
+    addrs = [address] + [a for a in _trace_counterparties(transactions) if a != address]
+    addrs = addrs[:300]
+    out: dict = {}
+    try:
+        from backend import wallet_labels as _wl
+        async with get_db() as db:
+            for w, labels in (await _wl.labels_for(db, addrs)).items():
+                out.setdefault(w, []).extend(labels)
+            qs = ",".join("?" * len(addrs))
+            cur = await db.execute(
+                f"SELECT address, label, address_type FROM tracked_wallets WHERE chain = ? AND address IN ({qs})",
+                [chain, *addrs])
+            for row in await cur.fetchall():
+                a, label, atype = row[0], row[1], row[2]
+                tag = f"watchlist: {label}" if label else f"watchlist ({atype or 'wallet'})"
+                if tag not in out.setdefault(a, []):
+                    out[a].append(tag)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("counterparty labels failed: %s", e)
+    try:
+        black = await asyncio.to_thread(wb.get_blacklisted_addresses, chain)
+        for a in addrs:
+            if a in black:
+                out.setdefault(a, []).append("blacklisted: exchange/custodian")
+    except Exception:  # noqa: BLE001
+        pass
+    for a, v in list(out.items()):
+        if any(wb.is_exchange_label(x) for x in v) and "exchange/custodian" not in v:
+            v.append("exchange/custodian")
+    return {a: sorted(set(v)) for a, v in out.items() if v}
 
 # ── Wallet holdings — actual SOL balance + every SPL token held, with live
 # USD prices where DexScreener has a listing. This is what the money-flow
@@ -875,6 +1023,12 @@ async def ingest(req: IngestRequest, agent: dict = Depends(get_agent)):
                                   "('solana', 'polymarket', 'twitter', or 'telegram').")
 
     if kind == "solana":
+        from backend import address_validation as _av
+        v = _av.validate_solana(raw)
+        if not v["valid"]:
+            # the detection regex only checks alphabet + length; a Bitcoin
+            # legacy address or a typo'd key used to be tracked as a wallet
+            raise HTTPException(422, f"Not a valid Solana address: {v['reason']}")
         result = await add_watchlist_wallet(
             WatchlistAddRequest(chain="solana", address=raw, label=req.label), agent
         )
@@ -917,6 +1071,133 @@ async def ingest(req: IngestRequest, agent: dict = Depends(get_agent)):
         return {"type": kind, "tracker": "social_tracker", "result": dict(row) if row else None}
 
     raise HTTPException(422, f"Unknown type '{kind}'")
+
+
+# ── Add Tracker preview — read-only: validate the input per chain and show
+# exactly what POST /ingest would track, before anything is written. ───────
+_SYSTEM_PROGRAM = "1" * 32
+_TOKEN_PROGRAMS = {"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA": "spl-token",
+                   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb": "token-2022"}
+
+
+async def _solana_account_kind(address: str) -> dict:
+    """What lives at this address on-chain (one getAccountInfo, fail-soft)."""
+    info = await ms._sol_rpc("getAccountInfo", [address, {"encoding": "jsonParsed"}], timeout=6)
+    if info is None:
+        err = ms._SOL_RPC_LAST_ERROR.get("getAccountInfo")
+        return {"kind": "unknown", "detail": f"on-chain check unavailable ({err or 'rpc error'})"}
+    v = info.get("value") if isinstance(info, dict) else None
+    if not v:
+        return {"kind": "empty", "detail": "no account on-chain yet (never funded) -- valid but has no history"}
+    owner, lamports = v.get("owner"), v.get("lamports") or 0
+    parsed = (v.get("data") or {}).get("parsed") if isinstance(v.get("data"), dict) else None
+    sol = round(lamports / 1e9, 6)
+    if v.get("executable"):
+        return {"kind": "program", "detail": "an executable program, not a wallet", "sol": sol}
+    if owner in _TOKEN_PROGRAMS and isinstance(parsed, dict):
+        if parsed.get("type") == "mint":
+            return {"kind": "token_mint", "detail": f"a {_TOKEN_PROGRAMS[owner]} token mint (contract address), not a wallet",
+                    "sol": sol}
+        if parsed.get("type") == "account":
+            o = ((parsed.get("info") or {}).get("owner"))
+            return {"kind": "token_account", "owner_wallet": o, "sol": sol,
+                    "detail": f"a token account; the wallet that owns it is {o}"}
+    if owner == _SYSTEM_PROGRAM:
+        return {"kind": "wallet", "detail": "system-owned wallet", "sol": sol}
+    return {"kind": "program_owned", "owner_program": owner, "sol": sol,
+            "detail": f"owned by program {owner} (PDA / program account), not a plain wallet"}
+
+
+@router.post("/ingest/preview")
+async def ingest_preview(req: IngestRequest, agent: dict = Depends(get_agent)):
+    """Dry run of POST /ingest: detection, per-chain validation, on-chain
+    account type (Solana), whether it's already tracked, known labels, and the
+    exact tracker/row it would create. Writes nothing."""
+    from backend import address_validation as av
+    raw = req.input.strip()
+    if not raw:
+        raise HTTPException(422, "input is required")
+    detected = _detect_ingest_type(raw)
+    kind = req.type or detected.get("type")
+    out: dict = {"input": raw, "detected": detected, "type": kind, "warnings": [], "already_tracked": False}
+
+    if not kind and detected.get("ambiguous"):
+        handle = detected.get("handle", "")
+        out.update(valid=False, can_submit=False, reason="ambiguous handle -- choose Twitter/X or Telegram",
+                   candidates={p: av.validate_handle(p, handle) for p in detected["ambiguous"]})
+        return out
+    if not kind:
+        if av.looks_like_bitcoin(raw) and av.validate_bitcoin(raw)["valid"]:
+            out.update(type="bitcoin", valid=True, can_submit=False,
+                       reason="valid Bitcoin address -- Add Tracker doesn't route Bitcoin; use the Trace tab")
+        else:
+            out.update(valid=False, can_submit=False, reason="not a Solana/EVM address or a Twitter/Telegram handle")
+        return out
+
+    if kind == "solana":
+        v = av.validate_solana(raw)
+        if not v["valid"] and av.looks_like_bitcoin(raw) and av.validate_bitcoin(raw)["valid"]:
+            v = {"valid": False, "reason": "this is a Bitcoin address, not Solana (it passes the old regex)"}
+        out.update(v)
+        if v["valid"]:
+            acct = await _solana_account_kind(raw)
+            out["account"] = acct
+            if acct["kind"] in ("token_mint", "program", "token_account", "program_owned"):
+                out["warnings"].append(f"This is {acct['detail']}. Tracking it as a wallet records no trades.")
+            try:
+                async with get_db() as db:
+                    cur = await db.execute("SELECT label, created_at, address_type FROM tracked_wallets "
+                                           "WHERE chain='solana' AND address=? LIMIT 1", (raw,))
+                    row = await cur.fetchone()
+                    if row:
+                        out.update(already_tracked=True,
+                                   existing={"label": row[0], "since": row[1], "address_type": row[2]})
+                    from backend import wallet_labels as _wl
+                    out["labels"] = (await _wl.labels_for(db, [raw])).get(raw, [])
+            except Exception as e:  # noqa: BLE001
+                out["warnings"].append(f"tracked/label lookup skipped ({type(e).__name__})")
+        out["will_track"] = {"tracker": "intel_watchlist", "table": "tracked_wallets", "chain": "solana",
+                             "address": raw, "label": req.label.strip() or "(none)",
+                             "also": "appended to degen_watchlist.json (best-effort, scoring there is stale)"}
+    elif kind == "polymarket":
+        v = av.validate_evm(raw)
+        out.update(v)
+        if v.get("checksum") == "bad":
+            out["warnings"].append(f"Expected checksum casing: {v.get('expected')}")
+        try:
+            async with httpx.AsyncClient(timeout=3) as c:
+                r = await c.post(f"{ARES}/api/rpc/polygon",
+                                 json={"jsonrpc": "2.0", "method": "eth_getCode", "params": [raw, "latest"], "id": 1})
+                code = (r.json() or {}).get("result") if r.status_code == 200 else None
+            if isinstance(code, str):
+                out["account"] = ({"kind": "contract", "detail": "a contract on Polygon (Polymarket proxy wallets are contracts)"}
+                                  if code not in ("0x", "0x0") else {"kind": "eoa", "detail": "externally-owned account on Polygon"})
+            else:
+                out["account"] = {"kind": "unknown", "detail": "Polygon RPC check unavailable"}
+        except Exception as e:  # noqa: BLE001
+            out["account"] = {"kind": "unknown", "detail": f"Polygon RPC check unavailable ({type(e).__name__})"}
+        out["will_track"] = {"tracker": "ares_polymarket", "command": "ares_polymarket.py --add <label> <address>",
+                             "label": req.label.strip() or raw[:10], "address": raw}
+    elif kind in ("twitter", "telegram"):
+        handle = (detected.get("handle") or raw.lstrip("@")).lower().strip("@")
+        v = av.validate_handle(kind, handle)
+        out.update(v)
+        async with get_db() as db:
+            try:
+                cur = await db.execute("SELECT id, created_at FROM social_accounts WHERE platform=? AND username=? LIMIT 1",
+                                       (kind, handle))
+                row = await cur.fetchone()
+                if row:
+                    out.update(already_tracked=True, existing={"id": row[0], "since": row[1]})
+                    out["warnings"].append("already tracked -- submitting again inserts a duplicate row")
+            except Exception:  # noqa: BLE001
+                out["warnings"].append("social_accounts table not readable here; duplicate check skipped")
+        out["will_track"] = {"tracker": "social_tracker", "table": "social_accounts", "platform": kind,
+                             "username": handle, "notes": req.label.strip() or "(none)"}
+    else:
+        out.update(valid=False, reason=f"Unknown type '{kind}'")
+    out["can_submit"] = bool(out.get("valid")) and kind in ("solana", "polymarket", "twitter", "telegram")
+    return out
 
 
 # ── Wallet blacklist — major exchange/custodian wallets excluded from the
@@ -1077,8 +1358,18 @@ _CHAIN_PROBES = {
     "solana": {"method": "getSlot", "params": [], "evm": False},
     "polygon": {"method": "eth_blockNumber", "params": [], "evm": True},
     "base": {"method": "eth_blockNumber", "params": [], "evm": True},
-    "sui": {"method": "sui_getLatestCheckpointSequenceNumber", "params": [], "evm": False},
+    "sui": {"method": "sui_getLatestCheckpointSequenceNumber", "params": [], "evm": False,
+            # public fullnodes deprecated JSON-RPC ("Method not found ... migrate
+            # to gRPC or GraphQL"): fall back to the public GraphQL endpoint
+            "graphql": os.environ.get("SUI_GRAPHQL_URL", "https://graphql.mainnet.sui.io/graphql")},
 }
+
+
+async def _sui_graphql_height(c, url: str):
+    r = await c.post(url, json={"query": "{ checkpoint { sequenceNumber } }"})
+    seq = (((r.json() or {}).get("data") or {}).get("checkpoint") or {}).get("sequenceNumber") \
+        if r.status_code == 200 else None
+    return int(seq) if isinstance(seq, (int, str)) and str(seq).isdigit() else None
 
 
 async def _probe_chain(c, chain: str) -> dict:
@@ -1096,6 +1387,12 @@ async def _probe_chain(c, chain: str) -> dict:
             res = int(res, 16)
         elif isinstance(res, str) and res.isdigit():
             res = int(res)
+        if not (isinstance(res, int) and res > 0) and spec.get("graphql"):
+            t1 = time.monotonic()
+            res = await _sui_graphql_height(c, spec["graphql"])
+            if res:
+                out["latency_ms"] = round((time.monotonic() - t1) * 1000)
+                out["source"] = "graphql"
         if isinstance(res, int) and res > 0:
             out["block_height"] = res
             out["health"] = "healthy" if out["latency_ms"] < 2000 else "degraded"
@@ -1123,6 +1420,14 @@ async def _chain_health() -> dict:
 @router.get("/health")
 async def get_health_detail(agent: dict = Depends(get_agent)):
     return {"chains": await _chain_health()}
+
+@router.get("/sources-live")
+async def get_sources_live(agent: dict = Depends(get_agent)):
+    """Measured health of every external host this process has called through
+    market_sources' HTTP helpers since start: calls, ok, errors, rate-limited,
+    last status/error, average latency. Real observations, not a registry."""
+    return {"since": ms.SOURCE_STATS_SINCE, "hosts": ms.source_stats()}
+
 
 @router.get("/sources")
 async def get_sources(agent: dict = Depends(get_agent)):

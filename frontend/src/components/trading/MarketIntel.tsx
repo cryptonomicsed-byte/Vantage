@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import QuantBacktestPanel from './analytics/QuantBacktestPanel'
+import WhalesPanel from './analytics/WhalesPanel'
+import FxPanel from './analytics/FxPanel'
+import SourcesLivePanel from './analytics/SourcesLivePanel'
 import { TrendingUp, BarChart3, Zap, Activity, Database, Radio, Layers, Droplets, Waves, DollarSign, History, GitBranch as Waypoints, ListOrdered, Share2, Flame, Brain, Scale, UserCog, PlusCircle } from 'lucide-react'
 import Top5Degen from './Top5Degen'
 import MoneyFlowGraph from '../MoneyFlowGraph'
@@ -8,6 +11,14 @@ import ShadowAccountSection from '../ShadowAccountSection'
 import { TokenLink, WalletLink } from './EntityProfileCard'
 import AgentIntel from './AgentIntel'
 import { LabelChips } from './EarlyRunnerIntel'
+import OverviewPanel from './analytics/OverviewPanel'
+import ArbitragePanel from './analytics/ArbitragePanel'
+import AlphaPanel from './analytics/AlphaPanel'
+import YieldsPanel from './analytics/YieldsPanel'
+import DexPanel from './analytics/DexPanel'
+import AllTokensPanel from './analytics/AllTokensPanel'
+import TracePanel from './analytics/TracePanel'
+import AddTrackerPanel from './analytics/AddTrackerPanel'
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Analytics — the deep-dive lenses behind Trading's default Dashboard tab. These
@@ -115,82 +126,7 @@ async function intelAuthApi(path: string, opts: RequestInit = {}): Promise<Respo
 // ══════════════════════════════════════════════════════════════════════════════
 
 function AresOverview() {
-  const intel = useAresApi('/api/intel', 60000)
-  const i = intel.data
-  const chains = i?.health?.chains || {}
-  const arbOpps = i?.arbitrage?.opportunities || []
-  const fusion = i?.anomalies?.fusion || {}
-
-  return (
-    <div>
-      <div className="ares-section-title" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <span>Market Intelligence</span>
-        <Badge status={Object.keys(chains).length > 0 ? 'live' : 'pending'} />
-        {intel.loading && <span style={{ color: 'var(--muted)', fontSize: 11 }}>refreshing…</span>}
-      </div>
-
-      {/* BTC Consensus */}
-      {fusion.btc_consensus && (
-        <div style={{ background: 'rgba(12,12,22,0.9)', border: '1px solid var(--border)', borderRadius: 12, padding: 20, marginBottom: 16 }}>
-          <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>BTC Price</div>
-          <div style={{ fontSize: 32, fontWeight: 700, color: '#39ff14', fontFamily: 'monospace' }}>${Number(fusion.btc_consensus).toLocaleString()}</div>
-          <div style={{ display: 'flex', gap: 24, marginTop: 8, fontSize: 12, color: 'var(--muted)' }}>
-            <span>ETH: ${Number(fusion.eth||0).toLocaleString()}</span>
-            <span>SOL: ${Number(fusion.sol||0).toFixed(2)}</span>
-            <span>Source: {fusion.price_source || '—'}</span>
-          </div>
-        </div>
-      )}
-
-      {/* Stat grid */}
-      <div className="ares-stat-grid" style={{ marginBottom: 16 }}>
-        <div className="ares-stat-tile"><div className="ares-stat-label">Chains</div><div className="ares-stat-value">{Object.keys(chains).length}</div></div>
-        <div className="ares-stat-tile"><div className="ares-stat-label">Arbitrage</div><div className="ares-stat-value" style={{ color: 'var(--warning)' }}>{arbOpps.length}</div></div>
-        <div className="ares-stat-tile"><div className="ares-stat-label">Anomalies</div><div className="ares-stat-value">{(i?.anomalies?.anomalies||[]).length}</div></div>
-        <div className="ares-stat-tile"><div className="ares-stat-label">Sentiment</div><div className="ares-stat-value" style={{ textTransform: 'capitalize', color: sentColor(i?.sentiment?.sentiment?.overall) }}>{i?.sentiment?.sentiment?.overall || '—'}</div></div>
-        <div className="ares-stat-tile"><div className="ares-stat-label">Fear &amp; Greed</div><div className="ares-stat-value">{i?.sentiment?.sentiment?.fear_greed ?? '—'}</div></div>
-        <div className="ares-stat-tile"><div className="ares-stat-label">Top-100 green</div><div className="ares-stat-value">{i?.market_snapshot?.tokens_tracked ? `${i?.market_snapshot?.gainers_24h}/${i?.market_snapshot?.tokens_tracked}` : '—'}</div></div>
-      </div>
-
-      {(i?.anomalies?.anomalies || []).length > 0 && (
-        <>
-          <div className="ares-section-title">Anomalies</div>
-          {(i.anomalies.anomalies as any[]).slice(0, 6).map((a, k) => (
-            <div key={k} style={{ background: 'rgba(12,12,22,0.9)', border: '1px solid var(--border)', borderRadius: 8, padding: '8px 12px', marginBottom: 4, fontSize: 12 }}>
-              <b>{a.symbol}</b> <span style={{ color: 'var(--muted)' }}>{String(a.type || '').replace(/_/g, ' ')}</span> · {a.detail || `${a.confidence_pct}%`}
-            </div>
-          ))}
-        </>
-      )}
-
-      {/* Chain health */}
-      <div className="ares-section-title">Chain Health ({Object.keys(chains).length})</div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 8, marginBottom: 16 }}>
-        {Object.entries(chains).map(([k, v]: [string, any]) => (
-          <div key={k} style={{ background: 'rgba(12,12,22,0.9)', border: '1px solid var(--border)', borderRadius: 8, padding: '12px 16px' }}>
-            <div style={{ fontSize: 12, fontWeight: 600, textTransform: 'capitalize' }}>{k}</div>
-            <Badge status={v.health || '?'} />
-            <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 4 }}>{Object.entries(v).filter(([k2]) => k2 !== 'health').map(([k2, v2]) => `${k2}=${v2}`).join(', ')}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Top arbitrage */}
-      {arbOpps.length > 0 && (
-        <>
-          <div className="ares-section-title">Top Arbitrage ({arbOpps.length})</div>
-          <table className="ares-table">
-            <thead><tr><th>Route</th><th>Pair</th><th>Spread</th></tr></thead>
-            <tbody>
-              {arbOpps.slice(0, 5).map((o: any, i: number) => (
-                <tr key={i}><td>{o.route}</td><td>{o.pair && o.pair.includes('/') ? <TokenLink symbol={o.pair.split('/')[0]} /> : o.pair}</td><td style={{ color: 'var(--warning)', fontWeight: 700 }}>{o.spread_pct?.toFixed(1)}%</td></tr>
-              ))}
-            </tbody>
-          </table>
-        </>
-      )}
-    </div>
-  )
+  return <OverviewPanel />
 }
 
 function AresIntel() {
@@ -200,32 +136,7 @@ function AresIntel() {
 }
 
 function AresArbitrage() {
-  const { data, loading } = useAresApi('/api/intel', 30000)
-  const opps = data?.arbitrage?.opportunities?.filter((o: any) => o.spread_pct > 0.5 && o.spread_pct < 1000) || []
-  if (loading && !data) return <div style={{ color: 'var(--muted)', padding: 20 }}>Loading…</div>
-  return (
-    <div>
-      <div className="ares-section-title">{opps.length} Arbitrage Opportunities <span style={{ fontSize: 11, color: 'var(--muted)' }}>(net = spread minus est. taker fees both legs)</span></div>
-      <table className="ares-table">
-        <thead><tr><th>Route</th><th>Pair</th><th>Raw Spread</th><th>Est. Fees</th><th>Net Spread</th><th>Buy</th><th>Sell</th></tr></thead>
-        <tbody>
-          {opps.map((o: any, i: number) => (
-            <tr key={i} className={(o.net_spread_pct ?? o.spread_pct) > 3 ? 'threat-high' : ''}>
-              <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{o.route}</td>
-              <td>{o.pair && o.pair.includes('/') ? <TokenLink symbol={o.pair.split('/')[0]} /> : o.pair}</td>
-              <td style={{ color: 'var(--muted)' }}>{o.spread_pct?.toFixed(2)}%</td>
-              <td style={{ color: 'var(--muted)' }}>−{o.est_fees_pct?.toFixed(2) ?? '?'}%</td>
-              <td style={{ color: (o.net_spread_pct ?? 0) > 0 ? ((o.net_spread_pct ?? 0) > 3 ? 'var(--danger)' : 'var(--warning)') : 'var(--muted)', fontWeight: 700 }}>
-                {o.net_spread_pct !== undefined ? `${o.net_spread_pct.toFixed(2)}%` : '—'}
-              </td>
-              <td>${o.buy_price?.toFixed(2)}</td>
-              <td>${o.sell_price?.toFixed(2)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )
+  return <ArbitragePanel />
 }
 
 function AresHealth() {
@@ -332,6 +243,7 @@ function AresSources() {
   })
   return (
     <div>
+      <SourcesLivePanel />
       <div className="ares-section-title" style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
         <span>{Object.keys(endpoints).length} Data Sources</span>
         {registry.length > 0 && (
@@ -373,31 +285,7 @@ function AresSources() {
 }
 
 function AresAlpha() {
-  const { data, loading } = useAresApi('/api/alpha', 30000)
-  const items = data?.items || []
-  if (loading && !data) return <div style={{ color: 'var(--muted)', padding: 20 }}>Loading…</div>
-  return (
-    <div>
-      <div className="ares-section-title">{items.length} Active Signals</div>
-      <table className="ares-table">
-        <thead><tr><th>Token</th><th title="abs(24h change) / 5, capped at 5">Conviction (0–5)</th><th>Signal</th><th>24h Change</th><th>Price</th><th>Volume 24h</th></tr></thead>
-        <tbody>
-          {items.map((i: any, idx: number) => (
-            <tr key={idx}>
-              <td style={{ fontWeight: 600 }}>{i.symbol ? <TokenLink symbol={i.symbol} ca={i.ca || i.address} chain={i.chain} /> : '?'}</td>
-              <td style={{ color: (i.conviction||0) > 3 ? 'var(--danger)' : 'var(--warning)', fontWeight: 700 }}>{(i.conviction||0).toFixed(2)}</td>
-              <td style={{ color: i.signal === 'breakdown' ? 'var(--danger)' : i.signal === 'breakout' ? 'var(--green)' : 'var(--muted)' }}>{i.signal || '—'}</td>
-              <td style={{ fontFamily: 'monospace', color: i.direction === 'down' ? 'var(--danger)' : 'var(--green)', fontWeight: 700 }}>
-                {i.direction === 'down' ? '▼' : '▲'} {(i.change_24h||0).toFixed(2)}%
-              </td>
-              <td style={{ fontFamily: 'monospace' }}>${(i.price||0).toFixed(8)}</td>
-              <td style={{ fontFamily: 'monospace' }}>${(i.volume_24h||0).toLocaleString()}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )
+  return <AlphaPanel />
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -405,195 +293,25 @@ function AresAlpha() {
 // ══════════════════════════════════════════════════════════════════════════════
 
 function AresYields() {
-  const { data, loading } = useAresApi('/api/intel/yields', 120000)
-  const pools = data?.pools || []
-  if (loading && !data) return <div style={{ color: 'var(--muted)', padding: 20 }}>Loading yields…</div>
-  return (
-    <div>
-      <div className="ares-section-title">{pools.length} DeFi Yield Pools <span style={{ fontSize: 11, color: 'var(--muted)' }}>(DefiLlama · TVL ≥ $1M)</span></div>
-      <table className="ares-table">
-        <thead><tr><th>Pool</th><th>Project</th><th>Chain</th><th>APY</th><th>Yield Source</th><th>IL Risk</th><th>TVL</th></tr></thead>
-        <tbody>
-          {pools.length === 0 && <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No pools loaded.</td></tr>}
-          {pools.map((p: any, i: number) => (
-            <tr key={i}>
-              <td style={{ fontWeight: 600 }}><TokenLink symbol={p.pool} chain={p.chain} />{p.stablecoin && <span style={{ fontSize: 9, color: 'var(--cyan)', marginLeft: 4 }}>STABLE</span>}</td>
-              <td style={{ fontSize: 11 }}>{p.project}</td>
-              <td style={{ fontSize: 11, color: 'var(--muted)' }}>{p.chain}</td>
-              <td style={{ color: 'var(--green)', fontWeight: 700 }}>{p.apy?.toFixed(1)}%</td>
-              <td style={{ fontSize: 10, color: 'var(--muted)' }} title="organic yield vs. reward-token emissions -- emissions can stop">
-                {p.apy_base != null ? `${p.apy_base.toFixed(1)}% base` : ''}
-                {p.apy_reward ? ` + ${p.apy_reward.toFixed(1)}% reward` : ''}
-                {p.apy_base == null && !p.apy_reward ? '—' : ''}
-              </td>
-              <td style={{ fontSize: 10, color: p.il_risk === 'yes' ? 'var(--warning)' : 'var(--muted)' }}>
-                {p.il_risk === 'yes' ? '⚠️ IL risk' : p.il_risk === 'no' ? 'no IL' : '—'}
-              </td>
-              <td style={{ fontFamily: 'monospace' }}>${(p.tvl_usd / 1e6).toFixed(1)}M</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )
+  return <YieldsPanel />
 }
 
 function AresDex() {
-  const [q, setQ] = useState('SOL')
-  const [data, setData] = useState<any>(null)
-  const [loading, setLoading] = useState(false)
-  const load = useCallback(async (query: string) => {
-    setLoading(true)
-    try { const r = await fetch(`/api/intel/dex?q=${encodeURIComponent(query)}`); if (r.ok) setData(await r.json()) } catch {}
-    setLoading(false)
-  }, [])
-  useEffect(() => { load('SOL') }, [load])
-  const pairs = data?.pairs || []
-  return (
-    <div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-        <input className="ares-input" placeholder="Token (e.g. SOL, PEPE, WIF)" value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => e.key === 'Enter' && load(q)} style={{ maxWidth: 240 }} />
-        <button className="btn btn-primary btn-sm" onClick={() => load(q)}>Search</button>
-      </div>
-      <div className="ares-section-title">{pairs.length} DEX Pairs {loading && <span style={{ fontSize: 11, color: 'var(--muted)' }}>loading…</span>}</div>
-      <table className="ares-table">
-        <thead><tr><th>Pair</th><th>DEX</th><th>Chain</th><th>Price</th><th>Liquidity</th><th>Vol 24h</th><th>24h</th></tr></thead>
-        <tbody>
-          {pairs.length === 0 && <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No pairs.</td></tr>}
-          {pairs.map((p: any, i: number) => (
-            <tr key={i}>
-              <td style={{ fontWeight: 600 }}>
-                {p.pair && p.pair.includes('/')
-                  ? <><TokenLink symbol={p.pair.split('/')[0]} ca={p.base_address} chain={p.chain} />/{p.pair.split('/')[1]}</>
-                  : <TokenLink symbol={p.pair} ca={p.base_address} chain={p.chain} />}
-              </td>
-              <td style={{ fontSize: 11 }}>{p.dex}</td>
-              <td style={{ fontSize: 11, color: 'var(--muted)' }}>{p.chain}</td>
-              <td style={{ fontFamily: 'monospace' }}>{p.price_usd != null ? '$' + Number(p.price_usd).toPrecision(4) : '—'}</td>
-              <td style={{ fontFamily: 'monospace' }}>{p.liquidity_usd ? '$' + (p.liquidity_usd / 1e3).toFixed(0) + 'K' : '—'}</td>
-              <td style={{ fontFamily: 'monospace' }}>{p.volume_24h ? '$' + (p.volume_24h / 1e3).toFixed(0) + 'K' : '—'}</td>
-              <td style={{ color: (p.change_24h || 0) >= 0 ? 'var(--green)' : 'var(--danger)', fontWeight: 700 }}>{p.change_24h != null ? p.change_24h.toFixed(1) + '%' : '—'}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )
+  return <DexPanel />
 }
 
 function AresAllTokens() {
-  const [network, setNetwork] = useState('solana')
-  const [kind, setKind] = useState<'trending' | 'new'>('trending')
-  const [data, setData] = useState<any>(null)
-  const [loading, setLoading] = useState(false)
-  const load = useCallback(async () => {
-    setLoading(true)
-    try {
-      const r = await fetch(`/api/intel/dex/pools?network=${encodeURIComponent(network)}&kind=${kind}&limit=50`)
-      if (r.ok) setData(await r.json())
-    } catch {}
-    setLoading(false)
-  }, [network, kind])
-  useEffect(() => { load() }, [load])
-  const pools = data?.pools || []
-  return (
-    <div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
-        <select className="ares-input" value={network} onChange={e => setNetwork(e.target.value)} style={{ maxWidth: 160 }}>
-          <option value="solana">Solana</option>
-          <option value="eth">Ethereum</option>
-          <option value="base">Base</option>
-        </select>
-        <button className={`btn btn-sm ${kind === 'trending' ? 'btn-primary' : ''}`} onClick={() => setKind('trending')}>Trending</button>
-        <button className={`btn btn-sm ${kind === 'new' ? 'btn-primary' : ''}`} onClick={() => setKind('new')}>New</button>
-        <button className="btn btn-ghost btn-sm" onClick={load}>Refresh</button>
-      </div>
-      <div className="ares-section-title">
-        {pools.length} pools — every pair currently trading, not just top-ranked tokens {loading && <span style={{ fontSize: 11, color: 'var(--muted)' }}>loading…</span>}
-      </div>
-      <div className="dash-panel" style={{ maxHeight: 560, overflowY: 'auto', padding: 0 }}>
-        <table className="ares-table">
-          <thead><tr><th>Pair</th><th>Price</th><th>Liquidity</th><th>Vol 24h</th><th>24h</th><th>Buys/Sells 24h</th><th>Created</th></tr></thead>
-          <tbody>
-            {pools.length === 0 && <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No pools.</td></tr>}
-            {pools.map((p: any, i: number) => (
-              <tr key={i}>
-                <td style={{ fontWeight: 600 }}>
-                  {p.pair && p.pair.includes('/')
-                    ? <><TokenLink symbol={p.pair.split('/')[0]} ca={p.base_address} chain={network} />/{p.pair.split('/')[1]}</>
-                    : <TokenLink symbol={p.pair} ca={p.base_address} chain={network} />}
-                </td>
-                <td style={{ fontFamily: 'monospace' }}>{p.price_usd != null ? '$' + Number(p.price_usd).toPrecision(4) : '—'}</td>
-                <td style={{ fontFamily: 'monospace' }}>{p.liquidity_usd ? '$' + (p.liquidity_usd / 1e3).toFixed(0) + 'K' : '—'}</td>
-                <td style={{ fontFamily: 'monospace' }}>{p.volume_24h ? '$' + (p.volume_24h / 1e3).toFixed(0) + 'K' : '—'}</td>
-                <td style={{ color: (p.change_24h_pct || 0) >= 0 ? 'var(--green)' : 'var(--danger)', fontWeight: 700 }}>{p.change_24h_pct != null ? p.change_24h_pct.toFixed(1) + '%' : '—'}</td>
-                <td style={{ fontSize: 11, color: 'var(--muted)' }}>{p.buys_24h ?? '—'} / {p.sells_24h ?? '—'}</td>
-                <td style={{ fontSize: 10, color: 'var(--muted)' }}>{p.created_at ? new Date(p.created_at).toLocaleString() : '—'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  )
+  return <AllTokensPanel />
 }
 
 function AresWhales() {
-  const { data, loading } = useAresApi('/api/intel/whales', 30000)
-  const txs = data?.transactions || []
-  const intel = useAresApi('/api/intel', 60000)
-  const btcPx = Number(intel.data?.anomalies?.fusion?.btc_consensus || 0)
-  if (loading && !data) return <div style={{ color: 'var(--muted)', padding: 20 }}>Loading whale activity…</div>
-  return (
-    <div>
-      <div className="ares-section-title">Largest Recent BTC Transactions <span style={{ fontSize: 11, color: 'var(--muted)' }}>(mempool.space)</span></div>
-      <table className="ares-table">
-        <thead><tr><th>Tx</th><th>Value (BTC)</th><th>≈ USD</th><th>Fee (sat/vB)</th><th>Size (vB)</th></tr></thead>
-        <tbody>
-          {txs.length === 0 && <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--muted)', padding: 20 }}>No mempool data.</td></tr>}
-          {txs.map((t: any, i: number) => (
-            <tr key={i} className={(t.value_btc || 0) > 10 ? 'threat-high' : ''}>
-              <td style={{ fontFamily: 'monospace', fontSize: 11 }}><a href={`https://mempool.space/tx/${t.txid}`} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>{String(t.txid || '').slice(0, 12)}…{String(t.txid || '').slice(-6)}</a></td>
-              <td style={{ fontFamily: 'monospace', fontWeight: 700, color: (t.value_btc || 0) > 10 ? 'var(--warning)' : 'var(--text)' }}>{t.value_btc}</td>
-              <td style={{ fontFamily: 'monospace' }}>{btcPx && t.value_btc ? `$${Math.round(t.value_btc * btcPx).toLocaleString()}` : '—'}</td>
-              <td style={{ fontFamily: 'monospace', color: 'var(--muted)' }}>{t.fee_sat?.toLocaleString()}{t.fee_sat && t.size_vb ? ` (${(t.fee_sat / t.size_vb).toFixed(1)})` : ''}</td>
-              <td style={{ fontFamily: 'monospace', color: 'var(--muted)' }}>{t.size_vb}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )
+  // confirmed block whales + mempool (analytics/WhalesPanel.tsx)
+  return <WhalesPanel />
 }
 
 function AresFx() {
-  const [base, setBase] = useState('USD')
-  const { data, loading, refresh } = useAresApi(`/api/intel/fx?base=${base}`, 300000)
-  const rates = data?.rates || {}
-  const majors = ['EUR', 'GBP', 'JPY', 'CNY', 'CAD', 'AUD', 'CHF', 'INR', 'BRL', 'MXN', 'KRW', 'SGD']
-  if (loading && !data) return <div style={{ color: 'var(--muted)', padding: 20 }}>Loading FX rates…</div>
-  return (
-    <div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
-        <input className="ares-input" placeholder="Base (e.g. USD)" value={base} onChange={e => setBase(e.target.value.toUpperCase())} onKeyDown={e => e.key === 'Enter' && refresh()} style={{ maxWidth: 120 }} />
-        <button className="btn btn-primary btn-sm" onClick={refresh}>Refresh</button>
-      </div>
-      <div className="ares-section-title">{base} Exchange Rates <span style={{ fontSize: 11, color: 'var(--muted)' }}>(ExchangeRate-API)</span></div>
-      {Object.keys(rates).length === 0 ? (
-        <div style={{ color: 'var(--muted)', padding: 20 }}>No rates loaded — check the base currency code.</div>
-      ) : (
-        <div className="ares-stat-grid">
-          {majors.filter(c => rates[c] != null).map(c => (
-            <div key={c} className="ares-stat-tile">
-              <div className="ares-stat-label">{c}</div>
-              <div className="ares-stat-value">{Number(rates[c]).toFixed(4)}</div>
-            </div>
-          ))}
-        </div>
-      )}
-      {data?.updated && <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 12 }}>Updated: {data.updated}</div>}
-    </div>
-  )
+  // converter, local-currency crypto prices, full table (analytics/FxPanel.tsx)
+  return <FxPanel />
 }
 
 function AresBacktest() {
@@ -769,158 +487,7 @@ function TraceByToken() {
 }
 
 function AresTrace() {
-  const [mode, setMode] = useState<'wallet' | 'token'>('wallet')
-  const [chain, setChain] = useState('bitcoin')
-  const [addressInput, setAddressInput] = useState('')
-  const [path, setPath] = useState<TraceHop[]>([])
-  const [data, setData] = useState<any>(null)
-  const [loading, setLoading] = useState(false)
-
-  const runTrace = useCallback(async (hop: TraceHop) => {
-    setLoading(true)
-    try {
-      const r = await fetch(`/api/intel/trace/${hop.chain}/${encodeURIComponent(hop.address)}?limit=15`)
-      setData(r.ok ? await r.json() : null)
-    } catch { setData(null) }
-    setLoading(false)
-  }, [])
-
-  function submit() {
-    if (!addressInput.trim()) return
-    const hop = { chain, address: addressInput.trim() }
-    setPath([hop])
-    runTrace(hop)
-  }
-
-  function pivot(address: string) {
-    const activeChain = path[path.length - 1]?.chain || chain
-    const hop = { chain: activeChain, address }
-    setPath(prev => [...prev, hop].slice(-8))
-    setAddressInput(address)
-    runTrace(hop)
-  }
-
-  function jumpTo(i: number) {
-    const truncated = path.slice(0, i + 1)
-    const hop = truncated[truncated.length - 1]
-    setPath(truncated)
-    setAddressInput(hop.address)
-    setChain(hop.chain)
-    runTrace(hop)
-  }
-
-  return (
-    <div>
-      <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
-        <button className={`btn btn-sm ${mode === 'wallet' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setMode('wallet')}>By Wallet</button>
-        <button className={`btn btn-sm ${mode === 'token' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setMode('token')}>By Token</button>
-      </div>
-
-      {mode === 'token' ? <TraceByToken /> : <>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-        <select className="ares-input" value={chain} onChange={e => setChain(e.target.value)} style={{ maxWidth: 120 }}>
-          <option value="bitcoin">Bitcoin</option>
-          <option value="solana">Solana</option>
-        </select>
-        <input
-          className="ares-input"
-          placeholder="Wallet address"
-          value={addressInput}
-          onChange={e => setAddressInput(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && submit()}
-          style={{ minWidth: 280, flex: 1 }}
-        />
-        <button className="btn btn-primary btn-sm" onClick={submit} disabled={loading}>{loading ? 'Tracing…' : 'Trace'}</button>
-      </div>
-
-      {path.length > 0 && (
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 16 }}>
-          {path.map((h, i) => (
-            <React.Fragment key={i}>
-              {i > 0 && <span style={{ color: 'var(--muted)' }}>→</span>}
-              <button
-                className="btn btn-ghost btn-sm"
-                onClick={() => jumpTo(i)}
-                style={{ fontFamily: 'monospace', fontSize: 11, opacity: i === path.length - 1 ? 1 : 0.6 }}
-              >
-                {h.address.slice(0, 6)}…{h.address.slice(-4)}
-              </button>
-            </React.Fragment>
-          ))}
-        </div>
-      )}
-
-      {path.length === 0 && (
-        <div style={{ color: 'var(--muted)', padding: 20 }}>
-          Enter a Bitcoin or Solana address to see its balance and recent in/out transactions — click any counterparty address below to pivot the trace onto it.
-        </div>
-      )}
-
-      {data && data.supported === false && (
-        <div style={{ color: 'var(--muted)', padding: 20 }}>{data.reason}</div>
-      )}
-
-      {data && data.supported && (
-        <div>
-          <div className="ares-stat-grid" style={{ marginBottom: 16 }}>
-            <div className="ares-stat-tile"><div className="ares-stat-label">Balance</div><div className="ares-stat-value">{data.balance?.amount} {data.balance?.unit}</div></div>
-            <div className="ares-stat-tile"><div className="ares-stat-label">Tx Count</div><div className="ares-stat-value">{data.tx_count}</div></div>
-            <div className="ares-stat-tile"><div className="ares-stat-label">Source</div><div className="ares-stat-value" style={{ fontSize: 12 }}>{data.source}</div></div>
-          </div>
-          {(data.transactions || []).length === 0 ? (
-            <div style={{ color: 'var(--muted)', padding: 20 }}>{data.reason || 'No recent transactions.'}</div>
-          ) : (
-            <table className="ares-table">
-              <thead><tr><th>Direction</th><th>Amount</th><th>Fee</th><th>Counterparties</th><th>SPL Tokens</th></tr></thead>
-              <tbody>
-                {data.transactions.map((t: any, i: number) => (
-                  <tr key={i}>
-                    <td><Badge status={t.direction === 'in' ? 'live' : 'pending'} /> {t.direction}</td>
-                    <td style={{ fontFamily: 'monospace', fontWeight: 700 }}>{t.amount}</td>
-                    <td style={{ fontFamily: 'monospace', color: 'var(--muted)' }}>{t.fee}</td>
-                    <td>
-                      {(t.counterparties || []).map((c: any, j: number) => (
-                        <button
-                          key={j}
-                          className="btn btn-ghost btn-sm"
-                          onClick={() => pivot(c.address)}
-                          title={`${c.role} · ${c.amount}`}
-                          style={{ fontFamily: 'monospace', fontSize: 10, marginRight: 4, marginBottom: 2 }}
-                        >
-                          {c.address.slice(0, 6)}…{c.address.slice(-4)}
-                        </button>
-                      ))}
-                    </td>
-                    <td>
-                      {(t.token_transfers || []).map((tt: any, k: number) => (
-                        <div key={k} style={{ marginBottom: 4 }}>
-                          <span style={{ fontFamily: 'monospace', fontSize: 10, color: tt.direction === 'in' ? 'var(--green)' : 'var(--danger)' }}>
-                            {tt.direction === 'in' ? '+' : '−'}{tt.amount} <span style={{ color: 'var(--muted)' }}>{tt.mint.slice(0, 4)}…{tt.mint.slice(-4)}</span>
-                          </span>
-                          {(tt.counterparties || []).map((c: any, j: number) => (
-                            <button
-                              key={j}
-                              className="btn btn-ghost btn-sm"
-                              onClick={() => pivot(c.address)}
-                              title={`${c.role} · ${c.amount}`}
-                              style={{ fontFamily: 'monospace', fontSize: 10, marginLeft: 4 }}
-                            >
-                              {c.address.slice(0, 6)}…{c.address.slice(-4)}
-                            </button>
-                          ))}
-                        </div>
-                      ))}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-      )}
-      </>}
-    </div>
-  )
+  return <TracePanel tokenMode={<TraceByToken />} />
 }
 
 // ── Unified ingestion — paste a Twitter/X link or handle, Telegram link or
@@ -930,100 +497,7 @@ function AresTrace() {
 // to an explicit type selector only when detection is genuinely ambiguous
 // (a bare @handle could be Twitter or Telegram). ───────────────────────────
 function AresIngest() {
-  const [input, setInput] = useState('')
-  const [label, setLabel] = useState('')
-  const [ambiguous, setAmbiguous] = useState<string[] | null>(null)
-  const [typeOverride, setTypeOverride] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [result, setResult] = useState<any>(null)
-  const [error, setError] = useState('')
-
-  async function submit(explicitType?: string) {
-    if (!input.trim()) return
-    setLoading(true); setError(''); setResult(null)
-    try {
-      const r = await intelAuthApi('/ingest', {
-        method: 'POST',
-        body: JSON.stringify({ input: input.trim(), label: label.trim(), type: explicitType || typeOverride || undefined }),
-      })
-      const d = await r.json()
-      if (r.ok) {
-        setResult(d); setAmbiguous(null); setTypeOverride('')
-      } else if (d?.detail?.error === 'ambiguous') {
-        setAmbiguous(d.detail.candidates || [])
-      } else {
-        setError(typeof d?.detail === 'string' ? d.detail : (d?.detail?.message || 'Failed to add'))
-      }
-    } catch {
-      setError('Request failed — check connection')
-    }
-    setLoading(false)
-  }
-
-  return (
-    <div style={{ maxWidth: 640 }}>
-      <div style={{ color: 'var(--muted)', marginBottom: 16, fontSize: 13 }}>
-        Paste a Twitter/X username or profile link, a Telegram channel/group username or t.me link,
-        a Solana wallet address, or a Polymarket wallet address — it's auto-detected and added to the
-        right tracker. No SSH or CLI needed.
-      </div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
-        <input
-          className="ares-input"
-          placeholder="Paste a link, handle, or wallet address…"
-          value={input}
-          onChange={e => { setInput(e.target.value); setAmbiguous(null); setResult(null); setError('') }}
-          onKeyDown={e => e.key === 'Enter' && !ambiguous && submit()}
-          style={{ minWidth: 320, flex: 1, fontFamily: 'monospace' }}
-        />
-        <input
-          className="ares-input"
-          placeholder="Label (optional)"
-          value={label}
-          onChange={e => setLabel(e.target.value)}
-          style={{ maxWidth: 180 }}
-        />
-        <button className="btn btn-primary btn-sm" onClick={() => submit()} disabled={loading || !input.trim()}>
-          {loading ? 'Adding…' : 'Add'}
-        </button>
-      </div>
-
-      {ambiguous && (
-        <div style={{ padding: 12, border: '1px solid var(--border)', borderRadius: 8, marginTop: 8 }}>
-          <div style={{ marginBottom: 8, fontSize: 13 }}>Could not tell if this is Twitter or Telegram — pick one:</div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {ambiguous.map(c => (
-              <button key={c} className="btn btn-ghost btn-sm" onClick={() => { setTypeOverride(c); submit(c) }}>
-                {c === 'twitter' ? 'Twitter/X' : 'Telegram'}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {error && (
-        <div style={{ color: 'var(--danger)', marginTop: 12, fontSize: 13 }}>{error}</div>
-      )}
-
-      {result && (
-        <div style={{ padding: 12, border: '1px solid var(--border)', borderRadius: 8, marginTop: 12 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-            <span style={{ color: '#39ff14', fontWeight: 700, fontSize: 13 }}>Added</span>
-            <TypeBadge type={result.type} />
-            <span style={{ color: 'var(--muted)', fontSize: 12 }}>→ {result.tracker}</span>
-          </div>
-          <pre style={{ fontSize: 11, color: 'var(--muted)', whiteSpace: 'pre-wrap', margin: 0 }}>
-            {JSON.stringify(result.result ?? { wallet: result.wallet, output: result.output }, null, 2)}
-          </pre>
-          {result.degen_watchlist_note && (
-            <div style={{ marginTop: 8, fontSize: 11, color: 'var(--warning, #ffaa00)' }}>
-              {result.degen_watchlist_note}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  )
+  return <AddTrackerPanel />
 }
 
 const ADDRESS_TYPE_LABELS: Record<string, string> = {

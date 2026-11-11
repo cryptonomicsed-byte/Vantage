@@ -29,7 +29,8 @@ interface FlowNode {
   address?: string; chain?: string; degen_score?: number
   trade_count?: number; unique_tokens?: number; address_type?: string
   is_migration_anchor?: boolean; balance_usd?: number; dormant_dim?: boolean
-  labels?: string[]; watchlist?: { entity: string; score: number }
+  labels?: string[]
+  watchlist?: { entity: string; score: number; source?: 'runner' | 'candidate' | 'radar'; unconfirmed?: boolean }
   cluster_tags?: string[]; cluster_label?: string | null
   // token-only
   ca?: string; market_cap?: number | null; tier?: string
@@ -526,7 +527,13 @@ export default function MoneyFlowGraph() {
                   </div>
                 )}
                 {selected.watchlist && (
-                  <div style={{ fontSize: 12, color: '#22c55e' }}>On the runner watchlist · score <b>{selected.watchlist.score.toFixed(3)}</b></div>
+                  <div style={{ fontSize: 12, color: selected.watchlist.unconfirmed ? '#f59e0b' : '#22c55e' }}>
+                    {selected.watchlist.source === 'radar'
+                      ? 'Radar wallet (unconfirmed)'
+                      : selected.watchlist.source === 'candidate'
+                        ? 'Watchlist candidate · 1 runner (unconfirmed)'
+                        : 'On the runner watchlist (confirmed) · ' + (selected.watchlist.source || 'runner')}
+                    {' · score '}<b>{selected.watchlist.score.toFixed(3)}</b></div>
                 )}
                 <RankedRoles edges={network?.edges || []} nodeId={selected.id} side="wallet" nodes={network?.nodes || []} />
               </>
