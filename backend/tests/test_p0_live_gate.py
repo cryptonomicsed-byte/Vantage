@@ -25,7 +25,7 @@ from backend.config import settings
 from backend.db import get_db
 
 pytestmark = pytest.mark.asyncio
-ADMIN = {"X-Admin-Key": "a" * 32}
+ADMIN = {"X-Admin-Key": settings.ADMIN_KEY}   # whatever key this run configured (CI sets its own)
 ARM_KEY = "jupiter_signer_trading_enabled"
 
 
