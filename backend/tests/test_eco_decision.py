@@ -109,6 +109,8 @@ def test_odu_cast_attached_for_high_stakes(monkeypatch):
         return _answers("fold-to-private")
 
     monkeypatch.setattr(eco_decision, "decide", fake_decide)
+    # The cast seed is instance config with no built-in default.
+    monkeypatch.setattr(eco_decision, "ODU_AGENT_SEED", "test-instance-seed")
     out = asyncio.run(
         eco_decision.eco_decide(_candidate(stake_usd=5000.0), high_stakes=True)
     )
