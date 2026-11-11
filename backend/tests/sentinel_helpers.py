@@ -2,9 +2,10 @@
 import hashlib
 import secrets
 
+from backend.config import settings
 from backend.db import get_db
 
-ADMIN = {"X-Admin-Key": "a" * 32}
+ADMIN = {"X-Admin-Key": settings.ADMIN_KEY}   # whatever key this run configured (CI sets its own)
 
 
 async def operator(client, role="operator"):
