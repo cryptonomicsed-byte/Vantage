@@ -72,6 +72,27 @@ def fake_engine(monkeypatch):
     return install
 
 
+@pytest.fixture(autouse=True)
+def _no_last_seen_write_on_the_test_loop(monkeypatch):
+    """Cross-loop deadlock, not a relay bug.
+
+    These are async tests on pytest's loop, but they wait on the websocket
+    SYNCHRONOUSLY (ws.receive_text / _receive_within), which blocks that loop's
+    thread. Opening the session over the httpx client queues
+    deps._update_last_seen on that same loop; if the batch writer flushes it
+    there, it takes SQLite's write lock and cannot commit until the loop runs
+    again. Meanwhile the relay, on the TestClient portal's loop, waits on that
+    lock for the busy timeout, so the test sees a "blocked pump" and teardown
+    hangs. The last-seen bookkeeping is not what this module tests, so it is a
+    no-op here.
+    """
+    from backend import deps
+
+    async def _noop(agent_id: int) -> None:
+        return None
+    monkeypatch.setattr(deps, "_update_last_seen", _noop)
+
+
 @pytest.fixture
 def sync_client(app, client, monkeypatch):
     """Starlette's TestClient — httpx's ASGI transport can't do websockets.
@@ -122,17 +143,13 @@ def _completed_calls(session_id):
     return check
 
 
-async def _eventually(check, timeout=95.0, interval=0.02):
+async def _eventually(check, timeout=5.0, interval=0.02):
     """Poll until `check()` returns something truthy, then return it.
 
     The relay finishes its cleanup (flush the open turn, log the tool result,
     stop the session) after the socket closes, so a test that asserts the
     instant the `with` block exits is racing the server. Returns the last value
     on timeout so the caller's own assert produces the failure message.
-
-    The default outlasts get_db's 90s SQLite busy_timeout: under lock pressure
-    from the app lifespan's background loops one relay write can wait that
-    long, and a shorter poll turned that wait into a false failure.
     """
     import time
     deadline = time.monotonic() + timeout
@@ -496,9 +513,7 @@ async def test_audio_keeps_flowing_while_a_tool_call_is_in_flight(
         # detection power doesn't depend on tightness. What a tight bound did
         # measure was SQLite audit-write latency on a loaded CI runner: 10 s
         # failed intermittently under the full 2000-test suite.
-        # 100 s: past get_db's 90 s SQLite busy_timeout, so a write queued behind
-        # a background loop's transaction is not reported as a blocked pump.
-        bound = float(os.environ.get("VOICE_RELAY_TEST_BOUND", "100"))
+        bound = float(os.environ.get("VOICE_RELAY_TEST_BOUND", "45"))
         first = json.loads(_receive_within(ws, bound))
         second = json.loads(_receive_within(ws, bound))
         assert {first["type"], second["type"]} == {"tool_call", "audio"}
