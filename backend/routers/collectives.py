@@ -164,27 +164,12 @@ async def add_member(collective_id: int, data: CollectiveMember, agent: dict = D
 
 @router.post("/workspaces")
 async def create_workspace(data: WorkspaceCreate, agent: dict = Depends(get_agent)):
-    # Create Gitea repo if name provided
-    gitea_url = ""
-    repo_name = data.gitea_repo or data.name.replace(" ", "-").lower()
-    if repo_name:
-        # Direct URL (works even if API call fails)
-        gitea_url = f"http://127.0.0.1:3001/ares-bot/{repo_name}.git"
-        # Actually create the repo via Gitea API (background, fail-open)
-        token_path = "/opt/ares/.gitea_token"
-        if os.path.exists(token_path):
-            try:
-                import urllib.request as _urlreq
-                token = open(token_path).read().strip()
-                import asyncio as _asyncio
-                await _asyncio.to_thread(lambda: _urlreq.urlopen(_urlreq.Request(
-                    "http://127.0.0.1:3001/api/v1/user/repos",
-                    data=json.dumps({"name": repo_name, "description": data.description, "auto_init": True}).encode(),
-                    headers={"Authorization": f"token {token}", "Content-Type": "application/json"},
-                    method="POST"
-                )))
-            except Exception:
-                pass
+    # Vantage never creates repositories (Gitea is a read-only mirror, GitHub
+    # the source of truth, and agents never create repos directly). A
+    # workspace may record an EXISTING repository URL its members push to.
+    gitea_url = (data.gitea_repo or "").strip()
+    if gitea_url and not gitea_url.startswith(("https://", "ssh://", "git@")):
+        raise HTTPException(422, "gitea_repo must be the URL of an existing repository (https://, ssh:// or git@)")
 
     async with get_db() as db:
         cur = await db.execute(
@@ -305,26 +290,9 @@ async def delegate_task(data: A2ADelegate, agent: dict = Depends(get_agent)):
         )
         await db.commit()
     
-    # Publish to Vantage feed (non-blocking) -- was shelling out to `curl`
-    # with the API key inlined into argv (visible via /proc/<pid>/cmdline
-    # to any process that can read it). An in-process async client sends
-    # it as a real HTTP header instead, which is the only place an API key
-    # should ever be visible.
-    key = open("/opt/ares/.vantage_key").read().strip() if os.path.exists("/opt/ares/.vantage_key") else ""
-    if key:
-        async def _pub():
-            try:
-                async with httpx.AsyncClient(timeout=5) as client:
-                    await client.post(
-                        "http://127.0.0.1:8001/api/agents/posts/text",
-                        headers={"X-Agent-Key": key, "Content-Type": "application/json"},
-                        json={"title": f"📤 A2A: {agent['name']} → {data.target_agent}",
-                              "content": f"**Task:** {data.task}", "tags": ["a2a", "delegation"]},
-                    )
-            except Exception:
-                pass
-        asyncio.create_task(_pub())
-    
+    # No feed post here: it used a shared on-box key, so the post appeared to
+    # come from whichever agent owns that key. The delegation is recorded
+    # above against the delegating agent; the target sees it in its tasks.
     return {"status": "delegated", "from": agent["name"], "to": data.target_agent, "task": data.task[:80]}
 
 # ─── Reputation ─────────────────────────────────────────────
@@ -346,83 +314,10 @@ async def get_reputation(agent: dict = Depends(get_agent)):
 
 @router.post("/workspaces/{workspace_id}/tasks/{task_id}/implement")
 async def implement_task(workspace_id: int, task_id: int, agent: dict = Depends(get_agent)):
-    """Task implementation — triggers OpenCode to write code for a task.
-    Calls the OpenCode serve API (port 4096) to generate code.
-    The code is committed to the workspace's Gitea repo.
-    """
-    async with get_db() as db:
-        db.row_factory = aiosqlite.Row
-        
-        # Get workspace
-        ws = await (await db.execute(
-            "SELECT * FROM collective_workspaces WHERE id=?", (workspace_id,)
-        )).fetchone()
-        if not ws:
-            raise HTTPException(404, "Workspace not found")
-        ws = dict(ws)
-        
-        # Get task
-        task = await (await db.execute(
-            "SELECT * FROM collective_tasks WHERE id=? AND workspace_id=?", (task_id, workspace_id)
-        )).fetchone()
-        if not task:
-            raise HTTPException(404, "Task not found")
-        task = dict(task)
-        
-        # Get collective
-        coll = await (await db.execute(
-            "SELECT * FROM agent_collectives WHERE id=?", (ws["collective_id"],)
-        )).fetchone()
-        
-        if not ws.get("gitea_repo"):
-            raise HTTPException(400, "No Gitea repo configured for this workspace")
-        
-        # Create implementation branch
-        branch = f"task-{task_id}-{task['title'].replace(' ', '-')[:30].lower()}"
-        
-        # Call OpenCode to implement the task
-        try:
-            import asyncio as _asyncio
-            import subprocess as _sp
-            
-            opm = "/root/.opencode/bin/opencode"
-            repo_name = ws["gitea_repo"].split("/")[-1].replace(".git", "")
-            short_path = f"/opt/ares/agent-workspace/{repo_name}"
-            
-            # Clone if needed
-            if not os.path.exists(short_path):
-                await _asyncio.to_thread(lambda: _sp.run(
-                    ["git", "clone", ws["gitea_repo"], short_path],
-                    capture_output=True, timeout=30
-                ))
-            
-            # Run OpenCode with the task
-            prompt = f"Implement task: {task['title']}. Description: {task.get('description', 'No description')}. Write clean, tested code. Commit to branch {branch}."
-            
-            result = await _asyncio.to_thread(lambda: _sp.run(
-                [opm, "-c", short_path, "-q", prompt],
-                capture_output=True, text=True, timeout=300
-            ))
-            
-            # Update task status
-            await db.execute(
-                "UPDATE collective_tasks SET status='in_progress', assigned_to=? WHERE id=?",
-                (agent["id"], task_id)
-                
-)
-            await db.commit()
-            
-
-            return {
-                "status": "implementation_started",
-                "task_id": task_id,
-                "workspace_id": workspace_id,
-                "branch": branch,
-                "repo": ws["gitea_repo"],
-                "note": "OpenCode is working on this task. Code will be committed to the branch."
-            }
-        except Exception as e:
-            raise HTTPException(500, f"OpenCode execution failed: {e}")
+    """Retired. It ran a coding tool as the host user on any workspace for any
+    agent. Implementation happens in the agent's own sandboxed worktree
+    (POST /api/guilds/{slug}/work/vtask/{id}/worktree) and its own pushes."""
+    raise HTTPException(410, "Retired: use the sandboxed task worktree and push with your own credentials")
 
 
 # Registered after all static single-segment GET routes (/skills, /reputation) so

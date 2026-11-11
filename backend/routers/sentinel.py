@@ -13,7 +13,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from ..deps import get_admin
+from ..deps import get_admin_bootstrap as get_admin
 from ..sentinel import operators, signoffs
 
 # Tagged "admin" so no agent tool surface (MCP, voice) ever exposes them:
@@ -70,3 +70,49 @@ async def approve(sid: str, data: Decision = Decision(), op: dict = Depends(oper
 @router.post("/api/sentinel/signoffs/{sid}/deny")
 async def deny(sid: str, data: Decision = Decision(), op: dict = Depends(operators.require_operator)):
     return await signoffs.decide(sid=sid, approver=op, approve=False, note=data.note)
+
+
+# ── federation admission ─────────────────────────────────────────────────────
+
+@router.get("/api/sentinel/federation/peers")
+async def list_peers(admitted: Optional[bool] = None, op: dict = Depends(operators.require_operator)):
+    import aiosqlite
+    from ..db import get_db
+    q = ("SELECT id, url, name, status, nostr_pubkey, discovered_via, COALESCE(admitted,0) AS admitted, "
+         "admitted_by, admitted_at, COALESCE(flagged,0) AS flagged FROM federation_peers")
+    args: tuple = ()
+    if admitted is not None:
+        q += " WHERE COALESCE(admitted,0)=?"
+        args = (1 if admitted else 0,)
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(q + " ORDER BY id", args)).fetchall()
+    return {"peers": [dict(r) for r in rows]}
+
+
+async def _set_admission(peer_id: int, admit: bool, op: dict) -> dict:
+    from ..db import get_db
+    if admit and op["operator_role"] not in operators.APPROVER_ROLES:
+        raise HTTPException(403, "Admitting a peer needs an owner or security operator")
+    async with get_db() as db:
+        row = await (await db.execute("SELECT nostr_pubkey FROM federation_peers WHERE id=?", (peer_id,))).fetchone()
+        if not row:
+            raise HTTPException(404, "No such peer")
+        if admit and not row[0]:
+            raise HTTPException(422, "Peer has no pinned Nostr key yet; it cannot be authenticated")
+        await db.execute(
+            "UPDATE federation_peers SET admitted=?, admitted_by=?, admitted_at=datetime('now') WHERE id=?",
+            (1 if admit else 0, f"operator:{op['id']}:{op['operator_role']}", peer_id))
+        await db.commit()
+    return {"peer_id": peer_id, "admitted": admit}
+
+
+@router.post("/api/sentinel/federation/peers/{peer_id}/admit")
+async def admit_peer(peer_id: int, op: dict = Depends(operators.require_operator)):
+    return await _set_admission(peer_id, True, op)
+
+
+@router.post("/api/sentinel/federation/peers/{peer_id}/revoke")
+async def revoke_peer(peer_id: int, op: dict = Depends(operators.require_operator)):
+    """Revoking is immediate for any operator: a brake never waits."""
+    return await _set_admission(peer_id, False, op)

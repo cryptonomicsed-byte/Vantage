@@ -574,6 +574,11 @@ async def init_agents_db() -> None:
             ("api_base",           "TEXT DEFAULT NULL"),
             ("relay_ws_url",       "TEXT DEFAULT NULL"),
             ("capabilities",       "TEXT DEFAULT NULL"),
+            # Sentinel admission. Reachability (`status`) is not consent:
+            # only admitted peers are polled by gossip or may read us.
+            ("admitted",           "INTEGER DEFAULT 0"),
+            ("admitted_by",        "TEXT DEFAULT NULL"),
+            ("admitted_at",        "TEXT DEFAULT NULL"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE federation_peers ADD COLUMN {col} {ddl}")
@@ -853,6 +858,18 @@ CREATE TABLE IF NOT EXISTS external_iranti_memories (
                 FOREIGN KEY (founder_id) REFERENCES agents(id)
             )
         """)
+        # Guild API keys are stored as sha256 only. Hash any row still in
+        # plaintext (raw keys start with "vantage_guild_"); idempotent.
+        try:
+            import hashlib as _hl
+            async with db.execute("SELECT id, guild_api_key FROM guilds WHERE guild_api_key LIKE 'vantage_guild_%'") as _c:
+                _plain = await _c.fetchall()
+            for _gid, _raw in _plain:
+                await db.execute("UPDATE guilds SET guild_api_key=? WHERE id=?",
+                                 (_hl.sha256(_raw.encode()).hexdigest(), _gid))
+        except Exception as _e:
+            logger.warning("guild key hashing migration skipped: %s", _e)
+
         await db.execute("CREATE INDEX IF NOT EXISTS idx_guilds_slug ON guilds(slug)")
         for col, ddl in [
             # Section 5.1: the real buzz community tenant this guild

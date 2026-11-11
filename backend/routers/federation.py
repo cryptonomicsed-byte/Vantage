@@ -218,7 +218,7 @@ async def discover_federation_agents(
         async with get_db() as db:
             db.row_factory = aiosqlite.Row
             peer_rows = await (await db.execute(
-                "SELECT url FROM federation_peers WHERE status = 'active' AND flagged = 0 LIMIT 20"
+                "SELECT url FROM federation_peers WHERE status = 'active' AND flagged = 0 AND COALESCE(admitted,0) = 1 LIMIT 20"
             )).fetchall()
         for pr in peer_rows:
             url = (pr["url"] or "").strip().rstrip("/")

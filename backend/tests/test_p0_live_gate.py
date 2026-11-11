@@ -302,13 +302,14 @@ async def test_demo_refuses_sui_settlement(client, registered_agent, monkeypatch
     assert r.status_code == 423
 
 
-async def test_daemon_denylist_refuses_start_before_systemctl(client, monkeypatch):
+async def test_daemon_denylist_refuses_start_before_systemctl(client, ops, monkeypatch):
     from backend.routers import daemons as d
 
     async def never(*a, **k):
         raise AssertionError("systemctl must not run for a deny-listed unit")
     monkeypatch.setattr(d, "_systemctl", never)
+    monkeypatch.setattr(settings, "DAEMON_UNIT_PREFIX", "ares-", raising=False)
     monkeypatch.setattr(settings, "DAEMON_DENYLIST", "ares-freqtrade, ares-wallet-learner", raising=False)
     for verb in ("start", "restart"):
-        r = await client.post(f"/api/admin/daemons/ares-wallet-learner.service/{verb}", headers=ADMIN)
+        r = await client.post(f"/api/admin/daemons/ares-wallet-learner.service/{verb}", headers=ops["owner"]["h"])
         assert r.status_code == 403, r.text

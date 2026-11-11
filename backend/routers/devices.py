@@ -125,7 +125,10 @@ async def register_device(
     caps_json = json.dumps(body.capabilities)
     endpoint_enc: Optional[str] = None
     if body.endpoint_url:
-        endpoint_enc = _encrypt_endpoint(body.endpoint_url)
+        try:
+            endpoint_enc = _encrypt_endpoint(body.endpoint_url)
+        except RuntimeError as exc:  # no master key: fail closed, never store plaintext
+            raise HTTPException(503, str(exc))
 
     async with get_db() as db:
         cur = await db.execute(

@@ -61,7 +61,19 @@ async def _apply_daemon_setting(p: dict, actor: str) -> dict:
     return await live_controls.set_daemon_setting(key=p["key"], value=p["value"], actor=actor, note=p.get("note", ""))
 
 
+async def _apply_daemon_start(p: dict, actor: str) -> dict:
+    from ..routers.daemons import apply_action
+    return await apply_action(p["unit"], "start", actor)
+
+
+async def _apply_daemon_restart(p: dict, actor: str) -> dict:
+    from ..routers.daemons import apply_action
+    return await apply_action(p["unit"], "restart", actor)
+
+
 KINDS: dict[str, tuple[str, Callable[[dict, str], Awaitable[dict]]]] = {
+    "daemon.start": ("high", _apply_daemon_start),
+    "daemon.restart": ("high", _apply_daemon_restart),
     "trading.live_mode_on": ("critical", _apply_live_mode_on),
     "trading.daemon_arm": ("critical", _apply_daemon_setting),
     "trading.daemon_wallet": ("critical", _apply_daemon_setting),
@@ -151,11 +163,12 @@ async def decide(*, sid: str, approver: dict, approve: bool, note: str = "") -> 
         return await _set(sid, status="denied", decided_at=_now(), result="denied", **stamp)
 
     risk, applier = KINDS[card["kind"]]
+    resource = "instance.daemons" if card["kind"].startswith("daemon.") else "instance.trading"
     verdict = await esu_gate.evaluate(esu_gate.Operation(
         tool=card["kind"], params=json.dumps(card["payload"], sort_keys=True),
         intent=card["summary"] or card["kind"], agent_id=None,
-        action_intent=esu_gate.ActionIntent(purpose=card["kind"], resource="instance.trading",
-                                            mutations=[card["kind"]], expected_effects=["live execution permitted"]),
+        action_intent=esu_gate.ActionIntent(purpose=card["kind"], resource=resource,
+                                            mutations=[card["kind"]], expected_effects=[card["summary"] or card["kind"]]),
     ))
     esu_note = ""
     if not verdict.is_approved() and trading_mode.demo_mode():

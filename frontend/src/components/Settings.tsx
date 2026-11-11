@@ -8,6 +8,7 @@ import {
 import MindTab from './MindTab'
 import ApiDocs from './ApiDocs'
 import LiveKillSwitchCard from './LiveKillSwitchCard'
+import { getHumanSession } from '../utils/humanSession'
 
 const TABS = ['Network', 'Mind & LLM', 'Integrations', 'Security', 'Cinema & Live TV', 'Developer', 'API Docs'] as const
 type Tab = typeof TABS[number]
@@ -557,7 +558,7 @@ export default function Settings() {
   const loadPeers = useCallback(async () => {
     setLoadingPeers(true)
     try {
-      const r = await fetch('/api/agents/federation/peers')
+      const r = await fetch('/api/agents/federation/peers', { headers: apiKey ? { 'X-Agent-Key': apiKey } : {} })
       if (r.ok) {
         const d = await r.json()
         setPeers(d.peers || [])
@@ -579,9 +580,10 @@ export default function Settings() {
     try {
       const r = await fetch('/api/agents/federation/peers', {
         method: 'POST',
+        // Adding (admitting) a peer is a Sentinel operator action.
         headers: {
           'Content-Type': 'application/json',
-          ...(apiKey ? { 'X-Agent-Key': apiKey } : {}),
+          ...(getHumanSession() ? { 'X-Human-Session': getHumanSession() as string } : {}),
         },
         body: JSON.stringify({ url: addUrl.trim(), name: addName.trim() }),
       })
