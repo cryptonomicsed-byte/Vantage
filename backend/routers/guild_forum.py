@@ -17,7 +17,8 @@ import re
 from typing import Optional
 
 import aiosqlite
-from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -272,21 +273,25 @@ async def list_channels(slug: str, principal: Optional[dict] = Depends(optional_
     }
 
 
+class CreateChannelBody(BaseModel):
+    channel_slug: str = Field(..., min_length=2, max_length=40)
+    name: str = Field(..., min_length=1, max_length=80)
+    topic: str = Field("", max_length=300)
+    parent: str = Field("")
+    channel_kind: str = Field("forum")
+    flow_mode: str = Field("open")
+    visibility: str = Field("members")
+    collab_type: str = Field("general")
+    mcp_provider: str = Field("")
+
+
 @router.post("/{slug}/channels")
 @_limiter.limit("10/minute")
 async def create_channel(
+    body: CreateChannelBody,
     request: Request,
     slug: str,
-    channel_slug: str = Form(..., min_length=2, max_length=40),
-    name: str = Form(..., min_length=1, max_length=80),
-    topic: str = Form("", max_length=300),
-    parent: str = Form(""),
-    channel_kind: str = Form("forum"),
-    flow_mode: str = Form("open"),
-    visibility: str = Form("members"),
-    collab_type: str = Form("general"),
-    mcp_provider: str = Form(""),
-    principal: dict = Depends(current_principal),
+    principal: dict = Depends(current_principal)
 ):
     """Create a channel or sub-guild.
 
@@ -294,6 +299,15 @@ async def create_channel(
     channel_kind='workspace', which is what makes "workspace connects into
     the guild" true rather than aspirational.
     """
+    channel_slug = body.channel_slug
+    name = body.name
+    topic = body.topic
+    parent = body.parent
+    channel_kind = body.channel_kind
+    flow_mode = body.flow_mode
+    visibility = body.visibility
+    collab_type = body.collab_type
+    mcp_provider = body.mcp_provider
     guild = await _guild(slug)
     membership = await _require_member(guild, principal)
     if membership["role"] not in _CHANNEL_ADMIN_ROLES:
@@ -478,18 +492,109 @@ async def read_thread(
     }
 
 
+#: `@agent /task cut the trailer`, `@agent /review vtask:…`, `@agent /handoff vtask:…`
+_INTENT_RE = re.compile(r"/(task|review|handoff)\b\s*(.*)$", re.IGNORECASE | re.DOTALL)
+
+
+async def _apply_mention_intent(
+    *, guild: dict, channel: dict, content: str, principal: dict, mentioned: list[dict],
+) -> Optional[dict]:
+    """A mention plus an intent starts work, not only a reply (G5).
+
+    /task <title>      creates a task in the channel's space (or on the guild
+                       board for a plain channel), notifies the mentioned
+                       agents, and announces it with a work_ref.
+    /review <ref>      asks the mentioned agents to review that work.
+    /handoff <ref>     releases the caller's claim on that work and asks the
+                       mentioned agents to take it.
+    Never raises: a malformed intent is a message that carried no intent.
+    """
+    if not mentioned or "@" not in (content or ""):
+        return None
+    m = _INTENT_RE.search(content or "")
+    if not m:
+        return None
+    intent, arg = m.group(1).lower(), (m.group(2) or "").strip()
+    actor_id = principal.get("agent_id")
+    actor_name = principal.get("display_name") or ""
+    targets = [p for p in mentioned if not p.get("_everyone") and p.get("agent_id")]
+    import time as _time
+    import uuid as _uuid
+    from .. import task_events
+    now = int(_time.time())
+
+    if intent == "task":
+        title = arg[:200] or "untitled task"
+        space_id = channel.get("space_id")
+        async with get_db() as db:
+            if space_id:
+                task_id = str(_uuid.uuid4())
+                status = "brief_submitted" if channel.get("collab_type") == "content" else "proposed"
+                await db.execute(
+                    "INSERT INTO vantage_tasks (id, workspace_id, guild_slug, title, description, status, priority, "
+                    "created_by_agent_id, kind_tag, created_ts, updated_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (task_id, space_id, guild["slug"], title, f"from chat by {actor_name}", status, 50,
+                     actor_id, "chat", now, now))
+                kind = "vtask"
+            else:
+                task_id = str(_uuid.uuid4())
+                await db.execute(
+                    "INSERT INTO guild_tasks (id, guild_id, guild_slug, title, description, created_by_id, created_by_name, kind_tag) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (task_id, guild["id"], guild["slug"], title, f"from chat by {actor_name}", actor_id or 0, actor_name, "chat"))
+                kind = "gtask"
+            for t in targets:
+                await db.execute(
+                    "INSERT INTO notifications (agent_id, type, actor_name, subject, subject_id) VALUES (?,?,?,?,?)",
+                    (t["agent_id"], "task_assigned", actor_name, f"{kind}:{task_id} {title}"[:200], None))
+            await db.commit()
+        await task_events.emit(guild_slug=guild["slug"], channel_slug=channel["slug"], event="created",
+                               kind=kind, ref_id=task_id, actor={"name": actor_name}, title=title,
+                               note="for " + ", ".join(t["display_name"] for t in targets) if targets else "")
+        return {"intent": "task", "work_ref": f"{kind}:{task_id}", "assigned_to": [t["display_name"] for t in targets]}
+
+    parsed = work_refs.parse_work_ref(arg.split()[0]) if arg else None
+    if parsed is None:
+        return {"intent": intent, "error": "needs a work_ref like vtask:<id>"}
+    resolved = await work_refs.resolve(f"{parsed[0]}:{parsed[1]}")
+    if resolved is None:
+        return {"intent": intent, "error": f"{parsed[0]}:{parsed[1]} does not resolve"}
+    kind, ref_id = parsed
+    async with get_db() as db:
+        if intent == "handoff" and kind == "vtask":
+            await db.execute(
+                "UPDATE vantage_tasks SET status=CASE WHEN status='in_production' THEN 'brief_submitted' ELSE 'proposed' END, "
+                "claimed_by_agent_id=NULL, claim_expires_at=NULL, updated_ts=? "
+                "WHERE id=? AND claimed_by_agent_id=? AND status IN ('claimed','in_production')",
+                (now, ref_id, actor_id))
+        for t in targets:
+            await db.execute(
+                "INSERT INTO notifications (agent_id, type, actor_name, subject, subject_id) VALUES (?,?,?,?,?)",
+                (t["agent_id"], f"task_{intent}", actor_name, f"{kind}:{ref_id} {resolved.title}"[:200], None))
+        await db.commit()
+    await task_events.emit(guild_slug=guild["slug"], channel_slug=channel["slug"],
+                           event="released" if intent == "handoff" else "review-requested",
+                           kind=kind, ref_id=ref_id, actor={"name": actor_name}, title=resolved.title,
+                           note="to " + ", ".join(t["display_name"] for t in targets) if targets else "")
+    return {"intent": intent, "work_ref": f"{kind}:{ref_id}", "to": [t["display_name"] for t in targets]}
+
+
+class PostChannelMessageBody(BaseModel):
+    content: str = Field(..., min_length=1, max_length=coord.MAX_CONTENT_CHARS)
+    msg_type: str = Field("say")
+    reply_to: str = Field("")
+    addressed_to: str = Field("")
+    work_ref: str = Field("")
+
+
 @router.post("/{slug}/channels/{channel_slug}/messages")
 @_limiter.limit("30/minute")
 async def post_channel_message(
+    body: PostChannelMessageBody,
     request: Request,
     slug: str,
     channel_slug: str,
-    content: str = Form(..., min_length=1, max_length=coord.MAX_CONTENT_CHARS),
-    msg_type: str = Form("say"),
-    reply_to: str = Form(""),
-    addressed_to: str = Form(""),
-    work_ref: str = Form(""),
-    principal: dict = Depends(current_principal),
+    principal: dict = Depends(current_principal)
 ):
     """Post to a channel. Signs as the caller, publishes to the relay, and
     only then indexes.
@@ -498,6 +603,11 @@ async def post_channel_message(
     publishes straight to the relay, where the indexer picks the message up
     identically. This exists for principals whose keys Vantage derives.
     """
+    content = body.content
+    msg_type = body.msg_type
+    reply_to = body.reply_to
+    addressed_to = body.addressed_to
+    work_ref = body.work_ref
     guild = await _guild(slug)
     channel = await _channel_or_404(guild, channel_slug)
     membership = await _require_member(guild, principal)
@@ -615,14 +725,17 @@ async def post_channel_message(
 
             if _slash_result is not None:
                 # Post the reply as a system message in the channel index
+                # The reply goes into the room as a system message, relay
+                # first like every other message. (This used to call
+                # coord.index_system_message, which does not exist; the
+                # AttributeError was swallowed and nothing was ever posted.)
                 try:
-                    await coord.index_system_message(
-                        channel_id=channel["id"],
-                        content=_slash_result.get("reply", ""),
-                        author_label=f"system:{_slash_cmd}",
+                    await coord.publish_system_message(
+                        channel=channel, guild_slug=slug,
+                        text=f"[{_slash_cmd}] {_slash_result.get('reply', '')}",
                     )
-                except Exception:
-                    pass  # fail-open: reply is still returned
+                except Exception as exc:
+                    logger.info("slash reply not posted to the room: %s", exc)
                 return {
                     "guild": slug, "channel": channel_slug,
                     "slash": True,
@@ -700,6 +813,13 @@ async def post_channel_message(
     # @everyone notifies the room; it must not ask every agent to answer, or a
     # single broadcast becomes one model call per member.
     dispatchable = [p for p in mentioned if not p.get("_everyone")]
+    intent = None
+    try:
+        intent = await _apply_mention_intent(
+            guild=guild, channel=channel, content=content, principal=principal, mentioned=mentioned,
+        )
+    except Exception as exc:
+        logger.warning("mention intent failed (message was published): %s", exc)
     replies = await guild_chat.dispatch_to_mentioned(
         channel=channel, guild_slug=slug, content=content,
         author_principal=principal, mentioned=dispatchable,
@@ -726,6 +846,7 @@ async def post_channel_message(
         "mentioned": [p["display_name"] for p in mentioned],
         "replies": replies,
         "work_ref_link": link,
+        "intent": intent,
     }
 
 
@@ -806,15 +927,19 @@ async def work_reference_kinds(principal: dict = Depends(current_principal)):
 # is enrolled; its private key never reaches Vantage. See
 # backend/coordination_join.py for the verification rules.
 
+class JoinRequestBody(BaseModel):
+    pubkey: str = Field(..., min_length=64, max_length=64)
+    display_name: str = Field(..., min_length=1, max_length=80)
+    framework: str = Field("", max_length=40)
+    capabilities: str = Field("[]")
+
+
 @router.post("/{slug}/join-request")
 @_limiter.limit("10/minute")
 async def join_request(
+    body: JoinRequestBody,
     request: Request,
-    slug: str,
-    pubkey: str = Form(..., min_length=64, max_length=64),
-    display_name: str = Form(..., min_length=1, max_length=80),
-    framework: str = Form("", max_length=40),
-    capabilities: str = Form("[]"),
+    slug: str
 ):
     """Step 1: ask to join, get a challenge to sign.
 
@@ -822,6 +947,10 @@ async def join_request(
     Vantage credential yet, only a keypair. The challenge is what turns that
     keypair into a proof.
     """
+    pubkey = body.pubkey
+    display_name = body.display_name
+    framework = body.framework
+    capabilities = body.capabilities
     guild = await _guild(slug)
     try:
         caps = _json.loads(capabilities) if capabilities else []
@@ -981,14 +1110,19 @@ async def chat_commands(request: Request, principal: dict = Depends(current_prin
 
 # ── workspace channels: binding to a code repository ─────────────────────────
 
+class BindRepoBody(BaseModel):
+    repo_owner: str = Field(..., max_length=100)
+    repo_name: str = Field(..., max_length=100)
+    repo_branch: str = Field("main", max_length=100)
+    provider: str = Field("github", max_length=20)
+
+
 @router.post("/{slug}/channels/{channel_slug}/repo")
 async def bind_repo(
+    body: BindRepoBody,
     slug: str,
     channel_slug: str,
-    repo_owner: str = Form(..., max_length=100),
-    repo_name: str = Form(..., max_length=100),
-    repo_branch: str = Form("main", max_length=100),
-    principal: dict = Depends(current_principal),
+    principal: dict = Depends(current_principal)
 ):
     """Bind a workspace channel to a Gitea repository.
 
@@ -1000,6 +1134,9 @@ async def bind_repo(
     Only workspace channels can be bound — a forum channel with a repo
     attached would imply an execution surface it does not have.
     """
+    repo_owner = body.repo_owner
+    repo_name = body.repo_name
+    repo_branch = body.repo_branch
     guild = await _guild(slug)
     membership = await _require_member(guild, principal)
     channel = await _channel_or_404(guild, channel_slug)
@@ -1016,20 +1153,43 @@ async def bind_repo(
             "channel_kind=workspace, or convert this channel first.",
         )
 
+    # G6: a binding is a verified fact, not three strings. The provider must
+    # confirm the repo exists and that the deployment's credential can see
+    # it; an unknown repo is 422 and an unreachable host is 502.
+    from .. import repo_providers
+    provider_name = (body.provider or "github").lower()
+    if provider_name not in repo_providers.PROVIDERS:
+        raise HTTPException(422, f"provider must be one of {', '.join(repo_providers.PROVIDERS)}")
+    try:
+        provider = repo_providers.get_provider(provider_name)
+        repo = await provider.get_repo(repo_owner.strip(), repo_name.strip())
+    except repo_providers.ProviderError as exc:
+        raise HTTPException(502, f"could not verify {repo_owner}/{repo_name} on {provider_name}: {exc}")
+    if repo is None:
+        raise HTTPException(422, f"{repo_owner}/{repo_name} does not exist on {provider_name}, or the "
+                                 "deployment credential cannot see it")
+    branch = (repo_branch or repo.default_branch or "main").strip()
+
     async with get_db() as db:
         await db.execute(
-            "UPDATE guild_channels SET repo_owner=?, repo_name=?, repo_branch=? WHERE id=?",
-            (repo_owner.strip(), repo_name.strip(), (repo_branch or "main").strip(), channel["id"]),
+            """UPDATE guild_channels
+                  SET repo_owner=?, repo_name=?, repo_branch=?, repo_provider=?, repo_default_branch=?,
+                      repo_html_url=?, repo_verified_at=datetime('now'), repo_credential_ref=?
+                WHERE id=?""",
+            (repo.owner, repo.name, branch, provider_name, repo.default_branch, repo.html_url,
+             f"deployment:{provider_name}", channel["id"]),
         )
         await db.commit()
 
     await _broadcast_gossip(f"guild.{slug}", {
         "type": "repo_bound", "channel": channel_slug,
-        "repo": f"{repo_owner}/{repo_name}", "branch": repo_branch,
+        "repo": repo.full_name, "branch": branch, "provider": provider_name,
     })
     return {
         "guild": slug, "channel": channel_slug,
-        "repo": f"{repo_owner}/{repo_name}", "branch": repo_branch,
+        "repo": repo.full_name, "branch": branch, "provider": provider_name,
+        "html_url": repo.html_url, "default_branch": repo.default_branch,
+        "private": repo.private, "verified": True,
         "sandbox_bound": bool(channel["sandbox_bound"]),
     }
 
@@ -1044,7 +1204,10 @@ async def unbind_repo(slug: str, channel_slug: str, principal: dict = Depends(cu
 
     async with get_db() as db:
         await db.execute(
-            "UPDATE guild_channels SET repo_owner=NULL, repo_name=NULL WHERE id=?", (channel["id"],)
+            """UPDATE guild_channels SET repo_owner=NULL, repo_name=NULL, repo_branch='main',
+                      repo_provider=NULL, repo_default_branch=NULL, repo_html_url=NULL,
+                      repo_verified_at=NULL, repo_credential_ref=NULL, repo_webhook_id=NULL
+                WHERE id=?""", (channel["id"],)
         )
         await db.commit()
     return {"guild": slug, "channel": channel_slug, "repo": None}
@@ -1085,14 +1248,18 @@ async def workspace_roster(
     }
 
 
+class SetWorkspaceRoleBody(BaseModel):
+    principal_name: str = Field(..., max_length=120)
+    role: str = Field("")
+    template: str = Field("")
+
+
 @router.post("/{slug}/channels/{channel_slug}/roster")
 async def set_workspace_role(
+    body: SetWorkspaceRoleBody,
     slug: str,
     channel_slug: str,
-    principal_name: str = Form(..., max_length=120),
-    role: str = Form(""),
-    template: str = Form(""),
-    principal: dict = Depends(current_principal),
+    principal: dict = Depends(current_principal)
 ):
     """Put a principal on this workspace, by role or by template.
 
@@ -1100,6 +1267,9 @@ async def set_workspace_role(
     because it carries the skills, permitted tools and budget alongside the
     rank, and a bare role carries only the rank.
     """
+    principal_name = body.principal_name
+    role = body.role
+    template = body.template
     guild = await _guild(slug)
     channel = await _channel_or_404(guild, channel_slug)
     membership = await _require_member(guild, principal)
@@ -1176,14 +1346,18 @@ async def guild_role_templates(slug: str, principal: dict = Depends(current_prin
 
 # ── presence as protocol state ───────────────────────────────────────────────
 
+class DeclarePresenceBody(BaseModel):
+    state: str
+    detail: str = Field("", max_length=200)
+    work_ref: str = Field("", max_length=120)
+    channel_slug: str = Field("")
+
+
 @router.put("/{slug}/presence")
 async def declare_presence(
+    body: DeclarePresenceBody,
     slug: str,
-    state: str = Form(...),
-    detail: str = Form("", max_length=200),
-    work_ref: str = Form("", max_length=120),
-    channel_slug: str = Form(""),
-    principal: dict = Depends(current_principal),
+    principal: dict = Depends(current_principal)
 ):
     """Declare what you are doing.
 
@@ -1192,6 +1366,10 @@ async def declare_presence(
     to say it is blocked. Both write the same row and mirror the same NIP-38
     status.
     """
+    state = body.state
+    detail = body.detail
+    work_ref = body.work_ref
+    channel_slug = body.channel_slug
     guild = await _guild(slug)
     await _require_member(guild, principal)
 
@@ -1245,12 +1423,16 @@ async def guild_presence(slug: str, principal: dict = Depends(current_principal)
 # runtime's own signed statement that it really ran, verifiable here without
 # trusting the sender. See backend/receipts.py.
 
+class RegisterReceiptKeyBody(BaseModel):
+    pubkey: str = Field(..., min_length=64, max_length=64)
+    label: str = Field("", max_length=80)
+
+
 @router.post("/{slug}/receipt-keys")
 async def register_receipt_key(
+    body: RegisterReceiptKeyBody,
     slug: str,
-    pubkey: str = Form(..., min_length=64, max_length=64),
-    label: str = Form("", max_length=80),
-    principal: dict = Depends(current_principal),
+    principal: dict = Depends(current_principal)
 ):
     """Pin this principal's Ed25519 receipt-signing key.
 
@@ -1258,6 +1440,8 @@ async def register_receipt_key(
     with Ed25519 and talks to the relay over secp256k1, and neither key can
     be derived from the other.
     """
+    pubkey = body.pubkey
+    label = body.label
     guild = await _guild(slug)
     await _require_member(guild, principal)
     try:

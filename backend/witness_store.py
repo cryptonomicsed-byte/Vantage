@@ -24,6 +24,10 @@ QUORUM = {3: 2, 5: 3}                     # pool_size → votes needed
 REPUTATION_APPROVE = 10   # submitter earns on approval
 REPUTATION_WITNESS = 1    # each witness earns for voting
 
+#: A round that has not reached quorum by then is expired, not left open
+#: forever (the audit found every round since September still open).
+ROUND_TTL_SECONDS = 7 * 24 * 3600
+
 
 async def init_witness_db() -> None:
     async with get_db() as db:
@@ -55,24 +59,73 @@ async def init_witness_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_wa_round ON witness_assignments(round_id);
             CREATE INDEX IF NOT EXISTS idx_wa_witness ON witness_assignments(witness_agent_id, vote);
         """)
+        # G8: scope and expiry. Tolerant ALTERs, same convention as elsewhere.
+        for ddl in (
+            "ALTER TABLE witness_rounds ADD COLUMN guild_slug TEXT DEFAULT NULL",
+            "ALTER TABLE witness_rounds ADD COLUMN expires_at INTEGER DEFAULT NULL",
+        ):
+            try:
+                await db.execute(ddl)
+            except Exception:
+                pass
         await db.commit()
+    await expire_stale_rounds()
 
 
-async def select_witness_pool(submitter_agent_id: int, pool_size: int) -> list[int]:
+async def expire_stale_rounds() -> int:
+    """Close every open round past its expiry. Idempotent; cheap."""
+    async with get_db() as db:
+        try:
+            cur = await db.execute(
+                "UPDATE witness_rounds SET status='expired', closed_at=unixepoch() "
+                "WHERE status='open' AND expires_at IS NOT NULL AND expires_at <= unixepoch()"
+            )
+            await db.commit()
+        except Exception as exc:
+            logger.debug("witness: expiry sweep skipped: %s", exc)
+            return 0
+    n = cur.rowcount or 0
+    if n:
+        logger.info("witness: expired %d stale round(s)", n)
+    return n
+
+
+async def _guild_id_for(guild_slug: str | None) -> int | None:
+    if not guild_slug:
+        return None
+    async with get_db() as db:
+        cur = await db.execute("SELECT id FROM guilds WHERE slug=?", (guild_slug,))
+        row = await cur.fetchone()
+    return row[0] if row else None
+
+
+async def select_witness_pool(submitter_agent_id: int, pool_size: int,
+                              guild_slug: str | None = None) -> list[int]:
     """Pick pool_size agents weighted by tier to serve as witnesses.
 
     Excludes the submitter. Prefers higher-tier agents (weight = tier+1).
-    Falls back to any available agent if not enough tier-weighted candidates.
+    With a guild_slug, only members of that guild are candidates (G8): a
+    guild's work is witnessed by the guild, not by a stranger drawn from the
+    whole platform. Without one, any agent may be drawn, as before.
     """
+    guild_id = await _guild_id_for(guild_slug)
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
-        # Get all agents with tier info, excluding submitter
-        cur = await db.execute("""
-            SELECT a.id, COALESCE(t.tier, 0) as tier
-            FROM agents a
-            LEFT JOIN agent_tiers t ON t.agent_id = a.id
-            WHERE a.id != ?
-        """, (submitter_agent_id,))
+        if guild_id is not None:
+            cur = await db.execute("""
+                SELECT a.id, COALESCE(t.tier, 0) as tier
+                FROM guild_members gm
+                JOIN agents a ON a.id = gm.agent_id
+                LEFT JOIN agent_tiers t ON t.agent_id = a.id
+                WHERE gm.guild_id = ? AND a.id != ?
+            """, (guild_id, submitter_agent_id))
+        else:
+            cur = await db.execute("""
+                SELECT a.id, COALESCE(t.tier, 0) as tier
+                FROM agents a
+                LEFT JOIN agent_tiers t ON t.agent_id = a.id
+                WHERE a.id != ?
+            """, (submitter_agent_id,))
         candidates = [dict(r) for r in await cur.fetchall()]
 
     if not candidates:
@@ -100,6 +153,8 @@ async def open_witness_round(
     pool_size: int | None = None,
     sim_receipt_id: str | None = None,       # P0-9: link to ScarabSwarm sim receipt
     consensus_output_id: str | None = None,  # P0-9: link to Twelve Thrones consensus
+    guild_slug: str | None = None,           # G8: witnesses drawn from this guild
+    ttl_seconds: int = ROUND_TTL_SECONDS,
 ) -> dict:
     """Open a new witness round and assign the witness pool."""
     # Determine pool size from submitter's tier
@@ -127,14 +182,16 @@ async def open_witness_round(
         cur = await db.execute("""
             INSERT INTO witness_rounds
                 (subject_type, subject_id, submitter_agent_id, pool_size, quorum,
-                 artifact_url, description, sim_receipt_id, consensus_output_id)
-            VALUES (?,?,?,?,?,?,?,?,?)
+                 artifact_url, description, sim_receipt_id, consensus_output_id,
+                 guild_slug, expires_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?, unixepoch() + ?)
         """, (subject_type, subject_id, submitter_agent_id, pool_size, q,
-              artifact_url, description, sim_receipt_id, consensus_output_id))
+              artifact_url, description, sim_receipt_id, consensus_output_id,
+              guild_slug, int(ttl_seconds)))
         round_id = cur.lastrowid
         await db.commit()
 
-    witnesses = await select_witness_pool(submitter_agent_id, pool_size)
+    witnesses = await select_witness_pool(submitter_agent_id, pool_size, guild_slug=guild_slug)
     async with get_db() as db:
         for wid in witnesses:
             try:
@@ -144,12 +201,36 @@ async def open_witness_round(
                 )
             except Exception:
                 pass
+        # G8: a witness that is never told cannot vote. One notification row
+        # per assignment; the notifications feed already renders these.
+        for wid in witnesses:
+            try:
+                await db.execute(
+                    "INSERT INTO notifications (agent_id, type, actor_name, subject, subject_id) VALUES (?,?,?,?,?)",
+                    (wid, "witness_assigned", f"agent:{submitter_agent_id}",
+                     f"witness round for {subject_type} {subject_id}", round_id),
+                )
+            except Exception as exc:
+                logger.debug("witness: notification skipped: %s", exc)
         await db.commit()
 
     return {
         "round_id": round_id, "pool_size": pool_size, "quorum": q, "witnesses": witnesses,
+        "guild_slug": guild_slug, "expires_in": int(ttl_seconds),
         "sim_receipt_id": sim_receipt_id, "consensus_output_id": consensus_output_id,
     }
+
+
+async def round_for_subject(subject_type: str, subject_id: int) -> dict | None:
+    """The most recent round on a subject, or None."""
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM witness_rounds WHERE subject_type=? AND subject_id=? ORDER BY id DESC LIMIT 1",
+            (subject_type, subject_id),
+        )
+        row = await cur.fetchone()
+    return dict(row) if row else None
 
 
 async def cast_vote(round_id: int, witness_agent_id: int, vote: str, comment: str = "") -> dict:

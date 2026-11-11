@@ -2,7 +2,8 @@
 import secrets
 
 import aiosqlite
-from fastapi import APIRouter, Depends, Form, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from ..db import get_db
 from ..deps import get_agent
@@ -77,18 +78,24 @@ async def read_memory_key(guild_slug: str, key: str, agent: dict = Depends(get_a
     return dict(row)
 
 
+class WriteMemoryKeyBody(BaseModel):
+    value: str = Field(..., description="Value as any JSON string")
+    visibility: str = Field("agent", description="agent|guild|public")
+
+
 @router.put(
     "/{key}",
     summary="Write guild memory key",
     description="Upsert a memory entry. visibility: agent (default, private), guild (all guild members), public.",
 )
 async def write_memory_key(
+    body: WriteMemoryKeyBody,
     guild_slug: str,
     key: str,
-    value: str = Form(..., description="Value as any JSON string"),
-    visibility: str = Form("agent", description="agent|guild|public"),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
+    value = body.value
+    visibility = body.visibility
     if visibility not in _VALID_VISIBILITY:
         raise HTTPException(422, f"visibility must be one of: {', '.join(_VALID_VISIBILITY)}")
     guild = await _get_guild(guild_slug)

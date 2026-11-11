@@ -103,7 +103,7 @@ async def get_guild_nostr_messages(
 )
 async def get_guild_nostr_info(guild_slug: str):
     await _get_guild(guild_slug)  # 404 if not found
-    relay = settings.NIPAE_RELAY
+    from ..nip29_bridge import _RELAY as relay  # the relay the bridge really publishes to
     group_id = await get_nip29_group_id(guild_slug)
     naddr = _naddr_for_group(relay, guild_slug)
     return {

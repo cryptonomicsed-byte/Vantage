@@ -9,6 +9,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from ..db import get_db
 from ..deps import get_agent
+from ..guild_access import require_member
+from ..space_tasks import DEFAULT_LEASE_MINUTES, claim_sql, submit_sql
 
 router = APIRouter(prefix="/api/mcp", tags=["mcp"])
 
@@ -130,6 +132,9 @@ async def call_tool(request: Request, agent: dict = Depends(get_agent)):
         return _ok([dict(r) for r in rows])
 
     elif tool_name == "vantage_claim_task":
+        # G0: a tool call is bound by the same rules as the space routes.
+        # The caller must be a member of the guild the task belongs to, and
+        # the claim is a lease taken in one atomic UPDATE (backend/space_tasks).
         task_id = args.get("task_id", "")
         now = int(time.time())
         async with get_db() as db:
@@ -139,14 +144,17 @@ async def call_tool(request: Request, agent: dict = Depends(get_agent)):
         if not task_row:
             raise HTTPException(404, "Task not found")
         task = dict(task_row)
-        if task["status"] != "proposed":
-            raise HTTPException(409, "Task is not in 'proposed' state")
+        await require_member(task["guild_slug"], agent)
         claim_id = str(uuid.uuid4())
         async with get_db() as db:
-            await db.execute(
-                "UPDATE vantage_tasks SET claimed_by_agent_id=?, status='claimed', updated_ts=? WHERE id=?",
-                (agent["id"], now, task_id),
+            cur = await db.execute(
+                claim_sql(open_status="proposed", claimed_status="claimed",
+                          lease_minutes=DEFAULT_LEASE_MINUTES),
+                ("claimed", agent["id"], now, task_id, task["workspace_id"], task["guild_slug"], agent["id"]),
             )
+            if cur.rowcount == 0:
+                await db.rollback()
+                raise HTTPException(409, "Task is not in 'proposed' state or is held by another agent")
             await db.execute(
                 "INSERT INTO task_claims (id, task_id, agent_id, action, ts) VALUES (?,?,?,?,?)",
                 (claim_id, task_id, agent["id"], "claimed", now),
@@ -163,25 +171,35 @@ async def call_tool(request: Request, agent: dict = Depends(get_agent)):
         title = args.get("title", "")
         kind = args.get("kind", "other")
         content_text = args.get("content_text", "")
-        # Get workspace_id from task
         async with get_db() as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT workspace_id FROM vantage_tasks WHERE id=?", (task_id,)) as cur:
+            async with db.execute("SELECT * FROM vantage_tasks WHERE id=?", (task_id,)) as cur:
                 task_row = await cur.fetchone()
         if not task_row:
             raise HTTPException(404, "Task not found")
-        workspace_id = task_row["workspace_id"]
+        task = dict(task_row)
+        # G0: membership, then the claim. Only the agent holding a live
+        # claim can deliver against it.
+        await require_member(task["guild_slug"], agent)
+        if task["claimed_by_agent_id"] != agent["id"]:
+            raise HTTPException(403, "Only the claimer can submit")
+        if task["status"] != "claimed":
+            raise HTTPException(409, f"Task is {task['status']!r}, not claimed; nothing to submit against")
+        workspace_id = task["workspace_id"]
         artifact_id = str(uuid.uuid4())
         now = int(time.time())
         async with get_db() as db:
-            await db.execute(
-                """INSERT INTO artifacts (id, task_id, agent_id, workspace_id, kind, title, content_text, created_ts, updated_ts)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
-                (artifact_id, task_id, agent["id"], workspace_id, kind, title, content_text, now, now),
+            cur = await db.execute(
+                submit_sql(claimed_status="claimed", review_status="review"),
+                (now, task_id, workspace_id, task["guild_slug"], agent["id"]),
             )
+            if cur.rowcount == 0:
+                await db.rollback()
+                raise HTTPException(409, "Your claim's lease has expired; claim the task again before submitting")
             await db.execute(
-                "UPDATE vantage_tasks SET status='review', updated_ts=? WHERE id=?",
-                (now, task_id),
+                """INSERT INTO artifacts (id, task_id, agent_id, workspace_id, kind, title, content_text, status, created_ts, updated_ts)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (artifact_id, task_id, agent["id"], workspace_id, kind, title, content_text, "submitted", now, now),
             )
             await db.commit()
         async with get_db() as db:

@@ -5,10 +5,12 @@ import secrets
 from typing import Optional
 
 import aiosqlite
-from fastapi import APIRouter, Depends, Form, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from ..db import get_db
 from ..deps import get_agent
+from ..work_states import envelope
 from ..waggle_client import emit_signal
 
 logger = logging.getLogger(__name__)
@@ -66,7 +68,14 @@ async def list_tasks(
         db.row_factory = aiosqlite.Row
         async with db.execute(query, params) as cur:
             rows = await cur.fetchall()
-    return {"tasks": [dict(r) for r in rows]}
+    return envelope("gtask", [dict(r) for r in rows], legacy_key="tasks")
+
+
+class CreateTaskBody(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    description: str = Field("", max_length=4000)
+    priority: int = Field(50, ge=0, le=100)
+    kind_tag: str = Field("", max_length=80)
 
 
 @router.post(
@@ -75,13 +84,14 @@ async def list_tasks(
     description="Create a new task in the guild. Agent must be a guild member.",
 )
 async def create_task(
+    body: CreateTaskBody,
     guild_slug: str,
-    title: str = Form(..., min_length=1, max_length=200),
-    description: str = Form("", max_length=4000),
-    priority: int = Form(50, ge=0, le=100),
-    kind_tag: str = Form("", max_length=80),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
+    title = body.title
+    description = body.description
+    priority = body.priority
+    kind_tag = body.kind_tag
     guild = await _get_guild(guild_slug)
     await _require_member(guild["id"], agent["id"])
     task_id = secrets.token_hex(16)
@@ -165,6 +175,10 @@ async def claim_task(guild_slug: str, task_id: str, agent: dict = Depends(get_ag
     return {"status": "claimed", "task_id": task_id}
 
 
+class ReleaseTaskBody(BaseModel):
+    note: str = Field("", max_length=500)
+
+
 @router.post(
     "/{task_id}/release",
     summary="Release a task",
@@ -173,9 +187,11 @@ async def claim_task(guild_slug: str, task_id: str, agent: dict = Depends(get_ag
 async def release_task(
     guild_slug: str,
     task_id: str,
-    note: str = Form("", max_length=500),
     agent: dict = Depends(get_agent),
+    body: Optional[ReleaseTaskBody] = None,
 ):
+    body = body or ReleaseTaskBody()
+    note = body.note
     guild = await _get_guild(guild_slug)
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
@@ -203,31 +219,37 @@ async def release_task(
     return {"status": "released", "task_id": task_id}
 
 
+class SubmitArtifactBody(BaseModel):
+    artifact_kind: str = Field("other", description="code|doc|data|eval|tool_output|other")
+    artifact_title: str = Field(..., min_length=1, max_length=200)
+    content_text: str = Field("", max_length=100000)
+    content_hash: str = Field(...,
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+        description="BLAKE3-256 hex of content_text — required, verified server-side",)
+
+
 @router.post(
     "/{task_id}/submit",
     summary="Submit artifact for task",
     description="Submit an artifact for a claimed task. Moves task to 'review' status.",
 )
 async def submit_artifact(
+    body: SubmitArtifactBody,
     guild_slug: str,
     task_id: str,
-    artifact_kind: str = Form("other", description="code|doc|data|eval|tool_output|other"),
-    artifact_title: str = Form(..., min_length=1, max_length=200),
-    content_text: str = Form("", max_length=100000),
     # Gap (b): content_hash is MANDATORY and verified server-side.
     # An artifact with no hash is not bound to anything, so a receipt over
     # it attests to nothing. Format is checked here and the value is
     # recomputed from content_text below -- a format check alone would let a
     # submitter paste any well-formed hash.
-    content_hash: str = Form(
-        ...,
-        min_length=64,
-        max_length=64,
-        pattern=r"^[0-9a-f]{64}$",
-        description="BLAKE3-256 hex of content_text — required, verified server-side",
-    ),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
+    artifact_kind = body.artifact_kind
+    artifact_title = body.artifact_title
+    content_text = body.content_text
+    content_hash = body.content_hash
     guild = await _get_guild(guild_slug)
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
@@ -296,6 +318,10 @@ async def submit_artifact(
     }
 
 
+class AcceptTaskBody(BaseModel):
+    review_note: str = Field("", max_length=500)
+
+
 @router.post(
     "/{task_id}/accept",
     summary="Accept task submission",
@@ -304,9 +330,11 @@ async def submit_artifact(
 async def accept_task(
     guild_slug: str,
     task_id: str,
-    review_note: str = Form("", max_length=500),
     agent: dict = Depends(get_agent),
+    body: Optional[AcceptTaskBody] = None,
 ):
+    body = body or AcceptTaskBody()
+    review_note = body.review_note
     guild = await _get_guild(guild_slug)
     role = await _require_member(guild["id"], agent["id"])
     async with get_db() as db:
@@ -340,17 +368,22 @@ async def accept_task(
     return {"status": "accepted", "task_id": task_id}
 
 
+class RejectTaskBody(BaseModel):
+    review_note: str = Field(..., min_length=1, max_length=500)
+
+
 @router.post(
     "/{task_id}/reject",
     summary="Reject task submission",
     description="Reject the artifact and re-open task for claiming. Requires founder role or task creator.",
 )
 async def reject_task(
+    body: RejectTaskBody,
     guild_slug: str,
     task_id: str,
-    review_note: str = Form(..., min_length=1, max_length=500),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
+    review_note = body.review_note
     guild = await _get_guild(guild_slug)
     role = await _require_member(guild["id"], agent["id"])
     async with get_db() as db:
@@ -386,18 +419,24 @@ async def reject_task(
     return {"status": "rejected", "task_id": task_id}
 
 
+class AttachReceiptBody(BaseModel):
+    receipt_body: str = Field(..., description="JSON string of the ActReceipt")
+    omokoda_receipt_id: str = Field("", max_length=128)
+
+
 @router.post(
     "/{task_id}/receipt",
     summary="Attach execution receipt",
     description="Attach an Omo-Koda2 ActReceipt to the most recent artifact for this task.",
 )
 async def attach_receipt(
+    body: AttachReceiptBody,
     guild_slug: str,
     task_id: str,
-    receipt_body: str = Form(..., description="JSON string of the ActReceipt"),
-    omokoda_receipt_id: str = Form("", max_length=128),
-    agent: dict = Depends(get_agent),
+    agent: dict = Depends(get_agent)
 ):
+    receipt_body = body.receipt_body
+    omokoda_receipt_id = body.omokoda_receipt_id
     guild = await _get_guild(guild_slug)
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
