@@ -129,10 +129,11 @@ async def _eventually(check, timeout=25.0, interval=0.02):
     stop the session) after the socket closes, so a test that asserts the
     instant the `with` block exits is racing the server. Returns the last value
     on timeout so the caller's own assert produces the failure message.
-    """
+
     The default outlasts SQLite's 20s busy_timeout: under CI lock pressure
     from the app lifespan's background loops one relay write can wait that
     long, and a shorter poll turned that wait into a false failure.
+    """
     import time
     deadline = time.monotonic() + timeout
     while True:
