@@ -662,11 +662,9 @@ async def lifespan(app: FastAPI):
             ]
             _content = _json.dumps({"tools": _tools, "endpoint": "nostr"})
             _tags = [["relay", RELAY_WS_URL]]
-            _sess = BuzzSession(RELAY_WS_URL, _pk)
-            await _sess.connect()
-            await _sess.authenticate()
-            await _sess.publish(11317, _content, tags=_tags)
-            await _sess.close()
+            async with BuzzSession(RELAY_WS_URL, _pk) as _sess:
+                await _sess.authenticate()
+                await _sess.publish(11317, _content, tags=_tags)
             logger.info("Published cordn coordinator announcement (kind 11317)")
         except Exception as _ann_exc:
             logger.warning("kind 11317 coordinator announcement failed (non-fatal): %s", _ann_exc)

@@ -41,43 +41,45 @@ async def run_bridge(agent_id: int, relay_ws_url: str, channel_id: str, max_mess
     my_pubkey = public_key_xonly_hex(pk)
 
     sess = BuzzSession(relay_ws_url, pk)
-    await sess.connect()
-    await sess.authenticate()
-    sub = await sess.subscribe([{"kinds": [9], "#h": [channel_id], "since": int(time.time())}])
+    try:
+        await sess.connect()
+        await sess.authenticate()
+        sub = await sess.subscribe([{"kinds": [9], "#h": [channel_id], "since": int(time.time())}])
 
-    handled = 0
-    while max_messages is None or handled < max_messages:
-        msg = await sess._recv_json()
-        # A REQ the relay rejects arrives as ["CLOSED", sub_id, reason]
-        # per NIP-01 -- not as an error, and not as EVENT/EOSE. Skipping
-        # these silently makes a subscription that was NEVER ACTIVE look
-        # identical to a quiet channel: that is how a cross-community
-        # relay URL became a 4-day zombie service (2026-09-18). Raise
-        # instead, so run_bridge_forever's reconnect loop reports it.
-        if (isinstance(msg, list) and len(msg) > 1
-                and msg[0] == "CLOSED" and msg[1] == sub):
-            raise RuntimeError(
-                "relay closed subscription %s: %s"
-                % (sub, msg[2] if len(msg) > 2 else "<no reason given>")
+        handled = 0
+        while max_messages is None or handled < max_messages:
+            msg = await sess._recv_json()
+            # A REQ the relay rejects arrives as ["CLOSED", sub_id, reason]
+            # per NIP-01 -- not as an error, and not as EVENT/EOSE. Skipping
+            # these silently makes a subscription that was NEVER ACTIVE look
+            # identical to a quiet channel: that is how a cross-community
+            # relay URL became a 4-day zombie service (2026-09-18). Raise
+            # instead, so run_bridge_forever's reconnect loop reports it.
+            if (isinstance(msg, list) and len(msg) > 1
+                    and msg[0] == "CLOSED" and msg[1] == sub):
+                raise RuntimeError(
+                    "relay closed subscription %s: %s"
+                    % (sub, msg[2] if len(msg) > 2 else "<no reason given>")
+                )
+            if msg[0] != "EVENT" or msg[1] != sub:
+                continue
+            event = msg[2]
+            if event["pubkey"] == my_pubkey:
+                continue  # ignore our own messages
+            text = event["content"]
+            logger.info("buzz-acp inbound from %s: %s", event["pubkey"][:12], text[:80])
+            result = await _dispatch_chat(agent_row, text, human_id=f"buzz:{event['pubkey'][:16]}")
+            reply_text = result.get("data", {}).get("reply") or f"[{result.get('action')}] {result.get('data')}"
+            await sess.publish(
+                9,
+                reply_text,
+                tags=[["h", channel_id], ["e", event["id"], "", "reply"], ["p", event["pubkey"]]],
             )
-        if msg[0] != "EVENT" or msg[1] != sub:
-            continue
-        event = msg[2]
-        if event["pubkey"] == my_pubkey:
-            continue  # ignore our own messages
-        text = event["content"]
-        logger.info("buzz-acp inbound from %s: %s", event["pubkey"][:12], text[:80])
-        result = await _dispatch_chat(agent_row, text, human_id=f"buzz:{event['pubkey'][:16]}")
-        reply_text = result.get("data", {}).get("reply") or f"[{result.get('action')}] {result.get('data')}"
-        await sess.publish(
-            9,
-            reply_text,
-            tags=[["h", channel_id], ["e", event["id"], "", "reply"], ["p", event["pubkey"]]],
-        )
-        logger.info("buzz-acp replied: %s", reply_text[:80])
-        handled += 1
+            logger.info("buzz-acp replied: %s", reply_text[:80])
+            handled += 1
 
-    await sess.close()
+    finally:
+        await sess.close()
     return handled
 
 

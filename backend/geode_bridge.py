@@ -89,6 +89,7 @@ async def run_bridge():
 
     async with httpx.AsyncClient() as http:
         while True:
+            session = None
             try:
                 log.info("Connecting to %s", BUZZ_WS)
                 session = NostrSession(BUZZ_WS, pk)
@@ -119,8 +120,11 @@ async def run_bridge():
                             break
 
             except Exception as exc:
-                log.warning("Disconnected: %s — retry in %ds", exc, RECONNECT_DELAY)
+                log.warning("Disconnected: %r — retry in %ds", exc, RECONNECT_DELAY)
                 await asyncio.sleep(RECONNECT_DELAY)
+            finally:
+                if session is not None:
+                    await session.close()
 
 
 if __name__ == "__main__":
