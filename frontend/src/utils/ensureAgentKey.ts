@@ -55,3 +55,22 @@ export function ensureAgentKey(): Promise<string | null> {
 export function hasStoredAgentKey(): boolean {
   return !!localStorage.getItem(KEY_STORAGE)
 }
+
+// The auto-minted viewer identity above is NOT a returning user. Only a key
+// the visitor registered or pasted themselves counts. Keys minted before this
+// marker existed are recognised by their viewer-* name.
+const ENTERED_STORAGE = 'vantage_entered_app'
+
+export function hasOwnAgentKey(): boolean {
+  if (!localStorage.getItem(KEY_STORAGE)) return false
+  return !(localStorage.getItem(NAME_STORAGE) || '').startsWith('viewer-')
+}
+
+/** The visitor chose "Go to app" on the landing page: stop redirecting them. */
+export function markEnteredApp(): void {
+  try { localStorage.setItem(ENTERED_STORAGE, '1') } catch { /* private mode */ }
+}
+
+export function hasEnteredApp(): boolean {
+  try { return localStorage.getItem(ENTERED_STORAGE) === '1' } catch { return false }
+}

@@ -50,7 +50,7 @@ import InstallPrompt from './components/InstallPrompt'
 import StatusBar from './components/StatusBar'
 import SubNav from './components/SubNav'
 import { getSection, SUB_NAV } from './utils/navigation'
-import { ensureAgentKey, hasStoredAgentKey } from './utils/ensureAgentKey'
+import { ensureAgentKey, hasStoredAgentKey, hasOwnAgentKey, hasEnteredApp } from './utils/ensureAgentKey'
 import { hasHumanSession } from './utils/humanSession'
 import { PipProvider } from './contexts/PipPlayerContext'
 
@@ -105,13 +105,13 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
   }
 }
 
-/* ── Root route: proper landing/login for genuinely new visitors, feed for
-   returning ones. hasStoredAgentKey() is checked once on mount, BEFORE
-   AppLayout's ensureAgentKey() effect has a chance to silently mint a
-   throwaway viewer identity -- otherwise every visitor would look like a
-   "returning" one by the time this check ran, defeating the point. ── */
+/* ── Root route: landing (sign in / create) for visitors who have not
+   identified themselves, feed for returning ones. This renders inside
+   AppLayout, which has ALREADY minted a throwaway viewer key by now, so a
+   stored key alone proves nothing: only a key the visitor owns, a human
+   session, or an explicit "Go to app" from the landing page counts. ── */
 function RootRoute() {
-  const [decided] = useState(() => hasStoredAgentKey() || hasHumanSession())
+  const [decided] = useState(() => hasOwnAgentKey() || hasHumanSession() || hasEnteredApp())
   if (!decided) return <Navigate to="/welcome" replace />
   return <HomeFeed />
 }

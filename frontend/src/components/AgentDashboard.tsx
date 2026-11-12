@@ -253,6 +253,7 @@ export default function AgentDashboard() {
     if (!r.ok) { setError(safeDetail(data, 'Registration failed')); return }
     setNewKey(data.api_key); setApiKey(data.api_key)
     localStorage.setItem('vantage_api_key', data.api_key)
+    if (data.name) localStorage.setItem('vantage_agent_name', data.name)
   }
 
   async function birthOmokoda() {
