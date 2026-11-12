@@ -183,3 +183,27 @@ def test_stats_scoreboard(conn):
     sb.refresh_stats(conn)
     r = conn.execute("SELECT * FROM strategy_paper_stats").fetchone()
     assert r["n_closed"] == 1 and r["wins"] == 0 and r["win_rate"] == 0
+
+
+def test_validation_verdicts():
+    assert sb.validation_verdict(-1.0, 0.01, 1.0) == "no-edge"
+    assert sb.validation_verdict(5.0, 0.01, 0.75) == "edge"
+    assert sb.validation_verdict(5.0, 0.30, 1.0) == "inconclusive"
+
+
+def test_validation_runs_on_closed_paper_trades(conn, monkeypatch):
+    monkeypatch.setattr(sb, "MIN_VALIDATION_TRADES", 6)
+    now = int(time.time())
+    for i, pnl in enumerate([12, -5, 20, -3, 8, 15, -4, 9]):
+        conn.execute(
+            "INSERT INTO strategy_positions (strategy_id, wallet_id, token_mint, symbol, status, entry_price, "
+            "entry_amount_usd, exit_price, pnl_pct, opened_at, closed_at) VALUES (1, 13, ?, 'T', 'closed', 1, 2, ?, ?, ?, ?)",
+            (f"m{i}", 1 + pnl / 100, pnl, now - 86400 * (10 - i), now - 86400 * (10 - i) + 600))
+    conn.execute("INSERT INTO strategy_positions (strategy_id, wallet_id, token_mint, status, entry_price, "
+                 "entry_amount_usd, pnl_pct, closed_at) VALUES (2, 13, 'x', 'closed', 1, 2, 5, ?)", (now,))
+    conn.commit()
+    res = sb.refresh_validation(conn)
+    assert set(res) == {1}  # strategy 2 has too few trades
+    row = conn.execute("SELECT * FROM strategy_validation WHERE strategy_id=1").fetchone()
+    assert row["n_trades"] == 8 and row["verdict"] in {"edge", "inconclusive"}
+    assert row["p_value_sharpe"] is not None and row["consistency_rate"] is not None

@@ -40,6 +40,10 @@ WHAT RUNS EACH CYCLE
      order is mirrored as a PAPER order for the follower.
   5. strategy_paper_stats is refreshed: closed trades, win rate, avg and total
      PnL per strategy — the running scoreboard the paper data feeds.
+  6. Hourly, strategies with MIN_VALIDATION_TRADES+ closed paper trades are
+     run through backend/backtest/validation.py (Monte-Carlo + walk-forward)
+     and strategy_validation gets edge / no-edge / inconclusive. Report only:
+     it never arms or enables live.
 
 LIVE GATE (unchanged in spirit, now explicit): an order is only created as a
 REAL pending order when the strategy is enabled=1 AND armed=1 AND live=1 AND
@@ -68,6 +72,9 @@ import urllib.request
 import uuid
 from datetime import datetime, timezone
 
+# backend.backtest is imported lazily by the validation stage; the unit runs from /opt/ares.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 DB_PATH = os.environ.get("VANTAGE_DB_PATH", "/opt/ares/Vantage/data/vantage.db")
 VANTAGE_URL = os.environ.get("VANTAGE_URL", "http://localhost:8001")
 KEY_FILE = os.environ.get("VANTAGE_KEY_FILE", os.path.expanduser("~/.vantage_key"))
@@ -80,6 +87,8 @@ REENTRY_COOLDOWN_S = int(os.environ.get("PAPER_REENTRY_COOLDOWN_S", "21600"))
 PINE_SYMBOLS = [s for s in os.environ.get("PINE_SYMBOLS", "SOL,BTC,ETH").split(",") if s]
 PINE_EVERY_S = int(os.environ.get("PINE_EVERY_S", "300"))
 STATS_EVERY_S = int(os.environ.get("STATS_EVERY_S", "300"))
+VALIDATE_EVERY_S = int(os.environ.get("VALIDATE_EVERY_S", "3600"))
+MIN_VALIDATION_TRADES = int(os.environ.get("MIN_VALIDATION_TRADES", "10"))
 
 DEFAULT_TP, DEFAULT_SL = 30.0, -12.0
 POOL_TYPES = {"scalper_5020", "bighit_40_800"}
@@ -166,6 +175,13 @@ CREATE TABLE IF NOT EXISTS strategy_paper_stats (
     avg_pnl_pct REAL, total_pnl_usd REAL, updated_at TEXT
 )
 """
+VALIDATION_DDL = """
+CREATE TABLE IF NOT EXISTS strategy_validation (
+    strategy_id INTEGER PRIMARY KEY, n_trades INTEGER, verdict TEXT,
+    avg_pnl_pct REAL, p_value_sharpe REAL, p_value_max_dd REAL, consistency_rate REAL,
+    monte_carlo TEXT, walk_forward TEXT, updated_at TEXT
+)
+"""
 COPY_CURSOR_DDL = """
 CREATE TABLE IF NOT EXISTS copy_paper_cursor (
     subscription_id INTEGER PRIMARY KEY, last_order_id INTEGER NOT NULL
@@ -186,6 +202,7 @@ def ensure_schema(conn):
     conn.execute(POSITIONS_DDL)
     conn.execute(STATS_DDL)
     conn.execute(COPY_CURSOR_DDL)
+    conn.execute(VALIDATION_DDL)
     cols = {r[1] for r in conn.execute("PRAGMA table_info(strategy_positions)")}
     for col, decl in (("pending_order_id", "INTEGER"), ("exit_price", "REAL"),
                       ("pnl_pct", "REAL"), ("is_paper", "INTEGER DEFAULT 1"),
@@ -682,6 +699,61 @@ def refresh_stats(conn):
     conn.commit()
 
 
+def validation_verdict(avg_pnl, p_sharpe, consistency):
+    """edge only when profitable, unlikely by chance, and consistent over time."""
+    if avg_pnl is None or avg_pnl <= 0:
+        return "no-edge"
+    if p_sharpe is not None and p_sharpe < 0.05 and consistency is not None and consistency >= 0.75:
+        return "edge"
+    return "inconclusive"
+
+
+def refresh_validation(conn):
+    """Monte-Carlo + walk-forward (backend/backtest/validation.py) on each
+    strategy's closed paper trades. Report only: a verdict never arms or
+    enables live on anything."""
+    import pandas as pd
+    from backend.backtest.models import TradeRecord
+    from backend.backtest.validation import monte_carlo_test, walk_forward_analysis
+    rows = conn.execute(
+        """SELECT * FROM strategy_positions WHERE status='closed' AND pnl_pct IS NOT NULL
+           AND entry_price > 0 AND closed_at IS NOT NULL ORDER BY strategy_id, closed_at""").fetchall()
+    by_strat = {}
+    for r in rows:
+        by_strat.setdefault(r["strategy_id"], []).append(r)
+    results = {}
+    for sid, rs in by_strat.items():
+        if len(rs) < MIN_VALIDATION_TRADES:
+            continue
+        recs = [TradeRecord(
+            symbol=r["symbol"] or r["token_mint"], direction=1, entry_price=r["entry_price"],
+            exit_price=r["exit_price"] or r["entry_price"] * (1 + r["pnl_pct"] / 100),
+            entry_time=pd.Timestamp(r["opened_at"] or r["closed_at"], unit="s"),
+            exit_time=pd.Timestamp(r["closed_at"], unit="s"),
+            size=r["entry_amount_usd"] / r["entry_price"], leverage=1.0,
+            pnl=r["entry_amount_usd"] * r["pnl_pct"] / 100, pnl_pct=r["pnl_pct"],
+            exit_reason="paper", holding_bars=0, commission=0.0, entry_margin=r["entry_amount_usd"])
+            for r in rs]
+        capital = max(sum(r["entry_amount_usd"] for r in rs) / len(rs) * 10, 1.0)
+        mc = monte_carlo_test(recs, capital, n_simulations=500)
+        ordered = sorted(recs, key=lambda t: t.exit_time)
+        equity = capital + pd.Series([t.pnl for t in ordered],
+                                     index=pd.DatetimeIndex([t.exit_time for t in ordered])).cumsum()
+        try:
+            wf = walk_forward_analysis(equity, recs, n_windows=max(2, min(4, len(recs) // 3)))
+        except Exception as e:
+            wf = {"error": str(e)[:200]}
+        avg = sum(r["pnl_pct"] for r in rs) / len(rs)
+        verdict = validation_verdict(avg, mc.get("p_value_sharpe"), wf.get("consistency_rate"))
+        conn.execute(
+            "INSERT OR REPLACE INTO strategy_validation VALUES (?,?,?,?,?,?,?,?,?,datetime('now'))",
+            (sid, len(rs), verdict, round(avg, 3), mc.get("p_value_sharpe"), mc.get("p_value_max_dd"),
+             wf.get("consistency_rate"), json.dumps(mc, default=str), json.dumps(wf, default=str)))
+        results[sid] = verdict
+    conn.commit()
+    return results
+
+
 # ── Main loop ───────────────────────────────────────────────────────────────
 def cycle(conn, state):
     strategies = [dict(r) for r in conn.execute("SELECT * FROM trading_strategies ORDER BY id").fetchall()]
@@ -724,6 +796,13 @@ def cycle(conn, state):
         for r in conn.execute("SELECT * FROM strategy_paper_stats ORDER BY strategy_id"):
             log(f"stats strategy {r['strategy_id']}: open={r['n_open']} closed={r['n_closed']} "
                 f"win_rate={r['win_rate']} avg_pnl={r['avg_pnl_pct']}% total=${r['total_pnl_usd']}")
+    if now - state.get("validate", 0) >= VALIDATE_EVERY_S:
+        state["validate"] = now
+        try:
+            for sid, verdict in refresh_validation(conn).items():
+                log(f"validation strategy {sid}: {verdict}")
+        except Exception as e:
+            log(f"validation stage error: {e}")
 
 
 def run(interval):
