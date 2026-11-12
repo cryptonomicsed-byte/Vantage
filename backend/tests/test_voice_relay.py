@@ -135,6 +135,26 @@ def _drain(ws, count, timeout_each=5):
     return out
 
 
+async def _talk(sync_client, s, exchange):
+    """Run a websocket exchange on a worker thread and return its result.
+
+    sync_client's calls block. Made straight from an async test they freeze
+    the test's own event loop, and any task on it caught between an INSERT and
+    its COMMIT (the batch writers `client` starts, request background work)
+    keeps SQLite's write lock while frozen. A test that waits *inside* the
+    exchange for a frame the relay sends only after its own write (the
+    tool-call audit row) then deadlocks until busy_timeout (90s) and the relay
+    drops the row with "database is locked". Off-thread, the loop keeps running
+    and those writers commit.
+    """
+    def run():
+        with sync_client.websocket_connect(
+            f"/api/agents/me/voice/sessions/{s['session_id']}/ws?key={s['token']}"
+        ) as ws:
+            return exchange(ws)
+    return await asyncio.to_thread(run)
+
+
 def _completed_calls(session_id):
     """Waits for a tool-call row that has actually been resolved."""
     async def check():
@@ -143,12 +163,15 @@ def _completed_calls(session_id):
     return check
 
 
-async def _eventually(check, timeout=5.0, interval=0.02):
+async def _eventually(check, timeout=30.0, interval=0.02):
     """Poll until `check()` returns something truthy, then return it.
 
     The relay finishes its cleanup (flush the open turn, log the tool result,
     stop the session) after the socket closes, so a test that asserts the
-    instant the `with` block exits is racing the server. Returns the last value
+    instant the `with` block exits is racing the server. The window is wide
+    because those writes can sit in SQLite's busy_timeout behind the app's
+    background daemons on a loaded machine; it returns as soon as the row
+    lands, so a fast run pays nothing for it. Returns the last value
     on timeout so the caller's own assert produces the failure message.
     """
     import time
@@ -344,13 +367,20 @@ async def test_a_session_without_an_allowlist_has_no_tools(client, fresh_agent, 
     agent = await fresh_agent()
     s = await _open_session(client, agent)  # no tools requested
 
-    with sync_client.websocket_connect(
-        f"/api/agents/me/voice/sessions/{s['session_id']}/ws?key={s['token']}"
-    ) as ws:
+    def exchange(ws):
         _drain(ws, 1)
         announced = json.loads(ws.receive_text())
+        # Wait for the relay to finish the call before closing. The tool runs
+        # and its result goes back to the engine only after the announce frame;
+        # leaving here cancels the relay mid-call, which under load raced the
+        # engine.tool_results assertion below.
+        return announced, json.loads(ws.receive_text())
+
+    announced, answered = await _talk(sync_client, s, exchange)
 
     assert announced["type"] == "tool_call"
+    assert answered["type"] == "tool_result"
+    assert answered["status"] == "unknown_tool"
     assert len(engine.tool_results) == 1
     call_id, _name, result = engine.tool_results[0]
     assert call_id == "fc-1"
@@ -378,12 +408,11 @@ async def test_an_allowed_tool_actually_executes(client, fresh_agent, sync_clien
     agent = await fresh_agent()
     s = await _open_session(client, agent, tools=["tag:copilot"])
 
-    with sync_client.websocket_connect(
-        f"/api/agents/me/voice/sessions/{s['session_id']}/ws?key={s['token']}"
-    ) as ws:
+    def exchange(ws):
         _drain(ws, 1)
-        assert json.loads(ws.receive_text())["type"] == "tool_call"
-        assert json.loads(ws.receive_text())["type"] == "tool_result"
+        return [json.loads(ws.receive_text())["type"] for _ in range(2)]
+
+    assert await _talk(sync_client, s, exchange) == ["tool_call", "tool_result"]
 
     assert len(engine.tool_results) == 1
     _cid, _name, result = engine.tool_results[0]
@@ -472,10 +501,15 @@ async def test_audio_keeps_flowing_while_a_tool_call_is_in_flight(
     disagree with an assertion."""
     from backend import voice_tools
 
-    tool_release = asyncio.Event()
+    # A threading.Event, not asyncio: the exchange below runs on a worker
+    # thread (see _talk) and releases the tool from there, while the relay
+    # awaits it on the TestClient portal's loop.
+    import threading
+    tool_release = threading.Event()
 
     async def slow_execute(self, name, args):
-        await tool_release.wait()
+        while not tool_release.is_set():
+            await asyncio.sleep(0.01)
         return {"status": "ok", "result": {}}
 
     monkeypatch.setattr(voice_tools.ToolDispatcher, "execute", slow_execute)
@@ -490,9 +524,7 @@ async def test_audio_keeps_flowing_while_a_tool_call_is_in_flight(
     agent = await fresh_agent()
     s = await _open_session(client, agent, tools=["tag:copilot"])
 
-    with sync_client.websocket_connect(
-        f"/api/agents/me/voice/sessions/{s['session_id']}/ws?key={s['token']}"
-    ) as ws:
+    def exchange(ws):
         _drain(ws, 1)  # connected
 
         # The dispatcher is still blocked on tool_release -- nobody has set it
@@ -512,7 +544,10 @@ async def test_audio_keeps_flowing_while_a_tool_call_is_in_flight(
         # SERIALISED pump would never deliver the audio frame at any bound --
         # detection power doesn't depend on tightness. What a tight bound did
         # measure was SQLite audit-write latency on a loaded CI runner: 10 s
-        # failed intermittently under the full 2000-test suite.
+        # failed intermittently under the full 2000-test suite. (Most of that
+        # "latency" was the test itself: run inline, this exchange froze the
+        # test loop and its half-open writes held the lock the audit row
+        # needed. _talk runs it off-thread now.)
         bound = float(os.environ.get("VOICE_RELAY_TEST_BOUND", "45"))
         first = json.loads(_receive_within(ws, bound))
         second = json.loads(_receive_within(ws, bound))
@@ -522,3 +557,5 @@ async def test_audio_keeps_flowing_while_a_tool_call_is_in_flight(
 
         tool_release.set()
         assert json.loads(_receive_within(ws, bound))["type"] == "tool_result"
+
+    await _talk(sync_client, s, exchange)
