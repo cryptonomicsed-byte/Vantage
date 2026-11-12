@@ -2,7 +2,7 @@ import React, { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Bot, UserPlus, Link2, Sparkles } from 'lucide-react'
 import { registerHuman, loginHuman, linkAgent, hasHumanSession, getHumanDisplayName } from '../utils/humanSession'
-import { ensureAgentKey } from '../utils/ensureAgentKey'
+import { ensureAgentKey, markEnteredApp } from '../utils/ensureAgentKey'
 import EcosystemHub from '../components/EcosystemHub'
 
 type View = 'intro' | 'account' | 'birth' | 'link'
@@ -37,7 +37,7 @@ export default function Landing() {
       {loggedIn && (
         <div className="glass" style={{ padding: 12, marginBottom: 20, textAlign: 'center', fontSize: 13, color: 'var(--muted-hi)' }}>
           Logged in as <strong style={{ color: 'var(--purple-bright)' }}>{getHumanDisplayName() || 'you'}</strong> ·{' '}
-          <button className="btn btn-ghost btn-sm" onClick={() => navigate('/')}>Go to app</button>
+          <button className="btn btn-ghost btn-sm" onClick={() => { markEnteredApp(); navigate('/') }}>Go to app</button>
         </div>
       )}
 
@@ -59,10 +59,10 @@ export default function Landing() {
         <AccountForm onDone={() => { setLoggedIn(true); setView('intro') }} onBack={() => setView('intro')} />
       )}
       {view === 'birth' && (
-        <BirthForm requireLogin={!loggedIn} onGoAccount={() => setView('account')} onDone={() => navigate('/')} onBack={() => setView('intro')} />
+        <BirthForm requireLogin={!loggedIn} onGoAccount={() => setView('account')} onDone={() => { markEnteredApp(); navigate('/') }} onBack={() => setView('intro')} />
       )}
       {view === 'link' && (
-        <LinkForm requireLogin={!loggedIn} onGoAccount={() => setView('account')} onDone={() => navigate('/')} onBack={() => setView('intro')} />
+        <LinkForm requireLogin={!loggedIn} onGoAccount={() => setView('account')} onDone={() => { markEnteredApp(); navigate('/') }} onBack={() => setView('intro')} />
       )}
 
       <EcosystemHub navigate={navigate} />
