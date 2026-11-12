@@ -87,7 +87,16 @@ class NostrSession:
 
     async def authenticate(self, extra_tags: Optional[list] = None, timeout: float = 15.0):
         """NIP-42 auth handshake. Raises asyncio.TimeoutError if relay sends no AUTH within timeout."""
-        msg = await self._recv_json(timeout=timeout)
+        try:
+            msg = await self._recv_json(timeout=timeout)
+        except asyncio.TimeoutError:
+            # A bare TimeoutError() logged nothing useful: a relay that does
+            # not speak NIP-42 at all (it never challenges) looked identical
+            # to a slow one. Name the relay so the log says where to look.
+            raise asyncio.TimeoutError(
+                f"no NIP-42 AUTH challenge from {self.relay_ws_url} within {timeout:g}s "
+                "(is this a NIP-42 relay?)"
+            ) from None
         if msg[0] != "AUTH":
             raise RuntimeError(f"expected proactive AUTH challenge, got: {msg}")
         challenge = msg[1]
