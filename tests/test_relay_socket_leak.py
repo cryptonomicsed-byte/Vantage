@@ -100,3 +100,23 @@ async def test_inbound_listener_closes_socket_on_every_failed_pass(monkeypatch):
         await buzz_inbound.run_inbound_listener()
     assert len(_FakeWS.opened) >= 4
     assert all(w.closed for w in _FakeWS.opened), "a failed pass orphaned its relay socket"
+async def test_auth_timeout_names_the_relay_that_never_challenged():
+    """A relay with no NIP-42 never sends AUTH. The error used to be a bare
+    TimeoutError(), which hid that the session was pointed at the wrong relay."""
+    import asyncio
+
+    import pytest
+    from coincurve import PrivateKey
+
+    from backend.nostr.client import NostrSession
+
+    class _SilentWS:
+        async def recv(self):
+            await asyncio.sleep(3600)
+
+    s = NostrSession("wss://relay.example/vantage-relay", PrivateKey())
+    s.ws = _SilentWS()
+    with pytest.raises(asyncio.TimeoutError) as exc:
+        await s.authenticate(timeout=0.05)
+    assert "wss://relay.example/vantage-relay" in str(exc.value)
+    assert "NIP-42" in str(exc.value)
